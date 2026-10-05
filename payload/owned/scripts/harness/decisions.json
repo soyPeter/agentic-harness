@@ -12,7 +12,7 @@
             "partial": "The message describes part of the diff but leaves out a significant change, or overstates what changed.",
             "mismatch": "The message describes a different change than the one in the diff."
           },
-          "warn_if": {"choices": ["mismatch"], "min_confidence": 0.8,
+          "warn_if": {"choices": ["mismatch"], "min_confidence": 0.8, "min_probability": 0.8,
                       "message": "The commit message does not seem to describe the staged change; reword it or split the commit."}
         },
         "unmentioned": {

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1 (2026-10-05)
+
+- **Decision layer: `ollama` provider** for a local Jev-style decision endpoint (Ollama's `/v1/systemone`, default model `nimble`).
+  - Data stays on the machine and calls are free.
+  - `HARNESS_DECISION_URL` overrides the endpoint, and is user-only like the other decision settings.
+- **Decision thresholds:** a choice's `warn_if` can use `min_probability`, the probability of the chosen option, besides `min_confidence`. Local Jev-style models report a low confidence even for likely answers.
+- **The `claude` provider uses plain HTTPS** (standard library), so there's no SDK to install.
+
 ## 0.4.0 (2026-10-05)
 
 The stack is decided in design, not at install; the reviewed skill library from agentic-backbone.

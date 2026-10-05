@@ -663,6 +663,40 @@ contains "claude: default model is pinned" '"model": "claude-opus-5-5"' "$req"
 contains "claude: structured output schema is sent" '"json_schema"' "$req"
 contains "claude: answer parsed from the text block (thinking skipped)" '"choice": "accurate"' "$(tail -1 "$LOG")"
 contains "claude: commit unaffected" "exit=0" "$out"
+OSTUB="$WORK/ollama-stub.py"
+cat > "$OSTUB" <<'EOF'
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+        open(sys.argv[2], "w").write(json.dumps({"path": self.path, "body": body}))
+        reply = {"model": body["model"], "answers": {
+            "fit": {"type": "choice", "choice": "mismatch", "probabilities": {"accurate": 0.02, "partial": 0.08, "mismatch": 0.9}, "confidence": 0.34},
+            "unmentioned": {"type": "noul", "noul": 0.2},
+            "leftovers": {"type": "noul", "noul": 0.1}}}
+        data = json.dumps(reply).encode()
+        self.send_response(200); self.send_header("content-type", "application/json"); self.send_header("content-length", str(len(data))); self.end_headers(); self.wfile.write(data)
+    def log_message(self, *a): pass
+srv = HTTPServer(("127.0.0.1", 0), H)
+open(sys.argv[1], "w").write(str(srv.server_address[1]))
+srv.handle_request()
+EOF
+rm -f "$PORTF" "$REQ"
+python3 "$OSTUB" "$PORTF" "$REQ" & STUB_PID=$!
+for i in $(seq 1 50); do [ -s "$PORTF" ] && break; python3 -c "import time; time.sleep(0.2)"; done
+setconf HARNESS_DECISION_PROVIDER=ollama "HARNESS_DECISION_URL=http://127.0.0.1:$(cat "$PORTF")/v1/systemone"
+printf '\n- The ollama provider (local nimble) may replace it.\n' >> "$D/backbone/adr/ADR-002-decision-provider.md"
+out=$(dcommit j "docs: describe something else entirely"; echo "exit=$?")
+kill $STUB_PID 2>/dev/null; wait $STUB_PID 2>/dev/null
+req=$(cat "$REQ" 2>/dev/null)
+contains "ollama: posts to /v1/systemone" '"path": "/v1/systemone"' "$req"
+contains "ollama: default model is nimble" '"model": "nimble"' "$req"
+contains "ollama: choice options sent as criteria" '"criteria": {"accurate"' "$req"
+contains "ollama: yes/no sent as noul" '"type": "noul"' "$req"
+contains "ollama: answers normalised into the log" '"p": 0.2' "$(tail -1 "$LOG")"
+contains "ollama: a likely mismatch warns despite low confidence (min_probability)" "harness decision (advisory)" "$out"
+contains "ollama: commit unaffected" "exit=0" "$out"
 unset FAKE_MARKER
 
 section "git hooks"

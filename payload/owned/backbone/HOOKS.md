@@ -109,7 +109,7 @@ Two files of each kind apply: the core file in `scripts/harness/`, then the proj
 | `HARNESS_SCOPE_CHECK` | `on` | Commit-scope warning |
 | `HARNESS_CROSS_SCOPES` | `deps\|build\|ci\|docs\|backbone\|harness\|release\|config\|tests?` | Scopes exempt from the scope check (regex) |
 | `HARNESS_CONTAINER_ENGINE` | empty | Container engine chosen in the stack ADR (set when a container pack is adopted) |
-| `HARNESS_DECISION_PROVIDER`, `_MODE`, `_ADR`, `_CMD`, `_MODEL`, `_TIMEOUT` | `none`, `off`, empty, empty, empty, `20` | Decision layer (see above). User-only, except the timeout |
+| `HARNESS_DECISION_PROVIDER`, `_MODE`, `_ADR`, `_CMD`, `_MODEL`, `_URL`, `_TIMEOUT` | `none`, `off`, empty, empty, empty, empty, `20` | Decision layer (see above). User-only, except the timeout |
 | `HARNESS_COMMIT_NUDGE` | `8` | With no `[WIP]` task, nudge to commit at this many changed tracked files; `0` turns it off |
 
 ## Decision layer (advisory)
@@ -119,11 +119,12 @@ Some checks need judgement that code cannot compute. The decision layer asks a m
 - **Providers:**
   - `none` (default);
   - `command`: any executable, given JSON on stdin and printing JSON on stdout, so local models fit behind it;
+  - `ollama`: a local Jev-style decision endpoint (Ollama's `/v1/systemone`, default model `nimble`). Data stays on the machine, and there's no per-call cost. `HARNESS_DECISION_URL` overrides the endpoint;
   - `claude`: the Claude Messages API over plain HTTPS, with structured outputs, effort `low`, and refusal fallback. It needs no install, only `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) in the environment of whoever commits;
   - `jev`: TypeSafe Jev via `typesafe-sdk`. This adapter is written from published examples and is unverified.
 - **Authorisation:** a provider receives project data (diffs and messages), so it runs only when `HARNESS_DECISION_ADR` names an **Accepted** ADR that mentions it. Choosing a provider is a design decision like any other stack choice. All `HARNESS_DECISION_*` keys are user-only.
 - **Modes:** `shadow` only logs. `advise` also prints the answers that cross their thresholds. Start in shadow mode, compare the log with your own judgement, then tune thresholds before switching to advise.
-- **Questions and thresholds** live in `scripts/harness/decisions.json`, versioned. The model never sees question ids, so the meaning has to be in `instructions` and the option texts. `warn_if` thresholds sit next to each question and are reviewed like code.
+- **Questions and thresholds** live in `scripts/harness/decisions.json`, versioned. The model never sees question ids, so the meaning has to be in `instructions` and the option texts. `warn_if` thresholds sit next to each question and are reviewed like code. A choice warns when its confidence reaches `min_confidence`, or when the probability of the chosen option reaches `min_probability`. Providers calibrate confidence differently: local Jev-style models report low confidence even for likely answers.
 - **Log:** every call is appended to `.git/harness/decisions.jsonl`, with its state, questions, answers, latency and errors, so any change can be replayed. Summarise it with `python3 scripts/harness/lib/harness.py decisions [--last N]`.
 - **Failures never block:** a timeout, error, refusal or off-schema answer is logged and ignored.
 

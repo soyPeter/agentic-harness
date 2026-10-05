@@ -9,6 +9,8 @@ Providers:
   none     no calls (default)
   command  HARNESS_DECISION_CMD gets {"decision", "state", "questions"} as JSON on stdin and prints
            the answers as JSON (format below); any local or remote model can sit behind it
+  ollama   a local Jev-style decision endpoint (Ollama /v1/systemone, e.g. the nimble model);
+           data stays on the machine; HARNESS_DECISION_URL overrides the endpoint
   claude   Claude Messages API over plain HTTPS (standard library), structured outputs;
            needs ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) in the environment
   jev      TypeSafe Jev via `typesafe_sdk` (written from published examples; unverified)
@@ -24,9 +26,10 @@ import shlex
 import subprocess
 import time
 
-PROVIDERS = ("none", "command", "claude", "jev")
+PROVIDERS = ("none", "command", "ollama", "claude", "jev")
 MODES = ("off", "shadow", "advise")
-DEFAULT_MODELS = {"claude": "claude-opus-5-5"}
+DEFAULT_MODELS = {"claude": "claude-opus-5-5", "ollama": "nimble"}
+DEFAULT_OLLAMA_URL = "http://localhost:11434/v1/systemone"
 
 
 class DecisionError(Exception):
@@ -210,6 +213,51 @@ def ask_claude(model, name, state, questions, timeout):
         raise DecisionError("Claude returned invalid JSON")
 
 
+def ask_ollama(url, model, name, state, questions, timeout):
+    """Local Jev-style decision endpoint (Ollama /v1/systemone). Standard library only."""
+    import socket
+    import urllib.error
+    import urllib.request
+
+    built = {}
+    for qid, question in questions.items():
+        if question["type"] == "choice":
+            built[qid] = {"type": "choice", "instructions": question["instructions"], "criteria": question["options"]}
+        elif question["type"] == "score":
+            rungs = [question["legend"][key] for key in sorted(question["legend"], key=lambda k: int(k))]
+            built[qid] = {"type": "score", "instructions": question["instructions"], "criteria": rungs}
+        else:
+            built[qid] = {"type": "noul", "instructions": question["instructions"]}
+    body = json.dumps({"model": model, "state": state, "questions": built}).encode("utf-8")
+    request = urllib.request.Request(url or DEFAULT_OLLAMA_URL, data=body,
+                                     headers={"content-type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as reply:
+            response = json.loads(reply.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise DecisionError("decision endpoint error %s" % exc.code)
+    except (socket.timeout, TimeoutError):
+        raise DecisionError("decision endpoint timed out after %ss" % timeout)
+    except urllib.error.URLError as exc:
+        raise DecisionError("cannot reach the decision endpoint (%s); is Ollama running?" % exc.reason)
+    except ValueError:
+        raise DecisionError("decision endpoint returned invalid JSON")
+    answers = response.get("answers") if isinstance(response, dict) else None
+    if not isinstance(answers, dict):
+        raise DecisionError("decision endpoint returned no answers")
+    raw = {}
+    for qid, question in questions.items():
+        item = answers.get(qid) or {}
+        if question["type"] == "choice":
+            raw[qid] = {"choice": item.get("choice"), "confidence": item.get("confidence"),
+                        "probabilities": item.get("probabilities")}
+        elif question["type"] == "score":
+            raw[qid] = {"score": item.get("score"), "confidence": item.get("confidence")}
+        else:
+            raw[qid] = {"p": item.get("noul", item.get("p"))}
+    return raw
+
+
 def ask_jev(model, name, state, questions, timeout):
     """Unverified: written from TypeSafe's published SDK examples (TypeSafeClient.system_one)."""
     try:
@@ -254,9 +302,12 @@ def advice(questions, answers):
         rule, answer = question.get("warn_if"), answers.get(qid)
         if not rule or not answer:
             continue
-        if answer["type"] == "choice" and answer["choice"] in rule.get("choices", []) \
-                and answer["confidence"] >= rule.get("min_confidence", 0):
-            notes.append(rule.get("message", "%s: %s" % (qid, answer["choice"])))
+        if answer["type"] == "choice" and answer["choice"] in rule.get("choices", []):
+            probability = (answer.get("probabilities") or {}).get(answer["choice"])
+            confident = answer["confidence"] >= rule.get("min_confidence", 0)
+            likely = probability is not None and "min_probability" in rule and probability >= rule["min_probability"]
+            if confident or likely:
+                notes.append(rule.get("message", "%s: %s" % (qid, answer["choice"])))
         elif answer["type"] == "score" and answer["score"] >= rule.get("min_score", float("inf")) \
                 and answer["confidence"] >= rule.get("min_confidence", 0):
             notes.append(rule.get("message", "%s: %.2f" % (qid, answer["score"])))
@@ -279,6 +330,8 @@ def decide(name, state, definitions, values, log_path):
     try:
         if provider == "command":
             raw = ask_command(values.get("HARNESS_DECISION_CMD", ""), name, state, questions, timeout)
+        elif provider == "ollama":
+            raw = ask_ollama(values.get("HARNESS_DECISION_URL", ""), model, name, state, questions, timeout)
         elif provider == "claude":
             raw = ask_claude(model, name, state, questions, timeout)
         elif provider == "jev":

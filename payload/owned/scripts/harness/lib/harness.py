@@ -53,7 +53,7 @@ FILE_TOOLS = ("Write", "Edit", "MultiEdit")
 PIPELINE_AGENTS = ("analyst", "architect", "griller", "implementer", "judge", "scribe")
 USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE", "HARNESS_JUDGE_MAX_ROUNDS",
                   "HARNESS_DECISION_PROVIDER", "HARNESS_DECISION_MODE", "HARNESS_DECISION_ADR",
-                  "HARNESS_DECISION_CMD", "HARNESS_DECISION_MODEL")
+                  "HARNESS_DECISION_CMD", "HARNESS_DECISION_MODEL", "HARNESS_DECISION_URL")
 DECISIONS_FILE = ROOT / "scripts/harness/decisions.json"
 
 # Write scope per agent: ("allow", patterns) permits only matches; ("deny", patterns) refuses matches.
@@ -107,6 +107,7 @@ DEFAULTS = {
     "HARNESS_DECISION_CMD": "",
     "HARNESS_DECISION_MODEL": "",
     "HARNESS_DECISION_TIMEOUT": "20",
+    "HARNESS_DECISION_URL": "",
 }
 STOP_MODES = ("remind", "block", "off")
 
