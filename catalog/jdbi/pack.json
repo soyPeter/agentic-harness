@@ -1,0 +1,12 @@
+{
+  "name": "jdbi",
+  "description": "SQL-first persistence with JDBI 3: SqlObject and Fluent API, row mapping to records, transactions, injection-safe binding, N+1 avoidance, batching, keyset pagination, optimistic locking, schema migrations.",
+  "decides": "The stack ADR chooses JDBI for data access.",
+  "requires": ["java"],
+  "groups": {},
+  "options": [
+    {"id": "no-orm", "description": "No ORM: JPA, Hibernate ORM/Reactive and Panache are blocked (Hibernate Validator stays allowed)."},
+    {"id": "hexagonal-layers", "description": "JDBI stays in infrastructure adapters; domain packages may not import org.jdbi."},
+    {"id": "flyway", "description": "Schema migrations with Flyway under src/main/resources/db/migration/ (versioned V<n>__<desc>.sql)."}
+  ]
+}

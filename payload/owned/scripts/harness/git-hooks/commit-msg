@@ -1,0 +1,4 @@
+#!/bin/sh
+# Harness-owned. Active through: git config core.hooksPath scripts/harness/git-hooks
+# Enforces Conventional Commits (types and length from backbone/harness.conf).
+exec python3 "$(git rev-parse --show-toplevel)/scripts/harness/lib/harness.py" git commit-msg "$1"

@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "decisions": {
+    "commit-message": {
+      "description": "Run by the commit-msg hook after the format checks pass: does the message describe the staged change? Advisory only.",
+      "questions": {
+        "fit": {
+          "type": "choice",
+          "instructions": "Does the commit message accurately describe what the staged diff changes?",
+          "options": {
+            "accurate": "The subject and body describe the main change in the diff, and nothing they claim is missing from it.",
+            "partial": "The message describes part of the diff but leaves out a significant change, or overstates what changed.",
+            "mismatch": "The message describes a different change than the one in the diff."
+          },
+          "warn_if": {"choices": ["mismatch"], "min_confidence": 0.8,
+                      "message": "The commit message does not seem to describe the staged change; reword it or split the commit."}
+        },
+        "unmentioned": {
+          "type": "yesno",
+          "instructions": "The staged diff contains a significant behaviour, API, schema or dependency change that the commit message does not mention.",
+          "warn_if": {"min_p": 0.8, "message": "The diff seems to contain a significant change the message does not mention."}
+        },
+        "leftovers": {
+          "type": "yesno",
+          "instructions": "The added lines include debugging leftovers: temporary print or log statements, commented-out code, disabled or skipped tests, or hard-coded test values in production code.",
+          "warn_if": {"min_p": 0.85, "message": "The added lines seem to contain debugging leftovers (prints, commented-out code, skipped tests)."}
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Harness-owned. Active through: git config core.hooksPath scripts/harness/git-hooks
+# Checks staged additions against guardrail rules, then runs HARNESS_BUILD_CMD.
+exec python3 "$(git rev-parse --show-toplevel)/scripts/harness/lib/harness.py" git pre-commit

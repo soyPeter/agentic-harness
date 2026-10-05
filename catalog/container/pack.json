@@ -1,0 +1,13 @@
+{
+  "name": "container",
+  "description": "OCI images and compose files: image building, runtime hardening, secrets, supply chain; guardrails against baked-in secrets, private keys in images and engine-socket mounts.",
+  "decides": "The stack or deployment ADR ships the application as container images.",
+  "requires": [],
+  "groups": {
+    "engine": {"required": true, "description": "The container engine the ADR chose; sets HARNESS_CONTAINER_ENGINE, which skills and scripts use for commands."}
+  },
+  "options": [
+    {"id": "podman", "group": "engine", "description": "Podman (rootless, daemonless) and podman-compose.", "conf": {"HARNESS_CONTAINER_ENGINE": "podman"}},
+    {"id": "docker", "group": "engine", "description": "Docker Engine with BuildKit and docker compose.", "conf": {"HARNESS_CONTAINER_ENGINE": "docker"}}
+  ]
+}

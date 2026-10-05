@@ -1,0 +1,12 @@
+{
+  "name": "quarkus",
+  "description": "Quarkus 3 guidance: configuration, REST resources, validation, security, testing, native images, container specifics, and CDI bean rules; includes a native-image test script.",
+  "decides": "The stack ADR chooses Quarkus as the application framework.",
+  "requires": ["java"],
+  "groups": {},
+  "options": [
+    {"id": "no-spring", "description": "No Spring APIs, not even through Quarkus's Spring compatibility extensions; Spring annotations and imports are blocked."},
+    {"id": "hexagonal-layers", "description": "Hexagonal layering with domain/, app|application|usecase/ and infra|infrastructure/ packages: the domain is framework-free, the domain imports neither app nor infra, and app does not import infra."},
+    {"id": "named-use-cases", "description": "Application-layer use cases are JSR-330 @Named beans with constructor injection; CDI scope annotations there are flagged."}
+  ]
+}
