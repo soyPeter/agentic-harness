@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2 (2026-10-05)
+
+- **java pack:** test paths now include `src/intTest` (Gradle's common name for an integration-test source set), for the JUnit-assertion rules, the `java-test` route and the `gradle` option's `HARNESS_TEST_PATHS`. The gap was found by the griller in the first live trial.
+
 ## 0.4.1 (2026-10-05)
 
 - **Decision layer: `ollama` provider** for a local Jev-style decision endpoint (Ollama's `/v1/systemone`, default model `nimble`).

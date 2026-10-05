@@ -4,14 +4,39 @@
   "decides": "The stack ADR chooses Java as an implementation language.",
   "requires": [],
   "groups": {
-    "build-tool": {"required": true, "description": "The build tool the ADR chose; sets HARNESS_BUILD_CMD, HARNESS_TEST_CMD and HARNESS_TEST_PATHS."}
+    "build-tool": {
+      "required": true,
+      "description": "The build tool the ADR chose; sets HARNESS_BUILD_CMD, HARNESS_TEST_CMD and HARNESS_TEST_PATHS."
+    }
   },
   "options": [
-    {"id": "gradle", "group": "build-tool", "description": "Build with the Gradle wrapper.",
-     "conf": {"HARNESS_BUILD_CMD": "./gradlew compileJava compileTestJava -q", "HARNESS_TEST_CMD": "./gradlew test", "HARNESS_TEST_PATHS": "(^|/)src/(test|integrationTest|native-test)/"}},
-    {"id": "maven", "group": "build-tool", "description": "Build with the Maven wrapper.",
-     "conf": {"HARNESS_BUILD_CMD": "./mvnw -q -DskipTests test-compile", "HARNESS_TEST_CMD": "./mvnw -q test", "HARNESS_TEST_PATHS": "(^|/)src/(test|it)/"}},
-    {"id": "junit5-assertj", "description": "Tests use JUnit 5 with AssertJ assertions only: installs the java-test skill, blocks JUnit 4 and JUnit assertion imports."},
-    {"id": "no-lombok", "description": "Lombok is not used: records, static factories and explicit constructors instead; Lombok imports are blocked."}
+    {
+      "id": "gradle",
+      "group": "build-tool",
+      "description": "Build with the Gradle wrapper.",
+      "conf": {
+        "HARNESS_BUILD_CMD": "./gradlew compileJava compileTestJava -q",
+        "HARNESS_TEST_CMD": "./gradlew test",
+        "HARNESS_TEST_PATHS": "(^|/)src/(test|intTest|integrationTest|native-test)/"
+      }
+    },
+    {
+      "id": "maven",
+      "group": "build-tool",
+      "description": "Build with the Maven wrapper.",
+      "conf": {
+        "HARNESS_BUILD_CMD": "./mvnw -q -DskipTests test-compile",
+        "HARNESS_TEST_CMD": "./mvnw -q test",
+        "HARNESS_TEST_PATHS": "(^|/)src/(test|it)/"
+      }
+    },
+    {
+      "id": "junit5-assertj",
+      "description": "Tests use JUnit 5 with AssertJ assertions only: installs the java-test skill, blocks JUnit 4 and JUnit assertion imports."
+    },
+    {
+      "id": "no-lombok",
+      "description": "Lombok is not used: records, static factories and explicit constructors instead; Lombok imports are blocked."
+    }
   ]
 }
