@@ -775,7 +775,13 @@ def git_findings(words):
     if sub == "commit" and "n" in short_flags(rest):
         found.append("git commit -n is --no-verify: it skips the harness git hooks; fix what the hook reports instead.")
     if sub == "config" and any(w.lower() == "core.hookspath" for w in rest):
-        found.append("Changing core.hooksPath turns off the harness git hooks.")
+        # Reading the setting is fine; setting, adding or unsetting it is not.
+        key = next(i for i, w in enumerate(rest) if w.lower() == "core.hookspath")
+        writes = {"--unset", "--unset-all", "--add", "--replace-all", "set", "unset", "--edit", "-e"}
+        reads = {"--get", "--get-all", "--get-regexp", "-l", "--list", "get"}
+        value = [w for w in rest[key + 1:] if not w.startswith("-")]
+        if (writes & set(rest)) or (value and not reads & set(rest)):
+            found.append("Changing core.hooksPath turns off the harness git hooks.")
     if sub == "push":
         if any(w.startswith("+") for w in rest) or "--mirror" in rest:
             found.append("A '+<ref>' or --mirror push is a force push: it rewrites remote history.")

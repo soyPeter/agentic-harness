@@ -801,7 +801,7 @@ for cmd in "sed -i '' 's/- \[ \]/- [x]/' backbone/3-TASKS.md" \
            "rm .claude/agents/judge.md" "cd backbone && rm 3-TASKS.md" "bash -c 'echo x > backbone/3-TASKS.md'" \
            "tee .git/harness/sessions/s.json < skills.json" "git rm -q backbone/specs/2.1.md" \
            "git commit -n -m 'feat: x'" "git -c core.hooksPath=/dev/null commit -m 'feat: x'" \
-           "git config --unset core.hooksPath" "git config core.hooksPath .husky" \
+           "git config --unset core.hooksPath" "git config core.hooksPath .husky" "git config set core.hooksPath x" \
            "HARNESS_VERIFY=off git commit -m 'feat: x'" "SKIP_BUILD=1 git commit -m 'feat: x'" \
            "export HARNESS_JUDGE_GATE=off" "env HARNESS_BUILD_CMD=true git commit -m 'feat: x'" \
            "git push origin +main" "git push origin --delete feature" "find / -name x -delete" \
@@ -814,7 +814,8 @@ for cmd in "cat backbone/3-TASKS.md" "grep -n WIP backbone/3-TASKS.md" "cp backb
            "git commit -m 'docs: explain why we never drop table'" "git commit -m 'docs: never use --no-verify'" \
            "$(printf "cat > notes.md <<'EOF'\ngit reset --hard is dangerous\nEOF")" \
            "psql -c 'DELETE FROM users WHERE id = 1'" "./gradlew test 2>&1 | tee build/test.log" \
-           "git push -u origin feature/x" "git push --force-with-lease" "curl -s https://example.com | jq ."; do
+           "git push -u origin feature/x" "git push --force-with-lease" "curl -s https://example.com | jq ." \
+           "git config --get core.hooksPath" "git config core.hooksPath" "git config --list"; do
   expect 0 "allows: $cmd" hook "$P" pre-tool-use "$(bash_json "$cmd")"
 done
 expect 2 "blocks: SQL sent through a heredoc" hook "$P" pre-tool-use "$(bash_json "$(printf "psql <<'SQL'\nDROP TABLE users;\nSQL")")"

@@ -19,7 +19,8 @@ Hardening from the first live unattended run, and the last trust gaps in autonom
 - **Doctor** flags skills not verified within `HARNESS_SKILL_MAX_AGE` days (default 180), or with no `last-verified` date.
 - **`harness.py report --json`**, plus agent cost and out-of-band change counts in the report.
 - **No `__pycache__`** written into projects.
-- **Self-test:** 483 checks.
+- **Reading `core.hooksPath` is allowed;** only setting or unsetting it is refused. This false positive was found by a live probe, which also confirmed that in a trusted folder both the project hooks and the agent (frontmatter) hooks load under `claude -p`.
+- **Self-test:** 487 checks.
 
 ## 0.7.0 (2026-10-09)
 
