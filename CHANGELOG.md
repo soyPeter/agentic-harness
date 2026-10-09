@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.0 (2026-10-09)
+
+The gates hold no matter how a change is made. A probe of 0.4.2 found that every file-level gate could be bypassed through the shell (`sed -i` on `3-TASKS.md`, `echo Approved-by: >> spec`, a Python one-liner writing a verdict), that `git commit -n` and `core.hooksPath` switched off the git hooks, and that a task marked `[x]` with no spec, grill or judge verdict could be committed.
+
+- **`harness.py verify`:** re-checks the gates on the resulting state, not on the edit.
+  - It runs in pre-commit on the staged change, and in CI with `verify --range <base>..HEAD`.
+  - It checks that new `[WIP]`/`[x]` tasks passed the start gate, and that finished tasks have a judge pass matching the committed code.
+  - It also checks that verdict history is append-only, user-only settings are unchanged, harness enforcement files match the lock, and settings still run the hooks.
+  - `HARNESS_VERIFY` (`block`/`off`, user-only) controls it; the user commits a deliberate exception with `HARNESS_VERIFY=off`.
+  - `HOOKS.md` has a GitHub Actions example.
+- **Shell checks:** commands are split into segments and tokenized instead of matched as raw text.
+  - Shell writes to `backbone/`, `scripts/harness/`, `.claude/`, `AGENTS.md`, `CLAUDE.md`, `.git/hooks`, `.git/harness` and `.git/config` are refused. This covers redirections, `rm`/`mv`/`cp`/`tee`, `sed -i`, `git rm`, and interpreter one-liners and heredocs; `cd`, `bash -c` and `eval` are followed.
+  - Also refused: `git commit -n`, `core.hooksPath` changes, `HARNESS_*=`/`SKIP_BUILD=` from the shell, `+<ref>`/`--mirror`/delete pushes, `find / -delete`, `DELETE` without `WHERE`, and `curl | sh`.
+  - `@bash` rules no longer match commit messages or data heredocs, so `git commit -m "docs: why we never drop table"` is allowed.
+- **The judge's tests are run by the harness:** on a claimed pass the recorder runs `HARNESS_TEST_CMD` (`HARNESS_TEST_TIMEOUT`, default 900 s) and records `test_run` (exit code, duration, output hash and tail) in the verdict. A failure or timeout turns the pass into a fail, and test evidence in the judge's JSON is ignored. The judge's hook timeout is 1200 s.
+- **Recorded passes are re-derived** from their stored evidence by the gates, so a hand-written `{"verdict": "pass"}` does not count.
+- **ADR acceptance is the user's:** agents can't set an ADR to `Accepted`, and an accepted ADR is frozen except for being superseded.
+- **Orchestrator scope** (`HARNESS_ORCHESTRATOR_SCOPE`, user-only, default `on`): the main session (no `agent_id`) may edit only `backbone/` docs and configuration, `.claude/skills/` and `CLAUDE.md`. Specs, ADRs and code go through the role agents.
+- **`SKIP_BUILD=1` is user-only**, like the other escape hatches.
+- **Self-test:** 389 checks, up from 314.
+
 ## 0.4.2 (2026-10-05)
 
 - **java pack:** test paths now include `src/intTest` (Gradle's common name for an integration-test source set), for the JUnit-assertion rules, the `java-test` route and the `gradle` option's `HARNESS_TEST_PATHS`. The gap was found by the griller in the first live trial.

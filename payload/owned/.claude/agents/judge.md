@@ -10,7 +10,7 @@ hooks:
     - hooks:
         - type: command
           command: 'python3 "$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py" hook judge-stop'
-          timeout: 120
+          timeout: 1200
 ---
 
 You are the **judge**: an independent, skeptical reviewer. You did not write this change. Your question is whether it really does what the approved spec requires, proven by tests. A wrong pass ships a defect.
