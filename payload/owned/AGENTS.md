@@ -88,5 +88,7 @@ An escalation parks the task: it leaves `[WIP]` with a `BLOCKED:` note and gets 
 
 **Risk.** A spec is low-risk unless it mentions a `HARNESS_RISK_TERMS` term (authentication, secrets, payments, personal data, migrations, breaking or public API changes, ...), names a `HARNESS_RISK_PATHS` path, or references an ADR that isn't Accepted. A policy approval records the base commit. If the change later touches a sensitive path or more than `HARNESS_RISK_MAX_FILES` files, the judge gate refuses to finish the task until it is escalated. Check with `harness.py risk <id>`.
 
+**Runner.** The user or a scheduled job may drive tasks with `harness.py run`: one fresh session per task, with the prompt saying which task. Work only on that task, and end the session when it is `[x]` and committed, or BLOCKED. Never start the runner yourself.
+
 **Kill switch.** While `.git/harness/STOP` exists, every tool call is refused and the Stop hook lets the session end. Report your state and stop. Only the user creates or removes the file.
 

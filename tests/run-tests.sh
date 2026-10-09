@@ -1033,5 +1033,70 @@ expect 2 "agents cannot set HARNESS_RISK_PATHS" hook "$A" pre-tool-use "$(edit_j
 HARNESS_TEST_CMD= expect 1 "doctor: autonomous mode needs a test command" "$A/scripts/harness/doctor.sh"
 unset HARNESS_AUTONOMY HARNESS_TEST_CMD
 
+section "CI trust: base-branch verifier and harness changes"
+expect 2 "agents cannot edit the harness lock" hook "$A" pre-tool-use "$(edit_json "$A/backbone/.harness-lock.json" '"files"' '"files"')"
+[ -f "$A/.github/workflows/harness-verify.yml" ] && ok "the CI workflow is installed" || bad "the CI workflow is installed"
+contains "CI runs the base branch's verifier" 'git archive "origin/$BASE" scripts/harness/lib' "$(cat "$A/.github/workflows/harness-verify.yml")"
+git -C "$A" add -A >/dev/null; HARNESS_VERIFY=off git -C "$A" commit -qm "chore: autonomy fixtures" >/dev/null
+CI_BASE=$(git -C "$A" rev-parse HEAD)
+echo "# local tweak" >> "$A/scripts/harness/routing.core.conf"
+git -C "$A" add -A; HARNESS_VERIFY=off git -C "$A" commit -qm "chore: tweak routes" >/dev/null
+TRUSTED="$WORK/trusted"
+mkdir -p "$TRUSTED/scripts/harness" && cp -R "$HARNESS/payload/owned/scripts/harness/lib" "$TRUSTED/scripts/harness/"
+out=$(cd "$A" && HARNESS_ROOT="$A" python3 "$TRUSTED/scripts/harness/lib/harness.py" verify --range "$CI_BASE..HEAD"; echo "exit=$?")
+contains "a trusted copy verifies another checkout via HARNESS_ROOT" "the harness itself changes (scripts/harness/routing.core.conf)" "$out"
+contains "harness changes in a range need approval" "exit=1" "$out"
+expect 0 "a maintainer-approved harness change passes" \
+  env HARNESS_ROOT="$A" python3 "$TRUSTED/scripts/harness/lib/harness.py" verify --range "$CI_BASE..HEAD" --allow-user-changes
+
+section "runner: unattended tasks, budgets, escalation, report"
+R="$WORK/runner"
+new_repo "$R"
+"$HARNESS/bootstrap.sh" "$R" --name runner >/dev/null
+RT="$R/backbone/3-TASKS.md"
+for id in 4.1 4.2 4.3; do printf -- '- [ ] **Task %s: Item %s** (spec: backbone/specs/%s.md)\n' "$id" "$id" "$id" >> "$RT"; done
+git -C "$R" add -A && HARNESS_VERIFY=off git -C "$R" commit -qm "chore: adopt agentic harness"
+cat > "$WORK/fake-agent.sh" <<'EOF'
+#!/bin/bash
+# Stands in for `claude -p`: reads the prompt on stdin and acts per task.
+task=$(sed -n 's/^Drive Task \([^ ]*\) .*/\1/p')
+echo "fake agent: task $task"
+case "$task" in
+  4.1) sed -i.bak "s/^- \[ \] \*\*Task 4.1/- [x] **Task 4.1/" backbone/3-TASKS.md && rm -f backbone/3-TASKS.md.bak
+       echo "done" > "out-4.1.txt"; git add -A; HARNESS_VERIFY=off git commit -qm "feat: task 4.1" ;;
+  4.2) python3 scripts/harness/lib/harness.py escalate 4.2 --reason "needs a product decision" ;;
+  4.3) : ;;
+  4.4) sleep 5 ;;
+  4.5) mkdir -p .git/harness && touch .git/harness/STOP ;;
+esac
+EOF
+chmod +x "$WORK/fake-agent.sh"
+export HARNESS_AGENT_CMD="$WORK/fake-agent.sh" HARNESS_AUTONOMY=autonomous HARNESS_TEST_CMD=true
+out=$(python3 "$R/scripts/harness/lib/harness.py" run --dry-run)
+contains "dry run lists the ready tasks in order" "would start task 4.1: Item 4.1" "$out"
+out=$(HARNESS_AUTONOMY=supervised python3 "$R/scripts/harness/lib/harness.py" run 2>&1; echo "exit=$?")
+contains "run refuses outside autonomous mode" "needs HARNESS_AUTONOMY" "$out"
+out=$(python3 "$R/scripts/harness/lib/harness.py" run 2>&1; echo "exit=$?")
+contains "run: a task the agent finished and committed is done" "done         task 4.1" "$out"
+contains "run: a task the agent escalated is left blocked" "blocked      task 4.2" "$out"
+contains "run: a task with no progress is escalated after the attempts" "escalated    task 4.3" "$out"
+contains "run: attempts are retried" "task 4.3 attempt 2" "$out"
+contains "run: the stalled task is BLOCKED by the runner" "Task 4.3: Item 4.3** (spec: backbone/specs/4.3.md) — BLOCKED: runner" "$(cat "$RT")"
+[ -f "$(ls "$R"/.git/harness/runs/*/4.1-1.log | head -1)" ] && ok "run keeps a log per agent session" || bad "run keeps a log per agent session"
+printf -- '- [ ] **Task 4.4: Slow** (spec: backbone/specs/4.4.md)\n- [ ] **Task 4.5: Halts** (spec: backbone/specs/4.5.md)\n- [ ] **Task 4.6: Never reached** (spec: backbone/specs/4.6.md)\n' >> "$RT"
+out=$(HARNESS_RUN_TASK_TIMEOUT=1 HARNESS_RUN_ATTEMPTS=1 python3 "$R/scripts/harness/lib/harness.py" run 2>&1)
+contains "run: a session over the time budget is cut off" "task 4.4 attempt 1: pending" "$out"
+contains "run: the timed-out task is escalated" "escalated    task 4.4" "$out"
+contains "run: the kill switch stops the run before the next task" "halted by" "$out"
+lacks "run: no task runs after the kill switch" "task 4.6 attempt" "$out"
+rm -f "$R/.git/harness/STOP"
+expect 2 "agents cannot start the runner" hook "$R" pre-tool-use "$(bash_json 'python3 scripts/harness/lib/harness.py run')"
+hook "$R" pre-tool-use "$(bash_json 'git commit -n -m x')" >/dev/null 2>&1
+out=$(python3 "$R/scripts/harness/lib/harness.py" report)
+contains "report counts escalations" "escalations: 3" "$out"
+contains "report lists finished tasks" "tasks finished by the runner: 1 4.1" "$out"
+contains "report counts blocked tool calls" "blocked tool calls: 2" "$out"
+unset HARNESS_AGENT_CMD HARNESS_AUTONOMY HARNESS_TEST_CMD
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

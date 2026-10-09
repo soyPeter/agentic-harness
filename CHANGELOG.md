@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.0 (2026-10-09)
+
+Unattended runs, with CI as the authority.
+
+- **`harness.py run`** (autonomous mode, user or scheduler only): for each ready task (a `[WIP]` one first, BLOCKED ones skipped), it starts a fresh session with `HARNESS_AGENT_CMD` (prompt on stdin).
+  - Budgets: `HARNESS_RUN_TASK_TIMEOUT` per session and `HARNESS_RUN_ATTEMPTS` per task.
+  - The outcome is read from `3-TASKS.md`: done when `[x]` and committed, otherwise retried and then escalated as `runner`.
+  - It honours the kill switch between sessions and keeps a log per session. Agents can't start it.
+- **CI workflow** `.github/workflows/harness-verify.yml` (harness-owned): runs `verify --range` on every pull request with the base branch's `scripts/harness/lib` (new `HARNESS_ROOT`), so a pull request can't change its own verifier. In a range, harness changes and user-only setting changes need the `harness-change-approved` label.
+- **The lock is protected:** agents can no longer edit `backbone/.harness-lock.json`. Before, the main session could rewrite it to match a modified harness file.
+- **Event log** `.git/harness/events.jsonl` (blocks, verify refusals, verdicts, approvals, escalations, run attempts), summarised by `harness.py report`.
+- **Self-test:** 441 checks.
+
 ## 0.6.0 (2026-10-09)
 
 Autonomous mode: the harness runs without a human in the loop, and the human-only decisions become policy or escalations.

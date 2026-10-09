@@ -25,6 +25,8 @@ Per-file checks in PreToolUse:
 | `backbone/adr/*.md` | Only the user sets an ADR to `Accepted`; an accepted ADR is frozen except for being superseded |
 | `backbone/harness.conf` | The gate switches, `HARNESS_JUDGE_MAX_ROUNDS`, `HARNESS_VERIFY`, `HARNESS_ORCHESTRATOR_SCOPE` and the decision-layer keys are user-only |
 | `backbone/.verdicts/*` | Never writable by agents |
+| `backbone/.harness-lock.json` | Written only by the installer and `harness.py adopt` |
+| `backbone/escalations.md` | Written by `harness.py escalate`; resolved by the user |
 
 **Orchestrator scope** (`HARNESS_ORCHESTRATOR_SCOPE`, user-only, default `on`): the main session (a tool call without an `agent_id`) may edit only `backbone/` docs and configuration (not specs, ADRs or verdicts), `.claude/skills/` and `CLAUDE.md`. Specs, ADRs and code are written by the role agents.
 
@@ -92,21 +94,11 @@ The hooks guard edits made through the tools. `harness.py verify` checks the **r
 
 `HARNESS_VERIFY` is `block` (default) or `off`, and user-only. The user commits a deliberate exception with `HARNESS_VERIFY=off git commit ...`; agents can't set it.
 
-**CI** is the authoritative copy of this check, because nothing in an agent's session can switch it off:
+**CI** is the authoritative copy of this check, because nothing in an agent's session can switch it off. The harness installs `.github/workflows/harness-verify.yml`, which on every pull request:
+- takes `scripts/harness/lib` from the **base branch** and runs it against the pull request's checkout (`HARNESS_ROOT`), so a pull request can't change the verifier that checks it;
+- runs `verify --range origin/<base>..HEAD`.
 
-```yaml
-# .github/workflows/harness.yml
-on: pull_request
-jobs:
-  verify:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with: {fetch-depth: 0}
-      - run: python3 scripts/harness/lib/harness.py verify --range origin/${{ github.base_ref }}..HEAD
-```
-
-Add `--allow-user-changes` only when CI has established that a human made the change (for example, a label only maintainers can set).
+In a range, any change to the harness itself (enforcement files, the lock) or to user-only settings fails. The only way through is the `harness-change-approved` label, which the workflow turns into `--allow-user-changes`. Make the check required in branch protection, and restrict who may label pull requests.
 
 ## Autonomous mode (`HARNESS_AUTONOMY`)
 
@@ -122,6 +114,30 @@ Add `--allow-user-changes` only when CI has established that a human made the ch
 | Kill switch | While `.git/harness/STOP` exists, every Bash and file tool call is refused, and the Stop hook lets the session end. Agents can't remove it through the shell. |
 
 `doctor.sh` reports an error if autonomous mode runs without `HARNESS_TEST_CMD`, or with verify, the start gate or the judge gate off.
+
+## Runner (`harness.py run`)
+
+The user (or a scheduled job) runs `python3 scripts/harness/lib/harness.py run [--max-tasks N] [--dry-run]` in autonomous mode. The runner only sequences work; the hooks, gates and verify still do all the enforcing. For each ready task (a `[WIP]` one first, then pending lines in order; BLOCKED tasks are skipped), it:
+
+- starts a fresh agent session with `HARNESS_AGENT_CMD`, passing the task prompt on stdin;
+- stops the session after `HARNESS_RUN_TASK_TIMEOUT` seconds;
+- reads the outcome from `3-TASKS.md`:
+  - `[x]` with a clean working tree means done;
+  - a `BLOCKED` note means the agent escalated;
+  - anything else is retried, up to `HARNESS_RUN_ATTEMPTS` sessions, and then escalated as `runner`;
+- checks the kill switch between sessions.
+
+Logs go to `.git/harness/runs/<timestamp>/<task>-<attempt>.log`. Agents can't start the runner.
+
+`HARNESS_AGENT_CMD` defaults to `claude -p --permission-mode acceptEdits`. An unattended agent needs its tools pre-approved: allow the build and test commands in `.claude/settings.json`, or run it in a container or VM with `--dangerously-skip-permissions`. The harness hooks apply either way. Work on a branch and let the CI check gate the merge.
+
+## Event log and report
+
+Blocks, verify refusals, verdicts, approvals, escalations and run attempts are appended to `.git/harness/events.jsonl`. `harness.py report [--days N]` summarises them:
+- tasks finished;
+- judge verdicts, and claimed passes the harness overturned;
+- escalations and policy approvals;
+- blocked tool calls and refused commits, by reason.
 
 ## Git hooks (`core.hooksPath = scripts/harness/git-hooks`)
 
@@ -170,6 +186,9 @@ Two files of each kind apply: the core file in `scripts/harness/`, then the proj
 | `HARNESS_RISK_MAX_FILES` | `20` | A policy-approved change touching more files is escalated. User-only |
 | `HARNESS_GRILL_MAX_ROUNDS` | `3` | Griller fails before an autonomous escalation. User-only |
 | `HARNESS_ESCALATE_GH` | `off` | `on`: escalations also open a GitHub issue (`gh`). User-only |
+| `HARNESS_AGENT_CMD` | `claude -p --permission-mode acceptEdits` | The runner's agent command (prompt on stdin). User-only |
+| `HARNESS_RUN_TASK_TIMEOUT` | `3600` | Seconds per agent session in a run. User-only |
+| `HARNESS_RUN_ATTEMPTS` | `2` | Sessions per task before the runner escalates it. User-only |
 | `HARNESS_SCOPE_CHECK` | `on` | Commit-scope warning |
 | `HARNESS_CROSS_SCOPES` | `deps\|build\|ci\|docs\|backbone\|harness\|release\|config\|tests?` | Scopes exempt from the scope check (regex) |
 | `HARNESS_CONTAINER_ENGINE` | empty | Container engine chosen in the stack ADR (set when a container pack is adopted) |

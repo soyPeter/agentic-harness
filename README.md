@@ -20,6 +20,7 @@ A stack-agnostic harness for AI coding agents such as Claude Code. Install it in
 - **Judging**: an independent `judge` checks every requirement and acceptance criterion against the code and tests. The verdict is recorded by a hook, which re-derives it from the evidence: an AC without a test that mentions its id, unmet criteria or failing tests all turn a claimed pass into a fail. The recorder runs the test command itself rather than trusting the judge's report. Verdicts are tied to a fingerprint of the code, so any later change makes them stale.
 - **Guardrails** throughout: destructive commands, secrets and project rules are blocked. Each agent can only write its own files, and the main session only orchestrates. Shell commands can't write harness state or switch off checks. One task is `[WIP]` at a time. Commits follow Conventional Commits. The gates are on by default and only the user can switch them off.
 - **Autonomous mode** (opt-in, user-only): no human in the loop. The harness approves low-risk specs by policy, from the spec and later the diff. Everything else, including repeated griller or judge failures, is escalated: the task is parked as BLOCKED, an entry goes into `backbone/escalations.md` (optionally a GitHub issue), and work continues. A kill switch halts everything.
+- **Runner and CI**: `harness.py run` drives ready tasks unattended, one fresh agent session per task, with time and attempt budgets, escalating stalls. The installed `harness-verify` workflow re-checks every pull request with the **base branch's** verifier, so a pull request can't weaken the check that gates it. `harness.py report` summarises the event log.
 - **Verify**: the pre-commit hook re-checks the gates on the staged state, and CI runs the same check on a pull request's commits (`harness.py verify --range`), so a change made any other way is still caught.
 - **Safe updates**: harness files are tracked by hash. Local edits are detected and never overwritten silently.
 
@@ -101,6 +102,7 @@ git config core.hooksPath scripts/harness/git-hooks
 | `backbone/.verdicts/` | hooks | Griller and judge verdicts per task, with fingerprints (audit trail) |
 | `backbone/.harness-lock.json` | harness | Installed version and file hashes |
 | `scripts/harness/` | harness | Runtime (`lib/harness.py`), git hooks, core rules and routes, `doctor.sh` |
+| `.github/workflows/harness-verify.yml` | harness | CI: `verify --range` with the base branch's verifier on every pull request |
 | `.claude/settings.json` | shared | Merged: harness hook entries plus a few read-only permissions |
 
 Check the state of a task's definition with `python3 scripts/harness/lib/harness.py spec-check <id>`, and the harness with `scripts/harness/doctor.sh`.

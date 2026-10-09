@@ -1,0 +1,43 @@
+# Harness-owned (agentic harness). The authoritative copy of the harness gates: it re-checks every pull
+# request with `harness.py verify --range`, using the BASE branch's harness, so a pull request cannot change
+# the verifier that checks it. Make this check required in the branch protection of your default branch.
+#
+# Changes to the harness itself or to user-only settings fail the check unless a maintainer adds the
+# `harness-change-approved` label (restrict who may label pull requests accordingly).
+name: harness-verify
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Take the verifier from the base branch
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/trusted"
+          if git archive "origin/$BASE" scripts/harness/lib | tar -x -C "$RUNNER_TEMP/trusted"; then
+            echo "Using the harness from origin/$BASE."
+          else
+            echo "::warning::origin/$BASE has no harness yet; using the pull request's copy."
+            mkdir -p "$RUNNER_TEMP/trusted/scripts/harness"
+            cp -R scripts/harness/lib "$RUNNER_TEMP/trusted/scripts/harness/"
+          fi
+
+      - name: Verify the pull request's commits
+        env:
+          BASE: ${{ github.base_ref }}
+          HARNESS_ROOT: ${{ github.workspace }}
+          ALLOW: ${{ contains(github.event.pull_request.labels.*.name, 'harness-change-approved') && '--allow-user-changes' || '' }}
+        run: python3 "$RUNNER_TEMP/trusted/scripts/harness/lib/harness.py" verify --range "origin/$BASE..HEAD" $ALLOW
