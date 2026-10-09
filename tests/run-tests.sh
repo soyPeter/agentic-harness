@@ -1068,10 +1068,26 @@ case "$task" in
   4.3) : ;;
   4.4) sleep 5 ;;
   4.5) mkdir -p .git/harness && touch .git/harness/STOP ;;
+  6.1) sed -i.bak "s/^- \[ \] \*\*Task 6.1/- [x] **Task 6.1/" backbone/3-TASKS.md && rm -f backbone/3-TASKS.md.bak
+       echo "done" > "out-6.1.txt"; git add -A; HARNESS_VERIFY=off git commit -qm "feat: task 6.1" ;;
 esac
+echo '{"type":"result","total_cost_usd":0.6,"num_turns":3,"result":"ok"}'
 EOF
 chmod +x "$WORK/fake-agent.sh"
 export HARNESS_AGENT_CMD="$WORK/fake-agent.sh" HARNESS_AUTONOMY=autonomous HARNESS_TEST_CMD=true
+REAL_HOME="$HOME"; export HOME="$WORK/home"; mkdir -p "$HOME"
+out=$(python3 "$R/scripts/harness/lib/harness.py" run 2>&1; echo "exit=$?")
+contains "run refuses an untrusted workspace (claude -p would skip the hooks)" "has not trusted" "$out"
+trust() { python3 - "$HOME/.claude.json" "$@" <<'EOF'
+import json, os, sys
+path = sys.argv[1]
+data = json.load(open(path)) if os.path.exists(path) else {"projects": {}}
+for folder in sys.argv[2:]:
+    data["projects"][os.path.realpath(folder)] = {"hasTrustDialogAccepted": True}
+json.dump(data, open(path, "w"))
+EOF
+}
+trust "$R"
 out=$(python3 "$R/scripts/harness/lib/harness.py" run --dry-run)
 contains "dry run lists the ready tasks in order" "would start task 4.1: Item 4.1" "$out"
 out=$(HARNESS_AUTONOMY=supervised python3 "$R/scripts/harness/lib/harness.py" run 2>&1; echo "exit=$?")
@@ -1090,12 +1106,117 @@ contains "run: the timed-out task is escalated" "escalated    task 4.4" "$out"
 contains "run: the kill switch stops the run before the next task" "halted by" "$out"
 lacks "run: no task runs after the kill switch" "task 4.6 attempt" "$out"
 rm -f "$R/.git/harness/STOP"
+python3 "$R/scripts/harness/lib/harness.py" escalate 4.5 --reason "test fixture: pulls the kill switch" >/dev/null
 expect 2 "agents cannot start the runner" hook "$R" pre-tool-use "$(bash_json 'python3 scripts/harness/lib/harness.py run')"
 hook "$R" pre-tool-use "$(bash_json 'git commit -n -m x')" >/dev/null 2>&1
 out=$(python3 "$R/scripts/harness/lib/harness.py" report)
-contains "report counts escalations" "escalations: 3" "$out"
+contains "report counts escalations" "escalations: 4" "$out"
 contains "report lists finished tasks" "tasks finished by the runner: 1 4.1" "$out"
 contains "report counts blocked tool calls" "blocked tool calls: 2" "$out"
+contains "report shows agent cost" "agent cost: \$" "$out"
+out=$(python3 "$R/scripts/harness/lib/harness.py" report --json)
+contains "report --json is JSON" '"escalations": 4' "$out"
+expect 0 "report --json parses" python3 -c 'import json,sys; json.loads(sys.argv[1])' "$out"
+
+section "runner: cost budget and worktrees"
+printf -- '- [ ] **Task 5.1: A** (spec: backbone/specs/5.1.md)\n- [ ] **Task 5.2: B** (spec: backbone/specs/5.2.md)\n' >> "$RT"
+out=$(HARNESS_RUN_MAX_COST=1 HARNESS_RUN_ATTEMPTS=1 python3 "$R/scripts/harness/lib/harness.py" run 2>&1)
+contains "run: the cost budget stops the run" "budget reached" "$out"
+lacks "run: no task starts after the budget" "task 5.2 attempt" "$out"
+printf -- '- [ ] **Task 6.1: Branch work** (spec: backbone/specs/6.1.md)\n' >> "$RT"
+git -C "$R" add -A; HARNESS_VERIFY=off git -C "$R" commit -qm "docs(backbone): add tasks" >/dev/null 2>&1
+out=$(python3 "$R/scripts/harness/lib/harness.py" run --worktree --only 6.1 2>&1)
+contains "run --worktree finishes the task on its own branch" "done         task 6.1" "$out"
+contains "the task's commit is on harness/task-6.1" "feat: task 6.1" "$(git -C "$R" log --oneline harness/task-6.1)"
+lacks "the base branch is untouched" "feat: task 6.1" "$(git -C "$R" log --oneline HEAD)"
+expect 0 "the worktree is removed afterwards" test -z "$(git -C "$R" worktree list | grep task-6.1)"
+contains "a task with a branch is skipped on the next run" "already has branch harness/task-6.1" \
+  "$(python3 "$R/scripts/harness/lib/harness.py" run --worktree --only 6.1 2>&1)"
+
+section "CI: independent judge and branch protection"
+trust "$F"
+FIN=$(git -C "$F" log --format=%H --grep "finish customer search" | head -1)
+cat > "$WORK/fake-judge.sh" <<'EOF'
+#!/bin/bash
+cat > /dev/null
+python3 -c 'import json,os
+v = os.environ.get("FAKE_VERDICT", "pass")
+crit = [{"id": a, "met": v == "pass", "evidence": "src/api/search_controller.py:1", "tests": ["t"]} for a in ("AC-2.1-1", "AC-2.1-2")]
+body = {"verdict": v, "task": "2.1", "criteria": crit, "findings": [], "tests": {"command": "true", "result": "passed"}, "summary": "s"}
+text = "Judged." if os.environ.get("FAKE_VERDICT") == "none" else "Judged.\n```json\n" + json.dumps(body) + "\n```"
+print(json.dumps({"type": "result", "result": text, "total_cost_usd": 0.2}))'
+EOF
+chmod +x "$WORK/fake-judge.sh"
+export HARNESS_CI_JUDGE_CMD="$WORK/fake-judge.sh"
+out=$(python3 "$F/scripts/harness/lib/harness.py" ci-judge --range "$FIN~1..$FIN"; echo "exit=$?")
+contains "ci-judge re-judges a task finished in the range" "ci-judge: task 2.1: PASS" "$out"
+contains "ci-judge passes when the independent judge agrees" "exit=0" "$out"
+out=$(FAKE_VERDICT=fail python3 "$F/scripts/harness/lib/harness.py" ci-judge --range "$FIN~1..$FIN"; echo "exit=$?")
+contains "ci-judge fails when the independent judge disagrees" "does not confirm the pass" "$out"
+contains "ci-judge exits non-zero then" "exit=1" "$out"
+out=$(FAKE_VERDICT=none python3 "$F/scripts/harness/lib/harness.py" ci-judge --range "$FIN~1..$FIN"; echo "exit=$?")
+contains "ci-judge fails without a verdict" "returned no verdict JSON" "$out"
+contains "ci-judge is silent when no task finished" "no task finished" "$(python3 "$F/scripts/harness/lib/harness.py" ci-judge --range "$FIN..$FIN")"
+unset HARNESS_CI_JUDGE_CMD
+out=$(python3 "$F/scripts/harness/lib/harness.py" ci-protect --dry-run)
+contains "ci-protect requires the verify check" '"contexts": [' "$out"
+contains "ci-protect targets the branch protection API" "/branches/main/protection" "$out"
+contains "ci-protect --with-judge adds the judge check" '"judge"' "$(python3 "$F/scripts/harness/lib/harness.py" ci-protect --dry-run --with-judge)"
+for cmd in "python3 scripts/harness/lib/harness.py ci-judge --range a..b" "python3 scripts/harness/lib/harness.py ci-protect"; do
+  expect 2 "agents cannot run: $cmd" hook "$F" pre-tool-use "$(bash_json "$cmd")"
+done
+[ -f "$F/.github/workflows/harness-judge.yml" ] && ok "the CI judge workflow template is installed" || bad "the CI judge workflow template is installed"
+contains "the judge workflow trusts the workspace for claude -p" "hasTrustDialogAccepted" "$(cat "$F/.github/workflows/harness-judge.yml")"
+
+section "autonomy hardening: assumptions, out-of-band changes, comments, skills"
+export HARNESS_AUTONOMY=autonomous HARNESS_TEST_CMD=true
+auto_spec 3.5 ""
+grill_q() { hook "$A" grill-stop "$(python3 -c 'import json,sys; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":sys.argv[2],"task":sys.argv[1],"questions":[{"severity":"major","question":"Unicode input?"}] if sys.argv[2]=="fail" else [],"summary":"s"})+"\n```"}))' "$1" "$2")" >/dev/null; }
+grill_q 3.5 fail; grill_q 3.5 pass
+out=$($AH approve 3.5; echo "exit=$?")
+contains "approve needs the griller's questions settled as Assumptions" "record how each was settled under '## Assumptions'" "$out"
+python3 - "$A/backbone/specs/3.5.md" <<'EOF'
+import sys
+p = sys.argv[1]; s = open(p).read()
+open(p, "w").write(s.replace("## Open questions", "## Assumptions\n- A1: Input is ASCII only (source: backbone/4-KNOWLEDGE.md).\n\n## Open questions", 1))
+EOF
+grill_q 3.5 pass
+expect 0 "approve: with the assumptions recorded and re-grilled, the spec is approved" $AH approve 3.5
+hook "$A" session-start '{}' >/dev/null
+echo "sneaky" >> "$A/backbone/4-KNOWLEDGE.md"
+out=$(hook "$A" post-tool-use "$(bash_json 'python3 tools/gen.py')")
+contains "a protected file changed by a script is detected" "changed outside the Write/Edit tools: backbone/4-KNOWLEDGE.md" "$out"
+contains "the WIP task is parked for review" "BLOCKED: out-of-band change" "$(cat "$AT")"
+git -C "$A" checkout -q -- backbone/4-KNOWLEDGE.md
+out=$(hook "$A" post-tool-use "$(bash_json 'git checkout -- backbone/4-KNOWLEDGE.md')")
+lacks "restoring the committed version is not flagged" "outside the Write/Edit tools" "$out"
+hook "$A" post-tool-use "$(sskill session code-quality)" >/dev/null
+hook "$A" post-tool-use "$(write_json "$A/backbone/4-KNOWLEDGE.md" "# knowledge")" >/dev/null
+lacks "file-tool edits are not flagged" "outside the Write/Edit tools" "$(hook "$A" post-tool-use "$(bash_json 'ls')")"
+unset HARNESS_AUTONOMY
+echo "manual edit" >> "$A/backbone/4-KNOWLEDGE.md"
+lacks "supervised mode does not watch for out-of-band changes" "outside" "$(hook "$A" post-tool-use "$(bash_json 'ls')")"
+export HARNESS_AUTONOMY=autonomous
+M="$WORK/comments"
+new_repo "$M"
+"$HARNESS/bootstrap.sh" "$M" --name comments >/dev/null
+printf -- '- [ ] **Task 1.1: Real task** (spec: backbone/specs/1.1.md)\n' >> "$M/backbone/3-TASKS.md"
+python3 "$M/scripts/harness/lib/harness.py" escalate 1.1 --reason "test" >/dev/null
+contains "escalate marks the real task line" "Task 1.1: Real task** (spec: backbone/specs/1.1.md) — BLOCKED" "$(cat "$M/backbone/3-TASKS.md")"
+lacks "escalate never touches the template's example in the comment" "<title>** (spec: backbone/specs/1.1.md) — BLOCKED" "$(cat "$M/backbone/3-TASKS.md")"
+expect 0 "the harness writes no __pycache__ into the project" test ! -d "$M/scripts/harness/lib/__pycache__"
+unset HARNESS_AUTONOMY HARNESS_TEST_CMD
+out=$(HARNESS_SKILL_MAX_AGE=1 "$M/scripts/harness/doctor.sh")
+contains "doctor warns about skills not verified recently" "was last verified" "$out"
+mkdir -p "$M/.claude/skills/undated"; printf -- '---\nname: undated\ndescription: x\n---\n# x\n' > "$M/.claude/skills/undated/SKILL.md"
+contains "doctor warns about skills without a date" "skill undated has no last-verified date" "$("$M/scripts/harness/doctor.sh")"
+for f in devcontainer.json Dockerfile init-firewall.sh trust-workspace.py; do
+  [ -f "$M/.devcontainer/harness-agent/$f" ] && ok "sandbox file installed: $f" || bad "sandbox file installed: $f"
+done
+contains "the spec template has an Assumptions section" "## Assumptions" "$(cat "$M/backbone/templates/spec.md")"
+out=$(HARNESS_AUTONOMY=autonomous HARNESS_TEST_CMD=true "$M/scripts/harness/doctor.sh")
+contains "doctor warns that an untrusted folder would skip the hooks" "has not trusted this folder" "$out"
+export HOME="$REAL_HOME"
 unset HARNESS_AGENT_CMD HARNESS_AUTONOMY HARNESS_TEST_CMD
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

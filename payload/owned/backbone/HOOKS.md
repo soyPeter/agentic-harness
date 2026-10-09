@@ -129,15 +129,55 @@ The user (or a scheduled job) runs `python3 scripts/harness/lib/harness.py run [
 
 Logs go to `.git/harness/runs/<timestamp>/<task>-<attempt>.log`. Agents can't start the runner.
 
+- **Workspace trust.** In a folder Claude Code hasn't trusted, `claude -p` ignores the project's hooks, agent hooks and permissions, so the harness would not run at all. The runner refuses to start there; accept the trust dialog once interactively. The sandbox and the CI judge trust their own workspace. `HARNESS_SKIP_TRUST_CHECK=1` is for agent commands other than Claude Code.
+- **Budgets.**
+  - `HARNESS_RUN_TASK_TIMEOUT` per session and `HARNESS_RUN_ATTEMPTS` per task.
+  - `HARNESS_RUN_MAX_COST`: dollars per run. The run stops before the next task once spent. Cost and turns are read from `--output-format json` output (the default command uses it).
+  - Per session, add `--max-budget-usd <n>` to `HARNESS_AGENT_CMD`.
+- **`--worktree [--pr]`:** each task runs in its own worktree, on branch `harness/task-<id>` from the current HEAD. The base branch is left untouched.
+  - With `--pr`, a done or escalated task's branch is pushed and a pull request opened (`gh`), so CI gates each task separately.
+  - A task that already has a branch is skipped; delete the branch to retry.
+  - Tasks run independently of each other, so `3-TASKS.md` may need a rebase between their pull requests.
+- **`--only <id>`** runs one task.
+
+**Sandbox.** `.devcontainer/harness-agent/` is a container for unattended runs. It is **untested on this release: review before use**. It provides:
+- outbound traffic limited to the Anthropic API, GitHub and `HARNESS_FIREWALL_ALLOW`;
+- no host credentials apart from `ANTHROPIC_API_KEY`;
+- a trusted workspace;
+- `HARNESS_AGENT_CMD` set to `--dangerously-skip-permissions`, because the container, not the prompt, is the boundary.
+
+Add your toolchain in a Dockerfile that builds `FROM` it.
+
 `HARNESS_AGENT_CMD` defaults to `claude -p --permission-mode acceptEdits`. An unattended agent needs its tools pre-approved: allow the build and test commands in `.claude/settings.json`, or run it in a container or VM with `--dangerously-skip-permissions`. The harness hooks apply either way. Work on a branch and let the CI check gate the merge.
+
+## Out-of-band changes (autonomous mode)
+
+The shell checks can't see what a script file does. In autonomous mode the harness keeps a snapshot of the protected files (`backbone/`, `scripts/harness/`, `.claude/`, `AGENTS.md`, `CLAUDE.md`). The snapshot is refreshed after every file-tool edit and every write of the harness's own.
+
+After each shell command, any protected file that changed outside those, and isn't simply back to its committed version, is reported. It is logged as `tamper`, and the `[WIP]` task is escalated for review. Restore the file with `git checkout -- <file>`.
 
 ## Event log and report
 
-Blocks, verify refusals, verdicts, approvals, escalations and run attempts are appended to `.git/harness/events.jsonl`. `harness.py report [--days N]` summarises them:
+Blocks, verify refusals, verdicts, approvals, escalations and run attempts are appended to `.git/harness/events.jsonl`. `harness.py report [--days N]` summarises them (`--json` for machines):
 - tasks finished;
 - judge verdicts, and claimed passes the harness overturned;
 - escalations and policy approvals;
 - blocked tool calls and refused commits, by reason.
+
+## CI judge and branch protection
+
+`harness.py ci-judge --range <base>..<tip>` re-judges every task the range marks `[x]`:
+- It runs a fresh judge session with `HARNESS_CI_JUDGE_CMD` (default `claude -p --agent judge ...`).
+- It re-runs `HARNESS_TEST_CMD`, and applies the same re-derivation rules as the judge recorder.
+- It fails unless the independent verdict is a pass.
+
+The verdicts committed with a task were produced inside the agent's session; this one isn't. The project-owned template `.github/workflows/harness-judge.yml` runs it on pull requests when the `ANTHROPIC_API_KEY` secret is set; add your toolchain steps to it.
+
+`harness.py ci-protect [--branch main] [--with-judge] [--dry-run]` (needs `gh`) does two things:
+- requires the `verify` check (and optionally `judge`) on the branch;
+- creates the `harness-change-approved` label.
+
+Agents can't run `ci-judge` or `ci-protect`.
 
 ## Git hooks (`core.hooksPath = scripts/harness/git-hooks`)
 
@@ -186,9 +226,12 @@ Two files of each kind apply: the core file in `scripts/harness/`, then the proj
 | `HARNESS_RISK_MAX_FILES` | `20` | A policy-approved change touching more files is escalated. User-only |
 | `HARNESS_GRILL_MAX_ROUNDS` | `3` | Griller fails before an autonomous escalation. User-only |
 | `HARNESS_ESCALATE_GH` | `off` | `on`: escalations also open a GitHub issue (`gh`). User-only |
-| `HARNESS_AGENT_CMD` | `claude -p --permission-mode acceptEdits` | The runner's agent command (prompt on stdin). User-only |
+| `HARNESS_AGENT_CMD` | `claude -p --permission-mode acceptEdits --output-format json` | The runner's agent command (prompt on stdin). User-only |
 | `HARNESS_RUN_TASK_TIMEOUT` | `3600` | Seconds per agent session in a run. User-only |
 | `HARNESS_RUN_ATTEMPTS` | `2` | Sessions per task before the runner escalates it. User-only |
+| `HARNESS_RUN_MAX_COST` | empty (no limit) | Dollars per run; the runner stops before the next task once spent. User-only |
+| `HARNESS_CI_JUDGE_CMD` | `claude -p --agent judge --dangerously-skip-permissions --output-format json` | The CI judge session. User-only |
+| `HARNESS_SKILL_MAX_AGE` | `180` | Days after which doctor flags a skill's `last-verified` date; `0` turns it off |
 | `HARNESS_SCOPE_CHECK` | `on` | Commit-scope warning |
 | `HARNESS_CROSS_SCOPES` | `deps\|build\|ci\|docs\|backbone\|harness\|release\|config\|tests?` | Scopes exempt from the scope check (regex) |
 | `HARNESS_CONTAINER_ENGINE` | empty | Container engine chosen in the stack ADR (set when a container pack is adopted) |

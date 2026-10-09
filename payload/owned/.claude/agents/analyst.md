@@ -28,6 +28,7 @@ You are the **analyst**. You turn a request into a precise, testable definition 
 - Fill these sections: Context, Requirements (`REQ-<id>-<n>`), Acceptance criteria (`AC-<id>-<n> (REQ-...)` in Given/When/Then), Non-functional requirements, Out of scope and Open questions.
 - Leave **Architecture** (ADRs and tech requirements) to the architect, but list in **Skills** the skills the work obviously needs (for example `api-design` for an endpoint).
 - Anything you cannot decide from the sources is an **open question for the user**. Never guess.
+- In **autonomous mode** (no user in the loop), settle a question from `backbone/` when the sources do decide it, and record it under **Assumptions** with its source (`- A1: ... (source: backbone/4-KNOWLEDGE.md)`). Leave anything the sources don't decide as an open question; the orchestrator escalates it. Keep the spec proportionate to the task: a small change needs few requirements and acceptance criteria.
 - Keep `PRD:` pointing at the PRD section this serves, or `none`.
 
 ## When revising after grilling

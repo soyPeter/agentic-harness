@@ -1,0 +1,22 @@
+// Agentic harness: sandbox for unattended runs (harness-owned).
+// Open the project in this container ("Dev Containers: Reopen in Container", then pick harness-agent),
+// or use the devcontainer CLI, and run: python3 scripts/harness/lib/harness.py run
+// Inside, the agent may skip permission prompts because the container is the boundary:
+// outbound network is limited to an allowlist (init-firewall.sh), there are no host credentials,
+// and the workspace is the only mount. The harness hooks still apply to everything the agent does.
+{
+  "name": "harness-agent",
+  "build": { "dockerfile": "Dockerfile" },
+  "runArgs": ["--cap-add=NET_ADMIN", "--cap-add=NET_RAW"],
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
+  "workspaceFolder": "/workspace",
+  "remoteUser": "agent",
+  "containerEnv": {
+    "HARNESS_AGENT_CMD": "claude -p --dangerously-skip-permissions --output-format json",
+    // Extra hosts the build and tests need (space-separated), e.g. "repo.maven.apache.org pypi.org".
+    "HARNESS_FIREWALL_ALLOW": ""
+  },
+  "remoteEnv": { "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}" },
+  "mounts": ["source=harness-agent-claude-config,target=/home/agent/.claude,type=volume"],
+  "postStartCommand": "sudo /usr/local/bin/init-firewall.sh && python3 /usr/local/bin/trust-workspace.py /workspace"
+}

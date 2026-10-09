@@ -30,6 +30,11 @@ Tech requirements:
 ## Out of scope
 - <what this task deliberately does not do>
 
+## Assumptions
+<!-- How questions were settled without the user, each with its source (a backbone/ file, an ADR, the PRD).
+     In autonomous mode, every question the griller raised must end up here or be escalated. -->
+- none
+
 ## Open questions
 <!-- Must be "- none" before the griller can pass the spec. -->
 - none
