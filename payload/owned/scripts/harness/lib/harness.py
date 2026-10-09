@@ -17,6 +17,10 @@ Usage:
   harness.py adopt <pack>[,<pack>] --adr ADR-NNN --with <opts> --without <opts> [--dry-run]
   harness.py adopt --remove <pack>[,<pack>] [--dry-run]
   harness.py verify [--range <base>..<tip>] [--allow-user-changes]   (gates on the staged change, or a CI range)
+  harness.py approve <task-id>                                    (autonomous mode: policy approval of a low-risk spec)
+  harness.py escalate <task-id> --reason <text> [--kind <k>] [--needed <text>]
+  harness.py escalations                                          (open escalations for the user)
+  harness.py risk <task-id>
   harness.py doctor
 """
 import hashlib
@@ -55,6 +59,8 @@ FILE_TOOLS = ("Write", "Edit", "MultiEdit")
 PIPELINE_AGENTS = ("analyst", "architect", "griller", "implementer", "judge", "scribe")
 USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE", "HARNESS_JUDGE_MAX_ROUNDS",
                   "HARNESS_VERIFY", "HARNESS_ORCHESTRATOR_SCOPE",
+                  "HARNESS_AUTONOMY", "HARNESS_AUTO_APPROVE", "HARNESS_RISK_TERMS", "HARNESS_RISK_PATHS",
+                  "HARNESS_RISK_MAX_FILES", "HARNESS_GRILL_MAX_ROUNDS", "HARNESS_ESCALATE_GH",
                   "HARNESS_DECISION_PROVIDER", "HARNESS_DECISION_MODE", "HARNESS_DECISION_ADR",
                   "HARNESS_DECISION_CMD", "HARNESS_DECISION_MODEL", "HARNESS_DECISION_URL")
 # Paths an agent may change only through the file tools, where the hooks see the change. Shell writes to
@@ -66,6 +72,10 @@ ENFORCEMENT_FILES = (r"^scripts/harness/", r"^\.claude/agents/")
 # What the main session (the orchestrator) may edit itself; specs, ADRs and code go through the role agents.
 ORCHESTRATOR_ALLOW = (r"^backbone/(?!specs/|adr/|\.verdicts/)", r"^\.claude/skills/", r"^CLAUDE\.md$")
 DECISIONS_FILE = ROOT / "scripts/harness/decisions.json"
+ESCALATIONS = BACKBONE / "escalations.md"
+AUTONOMY_MODES = ("supervised", "autonomous")
+BLOCKED_NOTE = re.compile(r"\s+[-\u2014]+\s+BLOCKED:\s*(.*)$")
+POLICY_APPROVAL = re.compile(r"^\s*Approved-by:\s*policy:(\S+)\s*\((.*)\)", re.M)
 
 # Write scope per agent: ("allow", patterns) permits only matches; ("deny", patterns) refuses matches.
 AGENT_SCOPES = {
@@ -112,6 +122,17 @@ DEFAULTS = {
     "HARNESS_VERIFY": "block",
     "HARNESS_ORCHESTRATOR_SCOPE": "on",
     "HARNESS_TEST_TIMEOUT": "900",
+    "HARNESS_AUTONOMY": "supervised",
+    "HARNESS_AUTO_APPROVE": "low",
+    "HARNESS_RISK_TERMS": r"(?i)\b(auth(entication|orization)?|logins?|passwords?|secrets?|tokens?|credentials?|"
+                          r"encrypt\w*|permissions?|roles?|payments?|billing|personal data|PII|GDPR|migrations?|"
+                          r"schema changes?|breaking changes?|public API|deletes? (all|every))\b",
+    "HARNESS_RISK_PATHS": r"(?i)(^|/)(auth|security|migrations?|db/migration|infra|deploy|\.github)/|openapi|swagger"
+                          r"|Dockerfile|(^|/)(pom\.xml|build\.gradle(\.kts)?|settings\.gradle(\.kts)?|package\.json|"
+                          r"go\.mod|Cargo\.toml|requirements[^/]*\.txt|pyproject\.toml)$",
+    "HARNESS_RISK_MAX_FILES": "20",
+    "HARNESS_GRILL_MAX_ROUNDS": "3",
+    "HARNESS_ESCALATE_GH": "off",
     "HARNESS_SCOPE_CHECK": "on",
     "HARNESS_CROSS_SCOPES": "deps|build|ci|docs|backbone|harness|release|config|tests?",
     "HARNESS_COMMIT_NUDGE": "8",
@@ -1041,7 +1062,199 @@ def record_verdict(data, kind):
     note = "harness: %s verdict for task %s: %s" % (agent_name, task, verdict.upper())
     if verdict == "fail":
         note += " (%s)" % "; ".join(reasons)[:500]
+        values = conf()
+        key = "HARNESS_JUDGE_MAX_ROUNDS" if kind == "judge" else "HARNESS_GRILL_MAX_ROUNDS"
+        limit = int(values[key]) if values[key].isdigit() else 2
+        if autonomous() and consecutive_fails(history) >= limit:
+            escalate(task, "%s failed %d times" % (agent_name, consecutive_fails(history)), "; ".join(reasons),
+                     "the user's decision on the findings")
+            note += ". Escalated after %d failed rounds: the task is BLOCKED (backbone/escalations.md); " \
+                    "continue with another task." % consecutive_fails(history)
     emit({"systemMessage": note})
+
+
+# --------------------------------------------------------------------------- autonomy
+# In autonomous mode no human answers questions in the loop. The harness itself approves low-risk specs
+# (deterministically, from the spec and later the diff), and everything else becomes an escalation:
+# the task is parked with a BLOCKED note and an entry in backbone/escalations.md, and work moves on.
+
+def autonomous():
+    return conf()["HARNESS_AUTONOMY"] == "autonomous"
+
+
+def halt_file():
+    common = git("rev-parse", "--git-common-dir").strip()
+    base = Path(common) if common and os.path.isabs(common) else ROOT / (common or ".git")
+    return base / "harness" / "STOP"
+
+
+def task_line(task, text=None):
+    """(index, line) of task's line in 3-TASKS.md, or (None, None)."""
+    lines = (read(TASKS) if text is None else text).splitlines()
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*[-*]\s+\[[^\]]*\]", line) and task_id_at(lines, i) == task:
+            return i, line
+    return None, None
+
+
+def blocked_tasks(text):
+    lines = (text or "").splitlines()
+    return {task_id_at(lines, i) for i, line in enumerate(lines)
+            if re.match(r"^\s*[-*]\s+\[[^\]]*\]", line) and BLOCKED_NOTE.search(line)}
+
+
+def policy_approval(text):
+    """{'rule', 'base'} of a policy approval line in the spec text, or None."""
+    m = POLICY_APPROVAL.search(md_section(strip_comments(text or ""), "Approval") or "")
+    if not m:
+        return None
+    base = re.search(r"\bbase ([0-9a-f]{7,40})", m.group(2))
+    return {"rule": m.group(1), "base": base.group(1) if base else None}
+
+
+def changed_files(base):
+    """Code files changed since commit base (committed, staged, unstaged or untracked), outside backbone/."""
+    names = set(n for n in git("diff", "--name-only", "-z", base).split("\0") if n) if base else set()
+    names |= set(n for n in git("ls-files", "-z", "--others", "--exclude-standard").split("\0") if n)
+    if not base:
+        names |= set(n for n in git("ls-files", "-z").split("\0") if n)
+    return sorted(n for n in names if not n.startswith("backbone/"))
+
+
+def risk_reasons(task, base=None):
+    """Why a task is not low-risk (empty list = low risk). With base, the diff since then is assessed too."""
+    values = conf()
+    text = read(spec_path(task))
+    body = without_approval(strip_comments(text))
+    reasons = []
+    terms = re.compile(values["HARNESS_RISK_TERMS"])
+    paths = re.compile(values["HARNESS_RISK_PATHS"])
+    hits = sorted({m.group(0).lower() for m in terms.finditer(body)})
+    if hits:
+        reasons.append("the spec involves %s" % ", ".join(hits[:6]))
+    named = sorted({w for w in re.findall(r"[\w.-]+(?:/[\w.-]+)+", body) if paths.search(w)})
+    if named:
+        reasons.append("the spec names sensitive paths: %s" % ", ".join(named[:6]))
+    for adr in spec_adrs(text):
+        found = adr_file(adr)
+        if found is not None and not adr_status(read(found)).lower().startswith("accepted"):
+            reasons.append("%s is not Accepted: the user decides on it" % adr)
+    if base is not None:
+        changed = changed_files(base)
+        sensitive = [n for n in changed if paths.search(n)]
+        if sensitive:
+            reasons.append("the change touches sensitive paths: %s" % ", ".join(sensitive[:6]))
+        limit = int(values["HARNESS_RISK_MAX_FILES"]) if values["HARNESS_RISK_MAX_FILES"].isdigit() else 20
+        if len(changed) > limit:
+            reasons.append("the change touches %d files (limit %d)" % (len(changed), limit))
+    return reasons
+
+
+def escalate(task, kind, reason, needed=None):
+    """Park task for the user: a BLOCKED note on its line (out of [WIP]) and an entry in escalations.md."""
+    stamp = time.strftime("%Y-%m-%d %H:%M")
+    text = read(TASKS)
+    lines = text.splitlines()
+    index, line = task_line(task, text)
+    if index is not None:
+        line = BLOCKED_NOTE.sub("", line)
+        line = re.sub(r"^(\s*[-*]\s+)\[WIP\]", r"\1[ ]", line)
+        lines[index] = "%s \u2014 BLOCKED: %s (backbone/escalations.md)" % (line, kind)
+        TASKS.write_text("\n".join(lines) + ("\n" if text.endswith("\n") else ""), encoding="utf-8")
+    if not ESCALATIONS.exists():
+        ESCALATIONS.write_text("# Escalations\n\nWritten by the harness when an autonomous run needs a human "
+                               "decision. Resolve an entry by acting on it, setting its status to resolved, and "
+                               "removing the BLOCKED note from the task line in 3-TASKS.md.\n", encoding="utf-8")
+    entry = ("\n## %s Task %s: %s\n\n- Status: open\n- Reason: %s\n- Needed: %s\n"
+             % (stamp, task, kind, reason.strip(), needed or "a decision from the user"))
+    with ESCALATIONS.open("a", encoding="utf-8") as handle:
+        handle.write(entry)
+    issue = None
+    if conf()["HARNESS_ESCALATE_GH"] == "on" and shutil.which("gh"):
+        result = subprocess.run(["gh", "issue", "create", "--title", "Harness escalation: task %s: %s" % (task, kind),
+                                 "--body", entry.strip(), "--label", "harness-escalation"],
+                                cwd=str(ROOT), capture_output=True, text=True)
+        issue = result.stdout.strip() if result.returncode == 0 else None
+    return issue
+
+
+def open_escalations():
+    entries = re.split(r"(?m)^## ", read(ESCALATIONS))[1:]
+    return [e.splitlines()[0] for e in entries if re.search(r"(?mi)^- Status:\s*open\b", e)]
+
+
+def approve_command(task):
+    if not autonomous():
+        print("approve: only in autonomous mode (HARNESS_AUTONOMY=\"autonomous\"); otherwise the user approves "
+              "the spec by adding their Approved-by: line")
+        return 1
+    if conf()["HARNESS_AUTO_APPROVE"] != "low":
+        print("approve: policy approval is off (HARNESS_AUTO_APPROVE); escalating to the user")
+        escalate(task, "approval", "policy approval is switched off", "the user's review and Approved-by: line")
+        return 1
+    text = read(spec_path(task))
+    if approved(text):
+        print("approve: %s is already approved" % spec_rel(task))
+        return 0
+    if task in blocked_tasks(read(TASKS)):
+        print("approve: task %s is BLOCKED; see backbone/escalations.md" % task)
+        return 1
+    invalid = validate_spec(task)
+    history = verdict_history(task, "grill")
+    last = history[-1] if history else None
+    if invalid or not last or last.get("verdict") != "pass" or last.get("fingerprint") != spec_fingerprint(task):
+        print("approve: the spec must be valid and have a current griller pass first (spec-check %s)" % task)
+        return 1
+    reasons = risk_reasons(task)
+    if reasons:
+        escalate(task, "approval", "; ".join(reasons), "the user's review of %s and their Approved-by: line"
+                 % spec_rel(task))
+        print("approve: task %s is not low-risk (%s); escalated to the user in backbone/escalations.md. "
+              "Continue with another task." % (task, "; ".join(reasons)))
+        return 1
+    base = git("rev-parse", "--verify", "-q", "HEAD").strip()[:12] or "none"
+    line = "Approved-by: policy:low-risk (%s; base %s; grill %s)" % (time.strftime("%Y-%m-%d"), base,
+                                                                    last.get("fingerprint", "")[:12])
+    m = re.search(r"^##\s+Approval\s*$", text, re.M | re.I)
+    text = (text.rstrip("\n") + "\n\n## Approval\n" if not m else text.rstrip("\n")) + "\n" + line + "\n"
+    spec_path(task).write_text(text, encoding="utf-8")
+    print("approve: %s approved by policy (low risk)." % spec_rel(task))
+    return 0
+
+
+def escalate_command(argv):
+    if not argv or argv[0].startswith("-"):
+        sys.stderr.write("usage: harness.py escalate <task> --reason <text> [--kind <kind>] [--needed <text>]\n")
+        return 64
+    task, opts, key = argv[0], {}, None
+    for arg in argv[1:]:
+        if arg in ("--reason", "--kind", "--needed"):
+            key = arg[2:]
+        elif key:
+            opts[key] = (opts.get(key, "") + " " + arg).strip()
+    if not opts.get("reason"):
+        sys.stderr.write("escalate: --reason is required\n")
+        return 64
+    issue = escalate(task, opts.get("kind", "decision"), opts["reason"], opts.get("needed"))
+    print("escalate: task %s parked as BLOCKED; recorded in backbone/escalations.md%s. Continue with another task."
+          % (task, " and " + issue if issue else ""))
+    return 0
+
+
+def escalations_command():
+    items = open_escalations()
+    for item in items:
+        print("open  %s" % item)
+    print("%d open escalation(s)" % len(items))
+    return 0
+
+
+def blocked_guard(before, after):
+    removed = blocked_tasks(before) - blocked_tasks(after)
+    if removed:
+        return ("  - Only the user clears a BLOCKED note (task %s), after resolving its entry in "
+                "backbone/escalations.md." % ", ".join(sorted(removed)))
+    return None
 
 
 # --------------------------------------------------------------------------- gates
@@ -1061,6 +1274,9 @@ def wip_collision(before, after):
 def start_problems(task):
     """Why task cannot be [WIP] (or done): spec, grill and approval. None when it may start."""
     spec = spec_rel(task)
+    if task in blocked_tasks(read(TASKS)):
+        return ("Task %s is BLOCKED by an escalation; the user resolves it in backbone/escalations.md and "
+                "removes the note. Continue with another task." % task)
     invalid = validate_spec(task)
     history = verdict_history(task, "grill")
     last = history[-1] if history else None
@@ -1113,6 +1329,13 @@ def judge_problems(task, current, max_rounds):
     rederived, why = effective_judge(task, report)
     if rederived != "pass":
         return "The recorded judge pass for task %s does not hold up: %s." % (task, "; ".join(why)[:400])
+    policy = policy_approval(read(spec_path(task)))
+    if policy:
+        risks = risk_reasons(task, policy["base"] if policy["base"] != "none" else "")
+        if risks:
+            return ("Task %s was approved by policy as low-risk, but %s. Escalate it: python3 "
+                    "scripts/harness/lib/harness.py escalate %s --kind approval --reason \"...\""
+                    % (task, "; ".join(risks), task))
     return None
 
 
@@ -1360,6 +1583,23 @@ def health():
     for key in ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE", "HARNESS_ORCHESTRATOR_SCOPE"):
         if values[key] not in ("on", "off"):
             issues.append(("error", "%s must be on or off" % key))
+    if values["HARNESS_AUTONOMY"] not in AUTONOMY_MODES:
+        issues.append(("error", "HARNESS_AUTONOMY must be one of %s" % "|".join(AUTONOMY_MODES)))
+    elif values["HARNESS_AUTONOMY"] == "autonomous":
+        if not values["HARNESS_TEST_CMD"]:
+            issues.append(("error", "autonomous mode needs HARNESS_TEST_CMD: the judge's tests are the only evidence"))
+        if values["HARNESS_VERIFY"] == "off" or values["HARNESS_JUDGE_GATE"] == "off" or values["HARNESS_SPEC_GATE"] == "off":
+            issues.append(("error", "autonomous mode needs HARNESS_VERIFY, HARNESS_SPEC_GATE and HARNESS_JUDGE_GATE on"))
+    if values["HARNESS_AUTO_APPROVE"] not in ("low", "off"):
+        issues.append(("error", "HARNESS_AUTO_APPROVE must be low or off"))
+    for key in ("HARNESS_RISK_TERMS", "HARNESS_RISK_PATHS"):
+        try:
+            re.compile(values[key])
+        except re.error as exc:
+            issues.append(("error", "%s is not a valid regex (%s)" % (key, exc)))
+    for key in ("HARNESS_RISK_MAX_FILES", "HARNESS_GRILL_MAX_ROUNDS"):
+        if not values[key].isdigit():
+            issues.append(("error", "%s must be a number" % key))
     if values["HARNESS_VERIFY"] not in ("block", "off"):
         issues.append(("error", "HARNESS_VERIFY must be block or off"))
     if not values["HARNESS_TEST_TIMEOUT"].isdigit():
@@ -1745,6 +1985,16 @@ def hook_session_start(_data):
     else:
         lines.append("Before changing anything read: AGENTS.md, backbone/4-KNOWLEDGE.md, backbone/7-CONVENTIONS.md, "
                      "backbone/8-WORKFLOW.md, backbone/3-TASKS.md.")
+    if autonomous():
+        lines.append("AUTONOMOUS MODE: no user is in the loop. Never ask the user; approve low-risk specs with "
+                     "harness.py approve <id>, escalate everything else with harness.py escalate <id> --reason ..., "
+                     "and continue with the next ready task (AGENTS.md section 7).")
+    if halt_file().exists():
+        lines.append("HALTED: %s exists. Do not change anything; report your state." % halt_file())
+    pending_escalations = open_escalations()
+    if pending_escalations:
+        lines.append("Open escalations waiting for the user: %d (backbone/escalations.md); tasks marked BLOCKED "
+                     "are parked." % len(pending_escalations))
     tasks = wip_task_ids()
     if tasks:
         lines.append("Task in progress (resume it, or ask the user before starting other work): %s "
@@ -1765,6 +2015,9 @@ def hook_session_start(_data):
 def hook_pre_tool_use(data):
     tool = data.get("tool_name") or ""
     tool_input = data.get("tool_input") or {}
+    if halt_file().exists():
+        deny("Harness halted: %s exists (the user's kill switch). Stop working and report your state; the user "
+             "removes the file to resume." % halt_file())
     rules, _ = load_rules()
     if tool == "Bash":
         command = tool_input.get("command") or ""
@@ -1789,8 +2042,11 @@ def hook_pre_tool_use(data):
     if hits:
         problems.append(describe(hits))
     checks = ()
+    if path == "backbone/escalations.md":
+        deny("Harness blocked this change to %s: escalations are written by harness.py escalate and resolved by "
+             "the user." % path)
     if path == "backbone/3-TASKS.md":
-        checks = (wip_collision, start_gate, judge_gate)
+        checks = (wip_collision, start_gate, judge_gate, blocked_guard)
     elif path == "backbone/harness.conf":
         checks = (user_only_change,)
     elif re.match(r"^backbone/specs/[^/]+\.md$", path):
@@ -1882,6 +2138,10 @@ def uncommitted_count():
 def hook_stop(data):
     values = conf()
     mode = values["HARNESS_STOP_MODE"]
+    if halt_file().exists():
+        return
+    if autonomous() and mode != "off":
+        mode = "block"
     tasks = wip_tasks()
     if mode == "off":
         return
@@ -2102,6 +2362,16 @@ def main(argv):
         return adopt_command(argv[2:])
     if argv[1:2] == ["verify"]:
         return verify_command(argv[2:])
+    if len(argv) == 3 and argv[1] == "approve":
+        return approve_command(argv[2])
+    if argv[1:2] == ["escalate"]:
+        return escalate_command(argv[2:])
+    if argv[1:] == ["escalations"]:
+        return escalations_command()
+    if len(argv) == 3 and argv[1] == "risk":
+        reasons = risk_reasons(argv[2])
+        print("risk %s: %s" % (argv[2], "; ".join(reasons) if reasons else "low"))
+        return 1 if reasons else 0
     sys.stderr.write(__doc__)
     return 64
 

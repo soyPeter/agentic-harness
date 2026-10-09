@@ -13,7 +13,7 @@ The main session orchestrates; the role agents do the work. Give each agent a se
 3. **Architect:** "Design task `<id>`." It writes the ADRs it needs and fills the spec's Architecture and Skills sections.
 4. **Griller:** "Grill the spec for task `<id>`." Its verdict is recorded in `backbone/.verdicts/<id>.grill.json`.
 5. **Grill the user:** relay the griller's questions to the user verbatim. Have the analyst or architect apply the answers, then grill again. Repeat until the griller passes.
-6. **Approval:** ask the user to review `backbone/specs/<id>.md` and add `Approved-by: <name> (<date>)` under `## Approval` themselves.
+6. **Approval:** ask the user to review `backbone/specs/<id>.md` and add `Approved-by: <name> (<date>)` under `## Approval` themselves. In autonomous mode, run `python3 scripts/harness/lib/harness.py approve <id>` instead: it approves a low-risk spec or escalates the task (AGENTS.md section 7).
 
 Check the state at any time with `python3 scripts/harness/lib/harness.py spec-check <id>`.
 

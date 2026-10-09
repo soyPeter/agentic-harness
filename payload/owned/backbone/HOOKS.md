@@ -108,6 +108,21 @@ jobs:
 
 Add `--allow-user-changes` only when CI has established that a human made the change (for example, a label only maintainers can set).
 
+## Autonomous mode (`HARNESS_AUTONOMY`)
+
+`supervised` (default) or `autonomous`, user-only. In autonomous mode no human is in the loop, and AGENTS.md section 7 replaces every "ask the user":
+
+| Mechanism | What it does |
+|---|---|
+| `harness.py approve <id>` | Policy approval. For a valid spec with a current griller pass, it writes `Approved-by: policy:low-risk (<date>; base <commit>; grill <fingerprint>)`, but only if `risk_reasons` finds nothing. Otherwise it escalates. Only `HARNESS_AUTO_APPROVE="low"` enables it; `off` escalates every spec. |
+| Risk | Spec text matching `HARNESS_RISK_TERMS`, spec paths matching `HARNESS_RISK_PATHS`, or a referenced ADR that isn't Accepted. When finishing a policy-approved task, the judge gate also assesses the diff since the base commit: sensitive paths, or more than `HARNESS_RISK_MAX_FILES` files. `harness.py risk <id>` shows the assessment. |
+| `harness.py escalate <id> --reason ...` | Parks the task. Its line leaves `[WIP]` with a `BLOCKED: <kind>` note, and an entry goes into `backbone/escalations.md` (a GitHub issue too with `HARNESS_ESCALATE_GH="on"` and `gh`). A BLOCKED task cannot start. Agents can't clear the note or edit `escalations.md`. `harness.py escalations` lists open entries. |
+| Automatic escalation | The griller's recorder after `HARNESS_GRILL_MAX_ROUNDS` consecutive fails, the judge's after `HARNESS_JUDGE_MAX_ROUNDS`. |
+| Stop hook | Behaves as `block` (once per stop) whenever a task is `[WIP]`. |
+| Kill switch | While `.git/harness/STOP` exists, every Bash and file tool call is refused, and the Stop hook lets the session end. Agents can't remove it through the shell. |
+
+`doctor.sh` reports an error if autonomous mode runs without `HARNESS_TEST_CMD`, or with verify, the start gate or the judge gate off.
+
 ## Git hooks (`core.hooksPath = scripts/harness/git-hooks`)
 
 | Hook | What it does | Blocks? |
@@ -149,6 +164,12 @@ Two files of each kind apply: the core file in `scripts/harness/`, then the proj
 | `HARNESS_VERIFY` | `block` | `block` or `off`: verify in pre-commit. User-only |
 | `HARNESS_ORCHESTRATOR_SCOPE` | `on` | Main session may not edit specs, ADRs or code. User-only |
 | `HARNESS_TEST_TIMEOUT` | `900` | Seconds the judge recorder lets `HARNESS_TEST_CMD` run |
+| `HARNESS_AUTONOMY` | `supervised` | `supervised` or `autonomous` (see above). User-only |
+| `HARNESS_AUTO_APPROVE` | `low` | `low`: `approve` approves low-risk specs in autonomous mode; `off`: every spec is escalated. User-only |
+| `HARNESS_RISK_TERMS`, `HARNESS_RISK_PATHS` | security, data, API and build terms and paths | Regexes for what is not low-risk. User-only |
+| `HARNESS_RISK_MAX_FILES` | `20` | A policy-approved change touching more files is escalated. User-only |
+| `HARNESS_GRILL_MAX_ROUNDS` | `3` | Griller fails before an autonomous escalation. User-only |
+| `HARNESS_ESCALATE_GH` | `off` | `on`: escalations also open a GitHub issue (`gh`). User-only |
 | `HARNESS_SCOPE_CHECK` | `on` | Commit-scope warning |
 | `HARNESS_CROSS_SCOPES` | `deps\|build\|ci\|docs\|backbone\|harness\|release\|config\|tests?` | Scopes exempt from the scope check (regex) |
 | `HARNESS_CONTAINER_ENGINE` | empty | Container engine chosen in the stack ADR (set when a container pack is adopted) |
