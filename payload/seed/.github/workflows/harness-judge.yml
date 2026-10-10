@@ -1,0 +1,68 @@
+# Agentic harness: independent judge (project-owned template, created once by the installer).
+#
+# For every task a pull request marks [x], this job runs a fresh judge session (claude -p --agent judge)
+# against the committed code, re-runs HARNESS_TEST_CMD, and fails unless the independent verdict is a pass.
+# The verdicts committed with the task were produced inside the agent's own session; this one is not.
+#
+# Setup:
+#   1. Add the repository secret ANTHROPIC_API_KEY. Without it the job is skipped.
+#   2. Add your toolchain below (the step marked TOOLCHAIN) so HARNESS_TEST_CMD can run here.
+#   3. Optionally require the "judge" check: python3 scripts/harness/lib/harness.py ci-protect --with-judge
+# Changes to this file in a pull request need the harness-change-approved label (harness-verify checks it).
+name: harness-judge
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  judge:
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        if: env.ANTHROPIC_API_KEY != ''
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        if: env.ANTHROPIC_API_KEY != ''
+        with:
+          node-version: "22"
+
+      - name: Install Claude Code
+        if: env.ANTHROPIC_API_KEY != ''
+        run: npm install -g @anthropic-ai/claude-code
+
+      # TOOLCHAIN: add the steps your HARNESS_TEST_CMD needs (e.g. actions/setup-java, actions/setup-python).
+
+      - name: Take the harness from the base branch
+        if: env.ANTHROPIC_API_KEY != ''
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/trusted"
+          git archive "origin/$BASE" scripts/harness/lib | tar -x -C "$RUNNER_TEMP/trusted" \
+            || { mkdir -p "$RUNNER_TEMP/trusted/scripts/harness"; cp -R scripts/harness/lib "$RUNNER_TEMP/trusted/scripts/harness/"; }
+
+      - name: Trust the workspace (claude -p ignores project hooks in untrusted folders)
+        if: env.ANTHROPIC_API_KEY != ''
+        run: |
+          python3 - "$GITHUB_WORKSPACE" <<'PY'
+          import json, os, sys
+          path = os.path.expanduser("~/.claude.json")
+          data = json.load(open(path)) if os.path.exists(path) else {}
+          data.setdefault("projects", {})[sys.argv[1]] = {"hasTrustDialogAccepted": True}
+          json.dump(data, open(path, "w"))
+          PY
+
+      - name: Re-judge the tasks this pull request finishes
+        if: env.ANTHROPIC_API_KEY != ''
+        env:
+          BASE: ${{ github.base_ref }}
+          HARNESS_ROOT: ${{ github.workspace }}
+        run: python3 "$RUNNER_TEMP/trusted/scripts/harness/lib/harness.py" ci-judge --range "origin/$BASE..HEAD"

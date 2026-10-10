@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.8.0 (2026-10-09)
+
+Hardening from the first live unattended run, and the last trust gaps in autonomous mode.
+
+- **Found in the live run (1 task, about 85 minutes, ended BLOCKED with no code):** in a folder Claude Code hasn't trusted, `claude -p` ignores the project's hooks, agent hooks and permissions, so the griller's verdict recorder never ran. The agent correctly escalated rather than forge a verdict.
+  - `harness.py run` and `ci-judge` now refuse an untrusted workspace, and doctor warns in autonomous mode.
+  - The sandbox and the CI judge trust their own workspace.
+- **Bug fixed:** `escalate` (and every task-line parser) could match the example task line inside the HTML comment in `3-TASKS.md`. With the usual first task id `1.1`, the BLOCKED note landed on the comment and the real task stayed runnable.
+- **Independent CI judge:** `harness.py ci-judge --range` re-judges tasks a pull request finishes with a fresh session (`HARNESS_CI_JUDGE_CMD`), re-runs the tests, and applies the re-derivation rules. There's a project-owned workflow template, `harness-judge.yml`.
+- **`harness.py ci-protect`:** requires the `verify` check (and optionally `judge`) on a branch, and creates the `harness-change-approved` label.
+- **Assumptions:** the spec template has an Assumptions section. In autonomous mode `approve` refuses a spec whose griller asked questions while Assumptions is empty. The analyst records settled answers with their source and keeps specs proportionate.
+- **Out-of-band changes** (autonomous): a snapshot of the protected files is compared after each shell command. Changes made outside the file tools (for example by a script) are logged and the `[WIP]` task is escalated. Restores to the committed version are fine.
+- **Runner:**
+  - `--worktree [--pr]` runs each task on its own branch, optionally opening a pull request, and `--only <id>` runs one task.
+  - `HARNESS_RUN_MAX_COST` sets a per-run budget, using cost and turns from `--output-format json` (now the default `HARNESS_AGENT_CMD`).
+- **Sandbox template** `.devcontainer/harness-agent/`: outbound allowlist, trusted workspace, unattended agent command. Untested on this release.
+- **Doctor** flags skills not verified within `HARNESS_SKILL_MAX_AGE` days (default 180), or with no `last-verified` date.
+- **`harness.py report --json`**, plus agent cost and out-of-band change counts in the report.
+- **No `__pycache__`** written into projects.
+- **Reading `core.hooksPath` is allowed;** only setting or unsetting it is refused. This false positive was found by a live probe, which also confirmed that in a trusted folder both the project hooks and the agent (frontmatter) hooks load under `claude -p`.
+- **Hooks fail closed on time.** A hook Claude Code kills for running too long lets the tool call through. Gate hooks now have their own 25-second budget (settings and agent hook timeouts are raised to 30 seconds), `git` calls time out inside hooks, and a gate that runs out of time refuses the call.
+- **Second live run, in a trusted folder: success end to end.** One task went spec → griller (2 passes, 8 minor questions settled as Assumptions) → policy approval → implementer → judge (pass on round 1; tests re-run by the harness) → scribe → `[x]` and committed. That took 21 turns and $6.39. Wall time was 4.8 hours for about 20 minutes of work, because the idle Mac slept; HOOKS.md now recommends `caffeinate -i`.
+- **Self-test:** 490 checks.
+
 ## 0.7.0 (2026-10-09)
 
 Unattended runs, with CI as the authority.

@@ -11,7 +11,7 @@ hooks:
       hooks:
         - type: command
           command: 'python3 "$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py" hook agent-guard architect'
-          timeout: 10
+          timeout: 30
 ---
 
 You are the **architect**. You decide how a specified task fits the system, and you record every hard-to-reverse decision as an ADR. You don't change requirements or acceptance criteria, and you don't write code.

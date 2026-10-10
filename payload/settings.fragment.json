@@ -26,7 +26,7 @@
           {
             "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py\" hook pre-tool-use",
-            "timeout": 10
+            "timeout": 30
           }
         ]
       }
@@ -38,7 +38,7 @@
           {
             "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py\" hook post-tool-use",
-            "timeout": 10
+            "timeout": 30
           }
         ]
       }

@@ -21,8 +21,10 @@ Usage:
   harness.py escalate <task-id> --reason <text> [--kind <k>] [--needed <text>]
   harness.py escalations                                          (open escalations for the user)
   harness.py risk <task-id>
-  harness.py run [--max-tasks N] [--dry-run]                      (autonomous: drive ready tasks unattended)
-  harness.py report [--days N]                                    (events: verdicts, escalations, blocks, runs)
+  harness.py run [--max-tasks N] [--only <task>] [--worktree [--pr]] [--dry-run]   (autonomous, unattended)
+  harness.py report [--days N] [--json]                           (events: verdicts, escalations, blocks, runs)
+  harness.py ci-judge --range <base>..<tip>                       (CI: independent re-judging of finished tasks)
+  harness.py ci-protect [--branch main] [--with-judge] [--dry-run] (require the CI checks; needs gh)
   harness.py doctor
 """
 import hashlib
@@ -31,12 +33,14 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 
+sys.dont_write_bytecode = True   # no __pycache__ in the project
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import decisions  # noqa: E402  (sibling module)
 
@@ -66,6 +70,7 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
                   "HARNESS_AUTONOMY", "HARNESS_AUTO_APPROVE", "HARNESS_RISK_TERMS", "HARNESS_RISK_PATHS",
                   "HARNESS_RISK_MAX_FILES", "HARNESS_GRILL_MAX_ROUNDS", "HARNESS_ESCALATE_GH",
                   "HARNESS_AGENT_CMD", "HARNESS_RUN_TASK_TIMEOUT", "HARNESS_RUN_ATTEMPTS",
+                  "HARNESS_RUN_MAX_COST", "HARNESS_CI_JUDGE_CMD",
                   "HARNESS_DECISION_PROVIDER", "HARNESS_DECISION_MODE", "HARNESS_DECISION_ADR",
                   "HARNESS_DECISION_CMD", "HARNESS_DECISION_MODEL", "HARNESS_DECISION_URL")
 # Paths an agent may change only through the file tools, where the hooks see the change. Shell writes to
@@ -73,7 +78,8 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
 SHELL_PROTECTED = (r"^backbone(/|$)", r"^scripts/harness(/|$)", r"^\.claude(/|$)", r"^(AGENTS|CLAUDE)\.md$",
                    r"^\.git/(hooks|harness)(/|$)", r"^\.git/config$")
 # Harness files whose edits change enforcement; verify refuses commits that change them away from the lock.
-ENFORCEMENT_FILES = (r"^scripts/harness/", r"^\.claude/agents/", r"^\.github/workflows/harness-[^/]+\.ya?ml$")
+ENFORCEMENT_FILES = (r"^scripts/harness/", r"^\.claude/agents/", r"^\.github/workflows/harness-[^/]+\.ya?ml$",
+                     r"^\.devcontainer/harness-agent/")
 # What the main session (the orchestrator) may edit itself; specs, ADRs and code go through the role agents.
 ORCHESTRATOR_ALLOW = (r"^backbone/(?!specs/|adr/|\.verdicts/)", r"^\.claude/skills/", r"^CLAUDE\.md$")
 DECISIONS_FILE = ROOT / "scripts/harness/decisions.json"
@@ -138,9 +144,12 @@ DEFAULTS = {
     "HARNESS_RISK_MAX_FILES": "20",
     "HARNESS_GRILL_MAX_ROUNDS": "3",
     "HARNESS_ESCALATE_GH": "off",
-    "HARNESS_AGENT_CMD": "claude -p --permission-mode acceptEdits",
+    "HARNESS_AGENT_CMD": "claude -p --permission-mode acceptEdits --output-format json",
     "HARNESS_RUN_TASK_TIMEOUT": "3600",
     "HARNESS_RUN_ATTEMPTS": "2",
+    "HARNESS_RUN_MAX_COST": "",
+    "HARNESS_CI_JUDGE_CMD": "claude -p --agent judge --dangerously-skip-permissions --output-format json",
+    "HARNESS_SKILL_MAX_AGE": "180",
     "HARNESS_SCOPE_CHECK": "on",
     "HARNESS_CROSS_SCOPES": "deps|build|ci|docs|backbone|harness|release|config|tests?",
     "HARNESS_COMMIT_NUDGE": "8",
@@ -191,8 +200,21 @@ def gate_on(key):
     return conf()[key] != "off"
 
 
+# A hook Claude Code kills for running too long counts as a non-blocking error: the tool call goes through.
+# So hooks keep their own budget below the settings timeout (30 s) and fail closed when they run out,
+# and git calls inside hooks time out well before that.
+GIT_TIMEOUT = 120
+HOOK_BUDGET = 25
+FAIL_CLOSED_HOOKS = ("pre-tool-use", "agent-guard")
+
+
 def git(*args):
-    result = subprocess.run(["git"] + list(args), cwd=str(ROOT), capture_output=True, text=True)
+    try:
+        result = subprocess.run(["git"] + list(args), cwd=str(ROOT), capture_output=True, text=True,
+                                timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        log_event("git-timeout", args=list(args)[:6])
+        return ""
     return result.stdout if result.returncode == 0 else ""
 
 
@@ -273,8 +295,13 @@ def stubs(path, text=None):
 
 # --------------------------------------------------------------------------- tasks
 
+def mask_comments(text):
+    """text with HTML comments blanked out but line breaks kept, so line indexes still match the file."""
+    return re.sub(r"<!--.*?-->", lambda m: "\n" * m.group(0).count("\n"), text or "", flags=re.S)
+
+
 def wip_tasks(text=None):
-    text = read(TASKS) if text is None else text
+    text = mask_comments(read(TASKS) if text is None else text)
     return [(n, line.strip()) for n, line in enumerate(text.splitlines(), 1) if WIP_LINE.match(line)]
 
 
@@ -294,7 +321,7 @@ def task_id_at(lines, index):
 
 
 def wip_task_ids(text=None):
-    text = read(TASKS) if text is None else text
+    text = mask_comments(read(TASKS) if text is None else text)
     lines = text.splitlines()
     return [task_id_at(lines, i) for i, line in enumerate(lines) if WIP_LINE.match(line)]
 
@@ -302,9 +329,9 @@ def wip_task_ids(text=None):
 def finished_tasks(before, after):
     """Ids of [WIP] tasks this edit takes out of progress, other than by reverting them to
     '- [ ]' (abandoning). Marking [x], rewording or deleting all count as finishing."""
-    after_lines = after.splitlines()
+    after_lines = mask_comments(after).splitlines()
     pending = {PENDING_LINE.sub("", line).strip() for line in after_lines if PENDING_LINE.match(line)}
-    lines = before.splitlines()
+    lines = mask_comments(before).splitlines()
     finished = []
     for i, line in enumerate(lines):
         if WIP_LINE.match(line) and line not in after_lines:
@@ -762,7 +789,13 @@ def git_findings(words):
     if sub == "commit" and "n" in short_flags(rest):
         found.append("git commit -n is --no-verify: it skips the harness git hooks; fix what the hook reports instead.")
     if sub == "config" and any(w.lower() == "core.hookspath" for w in rest):
-        found.append("Changing core.hooksPath turns off the harness git hooks.")
+        # Reading the setting is fine; setting, adding or unsetting it is not.
+        key = next(i for i, w in enumerate(rest) if w.lower() == "core.hookspath")
+        writes = {"--unset", "--unset-all", "--add", "--replace-all", "set", "unset", "--edit", "-e"}
+        reads = {"--get", "--get-all", "--get-regexp", "-l", "--list", "get"}
+        value = [w for w in rest[key + 1:] if not w.startswith("-")]
+        if (writes & set(rest)) or (value and not reads & set(rest)):
+            found.append("Changing core.hooksPath turns off the harness git hooks.")
     if sub == "push":
         if any(w.startswith("+") for w in rest) or "--mirror" in rest:
             found.append("A '+<ref>' or --mirror push is a force push: it rewrites remote history.")
@@ -810,8 +843,8 @@ def shell_findings(command, cwd=None, depth=0):
         elif prog == "eval" and depth < 3:
             found.extend(shell_findings(" ".join(words[1:]), cwd, depth + 1))
         elif prog in INTERPRETERS:
-            if any(w.endswith("harness.py") for w in words[1:3]) and "run" in words[2:4]:
-                found.append("harness.py run starts agent sessions; only the user (or CI) runs it.")
+            if any(w.endswith("harness.py") for w in words[1:3]) and set(words[2:4]) & {"run", "ci-judge", "ci-protect"}:
+                found.append("harness.py run, ci-judge and ci-protect are for the user or CI, not agents.")
             flag = next((f for f in ("-c", "-e", "-pe", "-ne") if f in words), None)
             if flag and words.index(flag) + 1 < len(words):
                 found.extend(code_findings(words[words.index(flag) + 1], "That %s one-liner" % prog))
@@ -1071,6 +1104,7 @@ def record_verdict(data, kind):
     VERDICTS.mkdir(parents=True, exist_ok=True)
     verdict_path(task, kind).write_text(json.dumps({"task": task, "kind": kind, "history": history}, indent=2) + "\n",
                                         encoding="utf-8")
+    snapshot_refresh()
     note = "harness: %s verdict for task %s: %s" % (agent_name, task, verdict.upper())
     if verdict == "fail":
         note += " (%s)" % "; ".join(reasons)[:500]
@@ -1101,8 +1135,8 @@ def halt_file():
 
 
 def task_line(task, text=None):
-    """(index, line) of task's line in 3-TASKS.md, or (None, None)."""
-    lines = (read(TASKS) if text is None else text).splitlines()
+    """(index, line) of task's line in 3-TASKS.md (outside comments), or (None, None)."""
+    lines = mask_comments(read(TASKS) if text is None else text).splitlines()
     for i, line in enumerate(lines):
         if re.match(r"^\s*[-*]\s+\[[^\]]*\]", line) and task_id_at(lines, i) == task:
             return i, line
@@ -1110,7 +1144,7 @@ def task_line(task, text=None):
 
 
 def blocked_tasks(text):
-    lines = (text or "").splitlines()
+    lines = mask_comments(text).splitlines()
     return {task_id_at(lines, i) for i, line in enumerate(lines)
             if re.match(r"^\s*[-*]\s+\[[^\]]*\]", line) and BLOCKED_NOTE.search(line)}
 
@@ -1182,6 +1216,7 @@ def escalate(task, kind, reason, needed=None):
     log_event("escalation", task=task, escalation=kind, reason=reason.strip()[:500])
     with ESCALATIONS.open("a", encoding="utf-8") as handle:
         handle.write(entry)
+    snapshot_refresh()
     issue = None
     if conf()["HARNESS_ESCALATE_GH"] == "on" and shutil.which("gh"):
         result = subprocess.run(["gh", "issue", "create", "--title", "Harness escalation: task %s: %s" % (task, kind),
@@ -1218,6 +1253,14 @@ def approve_command(task):
     if invalid or not last or last.get("verdict") != "pass" or last.get("fingerprint") != spec_fingerprint(task):
         print("approve: the spec must be valid and have a current griller pass first (spec-check %s)" % task)
         return 1
+    asked = sum(len(entry.get("questions") or []) for entry in history)
+    assumptions = [a for a in bullets(md_section(strip_comments(text), "Assumptions"))
+                   if a.lower().rstrip(".") not in ("none", "n/a")]
+    if asked and not assumptions:
+        print("approve: the griller asked %d question(s); record how each was settled under '## Assumptions' "
+              "(with its source in backbone/), grill again, then approve. Escalate what backbone/ cannot answer."
+              % asked)
+        return 1
     reasons = risk_reasons(task)
     if reasons:
         escalate(task, "approval", "; ".join(reasons), "the user's review of %s and their Approved-by: line"
@@ -1232,6 +1275,7 @@ def approve_command(task):
     text = (text.rstrip("\n") + "\n\n## Approval\n" if not m else text.rstrip("\n")) + "\n" + line + "\n"
     spec_path(task).write_text(text, encoding="utf-8")
     log_event("approval", task=task, rule="low-risk", base=base)
+    snapshot_refresh()
     print("approve: %s approved by policy (low risk)." % spec_rel(task))
     return 0
 
@@ -1261,6 +1305,66 @@ def escalations_command():
         print("open  %s" % item)
     print("%d open escalation(s)" % len(items))
     return 0
+
+
+# Out-of-band changes. Shell checks can't see what a script file does. In autonomous mode the harness keeps
+# a snapshot of the protected files, refreshed after every file-tool edit and every write of its own, and
+# compares it after each shell command. A protected file that changed in between, and is not simply back
+# to its committed version, was written some other way.
+SNAPSHOT_ROOTS = ("backbone", "scripts/harness", ".claude")
+SNAPSHOT_FILES = ("AGENTS.md", "CLAUDE.md")
+SNAPSHOT_SKIP = (".claude/settings.local.json",)
+
+
+def snapshot_file():
+    return events_file().parent / "snapshot.json"
+
+
+def protected_hashes():
+    hashes = {}
+    for top in SNAPSHOT_ROOTS:
+        for folder, dirs, files in os.walk(str(ROOT / top)):
+            dirs[:] = [d for d in dirs if d not in ("__pycache__", "node_modules")]
+            for name in files:
+                full = Path(folder) / name
+                key = full.relative_to(ROOT).as_posix()
+                if key not in SNAPSHOT_SKIP and not name.endswith((".pyc", ".harness-new", ".harness-bak")):
+                    hashes[key] = sha256(full)
+    for name in SNAPSHOT_FILES:
+        if (ROOT / name).is_file():
+            hashes[name] = sha256(ROOT / name)
+    return hashes
+
+
+def snapshot_refresh():
+    if not autonomous():
+        return
+    try:
+        path = snapshot_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(protected_hashes()), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def out_of_band_changes():
+    """Protected files changed since the snapshot, other than restores to the committed version."""
+    try:
+        previous = json.loads(read(snapshot_file()) or "null")
+    except ValueError:
+        previous = None
+    if previous is None:
+        return []
+    current = protected_hashes()
+    changed = []
+    for name in sorted(set(previous) | set(current)):
+        if previous.get(name) == current.get(name):
+            continue
+        committed = show("HEAD", name)
+        committed_hash = hashlib.sha256(committed.encode("utf-8")).hexdigest() if committed is not None else None
+        if current.get(name) != committed_hash:
+            changed.append(name)
+    return changed
 
 
 def blocked_guard(before, after):
@@ -1423,7 +1527,11 @@ def orchestrator_scope(data, path):
 
 def show(rev, name):
     """Content of name at rev ('' = the index), or None if it does not exist there."""
-    result = subprocess.run(["git", "show", "%s:%s" % (rev, name)], cwd=str(ROOT), capture_output=True, text=True)
+    try:
+        result = subprocess.run(["git", "show", "%s:%s" % (rev, name)], cwd=str(ROOT), capture_output=True,
+                                text=True, timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None
     return result.stdout if result.returncode == 0 else None
 
 
@@ -1452,7 +1560,7 @@ def tree_fingerprint(commit=None):
 
 
 def task_states(text):
-    lines = (text or "").splitlines()
+    lines = mask_comments(text).splitlines()
     wip = {task_id_at(lines, i) for i, line in enumerate(lines) if WIP_LINE.match(line)}
     done = {task_id_at(lines, i) for i, line in enumerate(lines) if DONE_LINE.match(line)}
     return wip, done
@@ -1599,6 +1707,21 @@ def health():
         issues.extend(("warn", "skill route %s names missing skill '%s'; the skill gate ignores it until it exists"
                        % (where, s)) for s in skills if s not in available)
     values = conf()
+    max_age = int(values["HARNESS_SKILL_MAX_AGE"]) if values["HARNESS_SKILL_MAX_AGE"].isdigit() else 0
+    for skill in sorted(SKILLS.glob("*/SKILL.md")) if max_age else []:
+        m = re.search(r"^last-verified:\s*(\d{4}-\d{2}-\d{2})\s*$", read(skill), re.M)
+        name = skill.parent.name
+        if not m:
+            issues.append(("warn", "skill %s has no last-verified date (backbone/SKILLS.md)" % name))
+            continue
+        try:
+            age = (time.time() - time.mktime(time.strptime(m.group(1), "%Y-%m-%d"))) / 86400
+        except ValueError:
+            issues.append(("warn", "skill %s has an invalid last-verified date" % name))
+            continue
+        if age > max_age:
+            issues.append(("warn", "skill %s was last verified %d days ago (HARNESS_SKILL_MAX_AGE %d): re-check it "
+                                   "against the current stack" % (name, age, max_age)))
     if values["HARNESS_STOP_MODE"] not in STOP_MODES:
         issues.append(("error", "HARNESS_STOP_MODE must be one of %s" % "|".join(STOP_MODES)))
     for key in ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE", "HARNESS_ORCHESTRATOR_SCOPE"):
@@ -1607,6 +1730,9 @@ def health():
     if values["HARNESS_AUTONOMY"] not in AUTONOMY_MODES:
         issues.append(("error", "HARNESS_AUTONOMY must be one of %s" % "|".join(AUTONOMY_MODES)))
     elif values["HARNESS_AUTONOMY"] == "autonomous":
+        if workspace_trusted() is False and os.environ.get("HARNESS_SKIP_TRUST_CHECK") != "1":
+            issues.append(("warn", "Claude Code has not trusted this folder: `claude -p` would ignore the project's "
+                                   "hooks here, so harness.py run refuses to start (accept the trust dialog once)"))
         if not values["HARNESS_TEST_CMD"]:
             issues.append(("error", "autonomous mode needs HARNESS_TEST_CMD: the judge's tests are the only evidence"))
         if values["HARNESS_VERIFY"] == "off" or values["HARNESS_JUDGE_GATE"] == "off" or values["HARNESS_SPEC_GATE"] == "off":
@@ -1966,7 +2092,11 @@ def add_context(event, text):
 
 
 def events_file():
-    common = git("rev-parse", "--git-common-dir").strip()
+    try:
+        common = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=str(ROOT), capture_output=True,
+                                text=True, timeout=10).stdout.strip()
+    except subprocess.TimeoutExpired:
+        common = ".git"
     base = Path(common) if common and os.path.isabs(common) else ROOT / (common or ".git")
     return base / "harness" / "events.jsonl"
 
@@ -2028,6 +2158,7 @@ def hook_session_start(_data):
     else:
         lines.append("Before changing anything read: AGENTS.md, backbone/4-KNOWLEDGE.md, backbone/7-CONVENTIONS.md, "
                      "backbone/8-WORKFLOW.md, backbone/3-TASKS.md.")
+    snapshot_refresh()
     if autonomous():
         lines.append("AUTONOMOUS MODE: no user is in the loop. Never ask the user; approve low-risk specs with "
                      "harness.py approve <id>, escalate everything else with harness.py escalate <id> --reason ..., "
@@ -2150,6 +2281,7 @@ def hook_post_tool_use(data):
         remember_skill(data, name)
         return
     if tool in FILE_TOOLS and tool_input.get("file_path"):
+        snapshot_refresh()
         path = rel(tool_input["file_path"])
         rules, _ = load_rules()
         hits = check_text(rules, path, added_text(tool, tool_input), ("warn",))
@@ -2173,6 +2305,18 @@ def hook_post_tool_use(data):
             notes.append("Guardrail warnings for that command:\n%s" % describe(hits))
         if re.search(r"\bgit\b[^\n;&|]*\bcommit\b", command) and fresh_commit():
             notes.extend(dod_after_commit())
+        if autonomous():
+            changed = out_of_band_changes()
+            if changed:
+                log_event("tamper", files=changed[:20], command=command[:300])
+                notes.append("Harness-protected files changed outside the Write/Edit tools: %s. Restore them "
+                             "(git checkout -- <file>) and make the change with the file tools, where the gates "
+                             "apply." % ", ".join(changed[:8]))
+                for task in wip_task_ids():
+                    escalate(task, "out-of-band change", "protected files changed outside the file tools: %s"
+                             % ", ".join(changed[:8]), "a check of what changed them, and a restore")
+                    notes.append("Task %s is BLOCKED for review (backbone/escalations.md)." % task)
+            snapshot_refresh()
     if notes:
         add_context("PostToolUse", "\n\n".join(notes))
 
@@ -2240,7 +2384,7 @@ Stop when the task is [x] and committed, or BLOCKED. Do not start other tasks.""
 
 def ready_tasks(text=None):
     """[(id, title, state)] the runner may work on: a [WIP] task first, then pending ones, never BLOCKED."""
-    lines = strip_comments(read(TASKS) if text is None else text).splitlines()
+    lines = mask_comments(read(TASKS) if text is None else text).splitlines()
     found = []
     for i, line in enumerate(lines):
         if BLOCKED_NOTE.search(line) or not (WIP_LINE.match(line) or PENDING_LINE.match(line)):
@@ -2265,6 +2409,107 @@ def task_state(task):
     return "wip" if WIP_LINE.match(line) else "pending"
 
 
+def session_usage(log_path):
+    """(cost in USD, turns) from an agent log written with --output-format json, else (None, None)."""
+    text = read(log_path)
+    decoder = json.JSONDecoder()
+    for start in reversed([m.start() for m in re.finditer(r"\{", text)]):
+        try:
+            data, _ = decoder.raw_decode(text[start:])
+        except ValueError:
+            continue
+        if isinstance(data, dict) and ("total_cost_usd" in data or "num_turns" in data):
+            return data.get("total_cost_usd"), data.get("num_turns")
+    return None, None
+
+
+def run_worktrees(queue, open_prs):
+    """Run each task in its own worktree on branch harness/task-<id>, from the current HEAD."""
+    common = git("rev-parse", "--git-common-dir").strip()
+    base_dir = Path(common) if os.path.isabs(common) else ROOT / common
+    base_branch = git("rev-parse", "--abbrev-ref", "HEAD").strip()
+    summary = []
+    for task, title, _ in queue:
+        branch = "harness/task-%s" % slug(task)
+        if git("rev-parse", "--verify", "-q", "refs/heads/%s" % branch).strip():
+            print("run: task %s already has branch %s; skipped (delete the branch to retry)" % (task, branch))
+            summary.append((task, "skipped"))
+            continue
+        if halt_file().exists():
+            print("run: halted by %s" % halt_file())
+            break
+        tree = base_dir / "harness" / "worktrees" / slug(task)
+        added = subprocess.run(["git", "worktree", "add", "-q", "-b", branch, str(tree), "HEAD"], cwd=str(ROOT),
+                               capture_output=True, text=True)
+        if added.returncode != 0:
+            print("run: could not create a worktree for task %s: %s" % (task, added.stderr.strip()))
+            summary.append((task, "error"))
+            continue
+        child = subprocess.run([sys.executable, str(tree / "scripts/harness/lib/harness.py"), "run", "--only", task],
+                               cwd=str(tree), capture_output=True, text=True)
+        sys.stdout.write(child.stdout)
+        m = re.search(r"^run: (\S+)\s+task %s$" % re.escape(task), child.stdout, re.M)
+        outcome = m.group(1) if m else "error"
+        if open_prs and outcome in ("done", "blocked", "escalated"):
+            dirty = git_in(tree, "status", "--porcelain").strip()
+            if dirty:
+                git_in(tree, "add", "-A")
+                subprocess.run(["git", "commit", "-qm", "chore(harness): record escalation for task %s" % task],
+                               cwd=str(tree), capture_output=True, text=True, env=dict(os.environ, HARNESS_VERIFY="block"))
+            pushed = subprocess.run(["git", "push", "-q", "-u", "origin", branch], cwd=str(tree),
+                                    capture_output=True, text=True)
+            if pushed.returncode == 0 and shutil.which("gh"):
+                state = "ready for review" if outcome == "done" else "BLOCKED, see backbone/escalations.md"
+                pr = subprocess.run(["gh", "pr", "create", "--head", branch, "--base", base_branch, "--title",
+                                     "Task %s: %s" % (task, title), "--body",
+                                     "Opened by harness.py run: task %s is %s.\n\nThe harness-verify check "
+                                     "re-checks the gates." % (task, state)],
+                                    cwd=str(tree), capture_output=True, text=True)
+                print("run: task %s: %s" % (task, pr.stdout.strip() or pr.stderr.strip()))
+                log_event("run-pr", task=task, branch=branch, url=pr.stdout.strip())
+            else:
+                print("run: task %s: branch %s kept locally (push failed or gh missing)" % (task, branch))
+        subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=str(ROOT), capture_output=True)
+        summary.append((task, outcome))
+    for task, outcome in summary:
+        print("run: %-12s task %s" % (outcome, task))
+    return 0 if all(o in ("done", "blocked", "escalated", "skipped") for _, o in summary) else 1
+
+
+def git_in(tree, *args):
+    result = subprocess.run(["git"] + list(args), cwd=str(tree), capture_output=True, text=True)
+    return result.stdout if result.returncode == 0 else ""
+
+
+def workspace_trusted(path=None):
+    """True/False from ~/.claude.json (this folder or a parent accepted the trust dialog), None if unknown."""
+    config = Path(os.path.expanduser("~/.claude.json"))
+    try:
+        projects = json.loads(config.read_text(encoding="utf-8")).get("projects") or {}
+    except (OSError, ValueError):
+        return None
+    folder = Path(path or ROOT).resolve()
+    candidates = [folder] + list(folder.parents)
+    for candidate in candidates:
+        for key in {str(candidate), str(candidate).replace("/private/", "/", 1)}:
+            if (projects.get(key) or {}).get("hasTrustDialogAccepted") is True:
+                return True
+    return False
+
+
+def trust_problem():
+    if os.environ.get("HARNESS_SKIP_TRUST_CHECK") == "1":
+        return None
+    trusted = workspace_trusted()
+    if trusted:
+        return None
+    return ("Claude Code has not trusted %s, and in an untrusted folder `claude -p` ignores the project's hooks, "
+            "agent hooks and permissions, so the harness would not run at all. Run Claude Code here once "
+            "interactively and accept the trust dialog, or set projects[\"%s\"].hasTrustDialogAccepted to true "
+            "in ~/.claude.json (CI does this in the workflow). HARNESS_SKIP_TRUST_CHECK=1 skips this check for "
+            "agent commands other than Claude Code." % (ROOT, ROOT))
+
+
 def run_agent(prompt, log_path, timeout):
     command = conf()["HARNESS_AGENT_CMD"]
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2282,6 +2527,7 @@ def run_agent(prompt, log_path, timeout):
 def run_command(argv):
     max_tasks = 0
     dry_run = "--dry-run" in argv
+    only = argv[argv.index("--only") + 1] if "--only" in argv and argv.index("--only") + 1 < len(argv) else None
     if "--max-tasks" in argv:
         i = argv.index("--max-tasks")
         max_tasks = int(argv[i + 1]) if i + 1 < len(argv) and argv[i + 1].isdigit() else 0
@@ -2293,9 +2539,17 @@ def run_command(argv):
     if errors:
         print("run: fix the harness first:\n  " + "\n  ".join(errors))
         return 1
+    problem = trust_problem() if not dry_run else None
+    if problem:
+        print("run: " + problem)
+        return 1
     queue = ready_tasks()
+    if only:
+        queue = [t for t in queue if t[0] == only]
     if max_tasks:
         queue = queue[:max_tasks]
+    if "--worktree" in argv and not dry_run:
+        return run_worktrees(queue, "--pr" in argv)
     if dry_run:
         for task, title, state in queue:
             print("run: would %s task %s: %s" % ("resume" if state == "wip" else "start", task, title))
@@ -2305,7 +2559,14 @@ def run_command(argv):
     run_dir = events_file().parent / "runs" / time.strftime("%Y%m%d-%H%M%S")
     log_event("run-start", tasks=[t for t, _, _ in queue])
     summary = []
+    max_cost = float(values["HARNESS_RUN_MAX_COST"]) if re.match(r"^\d+(\.\d+)?$", values["HARNESS_RUN_MAX_COST"]) else None
+    spent = 0.0
     for task, title, state in queue:
+        if max_cost is not None and spent >= max_cost:
+            print("run: budget reached ($%.2f of $%.2f); stopping before task %s" % (spent, max_cost, task))
+            log_event("run-budget", spent=spent, limit=max_cost)
+            summary.append((task, "budget"))
+            break
         outcome = None
         for attempt in range(1, attempts + 1):
             if halt_file().exists():
@@ -2316,7 +2577,10 @@ def run_command(argv):
             resume = ("The task is already [WIP]: resume it." if task_state(task) == "wip"
                       else "The task is pending.")
             prompt = RUN_PROMPT.format(task=task, title=title, state=resume)
-            code, seconds = run_agent(prompt, run_dir / ("%s-%d.log" % (slug(task), attempt)), timeout)
+            log_path = run_dir / ("%s-%d.log" % (slug(task), attempt))
+            code, seconds = run_agent(prompt, log_path, timeout)
+            cost, turns = session_usage(log_path)
+            spent += cost or 0.0
             if halt_file().exists():
                 print("run: halted by %s during task %s" % (halt_file(), task))
                 log_event("run-halt", task=task)
@@ -2325,7 +2589,7 @@ def run_command(argv):
             outcome = task_state(task)
             dirty = bool(git("status", "--porcelain").strip())
             log_event("run-attempt", task=task, attempt=attempt, exit=code, seconds=seconds, state=outcome,
-                      uncommitted=dirty)
+                      uncommitted=dirty, cost_usd=cost, turns=turns)
             print("run: task %s attempt %d: %s (%ss, exit %s%s)" % (task, attempt, outcome, seconds, code,
                                                                    ", uncommitted changes" if dirty else ""))
             if outcome == "done" and not dirty:
@@ -2348,8 +2612,89 @@ def run_command(argv):
     return 0 if all(o in ("done", "blocked", "escalated") for _, o in summary) else 1
 
 
+CI_JUDGE_PROMPT = """You are the judge, running in CI on a pull request. Task {task} is marked [x] in
+backbone/3-TASKS.md. Judge task {task} against backbone/specs/{task}.md exactly as your instructions say, on the
+code as committed (ignore the [WIP] lookup: the task is {task}). Do not modify anything. End with the verdict JSON."""
+
+
+def ci_judge_command(argv):
+    """CI: re-judge every task finished in a range with an independent judge session."""
+    if argv[:1] != ["--range"] or len(argv) < 2:
+        sys.stderr.write("usage: harness.py ci-judge --range <base>..<tip>\n")
+        return 64
+    base, _, tip = argv[1].partition("..")
+    tip = tip or "HEAD"
+    tasks_rel = TASKS.relative_to(ROOT).as_posix()
+    finished = sorted(task_states(show(tip, tasks_rel))[1] - task_states(show(base, tasks_rel))[1])
+    if not finished:
+        print("ci-judge: no task finished in %s" % argv[1])
+        return 0
+    problem = trust_problem()
+    if problem:
+        print("ci-judge: " + problem)
+        return 1
+    command = conf()["HARNESS_CI_JUDGE_CMD"]
+    timeout = int(conf()["HARNESS_RUN_TASK_TIMEOUT"]) if conf()["HARNESS_RUN_TASK_TIMEOUT"].isdigit() else 3600
+    problems = []
+    for task in finished:
+        try:
+            result = subprocess.run(command, shell=True, cwd=str(ROOT), input=CI_JUDGE_PROMPT.format(task=task),
+                                    capture_output=True, text=True, timeout=timeout)
+            output = result.stdout
+        except subprocess.TimeoutExpired:
+            problems.append("task %s: the CI judge timed out" % task)
+            continue
+        try:
+            wrapped = json.loads(output)
+            output = wrapped.get("result", output) if isinstance(wrapped, dict) else output
+        except ValueError:
+            pass
+        report = extract_report(output)
+        if report is None:
+            problems.append("task %s: the CI judge returned no verdict JSON" % task)
+            continue
+        report.pop("test_run", None)
+        report["test_run"] = run_tests()
+        verdict, reasons = effective_judge(task, report)
+        log_event("ci-judge", task=task, verdict=verdict, claimed=report.get("verdict"), reasons=reasons[:10])
+        print("ci-judge: task %s: %s%s" % (task, verdict.upper(), " (%s)" % "; ".join(reasons)[:400] if reasons else ""))
+        if verdict != "pass":
+            problems.append("task %s: the independent judge does not confirm the pass: %s" % (task, "; ".join(reasons)[:400]))
+    for problem in problems:
+        print("ci-judge: %s" % problem)
+    return 1 if problems else 0
+
+
+def ci_protect_command(argv):
+    """Make the harness-verify check required on a branch and create the approval label (needs gh)."""
+    branch = argv[argv.index("--branch") + 1] if "--branch" in argv and argv.index("--branch") + 1 < len(argv) else "main"
+    contexts = ["verify"] + (["judge"] if "--with-judge" in argv else [])
+    payload = {"required_status_checks": {"strict": True, "contexts": contexts}, "enforce_admins": False,
+               "required_pull_request_reviews": None, "restrictions": None}
+    repo = subprocess.run(["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], cwd=str(ROOT),
+                          capture_output=True, text=True) if shutil.which("gh") else None
+    name = repo.stdout.strip() if repo is not None and repo.returncode == 0 else "<owner>/<repo>"
+    endpoint = "repos/%s/branches/%s/protection" % (name, branch)
+    if "--dry-run" in argv or name.startswith("<"):
+        print("ci-protect: would PUT %s\n%s" % (endpoint, json.dumps(payload, indent=2)))
+        print("ci-protect: would create the label harness-change-approved")
+        return 0 if "--dry-run" in argv else 1
+    put = subprocess.run(["gh", "api", "-X", "PUT", endpoint, "--input", "-"], cwd=str(ROOT), input=json.dumps(payload),
+                         capture_output=True, text=True)
+    if put.returncode != 0:
+        print("ci-protect: branch protection failed: %s" % (put.stderr.strip() or put.stdout.strip()))
+        return 1
+    subprocess.run(["gh", "label", "create", "harness-change-approved", "--force", "--color", "B60205",
+                    "--description", "A maintainer approved changes to the harness or its user-only settings"],
+                   cwd=str(ROOT), capture_output=True, text=True)
+    print("ci-protect: %s now requires %s; label harness-change-approved created. Restrict who can label pull "
+          "requests (triage access)." % (branch, ", ".join(contexts)))
+    return 0
+
+
 def report_command(argv):
-    days = int(argv[argv.index("--days") + 1]) if "--days" in argv and argv[-1].isdigit() else 7
+    days = (int(argv[argv.index("--days") + 1]) if "--days" in argv and argv.index("--days") + 1 < len(argv)
+            and argv[argv.index("--days") + 1].isdigit() else 7)
     cutoff = time.time() - days * 86400
     events = []
     for line in read(events_file()).splitlines():
@@ -2372,13 +2717,24 @@ def report_command(argv):
         if e.get("kind") in ("block", "verify"):
             key = re.sub(r"\s+", " ", e.get("reason", ""))[:70]
             reasons[key] = reasons.get(key, 0) + 1
+    if "--json" in argv:
+        print(json.dumps({"days": days, "events": len(events), "tasks_finished": done,
+                          "judge_verdicts": len(judged), "judge_passes": passes, "overturned_passes": overturned,
+                          "escalations": count("escalation"), "open_escalations": len(open_escalations()),
+                          "policy_approvals": count("approval"), "blocked_tool_calls": count("block"),
+                          "verify_refusals": count("verify"), "out_of_band_changes": count("tamper"),
+                          "cost_usd": round(sum(e.get("cost_usd") or 0 for e in attempts), 4),
+                          "block_reasons": reasons}, indent=2, sort_keys=True))
+        return 0
     print("harness report, last %d day(s), %d event(s)" % (days, len(events)))
     print("  tasks finished by the runner: %d %s" % (len(done), ", ".join(done)))
     print("  judge verdicts: %d (%d pass, %d fail); claimed passes overturned by the harness: %d"
           % (len(judged), passes, len(judged) - passes, overturned))
     print("  escalations: %d (open now: %d); policy approvals: %d" % (count("escalation"), len(open_escalations()),
                                                                        count("approval")))
-    print("  blocked tool calls: %d; commits refused by verify: %d" % (count("block"), count("verify")))
+    print("  blocked tool calls: %d; commits refused by verify: %d; out-of-band changes: %d"
+          % (count("block"), count("verify"), count("tamper")))
+    print("  agent cost: $%.2f over %d session(s)" % (sum(e.get("cost_usd") or 0 for e in attempts), len(attempts)))
     for reason, n in sorted(reasons.items(), key=lambda kv: -kv[1])[:8]:
         print("    %4d  %s" % (n, reason))
     return 0
@@ -2546,7 +2902,29 @@ def read_hook_input():
     return data if isinstance(data, dict) else {}
 
 
+def hook_budget(name):
+    """Fail closed if a gate hook runs out of time, instead of being killed (which would let the call through)."""
+    global GIT_TIMEOUT
+    budget = int(os.environ.get("HARNESS_HOOK_BUDGET", HOOK_BUDGET)) if str(
+        os.environ.get("HARNESS_HOOK_BUDGET", HOOK_BUDGET)).isdigit() else HOOK_BUDGET
+    GIT_TIMEOUT = max(1, budget - 5)
+    if not hasattr(signal, "SIGALRM"):
+        return
+
+    def expired(_signum, _frame):
+        if name in FAIL_CLOSED_HOOKS:
+            sys.stderr.write("Harness hook ran out of time (%ds; slow git or filesystem). The call is refused to stay "
+                             "safe; retry it.\n" % budget)
+            os._exit(2)
+        os._exit(0)
+
+    signal.signal(signal.SIGALRM, expired)
+    signal.alarm(budget)
+
+
 def main(argv):
+    if argv[1:2] == ["hook"] and len(argv) >= 3 and argv[2] not in ("grill-stop", "judge-stop"):
+        hook_budget(argv[2])   # the verdict recorders run the tests and have their own, longer timeout
     if len(argv) == 3 and argv[1] == "hook" and argv[2] in HOOKS:
         HOOKS[argv[2]](read_hook_input())
         return 0
@@ -2583,6 +2961,10 @@ def main(argv):
         return run_command(argv[2:])
     if argv[1:2] == ["report"]:
         return report_command(argv[2:])
+    if argv[1:2] == ["ci-judge"]:
+        return ci_judge_command(argv[2:])
+    if argv[1:2] == ["ci-protect"]:
+        return ci_protect_command(argv[2:])
     if len(argv) == 3 and argv[1] == "risk":
         reasons = risk_reasons(argv[2])
         print("risk %s: %s" % (argv[2], "; ".join(reasons) if reasons else "low"))
