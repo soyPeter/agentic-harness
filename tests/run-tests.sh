@@ -936,5 +936,167 @@ out=$(git -C "$F" commit -qm "chore: settings" 2>&1)
 contains "verify blocks removing the harness hooks from settings" "no longer runs the harness hook(s): pre-tool-use" "$out"
 git -C "$F" checkout -q -- .claude/settings.json
 
+section "autonomous mode: policy approval and escalation"
+A="$WORK/auto"
+new_repo "$A"
+"$HARNESS/bootstrap.sh" "$A" --name auto >/dev/null
+AH="python3 $A/scripts/harness/lib/harness.py"
+AT="$A/backbone/3-TASKS.md"
+mkdir -p "$A/backbone/specs" "$A/src" "$A/tests"
+auto_spec() {  # auto_spec <id> <extra requirement text> [ADR]
+  printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/$1/g" -e 's/^- python: all code$/- code-quality: all code/' \
+    -e "s/^ADRs: ADR-001$/ADRs: ${3:-ADR-001}/" -e "s/ignoring case\./ignoring case. $2/" > "$A/backbone/specs/$1.md"
+  printf -- '- [ ] **Task %s: Item** (spec: backbone/specs/%s.md)\n' "$1" "$1" >> "$AT"
+}
+grill_pass() {  # grill_pass <id>
+  hook "$A" grill-stop "$(python3 -c 'import json,sys; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":sys.argv[1],"questions":[],"summary":"s"})+"\n```"}))' "$1")"
+}
+judge_report() {  # judge_report <id> <verdict>
+  python3 -c 'import json,sys; t,v=sys.argv[1:3]
+crit=[{"id":"AC-%s-%d"%(t,n),"met":v=="pass","evidence":"src/a.py:1","tests":["t"]} for n in (1,2)]
+body={"verdict":v,"task":t,"criteria":crit,"findings":[],"tests":{"command":"true","result":"passed"},"summary":"s"}
+print(json.dumps({"agent_type":"judge","last_assistant_message":"```json\n"+json.dumps(body)+"\n```"}))' "$1" "$2"
+}
+auto_spec 3.1 ""
+git -C "$A" add -A && HARNESS_VERIFY=off git -C "$A" commit -qm "chore: adopt agentic harness"
+out=$($AH approve 3.1; echo "exit=$?")
+contains "approve refuses in supervised mode" "only in autonomous mode" "$out"
+contains "approve exits non-zero" "exit=1" "$out"
+export HARNESS_AUTONOMY=autonomous HARNESS_TEST_CMD=true
+out=$($AH approve 3.1; echo "exit=$?")
+contains "approve needs a griller pass first" "current griller pass first" "$out"
+grill_pass 3.1 >/dev/null
+expect 0 "approve: a low-risk, grilled spec is approved by policy" $AH approve 3.1
+contains "the policy approval line names its base commit" "Approved-by: policy:low-risk" "$(cat "$A/backbone/specs/3.1.md")"
+expect 0 "the start gate accepts a policy approval" hook "$A" pre-tool-use "$(edit_json "$AT" "- [ ] **Task 3.1" "- [WIP] **Task 3.1")"
+sed -i.bak 's/^- \[ \] \*\*Task 3\.1/- [WIP] **Task 3.1/' "$AT" && rm -f "$AT.bak"
+expect 2 "agents still cannot write policy approval lines" hook "$A" pre-tool-use \
+  "$(edit_json "$A/backbone/specs/3.1.md" "## Approval" "## Approval
+Approved-by: policy:low-risk (2026-10-09; base abc1234)")"
+auto_spec 3.2 "Passwords are hashed before storage."
+grill_pass 3.2 >/dev/null
+out=$($AH approve 3.2; echo "exit=$?")
+contains "approve escalates a risky spec instead of approving it" "not low-risk" "$out"
+contains "the risky spec is not approved" "exit=1" "$out"
+contains "the escalation is recorded" "Task 3.2: approval" "$(cat "$A/backbone/escalations.md")"
+contains "the task is parked as BLOCKED" "Task 3.2: Item** (spec: backbone/specs/3.2.md) — BLOCKED: approval" "$(cat "$AT")"
+out=$(hook "$A" pre-tool-use "$(edit_json "$AT" "- [ ] **Task 3.2" "- [WIP] **Task 3.2")" 2>&1)
+contains "a BLOCKED task cannot start" "BLOCKED by an escalation" "$out"
+out=$(hook "$A" pre-tool-use "$(edit_json "$AT" " — BLOCKED: approval (backbone/escalations.md)" "")" 2>&1)
+contains "agents cannot clear a BLOCKED note" "Only the user clears a BLOCKED note" "$out"
+expect 2 "agents cannot edit escalations.md" hook "$A" pre-tool-use "$(edit_json "$A/backbone/escalations.md" "open" "resolved")"
+contains "escalations lists open entries" "1 open escalation(s)" "$($AH escalations)"
+printf '# ADR-002: Cache\n\n## Status\nProposed\n\n## Context\nc\n\n## Decision\nd\n\n## Alternatives considered\na\n\n## Consequences\nq\n' \
+  > "$A/backbone/adr/ADR-002-cache.md"
+auto_spec 3.3 "" ADR-002
+grill_pass 3.3 >/dev/null
+out=$($AH approve 3.3)
+contains "a spec on a Proposed ADR escalates for the user's decision" "ADR-002 is not Accepted" "$out"
+contains "session start reports autonomy and open escalations" "Open escalations waiting for the user: 2" "$(hook "$A" session-start '{}')"
+
+section "autonomous mode: judging, risk drift, kill switch"
+printf 'def a():  # AC-3.1-1 AC-3.1-2\n    return 1\n' > "$A/src/a.py"
+printf 'def test_a():  # AC-3.1-1 AC-3.1-2\n    assert True\n' > "$A/tests/test_a.py"
+hook "$A" judge-stop "$(judge_report 3.1 fail)" >/dev/null
+out=$(hook "$A" judge-stop "$(judge_report 3.1 fail)")
+contains "the judge's last allowed failure escalates automatically" "Escalated after 2 failed rounds" "$out"
+contains "the failed task leaves [WIP] as BLOCKED" "- [ ] **Task 3.1: Item** (spec: backbone/specs/3.1.md) — BLOCKED: judge failed 2 times" "$(cat "$AT")"
+auto_spec 3.4 ""
+grill_pass 3.4 >/dev/null
+$AH approve 3.4 >/dev/null
+python3 - "$AT" <<'EOF'
+import sys
+p = sys.argv[1]; s = open(p).read()
+open(p, "w").write(s.replace("- [ ] **Task 3.4", "- [WIP] **Task 3.4", 1))
+EOF
+sed -i.bak 's/AC-3\.1-/AC-3.4-/g' "$A/src/a.py" "$A/tests/test_a.py" && rm -f "$A/src/a.py.bak" "$A/tests/test_a.py.bak"
+hook "$A" judge-stop "$(judge_report 3.4 pass)" >/dev/null
+FIN4="$(edit_json "$AT" "- [WIP] **Task 3.4" "- [x] **Task 3.4")"
+expect 0 "a policy-approved task that stayed low-risk finishes" hook "$A" pre-tool-use "$FIN4"
+mkdir -p "$A/src/auth"; echo "x = 1" > "$A/src/auth/session.py"
+hook "$A" judge-stop "$(judge_report 3.4 pass)" >/dev/null
+out=$(hook "$A" pre-tool-use "$FIN4" 2>&1)
+contains "a policy approval does not cover a change that turned high-risk" "touches sensitive paths: src/auth/session.py" "$out"
+rm -rf "$A/src/auth"
+out=$(hook "$A" stop '{}')
+contains "autonomous mode makes the agent close out the DoD" '"decision": "block"' "$out"
+mkdir -p "$A/.git/harness" && touch "$A/.git/harness/STOP"
+out=$(hook "$A" pre-tool-use "$(bash_json 'ls')" 2>&1)
+contains "the kill switch halts every tool call" "Harness halted" "$out"
+expect 0 "the kill switch lets the agent stop" test -z "$(hook "$A" stop '{}')"
+contains "session start reports the halt" "HALTED" "$(hook "$A" session-start '{}')"
+expect 2 "agents cannot remove the kill switch" hook "$A" pre-tool-use "$(bash_json 'rm .git/harness/STOP')"
+rm "$A/.git/harness/STOP"
+expect 2 "agents cannot change HARNESS_AUTONOMY" hook "$A" pre-tool-use "$(edit_json "$A/backbone/harness.conf" 'HARNESS_AUTONOMY="supervised"' 'HARNESS_AUTONOMY="autonomous"')"
+expect 2 "agents cannot change HARNESS_AUTO_APPROVE" hook "$A" pre-tool-use "$(edit_json "$A/backbone/harness.conf" 'HARNESS_AUTO_APPROVE="low"' 'HARNESS_AUTO_APPROVE="off"')"
+expect 2 "agents cannot set HARNESS_RISK_PATHS" hook "$A" pre-tool-use "$(edit_json "$A/backbone/harness.conf" '# HARNESS_RISK_PATHS="<regex>"' 'HARNESS_RISK_PATHS="^$"')"
+HARNESS_TEST_CMD= expect 1 "doctor: autonomous mode needs a test command" "$A/scripts/harness/doctor.sh"
+unset HARNESS_AUTONOMY HARNESS_TEST_CMD
+
+section "CI trust: base-branch verifier and harness changes"
+expect 2 "agents cannot edit the harness lock" hook "$A" pre-tool-use "$(edit_json "$A/backbone/.harness-lock.json" '"files"' '"files"')"
+[ -f "$A/.github/workflows/harness-verify.yml" ] && ok "the CI workflow is installed" || bad "the CI workflow is installed"
+contains "CI runs the base branch's verifier" 'git archive "origin/$BASE" scripts/harness/lib' "$(cat "$A/.github/workflows/harness-verify.yml")"
+git -C "$A" add -A >/dev/null; HARNESS_VERIFY=off git -C "$A" commit -qm "chore: autonomy fixtures" >/dev/null
+CI_BASE=$(git -C "$A" rev-parse HEAD)
+echo "# local tweak" >> "$A/scripts/harness/routing.core.conf"
+git -C "$A" add -A; HARNESS_VERIFY=off git -C "$A" commit -qm "chore: tweak routes" >/dev/null
+TRUSTED="$WORK/trusted"
+mkdir -p "$TRUSTED/scripts/harness" && cp -R "$HARNESS/payload/owned/scripts/harness/lib" "$TRUSTED/scripts/harness/"
+out=$(cd "$A" && HARNESS_ROOT="$A" python3 "$TRUSTED/scripts/harness/lib/harness.py" verify --range "$CI_BASE..HEAD"; echo "exit=$?")
+contains "a trusted copy verifies another checkout via HARNESS_ROOT" "the harness itself changes (scripts/harness/routing.core.conf)" "$out"
+contains "harness changes in a range need approval" "exit=1" "$out"
+expect 0 "a maintainer-approved harness change passes" \
+  env HARNESS_ROOT="$A" python3 "$TRUSTED/scripts/harness/lib/harness.py" verify --range "$CI_BASE..HEAD" --allow-user-changes
+
+section "runner: unattended tasks, budgets, escalation, report"
+R="$WORK/runner"
+new_repo "$R"
+"$HARNESS/bootstrap.sh" "$R" --name runner >/dev/null
+RT="$R/backbone/3-TASKS.md"
+for id in 4.1 4.2 4.3; do printf -- '- [ ] **Task %s: Item %s** (spec: backbone/specs/%s.md)\n' "$id" "$id" "$id" >> "$RT"; done
+git -C "$R" add -A && HARNESS_VERIFY=off git -C "$R" commit -qm "chore: adopt agentic harness"
+cat > "$WORK/fake-agent.sh" <<'EOF'
+#!/bin/bash
+# Stands in for `claude -p`: reads the prompt on stdin and acts per task.
+task=$(sed -n 's/^Drive Task \([^ ]*\) .*/\1/p')
+echo "fake agent: task $task"
+case "$task" in
+  4.1) sed -i.bak "s/^- \[ \] \*\*Task 4.1/- [x] **Task 4.1/" backbone/3-TASKS.md && rm -f backbone/3-TASKS.md.bak
+       echo "done" > "out-4.1.txt"; git add -A; HARNESS_VERIFY=off git commit -qm "feat: task 4.1" ;;
+  4.2) python3 scripts/harness/lib/harness.py escalate 4.2 --reason "needs a product decision" ;;
+  4.3) : ;;
+  4.4) sleep 5 ;;
+  4.5) mkdir -p .git/harness && touch .git/harness/STOP ;;
+esac
+EOF
+chmod +x "$WORK/fake-agent.sh"
+export HARNESS_AGENT_CMD="$WORK/fake-agent.sh" HARNESS_AUTONOMY=autonomous HARNESS_TEST_CMD=true
+out=$(python3 "$R/scripts/harness/lib/harness.py" run --dry-run)
+contains "dry run lists the ready tasks in order" "would start task 4.1: Item 4.1" "$out"
+out=$(HARNESS_AUTONOMY=supervised python3 "$R/scripts/harness/lib/harness.py" run 2>&1; echo "exit=$?")
+contains "run refuses outside autonomous mode" "needs HARNESS_AUTONOMY" "$out"
+out=$(python3 "$R/scripts/harness/lib/harness.py" run 2>&1; echo "exit=$?")
+contains "run: a task the agent finished and committed is done" "done         task 4.1" "$out"
+contains "run: a task the agent escalated is left blocked" "blocked      task 4.2" "$out"
+contains "run: a task with no progress is escalated after the attempts" "escalated    task 4.3" "$out"
+contains "run: attempts are retried" "task 4.3 attempt 2" "$out"
+contains "run: the stalled task is BLOCKED by the runner" "Task 4.3: Item 4.3** (spec: backbone/specs/4.3.md) — BLOCKED: runner" "$(cat "$RT")"
+[ -f "$(ls "$R"/.git/harness/runs/*/4.1-1.log | head -1)" ] && ok "run keeps a log per agent session" || bad "run keeps a log per agent session"
+printf -- '- [ ] **Task 4.4: Slow** (spec: backbone/specs/4.4.md)\n- [ ] **Task 4.5: Halts** (spec: backbone/specs/4.5.md)\n- [ ] **Task 4.6: Never reached** (spec: backbone/specs/4.6.md)\n' >> "$RT"
+out=$(HARNESS_RUN_TASK_TIMEOUT=1 HARNESS_RUN_ATTEMPTS=1 python3 "$R/scripts/harness/lib/harness.py" run 2>&1)
+contains "run: a session over the time budget is cut off" "task 4.4 attempt 1: pending" "$out"
+contains "run: the timed-out task is escalated" "escalated    task 4.4" "$out"
+contains "run: the kill switch stops the run before the next task" "halted by" "$out"
+lacks "run: no task runs after the kill switch" "task 4.6 attempt" "$out"
+rm -f "$R/.git/harness/STOP"
+expect 2 "agents cannot start the runner" hook "$R" pre-tool-use "$(bash_json 'python3 scripts/harness/lib/harness.py run')"
+hook "$R" pre-tool-use "$(bash_json 'git commit -n -m x')" >/dev/null 2>&1
+out=$(python3 "$R/scripts/harness/lib/harness.py" report)
+contains "report counts escalations" "escalations: 3" "$out"
+contains "report lists finished tasks" "tasks finished by the runner: 1 4.1" "$out"
+contains "report counts blocked tool calls" "blocked tool calls: 2" "$out"
+unset HARNESS_AGENT_CMD HARNESS_AUTONOMY HARNESS_TEST_CMD
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
