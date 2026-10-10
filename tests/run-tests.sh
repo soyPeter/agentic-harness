@@ -1217,6 +1217,13 @@ done
 contains "the spec template has an Assumptions section" "## Assumptions" "$(cat "$M/backbone/templates/spec.md")"
 out=$(HARNESS_AUTONOMY=autonomous HARNESS_TEST_CMD=true "$M/scripts/harness/doctor.sh")
 contains "doctor warns that an untrusted folder would skip the hooks" "has not trusted this folder" "$out"
+mkdir -p "$WORK/slowgit"
+printf '#!/bin/sh\nsleep 6\nexec %s "$@"\n' "$(command -v git)" > "$WORK/slowgit/git"; chmod +x "$WORK/slowgit/git"
+out=$(PATH="$WORK/slowgit:$PATH" HARNESS_HOOK_BUDGET=2 hook "$M" pre-tool-use "$(bash_json 'ls')" 2>&1; echo "exit=$?")
+contains "a gate hook that runs out of time fails closed" "ran out of time" "$out"
+contains "the timed-out gate refuses the call" "exit=2" "$out"
+out=$(PATH="$WORK/slowgit:$PATH" HARNESS_HOOK_BUDGET=2 hook "$M" post-tool-use "$(bash_json 'ls')" 2>&1; echo "exit=$?")
+contains "other hooks that run out of time exit quietly" "exit=0" "$out"
 export HOME="$REAL_HOME"
 unset HARNESS_AGENT_CMD HARNESS_AUTONOMY HARNESS_TEST_CMD
 

@@ -33,6 +33,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -199,8 +200,21 @@ def gate_on(key):
     return conf()[key] != "off"
 
 
+# A hook Claude Code kills for running too long counts as a non-blocking error: the tool call goes through.
+# So hooks keep their own budget below the settings timeout (30 s) and fail closed when they run out,
+# and git calls inside hooks time out well before that.
+GIT_TIMEOUT = 120
+HOOK_BUDGET = 25
+FAIL_CLOSED_HOOKS = ("pre-tool-use", "agent-guard")
+
+
 def git(*args):
-    result = subprocess.run(["git"] + list(args), cwd=str(ROOT), capture_output=True, text=True)
+    try:
+        result = subprocess.run(["git"] + list(args), cwd=str(ROOT), capture_output=True, text=True,
+                                timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        log_event("git-timeout", args=list(args)[:6])
+        return ""
     return result.stdout if result.returncode == 0 else ""
 
 
@@ -1513,7 +1527,11 @@ def orchestrator_scope(data, path):
 
 def show(rev, name):
     """Content of name at rev ('' = the index), or None if it does not exist there."""
-    result = subprocess.run(["git", "show", "%s:%s" % (rev, name)], cwd=str(ROOT), capture_output=True, text=True)
+    try:
+        result = subprocess.run(["git", "show", "%s:%s" % (rev, name)], cwd=str(ROOT), capture_output=True,
+                                text=True, timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None
     return result.stdout if result.returncode == 0 else None
 
 
@@ -2074,7 +2092,11 @@ def add_context(event, text):
 
 
 def events_file():
-    common = git("rev-parse", "--git-common-dir").strip()
+    try:
+        common = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=str(ROOT), capture_output=True,
+                                text=True, timeout=10).stdout.strip()
+    except subprocess.TimeoutExpired:
+        common = ".git"
     base = Path(common) if common and os.path.isabs(common) else ROOT / (common or ".git")
     return base / "harness" / "events.jsonl"
 
@@ -2880,7 +2902,29 @@ def read_hook_input():
     return data if isinstance(data, dict) else {}
 
 
+def hook_budget(name):
+    """Fail closed if a gate hook runs out of time, instead of being killed (which would let the call through)."""
+    global GIT_TIMEOUT
+    budget = int(os.environ.get("HARNESS_HOOK_BUDGET", HOOK_BUDGET)) if str(
+        os.environ.get("HARNESS_HOOK_BUDGET", HOOK_BUDGET)).isdigit() else HOOK_BUDGET
+    GIT_TIMEOUT = max(1, budget - 5)
+    if not hasattr(signal, "SIGALRM"):
+        return
+
+    def expired(_signum, _frame):
+        if name in FAIL_CLOSED_HOOKS:
+            sys.stderr.write("Harness hook ran out of time (%ds; slow git or filesystem). The call is refused to stay "
+                             "safe; retry it.\n" % budget)
+            os._exit(2)
+        os._exit(0)
+
+    signal.signal(signal.SIGALRM, expired)
+    signal.alarm(budget)
+
+
 def main(argv):
+    if argv[1:2] == ["hook"] and len(argv) >= 3 and argv[2] not in ("grill-stop", "judge-stop"):
+        hook_budget(argv[2])   # the verdict recorders run the tests and have their own, longer timeout
     if len(argv) == 3 and argv[1] == "hook" and argv[2] in HOOKS:
         HOOKS[argv[2]](read_hook_input())
         return 0

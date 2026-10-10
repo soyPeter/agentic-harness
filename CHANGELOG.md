@@ -20,7 +20,9 @@ Hardening from the first live unattended run, and the last trust gaps in autonom
 - **`harness.py report --json`**, plus agent cost and out-of-band change counts in the report.
 - **No `__pycache__`** written into projects.
 - **Reading `core.hooksPath` is allowed;** only setting or unsetting it is refused. This false positive was found by a live probe, which also confirmed that in a trusted folder both the project hooks and the agent (frontmatter) hooks load under `claude -p`.
-- **Self-test:** 487 checks.
+- **Hooks fail closed on time.** A hook Claude Code kills for running too long lets the tool call through. Gate hooks now have their own 25-second budget (settings and agent hook timeouts are raised to 30 seconds), `git` calls time out inside hooks, and a gate that runs out of time refuses the call.
+- **Second live run, in a trusted folder: success end to end.** One task went spec → griller (2 passes, 8 minor questions settled as Assumptions) → policy approval → implementer → judge (pass on round 1; tests re-run by the harness) → scribe → `[x]` and committed. That took 21 turns and $6.39. Wall time was 4.8 hours for about 20 minutes of work, because the idle Mac slept; HOOKS.md now recommends `caffeinate -i`.
+- **Self-test:** 490 checks.
 
 ## 0.7.0 (2026-10-09)
 

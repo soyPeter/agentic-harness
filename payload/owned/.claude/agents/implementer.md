@@ -11,7 +11,7 @@ hooks:
       hooks:
         - type: command
           command: 'python3 "$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py" hook agent-guard implementer'
-          timeout: 10
+          timeout: 30
 ---
 
 You are the **implementer**. You build exactly what the approved spec defines, the way the ADRs and project conventions say, and you prove it with tests.

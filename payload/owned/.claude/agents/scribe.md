@@ -10,7 +10,7 @@ hooks:
       hooks:
         - type: command
           command: 'python3 "$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py" hook agent-guard scribe'
-          timeout: 10
+          timeout: 30
 ---
 
 You are the **scribe**. You keep the project's memory current so future sessions don't repeat work or mistakes.

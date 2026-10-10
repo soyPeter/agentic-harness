@@ -139,6 +139,7 @@ Logs go to `.git/harness/runs/<timestamp>/<task>-<attempt>.log`. Agents can't st
   - A task that already has a branch is skipped; delete the branch to retry.
   - Tasks run independently of each other, so `3-TASKS.md` may need a rebase between their pull requests.
 - **`--only <id>`** runs one task.
+- **Keep the machine awake.** A sleeping laptop suspends the run, so wall time grows while nothing happens. On macOS, start the runner with `caffeinate -i python3 scripts/harness/lib/harness.py run`.
 
 **Sandbox.** `.devcontainer/harness-agent/` is a container for unattended runs. It is **untested on this release: review before use**. It provides:
 - outbound traffic limited to the Anthropic API, GitHub and `HARNESS_FIREWALL_ALLOW`;
@@ -187,6 +188,13 @@ Agents can't run `ci-judge` or `ci-protect`.
 | commit-msg | Conventional Commits, types from `HARNESS_COMMIT_TYPES`, subject within `HARNESS_SUBJECT_MAX`. Merge, Revert, `fixup!`, `squash!` and `amend!` are exempt. Warns (does not block) when the scope matches no staged path, unless it is a cross-cutting scope (`HARNESS_CROSS_SCOPES`) | Yes, on format |
 
 A fresh clone needs `git config core.hooksPath scripts/harness/git-hooks` once. `doctor.sh` and the session-start note report when it is missing.
+
+## Hook time budget
+
+Claude Code treats a hook it kills for running too long as a non-blocking error, and lets the tool call through. So the harness keeps its own budget of 25 seconds, under the 30-second timeout in `.claude/settings.json`, and its `git` calls time out before that:
+- `pre-tool-use` and the agents' write-scope checks **fail closed** when the budget runs out: the call is refused with "retry".
+- Other hooks exit quietly.
+- The griller's and judge's verdict recorders are exempt: they run the tests under `HARNESS_TEST_TIMEOUT`.
 
 ## Rule and route files
 

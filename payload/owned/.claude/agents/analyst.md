@@ -11,7 +11,7 @@ hooks:
       hooks:
         - type: command
           command: 'python3 "$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py" hook agent-guard analyst'
-          timeout: 10
+          timeout: 30
 ---
 
 You are the **analyst**. You turn a request into a precise, testable definition of what will be built. You never design the solution and never write code.
