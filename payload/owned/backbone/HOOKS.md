@@ -7,8 +7,8 @@ Harness-owned. All hook logic lives in `scripts/harness/lib/harness.py`, which n
 | Event | Tools | What it does | Effect |
 |---|---|---|---|
 | SessionStart | all | Shows the reading list, SETUP INCOMPLETE if FILL placeholders remain, the `[WIP]` task, and harness errors | Added to context |
-| PreToolUse | Bash | `@bash` block rules: destructive git, recursive root/home delete, DROP/TRUNCATE, `--no-verify`, shell writes to `.verdicts/` | Command refused |
-| PreToolUse | Write, Edit, MultiEdit | Block rules for the path, the **skill gate**, plus per file (see below) | Edit refused |
+| PreToolUse | Bash | **Shell checks** (below) and `@bash` block rules: destructive git, recursive root/home delete, DROP/TRUNCATE, `--no-verify` | Command refused |
+| PreToolUse | Write, Edit, MultiEdit | Block rules for the path, the **orchestrator scope**, the **skill gate**, plus per file (see below) | Edit refused |
 | PostToolUse | Read, Skill | Records which skills the session has loaded (for the skill gate) | Silent |
 | PostToolUse | Write, Edit, MultiEdit | Warn rules; harness-owned file edited; spec readiness after a spec edit | Added to context |
 | PostToolUse | Bash | `@bash` warn rules (discarding changes, force branch delete, amend, ...); after a fresh `git commit`: task log touched, ADR format, TODO stubs, WIP left | Added to context |
@@ -22,8 +22,16 @@ Per-file checks in PreToolUse:
 |---|---|
 | `backbone/3-TASKS.md` | One `[WIP]` at a time; **start gate** for a new `[WIP]`; **judge gate** for finishing one |
 | `backbone/specs/*.md` | `Approved-by:` lines are user-only; an approved spec is frozen |
-| `backbone/harness.conf` | `HARNESS_SPEC_GATE`, `HARNESS_SKILL_GATE`, `HARNESS_JUDGE_GATE` and `HARNESS_JUDGE_MAX_ROUNDS` are user-only |
+| `backbone/adr/*.md` | Only the user sets an ADR to `Accepted`; an accepted ADR is frozen except for being superseded |
+| `backbone/harness.conf` | The gate switches, `HARNESS_JUDGE_MAX_ROUNDS`, `HARNESS_VERIFY`, `HARNESS_ORCHESTRATOR_SCOPE` and the decision-layer keys are user-only |
 | `backbone/.verdicts/*` | Never writable by agents |
+
+**Orchestrator scope** (`HARNESS_ORCHESTRATOR_SCOPE`, user-only, default `on`): the main session (a tool call without an `agent_id`) may edit only `backbone/` docs and configuration (not specs, ADRs or verdicts), `.claude/skills/` and `CLAUDE.md`. Specs, ADRs and code are written by the role agents.
+
+**Shell checks.** A command is split into its segments (`;`, `&&`, `|`, newlines) and tokenized, so the checks see the program that runs and its arguments, not text that only mentions a command. `@bash` rules don't see commit or tag messages or the bodies of data heredocs (`cat > notes.md <<EOF`). Refused:
+- Shell writes, moves and deletes in `backbone/`, `scripts/harness/`, `.claude/`, `AGENTS.md`, `CLAUDE.md`, `.git/hooks`, `.git/harness` and `.git/config`: redirections, `rm`/`mv`/`cp`/`tee`/`touch`/`chmod`, `sed -i`/`perl -i`, `git rm|mv`, and `python -c`/`node -e` or interpreter heredocs that write there. Every gate is enforced on the file tools, so these changes go through Write or Edit. `cd` and `bash -c`/`eval` are followed.
+- Bypasses: `git commit -n`, `git -c core.hooksPath=...`, `git config core.hooksPath`, and setting `HARNESS_*` or `SKIP_BUILD` from the shell (those are the user's, in their own terminal).
+- `git push` with a `+<ref>`, `--mirror` or a branch delete; `find / ... -delete`; `DELETE` without `WHERE` sent to a SQL client; `curl ... | sh`.
 
 ### Hooks scoped to agents (`.claude/agents/*.md` frontmatter)
 
@@ -63,16 +71,48 @@ A judge pass is recorded as a fail unless all of these hold:
 - Every AC id appears in at least one test file (matching `HARNESS_TEST_PATHS`, outside `backbone/`).
 - There are no blocker or major findings.
 - Tests were reported `passed`.
+- **The harness ran the tests itself.** When the judge claims a pass, its recorder runs `HARNESS_TEST_CMD` (timeout `HARNESS_TEST_TIMEOUT`, default 900 seconds) and records the exit code, duration, output hash and tail in the verdict as `test_run`. A non-zero exit or a timeout turns the pass into a fail. Test evidence in the judge's own JSON is ignored.
+
+Gates re-derive a recorded pass from its stored evidence before trusting it, so a hand-written `{"verdict": "pass"}` does not count.
 
 After `HARNESS_JUDGE_MAX_ROUNDS` consecutive fails, the agent is told to escalate to the user.
 
-The user can always act directly. Hooks only see agent edits, so the user can edit `3-TASKS.md` or a spec themselves, or switch a gate off in `harness.conf`.
+The user can always act directly. Hooks only see agent edits, so the user can edit `3-TASKS.md` or a spec themselves, or switch a gate off in `harness.conf`. To commit such a deliberate exception, they use `HARNESS_VERIFY=off git commit ...` (see verify below).
+
+## Verify (`HARNESS_VERIFY`)
+
+The hooks guard edits made through the tools. `harness.py verify` checks the **resulting state**, so it also catches changes made any other way. It runs in the pre-commit hook on the staged change, and in CI on a range of commits:
+
+- Every task that became `[WIP]` or `[x]` passes the start gate: valid spec, current grill pass, user approval.
+- Every task that became `[x]` has a judge pass whose fingerprint equals the committed code (in CI, the code of the commit that marked it done), and the pass holds up when re-derived.
+- At most one `[WIP]` task (unless `HARNESS_ALLOW_PARALLEL_WIP="1"`).
+- Verdict history is append-only.
+- User-only settings in `harness.conf` are unchanged.
+- Harness enforcement files (`scripts/harness/`, `.claude/agents/`) match `backbone/.harness-lock.json`, and `.claude/settings.json` still runs the harness hooks.
+
+`HARNESS_VERIFY` is `block` (default) or `off`, and user-only. The user commits a deliberate exception with `HARNESS_VERIFY=off git commit ...`; agents can't set it.
+
+**CI** is the authoritative copy of this check, because nothing in an agent's session can switch it off:
+
+```yaml
+# .github/workflows/harness.yml
+on: pull_request
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - run: python3 scripts/harness/lib/harness.py verify --range origin/${{ github.base_ref }}..HEAD
+```
+
+Add `--allow-user-changes` only when CI has established that a human made the change (for example, a label only maintainers can set).
 
 ## Git hooks (`core.hooksPath = scripts/harness/git-hooks`)
 
 | Hook | What it does | Blocks? |
 |---|---|---|
-| pre-commit | Checks added lines of staged files against block and warn rules, then runs `HARNESS_BUILD_CMD` if it is set | Yes, on a block rule or a failed build |
+| pre-commit | Checks added lines of staged files against block and warn rules, runs **verify** on the staged change, then runs `HARNESS_BUILD_CMD` if it is set | Yes, on a block rule, a verify problem or a failed build |
 | commit-msg | Conventional Commits, types from `HARNESS_COMMIT_TYPES`, subject within `HARNESS_SUBJECT_MAX`. Merge, Revert, `fixup!`, `squash!` and `amend!` are exempt. Warns (does not block) when the scope matches no staged path, unless it is a cross-cutting scope (`HARNESS_CROSS_SCOPES`) | Yes, on format |
 
 A fresh clone needs `git config core.hooksPath scripts/harness/git-hooks` once. `doctor.sh` and the session-start note report when it is missing.
@@ -106,6 +146,9 @@ Two files of each kind apply: the core file in `scripts/harness/`, then the proj
 | `HARNESS_SKILL_GATE` | `on` | Skill gate. User-only |
 | `HARNESS_JUDGE_GATE` | `on` | Judge gate. User-only |
 | `HARNESS_JUDGE_MAX_ROUNDS` | `2` | Judge fails before escalating. User-only |
+| `HARNESS_VERIFY` | `block` | `block` or `off`: verify in pre-commit. User-only |
+| `HARNESS_ORCHESTRATOR_SCOPE` | `on` | Main session may not edit specs, ADRs or code. User-only |
+| `HARNESS_TEST_TIMEOUT` | `900` | Seconds the judge recorder lets `HARNESS_TEST_CMD` run |
 | `HARNESS_SCOPE_CHECK` | `on` | Commit-scope warning |
 | `HARNESS_CROSS_SCOPES` | `deps\|build\|ci\|docs\|backbone\|harness\|release\|config\|tests?` | Scopes exempt from the scope check (regex) |
 | `HARNESS_CONTAINER_ENGINE` | empty | Container engine chosen in the stack ADR (set when a container pack is adopted) |
@@ -134,7 +177,7 @@ Some checks need judgement that code cannot compute. The decision layer asks a m
 
 ## Escape hatches
 
-- `SKIP_BUILD=1 git commit ...` skips the build check once. Agents must say when they use it.
+- `SKIP_BUILD=1 git commit ...` skips the build check once, and `HARNESS_VERIFY=off git commit ...` the verify check. Both are for the user in their own terminal; agents can't set them.
 - Blocked destructive commands are run by the user, never rephrased by agents.
 - A wrong rule or route is fixed in its file, not bypassed.
 

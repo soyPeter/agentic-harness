@@ -16,12 +16,14 @@ Usage:
   harness.py decisions [--last N]                                 (decision-layer log summary)
   harness.py adopt <pack>[,<pack>] --adr ADR-NNN --with <opts> --without <opts> [--dry-run]
   harness.py adopt --remove <pack>[,<pack>] [--dry-run]
+  harness.py verify [--range <base>..<tip>] [--allow-user-changes]   (gates on the staged change, or a CI range)
   harness.py doctor
 """
 import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -52,8 +54,17 @@ HOOK_MARK = "scripts/harness/"
 FILE_TOOLS = ("Write", "Edit", "MultiEdit")
 PIPELINE_AGENTS = ("analyst", "architect", "griller", "implementer", "judge", "scribe")
 USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE", "HARNESS_JUDGE_MAX_ROUNDS",
+                  "HARNESS_VERIFY", "HARNESS_ORCHESTRATOR_SCOPE",
                   "HARNESS_DECISION_PROVIDER", "HARNESS_DECISION_MODE", "HARNESS_DECISION_ADR",
                   "HARNESS_DECISION_CMD", "HARNESS_DECISION_MODEL", "HARNESS_DECISION_URL")
+# Paths an agent may change only through the file tools, where the hooks see the change. Shell writes to
+# them are refused: they would skip the gates (task states, approvals, verdicts, settings, skill state).
+SHELL_PROTECTED = (r"^backbone(/|$)", r"^scripts/harness(/|$)", r"^\.claude(/|$)", r"^(AGENTS|CLAUDE)\.md$",
+                   r"^\.git/(hooks|harness)(/|$)", r"^\.git/config$")
+# Harness files whose edits change enforcement; verify refuses commits that change them away from the lock.
+ENFORCEMENT_FILES = (r"^scripts/harness/", r"^\.claude/agents/")
+# What the main session (the orchestrator) may edit itself; specs, ADRs and code go through the role agents.
+ORCHESTRATOR_ALLOW = (r"^backbone/(?!specs/|adr/|\.verdicts/)", r"^\.claude/skills/", r"^CLAUDE\.md$")
 DECISIONS_FILE = ROOT / "scripts/harness/decisions.json"
 
 # Write scope per agent: ("allow", patterns) permits only matches; ("deny", patterns) refuses matches.
@@ -74,6 +85,7 @@ SCOPE_HELP = {
 # A task line, not any mention of the marker (legends and prose must not count).
 WIP_LINE = re.compile(r"^\s*[-*]\s+\[WIP\]\s*")
 PENDING_LINE = re.compile(r"^\s*[-*]\s+\[ \]\s*")
+DONE_LINE = re.compile(r"^\s*[-*]\s+\[[xX]\]\s*")
 TASK_REF = re.compile(r"\bTask\s+([A-Za-z0-9._-]*[A-Za-z0-9])")
 TASK_HEAD = re.compile(r"^#{2,4}\s+Task\s+([A-Za-z0-9._-]*[A-Za-z0-9])")
 ANY_HEAD = re.compile(r"^#{1,4}\s")
@@ -97,6 +109,9 @@ DEFAULTS = {
     "HARNESS_SKILL_GATE": "on",
     "HARNESS_JUDGE_GATE": "on",
     "HARNESS_JUDGE_MAX_ROUNDS": "2",
+    "HARNESS_VERIFY": "block",
+    "HARNESS_ORCHESTRATOR_SCOPE": "on",
+    "HARNESS_TEST_TIMEOUT": "900",
     "HARNESS_SCOPE_CHECK": "on",
     "HARNESS_CROSS_SCOPES": "deps|build|ci|docs|backbone|harness|release|config|tests?",
     "HARNESS_COMMIT_NUDGE": "8",
@@ -246,7 +261,7 @@ def task_id_at(lines, index):
             return m.group(1)
         if ANY_HEAD.match(lines[i]):
             break
-    return slug(WIP_LINE.sub("", lines[index]).strip())
+    return slug(re.sub(r"^\s*[-*]\s+\[[^\]]*\]\s*", "", lines[index]).strip())
 
 
 def wip_task_ids(text=None):
@@ -577,6 +592,230 @@ def describe(hits):
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------- shell commands
+# Commands are split into segments on shell operators and tokenized, so checks see the program that runs
+# and its arguments rather than any text that happens to appear (commit messages, data heredocs).
+
+SQL_CLIENTS = ("psql", "mysql", "mariadb", "sqlite3", "clickhouse-client", "cockroach", "sqlcmd")
+SHELLS = ("sh", "bash", "zsh", "dash", "ksh")
+INTERPRETERS = ("python", "python3", "perl", "ruby", "node")
+WRAPPERS = ("sudo", "env", "time", "nohup", "command", "exec", "nice")
+MUTATORS = ("rm", "rmdir", "unlink", "mv", "chmod", "chown", "truncate", "tee", "touch")
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+SETTING_ASSIGNMENT = re.compile(r"^(HARNESS_[A-Z0-9_]+|SKIP_BUILD)=")
+PROTECTED_MENTION = re.compile(r"(?:^|[\s'\"/=(:])(backbone/|scripts/harness/|\.claude/|AGENTS\.md|CLAUDE\.md"
+                               r"|\.git/(?:hooks|harness|config))")
+CODE_WRITES = re.compile(r"open\([^)]*,\s*['\"][wax+]|\.write_(text|bytes)\(|\bos\.(remove|unlink|rename|replace|"
+                         r"chmod|truncate)\(|\bshutil\.(copy|move|rmtree)|\.(unlink|rename|touch|rmdir)\(|"
+                         r"\bfs\.(writeFile|appendFile|unlink|rename|rm|copyFile)|\bFile\.(write|delete|rename)|"
+                         r"\bunlink\b|\brename\b")
+DELETE_ALL = re.compile(r"(?i)\bdelete\s+from\s+[\w.\"`]+\s*(;|$|['\"])", re.M)
+COMMIT_MESSAGE = re.compile(r"""(?<!\S)(--message(?:=|\s+)|--file(?:=|\s+)|-[A-Za-z]*[mF]\s*)"""
+                            r"""("(?:[^"\\]|\\.)*"|'[^']*'|\S+)""")
+
+
+def split_heredocs(command):
+    """(command without heredoc bodies, [(opening line, body)])."""
+    lines, kept, bodies, i = command.split("\n"), [], [], 0
+    while i < len(lines):
+        line = lines[i]
+        kept.append(line)
+        i += 1
+        for m in HEREDOC.finditer(line):
+            body = []
+            while i < len(lines) and lines[i].strip() != m.group(2):
+                body.append(lines[i])
+                i += 1
+            i += 1
+            bodies.append((line, "\n".join(body)))
+    return "\n".join(kept), bodies
+
+
+def split_segments(command):
+    """[(segment, operator after it)], splitting on ; && || | & and newlines outside quotes."""
+    segments, current, quote, i = [], [], None, 0
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            current.append(ch)
+            if ch == quote:
+                quote = None
+            elif ch == "\\" and quote == '"' and i + 1 < len(command):
+                current.append(command[i + 1])
+                i += 1
+        elif ch in "'\"":
+            quote = ch
+            current.append(ch)
+        elif command.startswith(("&&", "||"), i):
+            segments.append(("".join(current), command[i:i + 2]))
+            current = []
+            i += 1
+        elif ch == "&" and (command[i - 1:i] in (">", "<") or command[i + 1:i + 2] == ">"):
+            current.append(ch)  # a redirection such as 2>&1 or &>file
+        elif ch in ";\n|&":
+            segments.append(("".join(current), ch))
+            current = []
+        else:
+            current.append(ch)
+        i += 1
+    segments.append(("".join(current), ""))
+    return [(s, op) for s, op in segments if s.strip()]
+
+
+def shell_words(segment):
+    """(leading VAR=value assignments, remaining words), with wrappers such as sudo and env dropped."""
+    try:
+        words = shlex.split(segment, comments=True)
+    except ValueError:
+        words = segment.split()
+    assignments = []
+    while words and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]) or words[0] in WRAPPERS
+                     or (words[0] == "export" and len(words) > 1)):
+        if words[0] != "export" and "=" in words[0] and not words[0].startswith("-"):
+            assignments.append(words[0])
+        elif words[0] == "export":
+            assignments.extend(w for w in words[1:] if "=" in w)
+            return assignments, []
+        words = words[1:]
+    return assignments, words
+
+
+def program(words):
+    return words[0].rsplit("/", 1)[-1] if words else ""
+
+
+def short_flags(words):
+    return {c for w in words if w.startswith("-") and not w.startswith("--") for c in w[1:]}
+
+
+def protected_path(path_str, cwd):
+    """Repository-relative path if path_str points into a shell-protected harness path, else None."""
+    if not path_str or path_str.startswith("-"):
+        return None
+    path = os.path.expandvars(os.path.expanduser(path_str))
+    if not os.path.isabs(path):
+        path = os.path.join(cwd or str(ROOT), path)
+    full, root = os.path.realpath(path), os.path.realpath(str(ROOT))
+    if full != root and not full.startswith(root + os.sep):
+        return None
+    name = os.path.relpath(full, root).replace(os.sep, "/")
+    return name if any(re.search(p, name) for p in SHELL_PROTECTED) else None
+
+
+def written_paths(segment, words):
+    """Paths a segment writes, moves or deletes: redirection targets and mutating programs' operands."""
+    paths = re.findall(r"(?:^|[^<>&0-9])(?:[0-9]?>>?|&>>?)\s*([^\s;|&<>]+)", segment)
+    prog, args = program(words), [w for w in words[1:] if not w.startswith("-")]
+    if prog in MUTATORS:
+        paths += args
+    elif prog in ("cp", "ln", "install", "rsync"):
+        paths += args[-1:]
+    elif prog == "dd":
+        paths += [a[3:] for a in args if a.startswith("of=")]
+    elif prog in ("sed", "gsed", "perl") and any(w.startswith("-i") or w.startswith("-pi") or w == "--in-place"
+                                                for w in words[1:]):
+        paths += args[1:]
+    elif prog == "git" and len(words) > 1 and words[1] in ("rm", "mv"):
+        paths += [w for w in words[2:] if not w.startswith("-")]
+    return [p.strip("'\"") for p in paths]
+
+
+def git_findings(words):
+    args = words[1:]
+    while args and args[0].startswith("-"):
+        if args[0] == "-c" and len(args) > 1 and args[1].lower().startswith("core.hookspath"):
+            return ["git -c core.hooksPath=... turns off the harness git hooks."]
+        args = args[2:] if args[0] in ("-c", "-C") else args[1:]
+    if not args:
+        return []
+    sub, rest = args[0], args[1:]
+    found = []
+    if sub == "commit" and "n" in short_flags(rest):
+        found.append("git commit -n is --no-verify: it skips the harness git hooks; fix what the hook reports instead.")
+    if sub == "config" and any(w.lower() == "core.hookspath" for w in rest):
+        found.append("Changing core.hooksPath turns off the harness git hooks.")
+    if sub == "push":
+        if any(w.startswith("+") for w in rest) or "--mirror" in rest:
+            found.append("A '+<ref>' or --mirror push is a force push: it rewrites remote history.")
+        if "--delete" in rest or "d" in short_flags(rest) or any(w.startswith(":") for w in rest):
+            found.append("That push deletes a remote branch or tag.")
+    return found
+
+
+def code_findings(code, label):
+    if PROTECTED_MENTION.search(code) and CODE_WRITES.search(code):
+        return ["%s writes to harness-protected paths (backbone/, scripts/harness/, .claude/, git hooks); "
+                "use the Write/Edit tools so the gates see the change." % label]
+    return []
+
+
+def shell_findings(command, cwd=None, depth=0):
+    """Blocking problems with a shell command, beyond the @bash guardrail rules."""
+    found = []
+    command, bodies = split_heredocs(command)
+    segments = split_segments(command)
+    for index, (segment, op) in enumerate(segments):
+        assignments, words = shell_words(segment)
+        for assignment in assignments:
+            if SETTING_ASSIGNMENT.match(assignment):
+                found.append("Setting %s from the shell overrides a harness setting or skips a check; only the user "
+                             "may do that, in their own terminal." % assignment.split("=", 1)[0])
+        prog = program(words)
+        if prog == "cd" and len(words) > 1:
+            cwd = os.path.join(cwd or str(ROOT), os.path.expanduser(words[1]))
+            continue
+        for path in written_paths(segment, words):
+            name = protected_path(path, cwd)
+            if name:
+                found.append("Shell writes to %s skip the harness gates; change it with the Write or Edit tool "
+                             "(or not at all, for verdicts and user-only settings)." % name)
+        if prog == "git":
+            found.extend(git_findings(words))
+        elif prog == "find" and ("-delete" in words or ("-exec" in words and "rm" in words)):
+            start = next((w for w in words[1:] if not w.startswith("-")), ".")
+            if start.rstrip("/") in ("", "~", "$HOME", "${HOME}") or (start.startswith("/") and start.count("/") <= 1):
+                found.append("find ... -delete on %s deletes from the filesystem root or home." % start)
+        elif prog in SHELLS and depth < 3:
+            if "-c" in words and words.index("-c") + 1 < len(words):
+                found.extend(shell_findings(words[words.index("-c") + 1], cwd, depth + 1))
+        elif prog == "eval" and depth < 3:
+            found.extend(shell_findings(" ".join(words[1:]), cwd, depth + 1))
+        elif prog in INTERPRETERS:
+            flag = next((f for f in ("-c", "-e", "-pe", "-ne") if f in words), None)
+            if flag and words.index(flag) + 1 < len(words):
+                found.extend(code_findings(words[words.index(flag) + 1], "That %s one-liner" % prog))
+        if (prog in SQL_CLIENTS or any(w in SQL_CLIENTS for w in words[:6])) and DELETE_ALL.search(segment):
+            found.append("DELETE without a WHERE clause removes every row.")
+        if prog in ("curl", "wget") and op == "|" and index + 1 < len(segments):
+            if program(shell_words(segments[index + 1][0])[1]) in SHELLS:
+                found.append("Piping a download into a shell runs unreviewed remote code.")
+    for opening, body in bodies:
+        _, words = shell_words(split_segments(opening)[0][0] if split_segments(opening) else "")
+        prog = program(words)
+        if prog in SHELLS and depth < 3:
+            found.extend(shell_findings(body, cwd, depth + 1))
+        elif prog in INTERPRETERS:
+            found.extend(code_findings(body, "That %s script" % prog))
+        elif any(client in opening for client in SQL_CLIENTS) and DELETE_ALL.search(body):
+            found.append("DELETE without a WHERE clause removes every row.")
+    return sorted(set(found), key=found.index)
+
+
+def rule_text(command):
+    """The command as @bash guardrail rules see it: commit and tag messages and the bodies of data
+    heredocs (cat > file <<EOF) are left out, so text that only mentions a command does not match."""
+    stripped, bodies = split_heredocs(command)
+    executed = [body for opening, body in bodies
+                if any(re.search(r"\b%s\b" % re.escape(p), opening) for p in SQL_CLIENTS + SHELLS + INTERPRETERS)]
+    parts = []
+    for segment, op in split_segments(stripped):
+        _, words = shell_words(segment)
+        if program(words) == "git" and any(w in ("commit", "tag") for w in words[1:3]):
+            segment = COMMIT_MESSAGE.sub(lambda m: m.group(1) + "''", segment)
+        parts.append(segment + op)
+    return "".join(parts) + "".join("\n" + body for body in executed)
+
+
 # --------------------------------------------------------------------------- verdicts
 
 def verdict_path(task, kind):
@@ -722,7 +961,31 @@ def effective_judge(task, report):
     result = str((report.get("tests") or {}).get("result", "")).lower()
     if result != "passed":
         reasons.append("tests %s" % (result or "not reported"))
+    run = report.get("test_run")
+    if run is not None and run.get("exit") != 0:
+        reasons.append("the harness ran HARNESS_TEST_CMD (%s) and it %s" % (
+            run.get("command"), "timed out" if run.get("exit") is None else "failed with exit code %s" % run.get("exit")))
     return ("pass" if not reasons else "fail"), reasons
+
+
+def run_tests():
+    """Run HARNESS_TEST_CMD as the judge's evidence. None when no test command is configured."""
+    values = conf()
+    command = values["HARNESS_TEST_CMD"]
+    if not command:
+        return None
+    timeout = int(values["HARNESS_TEST_TIMEOUT"]) if values["HARNESS_TEST_TIMEOUT"].isdigit() else 900
+    started = time.time()
+    try:
+        result = subprocess.run(command, shell=True, cwd=str(ROOT), capture_output=True, text=True, timeout=timeout)
+        exit_code, output = result.returncode, (result.stdout or "") + (result.stderr or "")
+    except subprocess.TimeoutExpired as exc:
+        exit_code = None
+        output = "%s%s" % (exc.stdout or "", exc.stderr or "")
+        output = output.decode("utf-8", "replace") if isinstance(output, bytes) else output
+    return {"command": command, "exit": exit_code, "seconds": round(time.time() - started, 1),
+            "output_sha256": hashlib.sha256(output.encode("utf-8")).hexdigest(),
+            "tail": output.strip().splitlines()[-15:]}
 
 
 def record_verdict(data, kind):
@@ -757,9 +1020,16 @@ def record_verdict(data, kind):
         fingerprint = spec_fingerprint(task)
         details = {"questions": report.get("questions")}
     else:
+        report.pop("test_run", None)   # only the harness may supply this evidence
         verdict, reasons = effective_judge(task, report)
         fingerprint = code_fingerprint()
-        details = {"criteria": report.get("criteria"), "findings": report.get("findings"), "tests": report.get("tests")}
+        if verdict == "pass":
+            # The judge's "tests passed" is a claim; the harness runs the test command itself.
+            report["test_run"] = run_tests()
+            if report["test_run"] is not None:
+                verdict, reasons = effective_judge(task, report)
+        details = {"criteria": report.get("criteria"), "findings": report.get("findings"), "tests": report.get("tests"),
+                   "test_run": report.get("test_run")}
     history = verdict_history(task, kind)
     entry = {"verdict": verdict, "claimed": report.get("verdict"), "reasons": reasons, "fingerprint": fingerprint,
              "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "summary": report.get("summary")}
@@ -788,34 +1058,62 @@ def wip_collision(before, after):
     return None
 
 
+def start_problems(task):
+    """Why task cannot be [WIP] (or done): spec, grill and approval. None when it may start."""
+    spec = spec_rel(task)
+    invalid = validate_spec(task)
+    history = verdict_history(task, "grill")
+    last = history[-1] if history else None
+    if invalid:
+        return ("Task %s cannot start: %s is not ready:\n      - %s\n    The analyst writes requirements "
+                "and acceptance criteria, the architect the ADRs and Architecture section."
+                % (task, spec, "\n      - ".join(invalid)))
+    if last is None:
+        return "Task %s cannot start: the spec has not been grilled. Ask the griller agent to review %s." % (task, spec)
+    if last.get("verdict") != "pass":
+        return ("Task %s cannot start: the griller failed the spec (%s). Take its questions to the user, "
+                "update the spec and grill again." % (task, "; ".join(last.get("reasons") or [])[:400]))
+    if last.get("fingerprint") != spec_fingerprint(task):
+        return "Task %s cannot start: the spec or its ADRs changed after the griller passed it. Grill again." % task
+    report = dict(last, verdict=last.get("claimed"))
+    rederived, reasons = effective_grill(task, report)
+    if rederived != "pass":
+        return "Task %s cannot start: the recorded grill pass does not hold up (%s)." % (task, "; ".join(reasons)[:400])
+    if not approved(read(spec_path(task))):
+        return ("Task %s cannot start: the user has not approved the spec. Ask them to review %s and add "
+                "'Approved-by: <name> (<date>)' under '## Approval' themselves; agents cannot." % (task, spec))
+    return None
+
+
 def start_gate(before, after):
     """Starting a task requires a valid spec, a current griller pass and the user's approval."""
     if not gate_on("HARNESS_SPEC_GATE"):
         return None
-    problems = []
-    for task in started_tasks(before, after):
-        spec = spec_rel(task)
-        invalid = validate_spec(task)
-        history = verdict_history(task, "grill")
-        last = history[-1] if history else None
-        if invalid:
-            problems.append("Task %s cannot start: %s is not ready:\n      - %s\n    The analyst writes requirements "
-                            "and acceptance criteria, the architect the ADRs and Architecture section."
-                            % (task, spec, "\n      - ".join(invalid)))
-        elif last is None:
-            problems.append("Task %s cannot start: the spec has not been grilled. Ask the griller agent to review %s."
-                            % (task, spec))
-        elif last.get("verdict") != "pass":
-            problems.append("Task %s cannot start: the griller failed the spec (%s). Take its questions to the user, "
-                            "update the spec and grill again." % (task, "; ".join(last.get("reasons") or [])[:400]))
-        elif last.get("fingerprint") != spec_fingerprint(task):
-            problems.append("Task %s cannot start: the spec or its ADRs changed after the griller passed it. "
-                            "Grill again." % task)
-        elif not approved(read(spec_path(task))):
-            problems.append("Task %s cannot start: the user has not approved the spec. Ask them to review %s and add "
-                            "'Approved-by: <name> (<date>)' under '## Approval' themselves; agents cannot."
-                            % (task, spec))
+    problems = [p for p in (start_problems(task) for task in started_tasks(before, after)) if p]
     return "\n".join("  - " + p for p in problems) if problems else None
+
+
+def judge_problems(task, current, max_rounds):
+    """Why task cannot be finished: no judge pass on the code with fingerprint current. None when it may."""
+    history = verdict_history(task, "judge")
+    last = history[-1] if history else None
+    fails = consecutive_fails(history)
+    reasons = "; ".join((last or {}).get("reasons") or [])[:400]
+    if last is None:
+        return "Task %s has no judge verdict. Ask the judge agent to review task %s." % (task, task)
+    if last.get("verdict") != "pass" and fails >= max_rounds:
+        return ("The judge failed task %s %d times. Stop retrying: report the findings to the user and "
+                "ask how to proceed. Last reasons: %s" % (task, fails, reasons))
+    if last.get("verdict") != "pass":
+        return ("The judge failed task %s (round %d of %d): %s. Have the implementer fix the findings, "
+                "then run the judge again." % (task, fails, max_rounds, reasons))
+    if current and last.get("fingerprint") != current:
+        return "The code changed after the judge passed task %s. Run the judge again on the current code." % task
+    report = dict(last, verdict=last.get("claimed"))
+    rederived, why = effective_judge(task, report)
+    if rederived != "pass":
+        return "The recorded judge pass for task %s does not hold up: %s." % (task, "; ".join(why)[:400])
+    return None
 
 
 def judge_gate(before, after):
@@ -828,23 +1126,7 @@ def judge_gate(before, after):
         return None
     max_rounds = int(values["HARNESS_JUDGE_MAX_ROUNDS"] or 2)
     current = code_fingerprint()
-    problems = []
-    for task in finished:
-        history = verdict_history(task, "judge")
-        last = history[-1] if history else None
-        fails = consecutive_fails(history)
-        reasons = "; ".join((last or {}).get("reasons") or [])[:400]
-        if last is None:
-            problems.append("Task %s has no judge verdict. Ask the judge agent to review task %s." % (task, task))
-        elif last.get("verdict") != "pass" and fails >= max_rounds:
-            problems.append("The judge failed task %s %d times. Stop retrying: report the findings to the user and "
-                            "ask how to proceed. Last reasons: %s" % (task, fails, reasons))
-        elif last.get("verdict") != "pass":
-            problems.append("The judge failed task %s (round %d of %d): %s. Have the implementer fix the findings, "
-                            "then run the judge again." % (task, fails, max_rounds, reasons))
-        elif current and last.get("fingerprint") != current:
-            problems.append("The code changed after the judge passed task %s. Run the judge again on the current "
-                            "code." % task)
+    problems = [p for p in (judge_problems(task, current, max_rounds) for task in finished) if p]
     if not problems:
         return None
     return ("  - " + "\n  - ".join(problems) +
@@ -868,6 +1150,185 @@ def user_only_change(before, after):
         return ("  - %s may only be changed by the user. Ask them to edit backbone/harness.conf themselves."
                 % ", ".join(changed))
     return None
+
+
+def adr_guard(before, after):
+    """Accepting an ADR is the user's decision, and an accepted ADR changes only by being superseded."""
+    old, new = adr_status(before), adr_status(after)
+    if new.lower().startswith("accepted") and not old.lower().startswith("accepted"):
+        return ("  - Only the user may set an ADR's status to Accepted. Leave it Proposed and ask the user "
+                "to review and accept it.")
+    if old.lower().startswith("accepted") and new.lower().startswith("accepted"):
+        def body(text):
+            return re.sub(r"^##\s+Status\s*$.*?(?=^##\s)", "", strip_comments(text), flags=re.M | re.S | re.I)
+        if body(before) != body(after):
+            return ("  - This ADR is Accepted and therefore frozen. Record a change as a new ADR that supersedes it "
+                    "(and set this one's status to 'Superseded by ADR-NNN').")
+    return None
+
+
+def orchestrator_scope(data, path):
+    """The main session orchestrates: specs, ADRs and code are written by the role agents."""
+    if data.get("agent_id") or conf()["HARNESS_ORCHESTRATOR_SCOPE"] == "off" or path.startswith("/"):
+        return None
+    if any(re.search(pattern, path) for pattern in ORCHESTRATOR_ALLOW):
+        return None
+    role = ("the analyst (requirements) or architect (Architecture, Skills)" if path.startswith("backbone/specs/")
+            else "the architect or scribe" if path.startswith("backbone/adr/")
+            else "the implementer")
+    return ("  - The main session orchestrates and does not edit %s itself; have %s agent make the change."
+            % (path, role))
+
+
+# --------------------------------------------------------------------------- verify
+# The hooks guard edits made with the file tools. verify checks the resulting state instead, so it also
+# catches changes made any other way: it runs in pre-commit on the staged change, and in CI on a range.
+
+def show(rev, name):
+    """Content of name at rev ('' = the index), or None if it does not exist there."""
+    result = subprocess.run(["git", "show", "%s:%s" % (rev, name)], cwd=str(ROOT), capture_output=True, text=True)
+    return result.stdout if result.returncode == 0 else None
+
+
+def tree_fingerprint(commit=None):
+    """code_fingerprint for the index (commit None) or a commit: its tree hash without backbone/."""
+    git_dir = git("rev-parse", "--absolute-git-dir").strip()
+    if not git_dir:
+        return None
+    tmp = tempfile.mkdtemp(prefix="harness-index-")
+    try:
+        index = os.path.join(tmp, "index")
+        env = dict(os.environ, GIT_INDEX_FILE=index)
+
+        def run(*args):
+            return subprocess.run(["git"] + list(args), cwd=str(ROOT), env=env, capture_output=True, text=True)
+
+        if commit:
+            run("read-tree", commit)
+        elif os.path.isfile(os.path.join(git_dir, "index")):
+            shutil.copyfile(os.path.join(git_dir, "index"), index)
+        run("rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", "backbone")
+        result = run("write-tree")
+        return result.stdout.strip() if result.returncode == 0 else None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def task_states(text):
+    lines = (text or "").splitlines()
+    wip = {task_id_at(lines, i) for i, line in enumerate(lines) if WIP_LINE.match(line)}
+    done = {task_id_at(lines, i) for i, line in enumerate(lines) if DONE_LINE.match(line)}
+    return wip, done
+
+
+def verify_changes(before, after, changed, done_fingerprint, allow_user_changes=False):
+    """Problems with going from revision before to after ('' = index). changed: paths that differ;
+    done_fingerprint(task): the code fingerprint at the point task was marked done."""
+    values = conf()
+    problems = []
+    tasks_rel = TASKS.relative_to(ROOT).as_posix()
+    old_wip, old_done = task_states(show(before, tasks_rel) if before else "")
+    new_wip, new_done = task_states(show(after, tasks_rel))
+    if values["HARNESS_ALLOW_PARALLEL_WIP"] != "1" and len(new_wip) > 1 and len(new_wip) > len(old_wip):
+        problems.append("more than one task is [WIP]: %s" % ", ".join(sorted(new_wip)))
+    if gate_on("HARNESS_SPEC_GATE"):
+        for task in sorted((new_wip | new_done) - old_wip - old_done):
+            problem = start_problems(task)
+            if problem:
+                problems.append(problem)
+    if values["HARNESS_JUDGE_GATE"] != "off":
+        max_rounds = int(values["HARNESS_JUDGE_MAX_ROUNDS"] or 2)
+        for task in sorted(new_done - old_done):
+            problem = judge_problems(task, done_fingerprint(task), max_rounds)
+            if problem:
+                problems.append(problem.replace("Run the judge again on the current code.",
+                                                "The committed code differs from the code the judge passed "
+                                                "(uncommitted or untracked files?); run the judge again."))
+    for name in changed:
+        if name.startswith("backbone/.verdicts/") and before:
+            try:
+                old_history = json.loads(show(before, name) or "{}").get("history") or []
+                new_history = json.loads(show(after, name) or "{}").get("history") or []
+            except ValueError:
+                problems.append("%s is not valid JSON" % name)
+                continue
+            if new_history[:len(old_history)] != old_history:
+                problems.append("%s: recorded verdicts were changed or removed; verdict history is append-only "
+                                "and written only by the griller's and judge's hooks" % name)
+    conf_rel = CONF_FILE.relative_to(ROOT).as_posix()
+    old_conf = show(before, conf_rel) if before else None
+    if conf_rel in changed and old_conf is not None and not allow_user_changes:
+        old, new = parse_conf(old_conf), parse_conf(show(after, conf_rel) or "")
+        keys = [key for key in USER_ONLY_KEYS if old.get(key) != new.get(key)]
+        if keys:
+            problems.append("user-only setting(s) changed in backbone/harness.conf: %s. Only the user may change "
+                            "them and commit that change (HARNESS_VERIFY=off git commit ...)." % ", ".join(keys))
+    locked = (json.loads(show(after, LOCK_FILE.relative_to(ROOT).as_posix()) or "{}") or {}).get("files", {})
+    for name in changed:
+        if name in locked and any(re.search(p, name) for p in ENFORCEMENT_FILES):
+            content = show(after, name)
+            digest = hashlib.sha256(content.encode("utf-8")).hexdigest() if content is not None else None
+            if digest != locked[name]:
+                problems.append("%s is a harness enforcement file and differs from the installed version "
+                                "(backbone/.harness-lock.json). Harness changes come from update.sh; the user "
+                                "commits a deliberate local change with HARNESS_VERIFY=off." % name)
+    settings_rel = SETTINGS_FILE.relative_to(ROOT).as_posix()
+    if settings_rel in changed and locked:
+        commands = []
+        try:
+            for entries in (json.loads(show(after, settings_rel) or "{}").get("hooks") or {}).values():
+                for entry in entries or []:
+                    commands.extend(str(h.get("command", "")) for h in entry.get("hooks") or [])
+        except (ValueError, AttributeError):
+            pass
+        missing = [event for event in ("session-start", "pre-tool-use", "post-tool-use", "stop")
+                   if not any(re.search(r"harness\.py\"?\s+hook\s+%s\b" % event, c) for c in commands)]
+        if missing:
+            problems.append(".claude/settings.json no longer runs the harness hook(s): %s" % ", ".join(missing))
+    return problems
+
+
+def verify_staged():
+    head = git("rev-parse", "--verify", "-q", "HEAD").strip()
+    if head:
+        changed = [n for n in git("diff", "--cached", "--name-only", "-z", "HEAD").split("\0") if n]
+    else:
+        changed = [n for n in git("ls-files", "-z").split("\0") if n]
+    fingerprint = tree_fingerprint()
+    return verify_changes("HEAD" if head else "", "", changed, lambda task: fingerprint)
+
+
+def verify_range(spec, allow_user_changes=False):
+    base, _, tip = spec.partition("..")
+    tip = tip or "HEAD"
+    commits = [c for c in git("rev-list", "--reverse", "%s..%s" % (base, tip)).split() if c]
+    changed = [n for n in git("diff", "--name-only", "-z", base, tip).split("\0") if n]
+    tasks_rel = TASKS.relative_to(ROOT).as_posix()
+
+    def done_fingerprint(task):
+        for commit in commits:
+            if task in task_states(show(commit, tasks_rel))[1]:
+                return tree_fingerprint(commit)
+        return tree_fingerprint(tip)
+
+    return verify_changes(base, tip, changed, done_fingerprint, allow_user_changes)
+
+
+def verify_command(argv):
+    allow = "--allow-user-changes" in argv
+    args = [a for a in argv if a != "--allow-user-changes"]
+    if args[:1] == ["--range"] and len(args) == 2:
+        problems = verify_range(args[1], allow)
+    elif not args:
+        problems = verify_staged()
+    else:
+        sys.stderr.write("usage: harness.py verify [--range <base>..<tip>] [--allow-user-changes]\n")
+        return 64
+    for problem in problems:
+        print("verify: %s" % problem)
+    if not problems:
+        print("verify: ok")
+    return 1 if problems else 0
 
 
 # --------------------------------------------------------------------------- health
@@ -896,9 +1357,13 @@ def health():
     values = conf()
     if values["HARNESS_STOP_MODE"] not in STOP_MODES:
         issues.append(("error", "HARNESS_STOP_MODE must be one of %s" % "|".join(STOP_MODES)))
-    for key in ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE"):
+    for key in ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE", "HARNESS_ORCHESTRATOR_SCOPE"):
         if values[key] not in ("on", "off"):
             issues.append(("error", "%s must be on or off" % key))
+    if values["HARNESS_VERIFY"] not in ("block", "off"):
+        issues.append(("error", "HARNESS_VERIFY must be block or off"))
+    if not values["HARNESS_TEST_TIMEOUT"].isdigit():
+        issues.append(("error", "HARNESS_TEST_TIMEOUT must be a number of seconds"))
     if not values["HARNESS_JUDGE_MAX_ROUNDS"].isdigit() or int(values["HARNESS_JUDGE_MAX_ROUNDS"]) < 1:
         issues.append(("error", "HARNESS_JUDGE_MAX_ROUNDS must be a positive integer"))
     missing = [a for a in PIPELINE_AGENTS if not (AGENTS_DIR / ("%s.md" % a)).is_file()]
@@ -1302,11 +1767,15 @@ def hook_pre_tool_use(data):
     tool_input = data.get("tool_input") or {}
     rules, _ = load_rules()
     if tool == "Bash":
-        hits = check_text(rules, None, tool_input.get("command") or "", ("block",))
+        command = tool_input.get("command") or ""
+        problems = ["  - " + p for p in shell_findings(command, data.get("cwd"))]
+        hits = check_text(rules, None, rule_text(command), ("block",))
         if hits:
+            problems.append(describe(hits))
+        if problems:
             deny("Harness blocked this command:\n%s\nIf the user really wants it, ask them to run it "
                  "themselves (in Claude Code: `! <command>`). Do not rephrase the command to get "
-                 "around the rule." % describe(hits))
+                 "around the rule." % "\n".join(problems))
         return
     if tool not in FILE_TOOLS or not tool_input.get("file_path"):
         return
@@ -1326,10 +1795,15 @@ def hook_pre_tool_use(data):
         checks = (user_only_change,)
     elif re.match(r"^backbone/specs/[^/]+\.md$", path):
         checks = (spec_guard,)
+    elif re.match(r"^backbone/adr/[^/]+\.md$", path):
+        checks = (adr_guard,)
     if checks:
         before = read(ROOT / path)
         after = resulting_text(tool, tool_input, path_str)
         problems.extend(p for p in (check(before, after) for check in checks) if p)
+    scope = orchestrator_scope(data, path)
+    if scope:
+        problems.append(scope)
     skills = skill_gate(data, path)
     if skills:
         problems.append(skills)
@@ -1392,7 +1866,7 @@ def hook_post_tool_use(data):
     elif tool == "Bash":
         command = tool_input.get("command") or ""
         rules, _ = load_rules()
-        hits = check_text(rules, None, command, ("warn",))
+        hits = check_text(rules, None, rule_text(command), ("warn",))
         if hits:
             notes.append("Guardrail warnings for that command:\n%s" % describe(hits))
         if re.search(r"\bgit\b[^\n;&|]*\bcommit\b", command) and fresh_commit():
@@ -1464,6 +1938,13 @@ def git_pre_commit():
     if blocked:
         sys.stderr.write("harness: commit blocked by guardrail rules.\n")
         return 1
+    if conf()["HARNESS_VERIFY"] != "off":
+        problems = verify_staged()
+        if problems:
+            sys.stderr.write("harness: commit blocked; the staged state breaks the harness gates:\n%s\n"
+                             "The user can commit a deliberate exception with HARNESS_VERIFY=off.\n"
+                             % "\n".join("  - " + p for p in problems))
+            return 1
     build = conf()["HARNESS_BUILD_CMD"]
     if build and os.environ.get("SKIP_BUILD") != "1":
         sys.stderr.write("harness: build check: %s  (skip once with SKIP_BUILD=1)\n" % build)
@@ -1619,6 +2100,8 @@ def main(argv):
         return 0
     if argv[1:2] == ["adopt"]:
         return adopt_command(argv[2:])
+    if argv[1:2] == ["verify"]:
+        return verify_command(argv[2:])
     sys.stderr.write(__doc__)
     return 64
 

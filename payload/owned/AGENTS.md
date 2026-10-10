@@ -57,8 +57,8 @@ Every task goes through four phases. You, the main session, are the **orchestrat
 ## 5. Guardrails
 
 - Hooks block destructive commands, secrets, `backbone/guardrails.conf` violations, a second `[WIP]`, and every gate above. When something is blocked, fix the cause.
-- Never work around a hook. Don't use `--no-verify`, don't write files through the shell to avoid checks, and don't edit `backbone/.verdicts/`, `Approved-by:` lines or the user-only `HARNESS_*_GATE` settings.
-- Each agent may write only its own files. The hooks enforce this, so hand work to the right agent instead.
+- Never work around a hook. Don't use `--no-verify`, don't write files through the shell to avoid checks, and don't edit `backbone/.verdicts/`, `Approved-by:` lines, ADR acceptance or the user-only `harness.conf` settings. The hooks refuse these, and the pre-commit `verify` and CI re-check the resulting state.
+- Each agent may write only its own files, and the main session only `backbone/` docs and configuration, `.claude/skills/` and `CLAUDE.md`. The hooks enforce this, so hand work to the right agent instead.
 - If the user really wants a blocked command, ask them to run it themselves (in Claude Code: `! <command>`).
 - `backbone/HOOKS.md` describes every hook and gate.
 
