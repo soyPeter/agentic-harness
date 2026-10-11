@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1 (2026-10-11)
+
+- **CI workflow templates use current action versions:** `actions/checkout@v7` and `actions/setup-node@v7`, instead of v4, which GitHub runs on a deprecated Node 20 and warns about.
+  - `harness-verify.yml` is harness-owned, so `update.sh` replaces it.
+  - `harness-judge.yml` is a project-owned template, so existing projects change its two `@v4` lines themselves.
+
 ## 0.8.0 (2026-10-09)
 
 Hardening from the first live unattended run, and the last trust gaps in autonomous mode.
