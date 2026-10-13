@@ -1,0 +1,29 @@
+# Runs the harness self-test on every pull request and push to main, so a
+# regression in the payload is caught here before any project installs it.
+name: self-test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.10", "3.13"]
+    runs-on: ${{ matrix.os }}
+    # The suite usually takes a few minutes; this bounds the intermittent stall.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run the self-test
+        run: tests/run-tests.sh
