@@ -72,7 +72,12 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
                   "HARNESS_AGENT_CMD", "HARNESS_RUN_TASK_TIMEOUT", "HARNESS_RUN_ATTEMPTS",
                   "HARNESS_RUN_MAX_COST", "HARNESS_CI_JUDGE_CMD",
                   "HARNESS_DECISION_PROVIDER", "HARNESS_DECISION_MODE", "HARNESS_DECISION_ADR",
-                  "HARNESS_DECISION_CMD", "HARNESS_DECISION_MODEL", "HARNESS_DECISION_URL")
+                  "HARNESS_DECISION_CMD", "HARNESS_DECISION_MODEL", "HARNESS_DECISION_URL",
+                  "HARNESS_KNOWLEDGE_ROOT", "HARNESS_KNOWLEDGE_TOOLS", "HARNESS_KNOWLEDGE_PATHS")
+# The knowledge source: an MCP server registered as "knowledge" (claude mcp add) over a folder of notes, that the
+# analyst, architect and griller consult when grilling raises questions. Read-only; answers are cited as vault:<path>.
+KNOWLEDGE_TOOL_PREFIX = "mcp__knowledge__"
+KNOWLEDGE_PATH_KEYS = ("path", "paths", "note", "notes", "hub", "name", "file", "files", "target")
 # Paths an agent may change only through the file tools, where the hooks see the change. Shell writes to
 # them are refused: they would skip the gates (task states, approvals, verdicts, settings, skill state).
 SHELL_PROTECTED = (r"^backbone(/|$)", r"^scripts/harness(/|$)", r"^\.claude(/|$)", r"^(AGENTS|CLAUDE)\.md$",
@@ -161,6 +166,10 @@ DEFAULTS = {
     "HARNESS_DECISION_MODEL": "",
     "HARNESS_DECISION_TIMEOUT": "20",
     "HARNESS_DECISION_URL": "",
+    "HARNESS_KNOWLEDGE_ROOT": "",
+    "HARNESS_KNOWLEDGE_TOOLS": r"^((search|read|get|list|find|query|lookup|fetch)\w*|note_meta|batch_read|backlinks|"
+                               r"hub_children|decisions_status|pending_questions)$",
+    "HARNESS_KNOWLEDGE_PATHS": "",
 }
 STOP_MODES = ("remind", "block", "off")
 
@@ -398,6 +407,87 @@ def without_approval(text):
 def without_section(text, title):
     """text without any '## <title>' section."""
     return re.sub(r"^##\s+%s\s*\n(?:(?!##\s).*\n?)*" % re.escape(title), "", text, flags=re.M | re.I)
+
+
+def knowledge_root():
+    """The knowledge source's folder (HARNESS_KNOWLEDGE_ROOT), or None when the knowledge source is off."""
+    value = conf()["HARNESS_KNOWLEDGE_ROOT"].strip()
+    if not value:
+        return None
+    path = Path(os.path.expanduser(value))
+    return (path if path.is_absolute() else ROOT / path).resolve()
+
+
+def knowledge_path_allowed(path):
+    """A vault-relative path inside the folders HARNESS_KNOWLEDGE_PATHS allows (all when empty)."""
+    path = path.strip().lstrip("/")
+    if not path or ".." in Path(path).parts:
+        return False
+    prefixes = [p.strip("/") for p in conf()["HARNESS_KNOWLEDGE_PATHS"].split() if p.strip("/")]
+    return not prefixes or any(path == p or path.startswith(p + "/") for p in prefixes)
+
+
+def knowledge_citation_problems(text):
+    """Assumptions without a source, or citing vault:<path> notes that don't exist or aren't allowed."""
+    problems = []
+    root = knowledge_root()
+    for n, item in enumerate(bullets(md_section(strip_comments(text), "Assumptions")), 1):
+        if item.lower().rstrip(".") in ("none", "n/a"):
+            continue
+        label = (re.match(r"^(A\d+)", item) or [None, "assumption %d" % n])[1]
+        if "source:" not in item.lower():
+            problems.append("%s has no (source: ...)" % label)
+        for cited in re.findall(r"vault:([^\s;,)]+)", item):
+            cited = cited.rstrip(".")
+            if root is None:
+                problems.append("%s cites vault:%s, but the knowledge source is off (HARNESS_KNOWLEDGE_ROOT)"
+                                % (label, cited))
+                continue
+            target = (root / cited.lstrip("/")).resolve()
+            candidates = [target, target.with_name(target.name + ".md")]
+            inside = target == root or root in target.parents
+            if not inside or not knowledge_path_allowed(cited):
+                problems.append("%s cites vault:%s, outside HARNESS_KNOWLEDGE_PATHS" % (label, cited))
+            elif not any(c.is_file() for c in candidates):
+                problems.append("%s cites vault:%s, which is not a note in the knowledge source" % (label, cited))
+    return problems
+
+
+def knowledge_guard(tool, tool_input):
+    """Pre-tool check for the knowledge server's tools: on, read-only, inside the allowed folders."""
+    name = tool[len(KNOWLEDGE_TOOL_PREFIX):]
+    if knowledge_root() is None:
+        deny("Harness blocked %s: the knowledge source is off (HARNESS_KNOWLEDGE_ROOT is empty). Answer from "
+             "backbone/ and escalate what it cannot answer." % tool)
+    try:
+        read_only = re.search(conf()["HARNESS_KNOWLEDGE_TOOLS"], name)
+    except re.error:
+        read_only = None
+    if not read_only:
+        deny("Harness blocked %s: the knowledge source is read-only for agents (HARNESS_KNOWLEDGE_TOOLS). Record "
+             "answers in the spec's Assumptions; questions it can't answer are escalated, not written to it." % tool)
+    backbone_paths = [v for k, v in tool_input.items() if k in KNOWLEDGE_PATH_KEYS and isinstance(v, str)
+                      and re.match(r"^(\./)?(backbone|src|tests?|scripts|\.claude)/", v)]
+    prefixed = [v for k, v in tool_input.items() if k in KNOWLEDGE_PATH_KEYS and isinstance(v, str)
+                and v.startswith("vault:")]
+    if prefixed:
+        deny("Harness blocked %s on %s: vault: marks a citation in the spec; call the server with the plain path "
+             "(%s)." % (tool, prefixed[0], prefixed[0][len("vault:"):]))
+    if backbone_paths:
+        deny("Harness blocked %s on %s: that is a project file; read it with Read. The knowledge server serves "
+             "only the vault." % (tool, ", ".join(backbone_paths[:4])))
+    if conf()["HARNESS_KNOWLEDGE_PATHS"].split():
+        named = []
+        for key in KNOWLEDGE_PATH_KEYS:
+            value = tool_input.get(key)
+            named += [value] if isinstance(value, str) else [v for v in (value or []) if isinstance(v, str)]
+        outside = [v for v in named if "/" not in v or not knowledge_path_allowed(v)]
+        if outside:
+            deny("Harness blocked %s on %s: only notes under HARNESS_KNOWLEDGE_PATHS (%s) may be read, named by "
+                 "their path in the vault." % (tool, ", ".join(outside[:4]), conf()["HARNESS_KNOWLEDGE_PATHS"]))
+    looked_up = {k: tool_input[k] for k in ("query", "path", "paths", "name", "hub", "pillar")
+                 if isinstance(tool_input.get(k), (str, list)) and tool_input.get(k)}
+    log_event("knowledge", tool=name, **{k: (v if isinstance(v, str) else v[:5]) for k, v in looked_up.items()})
 
 
 def approval_lines(text):
@@ -1265,8 +1355,12 @@ def approve_command(task):
                    if a.lower().rstrip(".") not in ("none", "n/a")]
     if asked and not assumptions:
         print("approve: the griller asked %d question(s); record how each was settled under '## Assumptions' "
-              "(with its source in backbone/), grill again, then approve. Escalate what backbone/ cannot answer."
-              % asked)
+              "(with its source in backbone/ or vault:<path>), grill again, then approve. Escalate what the "
+              "sources cannot answer." % asked)
+        return 1
+    cited = knowledge_citation_problems(text)
+    if cited:
+        print("approve: fix the Assumptions' sources first:\n  " + "\n  ".join(cited))
         return 1
     reasons = risk_reasons(task)
     if reasons:
@@ -1746,6 +1840,17 @@ def health():
             issues.append(("error", "autonomous mode needs HARNESS_VERIFY, HARNESS_SPEC_GATE and HARNESS_JUDGE_GATE on"))
     if values["HARNESS_AUTO_APPROVE"] not in ("low", "off"):
         issues.append(("error", "HARNESS_AUTO_APPROVE must be low or off"))
+    root = knowledge_root()
+    if root is not None:
+        if not root.is_dir():
+            issues.append(("error", "HARNESS_KNOWLEDGE_ROOT is not a folder: %s" % root))
+        if knowledge_server_registered() is False:
+            issues.append(("warn", "the knowledge source is on, but no MCP server named \"knowledge\" is registered "
+                                   "for this folder: claude mcp add -s local knowledge -- <command>"))
+        try:
+            re.compile(values["HARNESS_KNOWLEDGE_TOOLS"])
+        except re.error as exc:
+            issues.append(("error", "HARNESS_KNOWLEDGE_TOOLS is not a valid regex (%s)" % exc))
     for key in ("HARNESS_RISK_TERMS", "HARNESS_RISK_PATHS"):
         try:
             re.compile(values[key])
@@ -2170,6 +2275,9 @@ def hook_session_start(_data):
         lines.append("AUTONOMOUS MODE: no user is in the loop. Never ask the user; approve low-risk specs with "
                      "harness.py approve <id>, escalate everything else with harness.py escalate <id> --reason ..., "
                      "and continue with the next ready task (AGENTS.md section 7).")
+        if knowledge_root() is not None:
+            lines.append("Knowledge source on: the analyst and architect answer the griller's questions from "
+                         "backbone/ and the knowledge MCP server (cite vault:<path>); escalate what neither answers.")
     if halt_file().exists():
         lines.append("HALTED: %s exists. Do not change anything; report your state." % halt_file())
     pending_escalations = open_escalations()
@@ -2199,6 +2307,9 @@ def hook_pre_tool_use(data):
     if halt_file().exists():
         deny("Harness halted: %s exists (the user's kill switch). Stop working and report your state; the user "
              "removes the file to resume." % halt_file())
+    if tool.startswith(KNOWLEDGE_TOOL_PREFIX):
+        knowledge_guard(tool, tool_input)
+        return
     rules, _ = load_rules()
     if tool == "Bash":
         command = tool_input.get("command") or ""
@@ -2382,7 +2493,7 @@ Drive Task {task} ("{title}") through the whole pipeline in backbone/8-WORKFLOW.
 {state}
 - Define: if backbone/specs/{task}.md is missing or not ready, have the analyst write it from the task title and
   backbone/, the architect complete Architecture and Skills, and the griller grill it. Answer the griller's
-  questions from backbone/ as Assumptions; escalate what backbone/ cannot answer.
+  questions from backbone/ and the knowledge source (if on) as Assumptions; escalate what they cannot answer.
 - Approve: python3 scripts/harness/lib/harness.py approve {task}
 - Build, judge and record with the implementer, judge and scribe; then mark the task [x] and commit.
 - When anything needs a human, escalate: python3 scripts/harness/lib/harness.py escalate {task} --reason "..."
@@ -2522,6 +2633,32 @@ def workspace_trusted(path=None):
             if (projects.get(key) or {}).get("hasTrustDialogAccepted") is True:
                 return True
     return False
+
+
+def knowledge_server_registered():
+    """True/False: an MCP server named "knowledge" is in ~/.claude.json (user scope, or local scope for this
+    folder) or in .mcp.json; None if ~/.claude.json can't be read."""
+    if "knowledge" in ((json_file(ROOT / ".mcp.json") or {}).get("mcpServers") or {}):
+        return True
+    config = Path(os.path.expanduser("~/.claude.json"))
+    data = json_file(config) if config.exists() else {}
+    if data is None:
+        return None
+    if "knowledge" in (data.get("mcpServers") or {}):
+        return True
+    folder = ROOT.resolve()
+    for key in {str(folder), str(folder).replace("/private/", "/", 1)}:
+        if "knowledge" in (((data.get("projects") or {}).get(key) or {}).get("mcpServers") or {}):
+            return True
+    return False
+
+
+def json_file(path):
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def trust_problem():
@@ -2756,6 +2893,7 @@ def report_command(argv):
                           "escalations": count("escalation"), "open_escalations": len(open_escalations()),
                           "policy_approvals": count("approval"), "blocked_tool_calls": count("block"),
                           "verify_refusals": count("verify"), "out_of_band_changes": count("tamper"),
+                          "knowledge_lookups": count("knowledge"),
                           "cost_usd": round(sum(e.get("cost_usd") or 0 for e in attempts), 4),
                           "block_reasons": reasons}, indent=2, sort_keys=True))
         return 0
@@ -2767,6 +2905,7 @@ def report_command(argv):
                                                                        count("approval")))
     print("  blocked tool calls: %d; commits refused by verify: %d; out-of-band changes: %d"
           % (count("block"), count("verify"), count("tamper")))
+    print("  knowledge source lookups: %d" % count("knowledge"))
     print("  agent cost: $%.2f over %d session(s)" % (sum(e.get("cost_usd") or 0 for e in attempts), len(attempts)))
     for reason, n in sorted(reasons.items(), key=lambda kv: -kv[1])[:8]:
         print("    %4d  %s" % (n, reason))

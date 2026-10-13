@@ -152,6 +152,33 @@ Add your toolchain in a Dockerfile that builds `FROM` it.
 
 `HARNESS_AGENT_CMD` defaults to `claude -p --permission-mode acceptEdits --output-format json`. The prompt arrives on stdin. That matters because `--allowedTools` takes any number of values and would swallow a prompt passed as an argument; quote each pattern, as in `--allowedTools 'Bash(git:*)' 'Bash(python3:*)'`. An unattended agent needs its tools pre-approved: allow the build and test commands in `.claude/settings.json`, or run it in a container or VM with `--dangerously-skip-permissions`. The harness hooks apply either way. Work on a branch and let the CI check gate the merge.
 
+## Knowledge source (`HARNESS_KNOWLEDGE_ROOT`)
+
+In autonomous mode the griller's questions are answered from `backbone/`. A knowledge source adds a second place to look: a folder of notes (an Obsidian vault, a wiki export) served by an MCP server. Unanswered questions still escalate; the knowledge source only means fewer of them do.
+
+**Setup (user-only):**
+1. Register the server for this project under the name `knowledge`: `claude mcp add -s local knowledge -- <the server's command>`. For the second-brain vault that is its `start.sh`. The name is fixed because the agent definitions grant `mcp__knowledge`.
+2. Set `HARNESS_KNOWLEDGE_ROOT` in `backbone/harness.conf` to the folder the server reads (used to check citations). Doctor warns if no `knowledge` server is registered.
+3. Optionally set `HARNESS_KNOWLEDGE_PATHS` to the vault folders agents may read and cite, and `HARNESS_KNOWLEDGE_TOOLS` to the server's read-only tool names.
+
+**How a question is settled.** The analyst (or the architect, for design questions) first checks `backbone/`, then the knowledge source:
+- A question already in the vault's open-questions register (`pending_questions`) is known to be open: it stays open.
+- A note that answers it clearly becomes an assumption citing it: `- A2: Endpoints are versioned in the path (source: vault:20-Architecture/adr-api-versioning.md)`.
+- Silence, vagueness or contradicting notes leave it open. A **blocker** may be settled from the vault only by an accepted decision record.
+- The griller's next pass re-reads every cited source and raises the question again if the note doesn't say what the assumption claims.
+- Questions left open are escalated to `backbone/escalations.md` as before. Nothing is written to the vault.
+
+**What the harness enforces:**
+| Check | Where |
+|---|---|
+| Knowledge tools are refused while `HARNESS_KNOWLEDGE_ROOT` is empty | `pre-tool-use` (matcher `mcp__knowledge__.*`) |
+| Only tools matching `HARNESS_KNOWLEDGE_TOOLS` run: write tools such as `create_note`, `update_note` or `move_note` are refused | `pre-tool-use` |
+| With `HARNESS_KNOWLEDGE_PATHS`, read tools must name notes by their vault path inside those folders (no bare aliases, no `..`) | `pre-tool-use` |
+| Every assumption has a `(source: ...)`; every `vault:<path>` is an existing note inside the vault and the allowed folders | `approve` |
+| Each lookup is logged; `report` counts them | event log |
+
+**Limits.** Search results aren't filtered: a search can list notes outside `HARNESS_KNOWLEDGE_PATHS`, though reading or citing them is refused. Whatever the agents read is sent to the model, so keep notes that must never leave your machine out of the folder the server serves (or run a second server over a subset). In the sandbox, mount the vault read-only, set `HARNESS_KNOWLEDGE_ROOT` to the mount point in `containerEnv`, install the server's dependencies in your Dockerfile, and register the server in `postStartCommand` (see the comments in `devcontainer.json`).
+
 ## Out-of-band changes (autonomous mode)
 
 The shell checks can't see what a script file does. In autonomous mode the harness keeps a snapshot of the protected files (`backbone/`, `scripts/harness/`, `.claude/`, `AGENTS.md`, `CLAUDE.md`). The snapshot is refreshed after every file-tool edit and every write of the harness's own.

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.0 (2026-10-13)
+
+- **Knowledge source for grilling (autonomous mode).** When `backbone/` doesn't answer a griller question, the analyst and architect search a read-only notes vault behind an MCP server registered as `knowledge` (for example the second-brain vault). A clear answer becomes an assumption citing `vault:<path>`; a question that is silent, vague, contradicted, or already in the vault's open-questions register is escalated as before. A blocker may be settled from the vault only by an accepted decision record. Nothing is written to the vault.
+  - New user-only settings: `HARNESS_KNOWLEDGE_ROOT` (the vault folder; empty = off), `HARNESS_KNOWLEDGE_PATHS` (folders agents may read and cite) and `HARNESS_KNOWLEDGE_TOOLS` (the read-only tool names).
+    `backbone/harness.conf` is project-owned, so `update.sh` doesn't add them: existing projects copy the block from the template, and commit it as the user (`HARNESS_VERIFY=off`).
+  - The hooks refuse the server's write tools, any knowledge tool while the source is off, and reads outside the allowed folders.
+  - `approve` refuses an assumption without a `(source: ...)`, and a `vault:` citation that isn't an existing note in the allowed folders.
+  - The griller re-reads every cited source and raises the question again when the note doesn't back the assumption.
+  - `.claude/settings.json` gains a `PreToolUse` hook for `mcp__knowledge__.*` and allows `mcp__knowledge` for unattended sessions (the hook keeps it read-only). Doctor warns when the source is on but no `knowledge` server is registered; `report` counts lookups.
+- **Stricter `approve`:** every assumption needs a source, with or without a knowledge source.
+- **Live runs against the second-brain vault** (2 tasks, with read access limited to the engineering folders):
+  - First run: one lookup only. The analyst picked "fixed delay, no jitter" as its own choice, while the vault's reliability note says exponential backoff with jitter. So the analyst and architect now check the vault before any default or design choice of their own, and the griller searches it against such choices.
+  - Second run: 12 lookups, including the open-questions register. Exponential backoff was settled from `vault:25-Reliability/rel-Reliability-Failover.md`. The numbers the vault doesn't give (base wait, factor, cap) were escalated with proposed values, and the griller flagged dropping the jitter the note asks for.
+  - The hook points agents at Read when they ask the knowledge server for a project file, and at the plain path when they pass a `vault:` citation as a path.
+
 ## 0.8.3 (2026-10-13)
 
 - **Fewer false escalations in autonomous mode:** the policy approval no longer reads the spec's Skills section. In the first sandbox run, the architect explained why `security` wasn't needed ("no auth, secret or personal data is handled"), and the keyword check escalated a slug-length task as touching auth, secrets and personal data. Requirements, acceptance criteria, architecture and the diff's sensitive paths are still checked.
