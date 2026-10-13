@@ -395,6 +395,11 @@ def without_approval(text):
     return text[:m.start()] if m else text
 
 
+def without_section(text, title):
+    """text without any '## <title>' section."""
+    return re.sub(r"^##\s+%s\s*\n(?:(?!##\s).*\n?)*" % re.escape(title), "", text, flags=re.M | re.I)
+
+
 def approval_lines(text):
     return sorted(line.strip() for line in text.splitlines() if APPROVAL_LINE.match(line))
 
@@ -1171,7 +1176,9 @@ def risk_reasons(task, base=None):
     """Why a task is not low-risk (empty list = low risk). With base, the diff since then is assessed too."""
     values = conf()
     text = read(spec_path(task))
-    body = without_approval(strip_comments(text))
+    # Skills only says which skills the agents load, and explaining why `security` isn't needed ("no auth or
+    # personal data") would read as risk. What the work does is in the other sections and in the diff.
+    body = without_section(without_approval(strip_comments(text)), "Skills")
     reasons = []
     terms = re.compile(values["HARNESS_RISK_TERMS"])
     paths = re.compile(values["HARNESS_RISK_PATHS"])

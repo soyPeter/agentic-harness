@@ -107,7 +107,7 @@ In a range, any change to the harness itself (enforcement files, the lock) or to
 | Mechanism | What it does |
 |---|---|
 | `harness.py approve <id>` | Policy approval. For a valid spec with a current griller pass, it writes `Approved-by: policy:low-risk (<date>; base <commit>; grill <fingerprint>)`, but only if `risk_reasons` finds nothing. Otherwise it escalates. Only `HARNESS_AUTO_APPROVE="low"` enables it; `off` escalates every spec. |
-| Risk | Spec text matching `HARNESS_RISK_TERMS`, spec paths matching `HARNESS_RISK_PATHS`, or a referenced ADR that isn't Accepted. When finishing a policy-approved task, the judge gate also assesses the diff since the base commit: sensitive paths, or more than `HARNESS_RISK_MAX_FILES` files. `harness.py risk <id>` shows the assessment. |
+| Risk | Spec text (outside the Skills section) matching `HARNESS_RISK_TERMS`, spec paths matching `HARNESS_RISK_PATHS`, or a referenced ADR that isn't Accepted. When finishing a policy-approved task, the judge gate also assesses the diff since the base commit: sensitive paths, or more than `HARNESS_RISK_MAX_FILES` files. `harness.py risk <id>` shows the assessment. |
 | `harness.py escalate <id> --reason ...` | Parks the task. Its line leaves `[WIP]` with a `BLOCKED: <kind>` note, and an entry goes into `backbone/escalations.md` (a GitHub issue too with `HARNESS_ESCALATE_GH="on"` and `gh`). A BLOCKED task cannot start. Agents can't clear the note or edit `escalations.md`. `harness.py escalations` lists open entries. |
 | Automatic escalation | The griller's recorder after `HARNESS_GRILL_MAX_ROUNDS` consecutive fails, the judge's after `HARNESS_JUDGE_MAX_ROUNDS`. |
 | Stop hook | Behaves as `block` (once per stop) whenever a task is `[WIP]`. |
@@ -142,7 +142,7 @@ Logs go to `.git/harness/runs/<timestamp>/<task>-<attempt>.log`. Agents can't st
 - **An agent that cannot start** (not logged in, bad API key: it fails at no cost) stops the run. Retrying or moving to the next task can't help, so no task is escalated for it, and the task stays ready.
 - **Keep the machine awake.** A sleeping laptop suspends the run, so wall time grows while nothing happens. On macOS, start the runner with `caffeinate -i python3 scripts/harness/lib/harness.py run`.
 
-**Sandbox.** `.devcontainer/harness-agent/` is a container for unattended runs. It has been built and checked (firewall, hooks, self-test, an unauthenticated runner start), but no agent task has run inside it yet: review it before use. It provides:
+**Sandbox.** `.devcontainer/harness-agent/` is a container for unattended runs. It has been built and checked (firewall, hooks, self-test), and has run a real task end to end (spec, grill, policy approval, build, judge) with a subscription token. Review it before use, and add your toolchain. It provides:
 - outbound traffic limited to the Anthropic API, GitHub and `HARNESS_FIREWALL_ALLOW`;
 - no host credentials apart from `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`, counted against your Claude subscription) or `ANTHROPIC_API_KEY` (billed per token). The host's keychain login isn't visible in the container;
 - a trusted workspace;
