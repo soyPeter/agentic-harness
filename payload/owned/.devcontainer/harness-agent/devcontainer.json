@@ -4,6 +4,8 @@
 // Inside, the agent may skip permission prompts because the container is the boundary:
 // outbound network is limited to an allowlist (init-firewall.sh), there are no host credentials,
 // and the workspace is the only mount. The harness hooks still apply to everything the agent does.
+// Credentials come from the host environment: CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`, uses your
+// Claude subscription) or ANTHROPIC_API_KEY (billed per token). The host's keychain login is not visible here.
 {
   "name": "harness-agent",
   "build": { "dockerfile": "Dockerfile" },
@@ -16,7 +18,10 @@
     // Extra hosts the build and tests need (space-separated), e.g. "repo.maven.apache.org pypi.org".
     "HARNESS_FIREWALL_ALLOW": ""
   },
-  "remoteEnv": { "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}" },
+  "remoteEnv": {
+    "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}"
+  },
   "mounts": ["source=harness-agent-claude-config,target=/home/agent/.claude,type=volume"],
   "postStartCommand": "sudo /usr/local/bin/init-firewall.sh && python3 /usr/local/bin/trust-workspace.py /workspace"
 }

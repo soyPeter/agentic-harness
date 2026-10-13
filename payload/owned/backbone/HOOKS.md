@@ -144,7 +144,7 @@ Logs go to `.git/harness/runs/<timestamp>/<task>-<attempt>.log`. Agents can't st
 
 **Sandbox.** `.devcontainer/harness-agent/` is a container for unattended runs. It has been built and checked (firewall, hooks, self-test, an unauthenticated runner start), but no agent task has run inside it yet: review it before use. It provides:
 - outbound traffic limited to the Anthropic API, GitHub and `HARNESS_FIREWALL_ALLOW`;
-- no host credentials apart from `ANTHROPIC_API_KEY`;
+- no host credentials apart from `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`, counted against your Claude subscription) or `ANTHROPIC_API_KEY` (billed per token). The host's keychain login isn't visible in the container;
 - a trusted workspace;
 - `HARNESS_AGENT_CMD` set to `--dangerously-skip-permissions`, because the container, not the prompt, is the boundary.
 
