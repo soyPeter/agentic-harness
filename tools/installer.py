@@ -13,7 +13,8 @@ File ownership:
   catalog/<pack>/         stack packs. Always shipped, inert, to scripts/harness/catalog/. The stack is
                           decided in the design phase: once an ADR is accepted, the project adopts packs
                           with `harness.py adopt`; updates then refresh the adopted packs' files too.
-  payload/seed/           project-owned: created once if missing, never modified afterwards.
+  payload/seed/           project-owned: created once if missing, never rewritten afterwards (update only
+                          appends new harness.conf settings, commented out).
   payload/settings.fragment.json
                           merged into .claude/settings.json; only hook entries whose command
                           contains "scripts/harness/" are owned by the harness.
@@ -22,6 +23,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -192,6 +194,43 @@ def seed_project(plan, context, report_existing):
         plan.note("seed", rel_path)
 
 
+CONF_REL = "backbone/harness.conf"
+CONF_KEY = re.compile(r"^\s*#?\s*([A-Z][A-Z0-9_]*)=")
+
+
+def migrate_conf(plan, context):
+    """Append settings the template has and the project's harness.conf lacks, commented out.
+
+    harness.conf is project-owned, so update never rewrites it. New keys arrive commented out, with the
+    template's explanation: nothing changes until the user uncomments one (user-only keys: as the user)."""
+    path = plan.target / CONF_REL
+    template_path = SEED / CONF_REL
+    if not path.exists() or not template_path.exists():
+        return
+    current = path.read_text(encoding="utf-8")
+    present = {m.group(1) for m in map(CONF_KEY.match, current.splitlines()) if m}
+    template = render(template_path.read_bytes(), context).decode("utf-8")
+    blocks, comments, added = [], [], []
+    for line in template.splitlines():
+        m = CONF_KEY.match(line)
+        if not line.strip():
+            comments = []
+        elif m:
+            if m.group(1) not in present:
+                blocks.append(comments + [line if line.lstrip().startswith("#") else "# " + line])
+                added.append(m.group(1))
+                comments = []
+        elif line.lstrip().startswith("#"):
+            comments.append(line)
+    if not added:
+        return
+    text = current.rstrip("\n") + "\n\n# Added by harness update %s, commented out so nothing changes until you uncomment\n" \
+        "# a setting (user-only ones: commit as the user, HARNESS_VERIFY=off git commit ...).\n" % VERSION
+    text += "\n".join("\n".join(block) for block in blocks) + "\n"
+    plan.write(CONF_REL, text.encode("utf-8"))
+    plan.note("migrate", CONF_REL, "new setting(s), commented out: %s" % ", ".join(added))
+
+
 def merge_settings(plan):
     path = plan.target / SETTINGS_REL
     original = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -287,6 +326,8 @@ def sync(target, args, installing):
     }
     files = sync_owned(plan, owned_sources(adopted), (previous or {}).get("files", {}), args.force)
     seed_project(plan, context, report_existing=installing)
+    if not installing:
+        migrate_conf(plan, context)
     merge_settings(plan)
     configure_hooks_path(plan, args.force_hooks_path)
     write_lock(plan, previous, files, adopted)

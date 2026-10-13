@@ -84,7 +84,7 @@ git config core.hooksPath scripts/harness/git-hooks
 | Edited locally, no upstream change | Kept |
 | Edited locally and changed upstream | Kept; new version written to `<file>.harness-new` (exit code 1) |
 | Removed from the harness | Deleted if unedited, otherwise left in place |
-| Project file (`seed`) | Never touched; missing ones are created |
+| Project file (`seed`) | Never rewritten; missing ones are created. New `harness.conf` settings are appended commented out, with their explanation, so nothing changes until you uncomment one |
 | `.claude/settings.json` | Harness hook entries replaced; everything else kept |
 
 ## What gets installed

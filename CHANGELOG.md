@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.1 (2026-10-13)
+
+- **`update.sh` brings new settings into `harness.conf`.** The file is project-owned, so update never rewrote it, and every new setting meant copying lines from the template by hand. Update now appends any setting the template has and the project's file lacks, **commented out** and with the template's explanation, and reports it as `migrate`. Nothing changes until you uncomment a line; a key you commented out yourself counts as present and isn't added again. User-only settings still need a commit as the user once you uncomment them.
+
 ## 0.9.0 (2026-10-13)
 
 - **Knowledge source for grilling (autonomous mode).** When `backbone/` doesn't answer a griller question, the analyst and architect search a read-only notes vault behind an MCP server registered as `knowledge` (for example the second-brain vault). A clear answer becomes an assumption citing `vault:<path>`; a question that is silent, vague, contradicted, or already in the vault's open-questions register is escalated as before. A blocker may be settled from the vault only by an accepted decision record. Nothing is written to the vault.

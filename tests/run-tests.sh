@@ -746,6 +746,7 @@ echo "Upstream change." >> "$H2/payload/owned/AGENTS.md"
 echo "Upstream workflow change." >> "$H2/payload/owned/backbone/8-WORKFLOW.md"
 echo "# new" > "$H2/payload/owned/backbone/NEW-DOC.md"
 rm "$H2/payload/owned/backbone/SKILLS.md"
+printf '\n# A new knob, explained.\n# Second line of the explanation.\nHARNESS_NEW_KNOB="x"\n' >> "$H2/payload/seed/backbone/harness.conf"
 echo "Local workflow tweak." >> "$P/backbone/8-WORKFLOW.md"
 python3 - "$P/.claude/settings.json" <<'EOF'
 import json, sys
@@ -758,7 +759,9 @@ EOF
 expect 0 "status works" "$H2/update.sh" status "$P"
 contains "status lists the upstream change" "update available" "$("$H2/update.sh" status "$P")"
 cp -R "$P" "$WORK/dry"
-"$H2/update.sh" "$WORK/dry" --dry-run >/dev/null 2>&1
+out=$("$H2/update.sh" "$WORK/dry" --dry-run 2>&1)
+contains "update reports the settings it would add to harness.conf" "migrate   backbone/harness.conf  (new setting(s), commented out: HARNESS_NEW_KNOB)" "$out"
+lacks "a dry run doesn't touch harness.conf" "HARNESS_NEW_KNOB" "$(cat "$WORK/dry/backbone/harness.conf")"
 contains "dry run changes nothing" "\"harness_version\": \"$(cat "$HARNESS/VERSION")\"" "$(cat "$WORK/dry/backbone/.harness-lock.json")"
 expect 1 "update reports a conflict" "$H2/update.sh" "$P"
 contains "unmodified harness file updated" "Upstream change." "$(cat "$P/AGENTS.md")"
@@ -774,7 +777,13 @@ contains "other settings kept" '"model": "opus"' "$settings"
 count=$(grep -c "hook pre-tool-use" "$P/.claude/settings.json")
 [ "$count" -eq 2 ] && ok "harness hooks not duplicated (tools and knowledge source)" || bad "harness hooks not duplicated ($count)"
 contains "lock records the new version" "99.0.0-test" "$(cat "$P/backbone/.harness-lock.json")"
+conf=$(cat "$P/backbone/harness.conf")
+contains "update adds a new setting to harness.conf, commented out" '# HARNESS_NEW_KNOB="x"' "$conf"
+contains "with the template's explanation" "# A new knob, explained." "$conf"
+lacks "the new setting is not switched on" $'\nHARNESS_NEW_KNOB=' "$conf"
+[ "$(grep -c '^HARNESS_JUDGE_GATE=' "$P/backbone/harness.conf")" -eq 1 ] && ok "existing settings are not duplicated" || bad "existing settings are not duplicated"
 expect 0 "second update is clean" "$H2/update.sh" "$P"
+[ "$(grep -c 'HARNESS_NEW_KNOB=' "$P/backbone/harness.conf")" -eq 1 ] && ok "a second update adds nothing" || bad "a second update adds nothing"
 expect 0 "--force takes the harness version" "$H2/update.sh" "$P" --force
 contains "--force replaced the local edit" "Upstream workflow change." "$(cat "$P/backbone/8-WORKFLOW.md")"
 
