@@ -637,7 +637,8 @@ contains "claude provider without credentials is logged, no call made" "needs AN
 STUB="$WORK/claude-stub.py"
 cat > "$STUB" <<'EOF'
 import json, sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
+from socketserver import TCPServer  # HTTPServer resolves its host name on start, which can hang on macOS
 class H(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
@@ -647,7 +648,7 @@ class H(BaseHTTPRequestHandler):
         data = json.dumps(reply).encode()
         self.send_response(200); self.send_header("content-type", "application/json"); self.send_header("content-length", str(len(data))); self.end_headers(); self.wfile.write(data)
     def log_message(self, *a): pass
-srv = HTTPServer(("127.0.0.1", 0), H)
+srv = TCPServer(("127.0.0.1", 0), H)
 open(sys.argv[1], "w").write(str(srv.server_address[1]))
 srv.handle_request()
 EOF
@@ -668,7 +669,8 @@ contains "claude: commit unaffected" "exit=0" "$out"
 OSTUB="$WORK/ollama-stub.py"
 cat > "$OSTUB" <<'EOF'
 import json, sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
+from socketserver import TCPServer  # HTTPServer resolves its host name on start, which can hang on macOS
 class H(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
@@ -680,7 +682,7 @@ class H(BaseHTTPRequestHandler):
         data = json.dumps(reply).encode()
         self.send_response(200); self.send_header("content-type", "application/json"); self.send_header("content-length", str(len(data))); self.end_headers(); self.wfile.write(data)
     def log_message(self, *a): pass
-srv = HTTPServer(("127.0.0.1", 0), H)
+srv = TCPServer(("127.0.0.1", 0), H)
 open(sys.argv[1], "w").write(str(srv.server_address[1]))
 srv.handle_request()
 EOF
