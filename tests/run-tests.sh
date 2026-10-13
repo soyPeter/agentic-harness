@@ -1127,6 +1127,20 @@ printf -- '- [ ] **Task 5.1: A** (spec: backbone/specs/5.1.md)\n- [ ] **Task 5.2
 out=$(HARNESS_RUN_MAX_COST=1 HARNESS_RUN_ATTEMPTS=1 python3 "$R/scripts/harness/lib/harness.py" run 2>&1)
 contains "run: the cost budget stops the run" "budget reached" "$out"
 lacks "run: no task starts after the budget" "task 5.2 attempt" "$out"
+cat > "$WORK/no-login-agent.sh" <<'EOF'
+#!/bin/sh
+# What `claude -p --output-format json` prints when it is not logged in.
+cat >/dev/null
+echo '{"type":"result","subtype":"success","is_error":true,"num_turns":1,"total_cost_usd":0,"result":"Not logged in · Please run /login"}'
+exit 1
+EOF
+chmod +x "$WORK/no-login-agent.sh"
+out=$(HARNESS_AGENT_CMD="$WORK/no-login-agent.sh" python3 "$R/scripts/harness/lib/harness.py" run 2>&1; echo "exit=$?")
+contains "run: an agent that cannot start stops the run" "the agent could not start (Not logged in" "$out"
+lacks "run: it is not retried" "attempt 2" "$out"
+lacks "run: no task is escalated for it" "escalated    task" "$out"
+contains "run: the run fails" "exit=1" "$out"
+contains "run: the task stays ready for the next run" "- [ ] **Task 5.2: B**" "$(cat "$RT")"
 printf -- '- [ ] **Task 6.1: Branch work** (spec: backbone/specs/6.1.md)\n' >> "$RT"
 git -C "$R" add -A; HARNESS_VERIFY=off git -C "$R" commit -qm "docs(backbone): add tasks" >/dev/null 2>&1
 out=$(python3 "$R/scripts/harness/lib/harness.py" run --worktree --only 6.1 2>&1)

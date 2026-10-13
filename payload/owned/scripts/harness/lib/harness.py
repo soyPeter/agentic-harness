@@ -2409,8 +2409,8 @@ def task_state(task):
     return "wip" if WIP_LINE.match(line) else "pending"
 
 
-def session_usage(log_path):
-    """(cost in USD, turns) from an agent log written with --output-format json, else (None, None)."""
+def session_result(log_path):
+    """The result object an agent log written with --output-format json ends with, else {}."""
     text = read(log_path)
     decoder = json.JSONDecoder()
     for start in reversed([m.start() for m in re.finditer(r"\{", text)]):
@@ -2419,8 +2419,23 @@ def session_usage(log_path):
         except ValueError:
             continue
         if isinstance(data, dict) and ("total_cost_usd" in data or "num_turns" in data):
-            return data.get("total_cost_usd"), data.get("num_turns")
-    return None, None
+            return data
+    return {}
+
+
+def session_usage(log_path):
+    """(cost in USD, turns) from an agent log written with --output-format json, else (None, None)."""
+    data = session_result(log_path)
+    return data.get("total_cost_usd"), data.get("num_turns")
+
+
+def agent_start_failure(log_path, code):
+    """The agent's error when a session failed without doing any work (not logged in, bad API key), else None.
+    Retrying or moving to the next task cannot help then, so the run stops instead of escalating every task."""
+    data = session_result(log_path)
+    if code in (0, None) or not data.get("is_error") or data.get("total_cost_usd") not in (0, 0.0):
+        return None
+    return str(data.get("result") or "exit %s" % code)
 
 
 def run_worktrees(queue, open_prs):
@@ -2450,6 +2465,11 @@ def run_worktrees(queue, open_prs):
         sys.stdout.write(child.stdout)
         m = re.search(r"^run: (\S+)\s+task %s$" % re.escape(task), child.stdout, re.M)
         outcome = m.group(1) if m else "error"
+        if outcome == "agent-failed":
+            subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=str(ROOT), capture_output=True)
+            git("branch", "-D", branch)
+            summary.append((task, outcome))
+            break
         if open_prs and outcome in ("done", "blocked", "escalated"):
             dirty = git_in(tree, "status", "--porcelain").strip()
             if dirty:
@@ -2579,6 +2599,12 @@ def run_command(argv):
             prompt = RUN_PROMPT.format(task=task, title=title, state=resume)
             log_path = run_dir / ("%s-%d.log" % (slug(task), attempt))
             code, seconds = run_agent(prompt, log_path, timeout)
+            failure = agent_start_failure(log_path, code)
+            if failure:
+                print("run: the agent could not start (%s); stopping the run. Log: %s" % (failure, log_path))
+                log_event("run-agent-failed", task=task, error=failure)
+                outcome = "agent-failed"
+                break
             cost, turns = session_usage(log_path)
             spent += cost or 0.0
             if halt_file().exists():
@@ -2599,12 +2625,12 @@ def run_command(argv):
             if outcome == "done" and dirty:
                 outcome = "done-uncommitted"
         else:
-            if outcome not in ("done", "blocked"):
+            if outcome not in ("done", "blocked", "agent-failed"):
                 escalate(task, "runner", "no resolution after %d agent session(s) (last state: %s; logs: %s)"
                          % (attempts, outcome, run_dir), "a look at the run logs and the task's state")
                 outcome = "escalated"
         summary.append((task, outcome))
-        if outcome == "halted":
+        if outcome in ("halted", "agent-failed"):
             break
     log_event("run-end", summary=summary)
     for task, outcome in summary:

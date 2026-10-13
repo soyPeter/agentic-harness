@@ -139,11 +139,12 @@ Logs go to `.git/harness/runs/<timestamp>/<task>-<attempt>.log`. Agents can't st
   - A task that already has a branch is skipped; delete the branch to retry.
   - Tasks run independently of each other, so `3-TASKS.md` may need a rebase between their pull requests.
 - **`--only <id>`** runs one task.
+- **An agent that cannot start** (not logged in, bad API key: it fails at no cost) stops the run. Retrying or moving to the next task can't help, so no task is escalated for it, and the task stays ready.
 - **Keep the machine awake.** A sleeping laptop suspends the run, so wall time grows while nothing happens. On macOS, start the runner with `caffeinate -i python3 scripts/harness/lib/harness.py run`.
 
-**Sandbox.** `.devcontainer/harness-agent/` is a container for unattended runs. It is **untested on this release: review before use**. It provides:
+**Sandbox.** `.devcontainer/harness-agent/` is a container for unattended runs. It has been built and checked (firewall, hooks, self-test, an unauthenticated runner start), but no agent task has run inside it yet: review it before use. It provides:
 - outbound traffic limited to the Anthropic API, GitHub and `HARNESS_FIREWALL_ALLOW`;
-- no host credentials apart from `ANTHROPIC_API_KEY`;
+- no host credentials apart from `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`, counted against your Claude subscription) or `ANTHROPIC_API_KEY` (billed per token). The host's keychain login isn't visible in the container;
 - a trusted workspace;
 - `HARNESS_AGENT_CMD` set to `--dangerously-skip-permissions`, because the container, not the prompt, is the boundary.
 

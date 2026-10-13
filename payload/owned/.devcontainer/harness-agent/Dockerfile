@@ -9,7 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN npm install -g @anthropic-ai/claude-code
 
+# ~/.claude exists before the volume mounts there, so the new volume takes the agent's ownership, not root's.
 RUN useradd -m -s /bin/bash agent \
+    && install -d -o agent -g agent /home/agent/.claude \
     && printf '%s\n' 'Defaults env_keep += "HARNESS_FIREWALL_ALLOW"' \
          'agent ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh' > /etc/sudoers.d/agent-firewall \
     && chmod 0440 /etc/sudoers.d/agent-firewall
