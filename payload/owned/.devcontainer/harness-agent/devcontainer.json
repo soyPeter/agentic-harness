@@ -6,6 +6,12 @@
 // and the workspace is the only mount. The harness hooks still apply to everything the agent does.
 // Credentials come from the host environment: CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`, uses your
 // Claude subscription) or ANTHROPIC_API_KEY (billed per token). The host's keychain login is not visible here.
+// Knowledge source (backbone/HOOKS.md): mount the vault read-only, point the harness at the mount and register
+// the server inside the container, for example:
+//   "mounts": [..., "source=/path/to/vault,target=/knowledge,type=bind,readonly"]
+//   "containerEnv": { ..., "HARNESS_KNOWLEDGE_ROOT": "/knowledge" }
+//   "postStartCommand": "... && claude mcp add -s user knowledge -- python3 /knowledge/<server script>"
+// and install the server's dependencies in a Dockerfile that builds FROM this one.
 {
   "name": "harness-agent",
   "build": { "dockerfile": "Dockerfile" },

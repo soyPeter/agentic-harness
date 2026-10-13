@@ -4,7 +4,8 @@
       "Bash(git status)",
       "Bash(git diff:*)",
       "Bash(git log:*)",
-      "Bash(scripts/harness/doctor.sh)"
+      "Bash(scripts/harness/doctor.sh)",
+      "mcp__knowledge"
     ]
   },
   "hooks": {
@@ -22,6 +23,16 @@
     "PreToolUse": [
       {
         "matcher": "Bash|Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py\" hook pre-tool-use",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__knowledge__.*",
         "hooks": [
           {
             "type": "command",

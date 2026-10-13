@@ -78,7 +78,7 @@ When the user sets `HARNESS_AUTONOMY="autonomous"` (user-only), no human answers
 
 | Supervised | Autonomous |
 |---|---|
-| Relay the griller's questions to the user | Have the analyst or architect answer them from `backbone/` (PRD, knowledge, conventions, ADRs, memory), recording each answer under the spec's **Assumptions** with its source. A question `backbone/` can't answer is escalated. `approve` refuses a spec whose griller asked questions while Assumptions is empty. |
+| Relay the griller's questions to the user | Have the analyst or architect answer them from `backbone/` (PRD, knowledge, conventions, ADRs, memory) and, when it is on, the read-only knowledge source (`HARNESS_KNOWLEDGE_ROOT`, MCP server `knowledge`). Each answer goes under the spec's **Assumptions** with its source (`vault:<path>` for a note). A question neither can answer clearly is escalated. `approve` refuses a spec whose griller asked questions while Assumptions is empty, an assumption without a source, or a `vault:` citation that isn't a note in the allowed folders. |
 | The user adds `Approved-by:` | `python3 scripts/harness/lib/harness.py approve <id>`. The harness approves a valid, grilled spec only if it is low-risk; otherwise it escalates the task itself. |
 | The user accepts an ADR | A task on a Proposed ADR is escalated by `approve`; tasks on accepted ADRs go on. |
 | Judge fails `HARNESS_JUDGE_MAX_ROUNDS` times: ask the user | The judge's recorder escalates automatically; so does the griller's after `HARNESS_GRILL_MAX_ROUNDS` fails. |

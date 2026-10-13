@@ -772,7 +772,7 @@ contains "custom hook kept" "custom-hook" "$settings"
 contains "custom permission kept" "Bash(make:*)" "$settings"
 contains "other settings kept" '"model": "opus"' "$settings"
 count=$(grep -c "hook pre-tool-use" "$P/.claude/settings.json")
-[ "$count" -eq 1 ] && ok "harness hooks not duplicated" || bad "harness hooks not duplicated ($count)"
+[ "$count" -eq 2 ] && ok "harness hooks not duplicated (tools and knowledge source)" || bad "harness hooks not duplicated ($count)"
 contains "lock records the new version" "99.0.0-test" "$(cat "$P/backbone/.harness-lock.json")"
 expect 0 "second update is clean" "$H2/update.sh" "$P"
 expect 0 "--force takes the harness version" "$H2/update.sh" "$P" --force
@@ -1002,6 +1002,69 @@ grill_pass 3.3 >/dev/null
 out=$($AH approve 3.3)
 contains "a spec on a Proposed ADR escalates for the user's decision" "ADR-002 is not Accepted" "$out"
 contains "session start reports autonomy and open escalations" "Open escalations waiting for the user: 2" "$(hook "$A" session-start '{}')"
+
+section "knowledge source: read-only, cited, checked"
+K="$WORK/vault"; mkdir -p "$K/20-Architecture" "$K/40-Security"
+printf -- '---\ntitle: API versioning\n---\nPublic endpoints are versioned in the path.\n' > "$K/20-Architecture/adr-api-versioning.md"
+printf -- 'secret stuff\n' > "$K/40-Security/pci.md"
+kjson() { python3 -c 'import json,sys; print(json.dumps({"agent_id":"a","tool_name":"mcp__knowledge__"+sys.argv[1],"tool_input":json.loads(sys.argv[2])}))' "$1" "$2"; }
+out=$(hook "$A" pre-tool-use "$(kjson search_notes '{"query":"versioning"}')" 2>&1; echo "exit=$?")
+contains "knowledge tools are refused while the source is off" "knowledge source is off" "$out"
+contains "the refusal blocks the call" "exit=2" "$out"
+export HARNESS_KNOWLEDGE_ROOT="$K"
+expect 0 "a read tool is allowed when the source is on" hook "$A" pre-tool-use "$(kjson search_notes '{"query":"versioning"}')"
+expect 0 "read_note is allowed" hook "$A" pre-tool-use "$(kjson read_note '{"path":"20-Architecture/adr-api-versioning.md"}')"
+expect 0 "the open-questions register is readable" hook "$A" pre-tool-use "$(kjson pending_questions '{}')"
+out=$(hook "$A" pre-tool-use "$(kjson create_note '{"pillar":"20","filename":"x","title":"x","body":"x","up":"x"}')" 2>&1; echo "exit=$?")
+contains "write tools are refused: the source is read-only" "read-only for agents" "$out"
+contains "the write is blocked" "exit=2" "$out"
+expect 2 "update_note is refused" hook "$A" pre-tool-use "$(kjson update_note '{"path":"20-Architecture/adr-api-versioning.md","old":"a","new":"b"}')"
+expect 2 "mark_obligation_verified is refused" hook "$A" pre-tool-use "$(kjson mark_obligation_verified '{"obligation_id":"O-1"}')"
+export HARNESS_KNOWLEDGE_PATHS="20-Architecture"
+expect 0 "a note inside HARNESS_KNOWLEDGE_PATHS is readable" hook "$A" pre-tool-use "$(kjson read_note '{"path":"20-Architecture/adr-api-versioning.md"}')"
+out=$(hook "$A" pre-tool-use "$(kjson read_note '{"path":"40-Security/pci.md"}')" 2>&1; echo "exit=$?")
+contains "a note outside HARNESS_KNOWLEDGE_PATHS is refused" "only notes under HARNESS_KNOWLEDGE_PATHS" "$out"
+expect 2 "batch_read with one outside note is refused" hook "$A" pre-tool-use "$(kjson batch_read '{"paths":["20-Architecture/adr-api-versioning.md","40-Security/pci.md"]}')"
+expect 2 "a bare alias can't be checked, so it is refused" hook "$A" pre-tool-use "$(kjson read_note '{"path":"pci"}')"
+out=$(hook "$A" pre-tool-use "$(kjson read_note '{"path":"backbone/specs/9.1.md"}')" 2>&1)
+contains "a project file asked of the knowledge server is pointed at Read" "read it with Read" "$out"
+contains "a vault: prefix in a tool call is explained" "call the server with the plain path" "$(hook "$A" pre-tool-use "$(kjson read_note '{"path":"vault:20-Architecture/adr-api-versioning.md"}')" 2>&1)"
+expect 2 "path traversal is refused" hook "$A" pre-tool-use "$(kjson read_note '{"path":"20-Architecture/../40-Security/pci.md"}')"
+expect 2 "agents cannot switch the knowledge source" hook "$A" pre-tool-use "$(edit_json "$A/backbone/harness.conf" 'HARNESS_KNOWLEDGE_ROOT=""' 'HARNESS_KNOWLEDGE_ROOT="/"')"
+kspec() {  # kspec <id> <assumption line>: a grilled spec whose griller asked one question, answered by <line>
+  auto_spec "$1" ""
+  python3 - "$A/backbone/specs/$1.md" "$2" <<'EOF'
+import re, sys
+path, line = sys.argv[1:3]
+text = open(path).read()
+text = re.sub(r"(^## Assumptions\s*\n)", lambda m: m.group(1) + "\n" + line + "\n", text, count=1, flags=re.M) \
+    if re.search(r"^## Assumptions", text, re.M) else text.replace("\n## Approval", "\n## Assumptions\n\n" + line + "\n\n## Approval")
+open(path, "w").write(text)
+EOF
+  hook "$A" grill-stop "$(python3 -c 'import json,sys; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"needs-answers","task":sys.argv[1],"questions":[{"severity":"major","about":"REQ","question":"How are endpoints versioned?","why":"unstated"}],"summary":"s"})+"\n```"}))' "$1")" >/dev/null 2>&1
+  grill_pass "$1" >/dev/null
+}
+kspec 9.1 "- A1: Endpoints are versioned in the path (source: vault:20-Architecture/adr-api-versioning.md)"
+expect 0 "approve accepts an assumption citing an existing vault note" $AH approve 9.1
+kspec 9.2 "- A1: Endpoints are versioned in the path (source: vault:20-Architecture/made-up.md)"
+out=$($AH approve 9.2; echo "exit=$?")
+contains "approve refuses a citation of a note that doesn't exist" "not a note in the knowledge source" "$out"
+contains "the made-up citation is not approved" "exit=1" "$out"
+kspec 9.3 "- A1: Card data is tokenised (source: vault:40-Security/pci.md)"
+contains "approve refuses a citation outside HARNESS_KNOWLEDGE_PATHS" "outside HARNESS_KNOWLEDGE_PATHS" "$($AH approve 9.3)"
+kspec 9.4 "- A1: Endpoints are versioned in the path (source: vault:../../etc/passwd)"
+contains "approve refuses a citation escaping the vault" "outside HARNESS_KNOWLEDGE_PATHS" "$($AH approve 9.4)"
+kspec 9.5 "- A1: Endpoints are versioned in the path"
+contains "approve refuses an assumption without a source" "A1 has no (source: ...)" "$($AH approve 9.5)"
+contains "the session-start note says the knowledge source is on" "Knowledge source on" "$(hook "$A" session-start '{}')"
+contains "doctor warns when no knowledge server is registered" 'no MCP server named "knowledge"' "$(HOME="$WORK/nohome" "$A/scripts/harness/doctor.sh" 2>&1)"
+contains "report counts knowledge lookups" "knowledge source lookups: " "$($AH report)"
+contains "the lookup's query is logged" '"query": "versioning"' "$(grep '"knowledge"' "$A/.git/harness/events.jsonl" | head -1)"
+unset HARNESS_KNOWLEDGE_ROOT HARNESS_KNOWLEDGE_PATHS
+kspec 9.6 "- A1: Endpoints are versioned in the path (source: vault:20-Architecture/adr-api-versioning.md)"
+contains "with the source off, vault citations are refused" "knowledge source is off" "$($AH approve 9.6)"
+contains "the agents can use the knowledge server's tools" "mcp__knowledge" "$(sed -n 1,6p "$A/.claude/agents/analyst.md")"
+contains "unattended sessions may call it (the hook keeps it read-only)" '"mcp__knowledge"' "$(cat "$A/.claude/settings.json")"
 
 section "autonomous mode: judging, risk drift, kill switch"
 printf 'def a():  # AC-3.1-1 AC-3.1-2\n    return 1\n' > "$A/src/a.py"
