@@ -104,7 +104,7 @@ git config core.hooksPath scripts/harness/git-hooks
 | `scripts/harness/` | harness | Runtime (`lib/harness.py`), git hooks, core rules and routes, `doctor.sh` |
 | `.github/workflows/harness-verify.yml` | harness | CI: `verify --range` with the base branch's verifier on every pull request |
 | `.github/workflows/harness-judge.yml` | project | CI: an independent judge session re-judges tasks a pull request finishes (needs `ANTHROPIC_API_KEY`; add your toolchain) |
-| `.devcontainer/harness-agent/` | harness | Sandbox for unattended runs: outbound allowlist, trusted workspace, no prompts (built and checked; no agent task run in it yet) |
+| `.devcontainer/harness-agent/` | harness | Sandbox for unattended runs: outbound allowlist, trusted workspace, no prompts (checked; has run a real task end to end) |
 | `.claude/settings.json` | shared | Merged: harness hook entries plus a few read-only permissions |
 
 Check the state of a task's definition with `python3 scripts/harness/lib/harness.py spec-check <id>`, and the harness with `scripts/harness/doctor.sh`.

@@ -4,6 +4,8 @@
 
 - **Fewer false escalations in autonomous mode:** the policy approval no longer reads the spec's Skills section. In the first sandbox run, the architect explained why `security` wasn't needed ("no auth, secret or personal data is handled"), and the keyword check escalated a slug-length task as touching auth, secrets and personal data. Requirements, acceptance criteria, architecture and the diff's sensitive paths are still checked.
   - The analyst and architect are told not to name risks to rule them out, since a negated mention still matches elsewhere in the spec.
+- **Sandbox: first real task.** After the fix, the runner took a task from spec to a judged commit inside the sandbox in under 2 minutes with a `CLAUDE_CODE_OAUTH_TOKEN`. The agent passed git and the harness hooks through the firewall, and `verify --range` passes on its commit.
+  - Git inside the container needs a user name and email. VS Code copies your `~/.gitconfig` into a dev container; with other tools, set them in the workspace.
 
 ## 0.8.2 (2026-10-13)
 
