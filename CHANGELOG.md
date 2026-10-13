@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.2 (2026-10-13)
+
+- **Sandbox built and checked for the first time** (OrbStack, Docker 29). The outbound allowlist works: the Anthropic API and GitHub are reachable, everything else is dropped. The hooks block inside the container, and the self-test passes there.
+  - **Bug fixed:** the `~/.claude` volume was created owned by root, so Claude Code couldn't write its sessions or settings. The image now creates the folder for the `agent` user before the volume mounts on it.
+  - No agent task has run inside the sandbox yet; that needs an `ANTHROPIC_API_KEY`.
+- **Runner:** an agent session that fails at no cost with an error (not logged in, bad API key) stops the run. Before, each task was retried and then escalated with a misleading "no resolution" note. With `--worktree`, the task's branch is removed so the next run retries it.
+- **Self-test in CI** on Ubuntu and macOS. The test API stubs no longer resolve their host name on start, which hung on macOS.
+
 ## 0.8.1 (2026-10-11)
 
 - **CI workflow templates use current action versions:** `actions/checkout@v7` and `actions/setup-node@v7`, instead of v4, which GitHub runs on a deprecated Node 20 and warns about.
