@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.3 (2026-10-13)
+
+- **Fewer false escalations in autonomous mode:** the policy approval no longer reads the spec's Skills section. In the first sandbox run, the architect explained why `security` wasn't needed ("no auth, secret or personal data is handled"), and the keyword check escalated a slug-length task as touching auth, secrets and personal data. Requirements, acceptance criteria, architecture and the diff's sensitive paths are still checked.
+  - The analyst and architect are told not to name risks to rule them out, since a negated mention still matches elsewhere in the spec.
+
 ## 0.8.2 (2026-10-13)
 
 - **Sandbox built and checked for the first time** (OrbStack, Docker 29). The outbound allowlist works: the Anthropic API and GitHub are reachable, everything else is dropped. The hooks block inside the container, and the self-test passes there.

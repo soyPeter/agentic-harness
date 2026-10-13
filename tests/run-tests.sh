@@ -988,6 +988,12 @@ contains "a BLOCKED task cannot start" "BLOCKED by an escalation" "$out"
 out=$(hook "$A" pre-tool-use "$(edit_json "$AT" " — BLOCKED: approval (backbone/escalations.md)" "")" 2>&1)
 contains "agents cannot clear a BLOCKED note" "Only the user clears a BLOCKED note" "$out"
 expect 2 "agents cannot edit escalations.md" hook "$A" pre-tool-use "$(edit_json "$A/backbone/escalations.md" "open" "resolved")"
+auto_spec 3.3 ""
+sed -i.bak 's/^- code-quality: all code$/&\
+- `security` is not listed: titles are trusted input and no auth, secret or personal data is handled./' "$A/backbone/specs/3.3.md" && rm -f "$A/backbone/specs/3.3.md.bak"
+contains "fixture: the Skills section rules out risks by name" "no auth, secret or personal data" "$(cat "$A/backbone/specs/3.3.md")"
+grill_pass 3.3 >/dev/null
+expect 0 "approve: risk words in the Skills section don't escalate" $AH approve 3.3
 contains "escalations lists open entries" "1 open escalation(s)" "$($AH escalations)"
 printf '# ADR-002: Cache\n\n## Status\nProposed\n\n## Context\nc\n\n## Decision\nd\n\n## Alternatives considered\na\n\n## Consequences\nq\n' \
   > "$A/backbone/adr/ADR-002-cache.md"

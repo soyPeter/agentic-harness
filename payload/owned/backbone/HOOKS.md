@@ -107,7 +107,7 @@ In a range, any change to the harness itself (enforcement files, the lock) or to
 | Mechanism | What it does |
 |---|---|
 | `harness.py approve <id>` | Policy approval. For a valid spec with a current griller pass, it writes `Approved-by: policy:low-risk (<date>; base <commit>; grill <fingerprint>)`, but only if `risk_reasons` finds nothing. Otherwise it escalates. Only `HARNESS_AUTO_APPROVE="low"` enables it; `off` escalates every spec. |
-| Risk | Spec text matching `HARNESS_RISK_TERMS`, spec paths matching `HARNESS_RISK_PATHS`, or a referenced ADR that isn't Accepted. When finishing a policy-approved task, the judge gate also assesses the diff since the base commit: sensitive paths, or more than `HARNESS_RISK_MAX_FILES` files. `harness.py risk <id>` shows the assessment. |
+| Risk | Spec text (outside the Skills section) matching `HARNESS_RISK_TERMS`, spec paths matching `HARNESS_RISK_PATHS`, or a referenced ADR that isn't Accepted. When finishing a policy-approved task, the judge gate also assesses the diff since the base commit: sensitive paths, or more than `HARNESS_RISK_MAX_FILES` files. `harness.py risk <id>` shows the assessment. |
 | `harness.py escalate <id> --reason ...` | Parks the task. Its line leaves `[WIP]` with a `BLOCKED: <kind>` note, and an entry goes into `backbone/escalations.md` (a GitHub issue too with `HARNESS_ESCALATE_GH="on"` and `gh`). A BLOCKED task cannot start. Agents can't clear the note or edit `escalations.md`. `harness.py escalations` lists open entries. |
 | Automatic escalation | The griller's recorder after `HARNESS_GRILL_MAX_ROUNDS` consecutive fails, the judge's after `HARNESS_JUDGE_MAX_ROUNDS`. |
 | Stop hook | Behaves as `block` (once per stop) whenever a task is `[WIP]`. |
