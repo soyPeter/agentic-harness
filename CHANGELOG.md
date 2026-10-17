@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.13.0 (2026-10-17)
+
+- **`harness.py orca` runs a backlog, not just a batch.**
+  - All ready tasks are queued; up to `--parallel` run at once, and the next starts when a slot frees.
+  - Dependencies come from the task line: `(after: 1.2, 1.3)`. A task waits until they are `[x]` on the base branch, and `--dry-run` shows what it waits for.
+  - `--merge` brings each finished task into the base branch, so the tasks after it build on it.
+  - Conflicts only in `3-TASKS.md` (neighbouring task lines) and the memory and decision logs are resolved: the base's task list with the task marked `[x]`, and both sides of each log. Any other conflict aborts the merge and is reported.
+
 ## 0.12.1 (2026-10-17)
 
 - **Codex workers report to Orca without permission prompts.** `.codex/rules/harness.rules` (harness-owned and lock-checked) allows exactly `orca orchestration check`, `send` and `ask` outside Codex's sandbox; everything else keeps Codex's own approvals (checked with `codex execpolicy check`). Codex loads it once the project's `.codex/` layer is trusted, which `harness.py orca --trust` does for task worktrees. This removes the manual approvals of the 0.12.0 live run.

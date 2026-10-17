@@ -2826,6 +2826,20 @@ def questions_command(argv):
     return 0
 
 
+AFTER_NOTE = re.compile(r"\(after:\s*([^)]+)\)", re.I)
+
+
+def task_dependencies():
+    """{task: [tasks it waits for]} from "(after: 1.1, 1.2)" on its line in 3-TASKS.md."""
+    lines = mask_comments(read(TASKS)).splitlines()
+    deps = {}
+    for i, line in enumerate(lines):
+        m = AFTER_NOTE.search(line)
+        if m and re.match(r"^\s*[-*]\s+\[[^\]]*\]", line):
+            deps[task_id_at(lines, i)] = [d.strip() for d in re.split(r"[,\s]+", m.group(1)) if d.strip()]
+    return deps
+
+
 def orca_command(argv):
     """harness.py orca: drive ready tasks with Orca supervised workers (scripts/harness/lib/coordinator.py)."""
     import coordinator
@@ -2844,18 +2858,24 @@ def orca_command(argv):
     tasks = [t for t in (value("--tasks") or "").split(",") if t] or ready
     tasks = [t for t in tasks if t in ready]
     limit = int(value("--parallel")) if (value("--parallel") or "").isdigit() else 2
-    tasks = tasks[:1] if "--here" in argv else tasks[:limit]
+    if "--here" in argv:
+        tasks, limit = tasks[:1], 1
+    deps = task_dependencies()
     if not tasks:
         print("orca: no ready task (pending or [WIP], not BLOCKED)")
         return 0
     if "--dry-run" in argv:
+        done = task_states(read(TASKS))[1]
         for task in tasks:
             step = next_step(task)
-            print("orca: would drive task %s (next: %s%s), agents %s" % (task, step["step"],
-                  " by the %s" % step["role"] if step.get("role") else "", agents))
+            waits = sorted(set(deps.get(task, [])) - done)
+            print("orca: would drive task %s (next: %s%s)%s, agents %s" % (task, step["step"],
+                  " by the %s" % step["role"] if step.get("role") else "",
+                  ", after %s is done" % ", ".join(waits) if waits else "", agents))
         return 0
     launch = dict(part.strip().split("=", 1) for part in conf()["HARNESS_ORCA_LAUNCH"].split(";") if "=" in part)
     opts = {"run": value("--run"), "agents": agents, "launch": launch, "trust": "--trust" in argv,
+            "parallel": limit, "deps": deps, "merge": "--merge" in argv,
             "launch_wait": int(os.environ.get("HARNESS_ORCA_LAUNCH_WAIT", "8")), "here": "--here" in argv, "pr": "--pr" in argv,
             "orca": os.environ.get("HARNESS_ORCA_BIN"),
             "wait_ms": int(value("--wait-ms")) if (value("--wait-ms") or "").isdigit() else 900000,

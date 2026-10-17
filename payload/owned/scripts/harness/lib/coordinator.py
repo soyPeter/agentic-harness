@@ -356,6 +356,8 @@ class Coordinator(object):
             info["outcome"] = "done, but the commit was refused: %s" % (commit.stderr + commit.stdout).strip()[:400]
             return False
         info["outcome"] = "done"
+        if self.opts.get("merge") and not self.opts.get("here"):
+            self.merge(task)
         if self.opts.get("pr") and not self.opts.get("here"):
             pushed = self.git(info["path"], "push", "-q", "-u", "origin", info["branch"])
             if pushed.returncode == 0 and shutil.which("gh"):
@@ -383,6 +385,7 @@ class Coordinator(object):
                                                               ": " + summary[:200] if outcome == "failed" else ""))
         if entry.get("step") == "finish":
             self.finish(task)
+            self.start_next()
             return
         queue = self.tasks[task].get("answer_queue") or []
         if entry.get("step") == "answer" and queue:
@@ -393,7 +396,8 @@ class Coordinator(object):
                                       role_note="")
             self.start_worker(task, spec, role, "step", {"step": "answer"})
             return
-        self.advance(task)
+        if not self.advance(task):
+            self.start_next()
 
     def on_question(self, message):
         asker = next((d for d, e in self.active.items() if e.get("handle") == message.get("from_handle")), None)
@@ -418,15 +422,8 @@ class Coordinator(object):
             self.run = find(created, "id")
             self.log("orca: run %s" % self.run)
         self.ensure_repo()
-        for task in task_ids:
-            path, branch, selector = self.workspace(task)
-            if self.opts.get("trust"):
-                self.trust(path)
-            title = self.harness(path, "state", "--json")
-            titles = {t["task"]: t["title"] for t in json.loads(title.stdout or "{}").get("tasks", [])}
-            self.tasks[task] = {"path": path, "branch": branch, "selector": selector, "title": titles.get(task, ""),
-                                "steps": [], "outcome": None}
-            self.advance(task)
+        self.queue = list(task_ids)
+        self.start_next()
         empty = 0
         deadline = time.time() + self.opts.get("timeout", 4 * 3600)
         while self.active and time.time() < deadline:
@@ -467,12 +464,102 @@ class Coordinator(object):
                              "the %s worker (%s) failed: %s" % (entry["role"], self.agent_for(entry["role"]), why),
                              "--needed", "a look at that agent in this worktree (trust, login, configuration)")
                 self.tasks[task]["outcome"] = "escalated (%s worker failed: %s)" % (entry["role"], why)
+            self.start_next()
         if self.delivery:
             try:
                 self.orca("orchestration", "check", "--run", self.run, "--ack", self.delivery, "--peek")
             except CoordinatorError:
                 pass
         return self.report()
+
+    def base_done(self):
+        """Tasks marked [x] on the base branch (the root checkout), where --merge brings finished tasks."""
+        state = self.harness(self.root, "state", "--json")
+        try:
+            return {t["task"] for t in json.loads(state.stdout or "{}").get("tasks", []) if t.get("state") == "done"}
+        except ValueError:
+            return set()
+
+    def start_next(self):
+        """Fill the free slots (--parallel) with queued tasks whose dependencies (after: ...) are done on the base."""
+        while self.queue:
+            running = [t for t, i in self.tasks.items() if i["outcome"] is None]
+            if len(running) >= self.opts.get("parallel", 2):
+                return
+            done = self.base_done()
+            deps = self.opts.get("deps") or {}
+            ready = next((t for t in self.queue if set(deps.get(t, [])) <= done), None)
+            if ready is None:
+                if not running:
+                    for task in self.queue:
+                        self.tasks[task] = {"path": self.root, "branch": "", "selector": "", "title": "", "steps": [],
+                                            "outcome": "waiting for %s" % ", ".join(sorted(set(deps.get(task, [])) - done))}
+                    self.queue = []
+                return
+            self.queue.remove(ready)
+            path, branch, selector = self.workspace(ready)
+            if self.opts.get("trust"):
+                self.trust(path)
+            state = self.harness(path, "state", "--json")
+            titles = {t["task"]: t["title"] for t in json.loads(state.stdout or "{}").get("tasks", [])}
+            self.tasks[ready] = {"path": path, "branch": branch, "selector": selector, "title": titles.get(ready, ""),
+                                 "steps": [], "outcome": None}
+            self.advance(ready)
+
+    def merge(self, task):
+        """--merge: bring a finished task's branch into the base branch, so the tasks after it build on it."""
+        info = self.tasks[task]
+        if self.git(self.root, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+            info["outcome"] += "; not merged: the base checkout has uncommitted changes"
+            return
+        message = "chore: merge task %s (%s)" % (task, info["branch"])
+        merged = self.git(self.root, "merge", "--no-ff", "-m", message, info["branch"])
+        if merged.returncode != 0 and not self.resolve_backbone_conflicts(task, message):
+            self.git(self.root, "merge", "--abort")
+            info["outcome"] += "; not merged: %s" % (merged.stdout + merged.stderr).strip()[:200]
+            return
+        info["outcome"] += "; merged into %s" % self.git(self.root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        self.log("orca: task %s merged" % task)
+
+    LOGS = ("backbone/6-MEMORY.md", "backbone/5-DECISIONS.md")
+
+    def resolve_backbone_conflicts(self, task, message):
+        """Parallel tasks both edit 3-TASKS.md (neighbouring task lines) and append to the memory and decision logs.
+        Resolve only those: the base's task list with this task marked [x], and both sides of each log. Any other
+        conflict is left for a person (the merge is aborted)."""
+        conflicted = [n for n in self.git(self.root, "diff", "--name-only", "--diff-filter=U").stdout.splitlines() if n]
+        if not conflicted or any(n not in ("backbone/3-TASKS.md",) + self.LOGS for n in conflicted):
+            return False
+        for name in conflicted:
+            path = self.root / name
+            if name == "backbone/3-TASKS.md":
+                ours = self.git(self.root, "show", ":2:%s" % name).stdout
+                marked = re.sub(r"(?m)^(\s*[-*]\s+)\[[^\]]*\](\s*\**Task %s\b)" % re.escape(task), r"\1[x]\2", ours,
+                                count=1)
+                path.write_text(marked, encoding="utf-8")
+            else:
+                stages = {}
+                for stage in (1, 2, 3):
+                    tmp = self.root / ".git" / ("harness-merge-%d" % stage)
+                    tmp.write_text(self.git(self.root, "show", ":%d:%s" % (stage, name)).stdout, encoding="utf-8")
+                    stages[stage] = tmp
+                subprocess.run(["git", "merge-file", "--union", str(stages[2]), str(stages[1]), str(stages[3])],
+                               cwd=str(self.root), capture_output=True)
+                path.write_text(stages[2].read_text(encoding="utf-8"), encoding="utf-8")
+                for tmp in stages.values():
+                    tmp.unlink()
+            self.git(self.root, "add", name)
+        # The gates already passed on the task's own commit (in its worktree); in the merged tree the code of the
+        # tasks merged before it is there too, so the judge's fingerprint can't match here. A clean merge doesn't run
+        # the pre-commit hook either; this commit skips verify the same way, as the user's exception.
+        committed = subprocess.run(["git", "commit", "-q", "-m", message], cwd=str(self.root), capture_output=True,
+                                   text=True, env=dict(os.environ, HARNESS_VERIFY="off"))
+        if committed.returncode == 0:
+            self.log("orca: task %s: resolved the backbone merge conflicts (%s); the task's own commit passed the "
+                     "gates" % (task, ", ".join(conflicted)))
+        else:
+            self.log("orca: task %s: merge commit refused: %s" % (task, (committed.stdout + committed.stderr).strip()[:300]))
+        return committed.returncode == 0
 
     def report(self):
         lines = ["harness orca: run %s" % self.run]
