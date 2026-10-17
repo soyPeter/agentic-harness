@@ -1618,14 +1618,14 @@ EN="$WORK/enrolled"; new_repo "$EN"
 out=$("$HARNESS/enroll.sh" "$EN" --name enr --orca --automation daily --agents "default=claude judge=codex" --dry-run 2>&1; echo "exit=$?")
 contains "enroll --dry-run says it would install" "install" "$out"
 expect 1 "enroll --dry-run installs nothing" test -f "$EN/backbone/.harness-lock.json"
-contains "enroll --dry-run creates no automation" "would create harness-enr-" "$out"
+contains "enroll --dry-run creates no automation" "would create harness-enrolled-" "$out"
 out=$("$HARNESS/enroll.sh" "$EN" --name enr --orca --automation daily --agents "default=claude judge=codex" 2>&1; echo "exit=$?")
 contains "enroll installs the harness into a new project" "install" "$out"
 [ -f "$EN/backbone/.harness-lock.json" ] && ok "the harness is installed" || bad "the harness is installed"
 contains "enroll runs the doctor" "doctor" "$out"
 contains "enroll registers the repository in Orca" '"repo", "add", "--path"' "$(cat "$FAKE_ENROLL_STATE")"
 contains "enroll prints the Orca setup-hook step" "set the setup script to: python3 scripts/harness/lib/harness.py doctor" "$out"
-contains "enroll creates the scheduled automation" "created harness-enr-" "$out"
+contains "enroll creates the scheduled automation" "created harness-enrolled-" "$out"
 contains "the automation's precheck (run by Orca, not an agent) starts the backlog" '"precheck": "python3 scripts/harness/lib/harness.py orca-nightly"' "$(cat "$FAKE_ENROLL_STATE")"
 contains "the automation runs in the repository's own checkout" "\"workspace\": \"path:$EN\"" "$(cat "$FAKE_ENROLL_STATE")"
 contains "enroll sets the agent per role" 'HARNESS_ORCA_AGENTS="default=claude judge=codex"' "$(cat "$EN/backbone/harness.conf")"
@@ -1643,8 +1643,20 @@ contains "--protect without a GitHub remote is skipped, with the reason" "skippe
 expect 64 "--automation without --orca is refused" "$HARNESS/enroll.sh" "$EN" --automation daily
 EN2="$WORK/elsewhere/enrolled"; mkdir -p "$WORK/elsewhere"; new_repo "$EN2"
 out=$("$HARNESS/enroll.sh" "$EN2" --name enr --orca --automation daily 2>&1)
-contains "two checkouts with the same name each get their own automation" "created harness-enr-" "$out"
-[ "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["automations"]))' "$FAKE_ENROLL_STATE")" -eq 2 ] && ok "one automation per checkout" || bad "one automation per checkout"
+contains "two checkouts with the same name each get their own automation" "created harness-" "$out"
+out=$("$HARNESS/enroll.sh" "$EN2" --name renamed --orca --automation daily 2>&1)
+contains "enrolling a checkout again under another --name finds its automation" "exists already for this checkout" "$out"
+python3 - "$FAKE_ENROLL_STATE" "$WORK/third" <<'EOF'
+import json, sys
+p, path = sys.argv[1:3]; d = json.load(open(p))
+d["automations"].append({"name": "made-by-hand", "workspaceId": "repo9::" + path, "runContext": {"path": path}})
+json.dump(d, open(p, "w"))
+EOF
+new_repo "$WORK/third"
+contains "an automation is matched by the checkout Orca stores (runContext.path)" "made-by-hand exists already" "$("$HARNESS/enroll.sh" "$WORK/third" --orca --automation daily 2>&1)"
+[ "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["automations"]))' "$FAKE_ENROLL_STATE")" -eq 3 ] && ok "one automation per checkout (two enrolled, one made by hand)" || bad "one automation per checkout"
+printf '#!/bin/sh\necho "{}"\nexit 3\n' > "$WORK/json-but-failing-orca"; chmod +x "$WORK/json-but-failing-orca"
+contains "a failing orca that prints JSON is still a failure" "orca repo add" "$(HARNESS_ORCA_BIN="$WORK/json-but-failing-orca" "$HARNESS/enroll.sh" "$EN" --orca 2>&1)"
 printf '#!/bin/sh\necho "orca: runtime unreachable" >&2\nexit 3\n' > "$WORK/broken-orca"; chmod +x "$WORK/broken-orca"
 out=$(HARNESS_ORCA_BIN="$WORK/broken-orca" "$HARNESS/enroll.sh" "$EN" --orca 2>&1; echo "exit=$?")
 contains "a failing orca is reported, not taken for success" "runtime unreachable" "$out"
@@ -1681,7 +1693,63 @@ contains "and verify is added" '"verify"' "$put"
 contains "required reviews are kept" '"required_approving_review_count": 2' "$put"
 contains "admin enforcement is kept" '"enforce_admins": true' "$put"
 contains "linear history is kept" '"required_linear_history": true' "$put"
+cat > "$GB/gh" <<'EOF'
+#!/bin/sh
+case "$*" in
+  "repo view --json nameWithOwner,defaultBranchRef") echo '{"nameWithOwner":"me/app","defaultBranchRef":{"name":"main"}}' ;;
+  "api repos/me/app/branches/main/protection") echo '{"required_status_checks":{"strict":true,"checks":[{"context":"security","app_id":123}]},"required_pull_request_reviews":{"required_approving_review_count":1,"dismissal_restrictions":{"users":[{"login":"lead"}],"teams":[]},"bypass_pull_request_allowances":{"users":[],"teams":[{"slug":"release"}]}}}' ;;
+  "api -X PUT repos/me/app/branches/main/protection --input -") cat > "$FAKE_GH_PUT"; echo '{}' ;;
+  *) echo '{}' ;;
+esac
+EOF
+export FAKE_GH_PUT="$WORK/gh-put2.json"
+PATH="$GB:$PATH" python3 "$EN/scripts/harness/lib/harness.py" ci-protect >/dev/null 2>&1
+put=$(cat "$FAKE_GH_PUT")
+contains "a check bound to an app keeps its app" '"app_id": 123' "$put"
+contains "review dismissal restrictions are kept" '"dismissal_restrictions": {"users": ["lead"]' "$put"
+contains "review bypass allowances are kept" '"teams": ["release"]' "$put"
+cat > "$GB/gh" <<'EOF'
+#!/bin/sh
+case "$*" in
+  "repo view --json nameWithOwner,defaultBranchRef") echo '{"nameWithOwner":"me/app","defaultBranchRef":{"name":"main"}}' ;;
+  "api repos/me/app/branches/main/protection") echo "HTTP 503: Service Unavailable" >&2; exit 1 ;;
+  "api -X PUT repos/me/app/branches/main/protection --input -") echo put > "$FAKE_GH_PUT"; echo '{}' ;;
+esac
+EOF
+export FAKE_GH_PUT="$WORK/gh-put3.json"
+out=$(PATH="$GB:$PATH" python3 "$EN/scripts/harness/lib/harness.py" ci-protect 2>&1; echo "exit=$?")
+contains "a failed protection read changes nothing" "nothing was changed" "$out"
+contains "and fails" "exit=1" "$out"
+expect 1 "no PUT after a failed read" test -f "$WORK/gh-put3.json"
 unset FAKE_GH_PUT
+
+section "one backlog run per repository, and its digest"
+HP="$EN/scripts/harness/lib/harness.py"
+expect 1 "orca-digest creates no metadata in a fresh repository" test -e "$(git -C "$EN" rev-parse --path-format=absolute --git-common-dir)/harness/orca-digest.txt"
+contains "orca-digest says when there's no finished run" "no finished backlog run yet" "$(python3 "$HP" orca-digest)"
+rm -rf "$(git -C "$EN" rev-parse --path-format=absolute --git-common-dir)/harness"
+HARNESS_ORCA_BIN=/usr/bin/true python3 "$HP" orca-nightly --dry-run >/dev/null 2>&1
+expect 1 "orca-nightly --dry-run creates no metadata" test -d "$(git -C "$EN" rev-parse --path-format=absolute --git-common-dir)/harness"
+lockpy() { HARNESS_ROOT="$EN" python3 -c 'import importlib.util as u,sys,time; s=u.spec_from_file_location("h",sys.argv[1]); m=u.module_from_spec(s); s.loader.exec_module(m)
+first = m.orca_lock_acquire()
+import os
+fd = None
+second_holder = m.orca_lock_holder()
+s2 = u.spec_from_file_location("h2",sys.argv[1]); m2 = u.module_from_spec(s2); s2.loader.exec_module(m2)
+second = m2.orca_lock_acquire()
+print(first, second, second_holder == os.getpid())
+m.orca_lock_release()
+print(m2.orca_lock_acquire())' "$HP"; }
+contains "a second coordinator can't take a held lock, and sees who holds it" "True False True" "$(lockpy)"
+contains "once released, the lock can be taken again" "True" "$(lockpy | tail -1)"
+mkdir -p "$(git -C "$EN" rev-parse --path-format=absolute --git-common-dir)/harness"
+echo '{"pid": 999999}' > "$(git -C "$EN" rev-parse --path-format=absolute --git-common-dir)/harness/orca.lock"
+contains "a stale lock file (no process holds it) doesn't block" "True" "$(HARNESS_ROOT="$EN" python3 -c 'import importlib.util as u,sys; s=u.spec_from_file_location("h",sys.argv[1]); m=u.module_from_spec(s); s.loader.exec_module(m); print(m.orca_lock_holder() is None and m.orca_lock_acquire())' "$HP")"
+HARNESS_ROOT="$EN" python3 -c 'import importlib.util as u,sys; s=u.spec_from_file_location("h",sys.argv[1]); m=u.module_from_spec(s); s.loader.exec_module(m); m.orca_digest_publish("harness orca: run run_x\n  task 1.1: done")' "$HP"
+: > "$(git -C "$EN" rev-parse --path-format=absolute --git-common-dir)/harness/orca-latest.log"
+contains "the last finished run's digest survives a new run's log" "task 1.1: done" "$(python3 "$HP" orca-digest)"
+contains "orca-nightly prints that digest before starting" "task 1.1: done" "$(HARNESS_ORCA_BIN=/usr/bin/true python3 "$HP" orca-nightly --dry-run 2>&1)"
+expect 0 "agents may plan with orca --dry-run" hook "$EN" pre-tool-use "$(bash_json 'python3 scripts/harness/lib/harness.py orca --dry-run')"
 
 section "the Orca skill names only commands that exist"
 SK="$HARNESS/orca/skills/agentic-harness/SKILL.md"
@@ -1726,8 +1794,11 @@ bj() { python3 -c 'import json,sys; print(json.dumps({"session_id":sys.argv[3],"
 HOME="$MH" "$HARNESS/machine.sh" install --roots "$MH/work" --mode block >/dev/null 2>&1
 expect 2 "block mode: a shell write in an unenrolled repo is refused" sh -c "printf '%s' '$(bj "printf x > src.py" "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
 expect 2 "block mode: sed -i is refused" sh -c "printf '%s' '$(bj "sed -i s/a/b/ f.py" "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
-expect 0 "block mode: read-only shell commands run" sh -c "printf '%s' '$(bj "git status && ls -la | grep x" "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
+for c in "find . -delete" "printf x 1>src.py" "printf x &>src.py" "env python3 -c pass" "git branch -D x" 'echo $(touch x)' "git status"; do
+  expect 2 "block mode: no shell command runs in an unenrolled repo: $c" sh -c "printf '%s' '$(bj "$c" "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
+done
 expect 0 "block mode: enrolling is allowed" sh -c "printf '%s' '$(bj "/opt/agentic-harness/enroll.sh ." "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
+expect 2 "block mode: enroll chained with anything else is not" sh -c "printf '%s' '$(bj "/opt/agentic-harness/enroll.sh . && rm -rf x" "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
 xj() { python3 -c 'import json,sys; print(json.dumps({"session_id":"s1","tool_name":"Write","tool_input":{"file_path":sys.argv[1],"content":"x"},"cwd":sys.argv[2]}))' "$1" "$2"; }
 expect 2 "a write into an unenrolled repo from an enrolled session is refused" sh -c "printf '%s' '$(xj "$MH/work/other/x.py" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
 expect 0 "a write outside the roots from a session in an unenrolled repo is allowed" sh -c "printf '%s' '$(xj "$MH/elsewhere/x.py" "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
@@ -1743,6 +1814,17 @@ expect 0 "codex always gets JSON on stdout" python3 -c 'import json,sys; json.lo
 printf '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo audit ~/.agentic-harness/guard.py"}]},{"hooks":[{"type":"command","command":"orca-hook.sh"}]}]}}\n' > "$MH/.claude/settings.json"
 HOME="$MH" "$HARNESS/machine.sh" install --roots "$MH/work" >/dev/null 2>&1; HOME="$MH" "$HARNESS/machine.sh" remove >/dev/null 2>&1
 contains "an unrelated hook that mentions the guard's path is kept" "echo audit" "$(cat "$MH/.claude/settings.json")"
+python3 - "$MH/.claude/settings.json" "$MH" <<'EOF'
+import json, sys
+p, h = sys.argv[1:3]; d = json.load(open(p))
+d["hooks"]["PreToolUse"].append({"matcher": "Write|Edit|MultiEdit|Bash", "hooks": [{"type": "command", "command": 'python3 "%s/.agentic-harness/guard.py" --from claude' % h}]})
+json.dump(d, open(p, "w"))
+EOF
+contains "a hook from the earlier guard version is recognised" "guard hook present" "$(HOME="$MH" "$HARNESS/machine.sh" status 2>&1 | grep claude)"
+HOME="$MH" "$HARNESS/machine.sh" install --roots "$MH/work" >/dev/null 2>&1
+[ "$(grep -c 'guard.py' "$MH/.claude/settings.json")" -eq 2 ] && ok "upgrading replaces the earlier hook (one guard, plus the unrelated audit hook)" || bad "upgrading replaces the earlier hook"
+HOME="$MH" "$HARNESS/machine.sh" remove >/dev/null 2>&1
+lacks "remove takes out the earlier version's hook too" "--from claude" "$(cat "$MH/.claude/settings.json")"
 HOME="$MH" "$HARNESS/machine.sh" install --roots "$MH/work" >/dev/null 2>&1
 expect 0 "a broken config never blocks" sh -c "printf 'not json' > '$MH/.agentic-harness/machine.json'; printf '%s' '$(gj Write "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
 contains "status shows the hooks" "guard hook present" "$(HOME="$MH" "$HARNESS/machine.sh" status 2>&1)"
@@ -1791,7 +1873,7 @@ contains "ci-judge fails without a verdict" "returned no verdict JSON" "$out"
 contains "ci-judge is silent when no task finished" "no task finished" "$(python3 "$F/scripts/harness/lib/harness.py" ci-judge --range "$FIN..$FIN")"
 unset HARNESS_CI_JUDGE_CMD
 out=$(python3 "$F/scripts/harness/lib/harness.py" ci-protect --dry-run)
-contains "ci-protect requires the verify check" '"contexts": [' "$out"
+contains "ci-protect requires the verify check" '"context": "verify"' "$out"
 contains "ci-protect targets the branch protection API" "/branches/main/protection" "$out"
 contains "ci-protect --with-judge adds the judge check" '"judge"' "$(python3 "$F/scripts/harness/lib/harness.py" ci-protect --dry-run --with-judge)"
 for cmd in "python3 scripts/harness/lib/harness.py ci-judge --range a..b" "python3 scripts/harness/lib/harness.py ci-protect"; do
