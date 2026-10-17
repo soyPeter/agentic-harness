@@ -1864,7 +1864,9 @@ contains "and keeps the other hooks" "orca-hook.sh" "$(cat "$MH/.claude/settings
 lacks "and out of Codex" "--harness-machine-guard" "$(cat "$MH/.codex/hooks.json")"
 out=$(HOME="$MH" "$HARNESS/machine.sh" managed --out "$WORK/managed" --roots /Users --platform macos 2>&1)
 contains "managed only writes files to review" "Nothing was installed" "$out"
-expect 0 "the Codex requirements are valid TOML" python3 -c 'import sys,tomllib; tomllib.load(open(sys.argv[1],"rb"))' "$WORK/managed/requirements.toml"
+if python3 -c 'import tomllib' 2>/dev/null; then   # Python 3.11+
+  expect 0 "the Codex requirements are valid TOML" python3 -c 'import sys,tomllib; tomllib.load(open(sys.argv[1],"rb"))' "$WORK/managed/requirements.toml"
+fi
 lacks "the Codex requirements don't switch off project hooks" "allow_managed_hooks_only =" "$(cat "$WORK/managed/requirements.toml")"
 contains "the Claude Code managed settings disable bypassPermissions" '"disableBypassPermissionsMode": "disable"' "$(cat "$WORK/managed/managed-settings.json")"
 HOME="$MH" "$HARNESS/machine.sh" managed --out "$WORK/managed-linux" --platform linux >/dev/null 2>&1
