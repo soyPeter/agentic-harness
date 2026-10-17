@@ -29,7 +29,9 @@ python3 scripts/harness/lib/harness.py orca --merge --trust    # drive the backl
 
 It needs `HARNESS_AUTONOMY="autonomous"` in `backbone/harness.conf`, which only the user sets. Useful options:
 `--tasks 1.3,1.4`, `--parallel N`, `--agents default=claude,judge=codex`, `--pr` instead of `--merge`. It runs for
-hours; start it in the background and read its log.
+hours and must run in an Orca terminal of its own (a terminal coordinates one Run at a time):
+`harness.py orca-nightly` opens one and logs to the repository's git directory; `harness.py orca-digest` reports the
+last run. Scheduled runs come from `enroll.sh --orca --automation <schedule>`.
 
 ## 3. Rules when coordinating by hand
 
@@ -38,8 +40,10 @@ hours; start it in the background and read its log.
 2. **One worker per step, delegating to the role.** A worker's spec names the step and the role agent it must use
    (analyst, architect, griller, tester, implementer, judge, debugger, scribe). The worker orchestrates; the role
    agent edits, and the hooks hold it to its role.
-3. **Command steps go through the harness.** Run `harness.py approve <id>`, `start <id>` and `finish <id>`
-   yourself. Never edit `backbone/3-TASKS.md`, a spec's approval line, `backbone/.verdicts/` or
+3. **Command steps go through the harness.** When `next` returns a `command` (`harness.py approve <id>`,
+   `start <id>`), run it yourself, and run `harness.py finish <id>` when it says `finish`. When it returns `needed`
+   instead (in supervised mode, approval is the user's `Approved-by:` line), ask the user and wait; policy approval
+   exists only in autonomous mode. Never edit `backbone/3-TASKS.md`, a spec's approval line, `backbone/.verdicts/` or
    `backbone/escalations.md` to move a task along.
 4. **Workers don't finish tasks.** A worker never marks a task `[x]` and never commits it. After `finish` succeeds,
    commit the task's code, tests, spec, verdicts and backbone changes together.

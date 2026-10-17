@@ -98,9 +98,9 @@ has it and every agent loads it:
 - **`./enroll.sh <project> [--orca] [--automation daily] [--agents "default=claude judge=codex"] [--protect]`**:
   - installs or updates the harness and runs the doctor;
   - registers the project in Orca;
-  - creates one scheduled Orca automation, which runs the backlog with `harness.py orca --merge --trust` and reports the previous run's digest;
+  - with `--automation <schedule>`, creates one Orca automation per checkout: its precheck, which Orca runs itself, starts `harness.py orca --merge --trust` in its own Orca terminal (`harness.py orca-nightly`), and its agent reports the previous run's digest (`harness.py orca-digest`);
   - sets the agent per role;
-  - requires the CI checks on GitHub.
+  - with `--protect`, requires the CI checks on the GitHub default branch, keeping its existing checks and rules.
 
   `--dry-run` shows what it would do. Enrolling again is safe.
 - **`./machine.sh install [--roots ~/Work/repos] [--mode warn|block]`**: a user-level guard hook for Claude Code and
@@ -117,6 +117,11 @@ has it and every agent loads it:
 
 The hard floor stays CI: an agent without hooks, or a human with `--no-verify`, still can't merge past
 `harness-verify` once the branch is protected.
+
+The guard's limits: it needs `python3` and `git` on the PATH, and when its own lookup fails (no git, a broken
+config) it lets the call through rather than stop every agent on the machine. It checks the repository of each file
+a tool writes and, for shell commands, the working directory; a command that writes into another repository is only
+caught there by that repository's own hooks.
 
 ## What gets installed
 
