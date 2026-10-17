@@ -323,8 +323,7 @@ class Coordinator(object):
                 # run that stopped): merge it now, so the tasks after it can start.
                 info["outcome"] = "done"
                 self.log("orca: task %s: done on its branch, not yet on the base; merging" % task)
-                self.merge(task)
-                return False
+                return self.merge(task)
             if name in END_STEPS:
                 info["outcome"] = name
                 self.log("orca: task %s: %s%s" % (task, name, (": " + "; ".join(step.get("escalations") or []))[:300]
@@ -405,6 +404,11 @@ class Coordinator(object):
         if entry.get("step") == "finish":
             self.finish(task)
             self.start_next()
+            return
+        if entry.get("step") == "integrate":
+            info = self.tasks[task]
+            if not self.finish_integration(task, info.get("integrate_message") or "chore: integrate task %s" % task):
+                self.start_next()
             return
         queue = self.tasks[task].get("answer_queue") or []
         if entry.get("step") == "answer" and queue:
@@ -528,20 +532,105 @@ class Coordinator(object):
                                  "steps": [], "outcome": None}
             self.advance(ready)
 
+    def harness_owned(self):
+        """The base's harness-owned files (its lock lists them): a task never decides their version."""
+        try:
+            lock = json.loads((self.root / "backbone/.harness-lock.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            lock = {}
+        return set(lock.get("files") or {}) | {"backbone/.harness-lock.json"}
+
     def merge(self, task):
-        """--merge: bring a finished task's branch into the base branch, so the tasks after it build on it."""
+        """--merge: bring a finished task's branch into the base branch, so the tasks after it build on it. Returns
+        True when an integration worker was started (the task's code conflicts with what the base has gained)."""
         info = self.tasks[task]
         if self.git(self.root, "status", "--porcelain", "--untracked-files=no").stdout.strip():
             info["outcome"] += "; not merged: the base checkout has uncommitted changes"
-            return
+            return False
         message = "chore: merge task %s (%s)" % (task, info["branch"])
         merged = self.git(self.root, "merge", "--no-ff", "-m", message, info["branch"])
-        if merged.returncode != 0 and not self.resolve_backbone_conflicts(task, message):
-            self.git(self.root, "merge", "--abort")
-            info["outcome"] += "; not merged: %s" % (merged.stdout + merged.stderr).strip()[:200]
-            return
+        if merged.returncode != 0:
+            remaining = self.resolve_conflicts(self.root, task, base_stage=2)
+            if remaining:
+                self.git(self.root, "merge", "--abort")
+                if not info.get("integrated"):
+                    return self.integrate(task)
+                info["outcome"] += "; not merged: code conflicts remain in %s" % ", ".join(remaining[:5])
+                return False
+            if not self.commit_merge(self.root, message):
+                self.git(self.root, "merge", "--abort")
+                info["outcome"] += "; not merged: the merge commit was refused"
+                return False
+            self.log("orca: task %s: resolved the backbone and harness conflicts" % task)
         info["outcome"] += "; merged into %s" % self.git(self.root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
         self.log("orca: task %s merged" % task)
+        return False
+
+    def integrate(self, task):
+        """The task's code conflicts with what the base gained meanwhile (parallel tasks built the same module).
+        Merge the base into the task's branch in its worktree, resolve what the harness can, and hand the remaining
+        code conflicts to an implementer worker; the result must pass the tests before the task is merged."""
+        info = self.tasks[task]
+        info["integrated"] = True
+        base = self.git(self.root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        message = "chore: merge %s into task %s" % (base, task)
+        self.git(info["path"], "merge", "--no-ff", "--no-commit", base)
+        remaining = self.resolve_conflicts(info["path"], task, base_stage=3)
+        self.harness(info["path"], "snapshot")
+        if not remaining:
+            return self.finish_integration(task, message)
+        info["outcome"], info["integrate_message"], info["conflicts"] = None, message, remaining
+        self.log("orca: task %s: code conflicts with %s in %s; an implementer integrates them"
+                 % (task, base, ", ".join(remaining[:5])))
+        spec = WORKER_SPEC.format(
+            task=task, title=info["title"], step="integrate", role="implementer", role_note="",
+            instruction=("This task is done, but its branch now conflicts with %s, which gained other tasks' work in "
+                         "the same files. A merge is in progress in this worktree. Resolve the conflict markers in "
+                         "these files only: %s. Keep both sides' behaviour, this task's and the base's (each side's "
+                         "tests must keep passing). Edit them with your file tools; don't run git, don't commit and "
+                         "don't touch other files. Then run the test command (backbone/harness.conf, HARNESS_TEST_CMD)."
+                         % (base, ", ".join(remaining))))
+        spec = spec.replace('`python3 scripts/harness/lib/harness.py next %s` no longer says "integrate"' % task,
+                            "no conflict markers are left in those files and the tests pass")
+        self.start_worker(task, spec, "implementer", "step", {"step": "integrate"})
+        return True
+
+    def finish_integration(self, task, message):
+        info = self.tasks[task]
+        left = [f for f in info.get("conflicts") or []
+                if (info["path"] / f).exists() and "<<<<<<<" in (info["path"] / f).read_text(encoding="utf-8",
+                                                                                          errors="replace")]
+        if left:
+            self.git(info["path"], "merge", "--abort")
+            self.escalate_integration(task, "conflict markers are still in %s" % ", ".join(left[:5]))
+            return False
+        self.git(info["path"], "add", "-A")
+        if not self.commit_merge(info["path"], message):
+            self.git(info["path"], "merge", "--abort")
+            self.escalate_integration(task, "the integration commit was refused")
+            return False
+        self.harness(info["path"], "snapshot")
+        tests = self.harness(info["path"], "test-run")
+        if tests.returncode != 0:
+            self.escalate_integration(task, "the tests fail after integrating: %s" % tests.stdout.strip()[:300])
+            return False
+        self.log("orca: task %s: integrated with the base; the tests pass" % task)
+        info["outcome"] = "done"
+        return self.merge(task)
+
+    def escalate_integration(self, task, why):
+        info = self.tasks[task]
+        self.harness(info["path"], "escalate", task, "--kind", "integration", "--reason",
+                     "task %s is done but can't be merged: %s" % (task, why),
+                     "--needed", "a person to integrate the task's branch with the base")
+        info["outcome"] = "done; not merged: %s (escalated)" % why
+
+    def commit_merge(self, cwd, message):
+        # The gates passed on each task's own commit; a merge commit puts several tasks' code together, so a judge
+        # fingerprint can't match it. A clean merge doesn't run the pre-commit hook; this one skips verify likewise.
+        committed = subprocess.run(["git", "commit", "-q", "-m", message], cwd=str(cwd), capture_output=True,
+                                   text=True, env=dict(os.environ, HARNESS_VERIFY="off"))
+        return committed.returncode == 0
 
     LOGS = ("backbone/6-MEMORY.md", "backbone/5-DECISIONS.md")
     ESCALATIONS = "backbone/escalations.md"
@@ -565,47 +654,43 @@ class Coordinator(object):
                 entries[key] = entry
         return head.rstrip("\n") + "\n\n" + "\n".join(e.rstrip("\n") + "\n" for e in (entries[k] for k in order))
 
-    def resolve_backbone_conflicts(self, task, message):
-        """Parallel tasks both edit 3-TASKS.md (neighbouring task lines) and append to the memory and decision logs.
-        Resolve only those: the base's task list with this task marked [x], and both sides of each log. Any other
-        conflict is left for a person (the merge is aborted)."""
-        conflicted = [n for n in self.git(self.root, "diff", "--name-only", "--diff-filter=U").stdout.splitlines() if n]
-        if not conflicted or any(n not in ("backbone/3-TASKS.md", self.ESCALATIONS) + self.LOGS for n in conflicted):
-            return False
+    def resolve_conflicts(self, cwd, task, base_stage):
+        """Resolve the conflicts the harness understands, in checkout cwd: harness-owned files take the base's
+        version; 3-TASKS.md takes the base's list with this task marked [x]; the memory and decision logs keep both
+        sides; escalations.md is merged by entry. Returns the conflicted files left over (code). base_stage is git's
+        stage of the base side: 2 when merging into the base, 3 when merging the base into the task's branch."""
+        cwd = Path(cwd)
+        conflicted = [n for n in self.git(cwd, "diff", "--name-only", "--diff-filter=U").stdout.splitlines() if n]
+        task_stage = 5 - base_stage
+        owned = self.harness_owned()
+        git_dir = Path(self.git(cwd, "rev-parse", "--absolute-git-dir").stdout.strip())
+        remaining = []
         for name in conflicted:
-            path = self.root / name
-            if name == self.ESCALATIONS:
-                path.write_text(self.merge_escalations(self.git(self.root, "show", ":2:%s" % name).stdout,
-                                                       self.git(self.root, "show", ":3:%s" % name).stdout),
-                                encoding="utf-8")
+            path = cwd / name
+            show = lambda stage, name=name: self.git(cwd, "show", ":%d:%s" % (stage, name)).stdout
+            if name in owned:
+                self.git(cwd, "checkout", "--ours" if base_stage == 2 else "--theirs", "--", name)
             elif name == "backbone/3-TASKS.md":
-                ours = self.git(self.root, "show", ":2:%s" % name).stdout
-                marked = re.sub(r"(?m)^(\s*[-*]\s+)\[[^\]]*\](\s*\**Task %s\b)" % re.escape(task), r"\1[x]\2", ours,
-                                count=1)
-                path.write_text(marked, encoding="utf-8")
-            else:
+                path.write_text(re.sub(r"(?m)^(\s*[-*]\s+)\[[^\]]*\](\s*\**Task %s\b)" % re.escape(task), r"\1[x]\2",
+                                       show(base_stage), count=1), encoding="utf-8")
+            elif name == self.ESCALATIONS:
+                path.write_text(self.merge_escalations(show(base_stage), show(task_stage)), encoding="utf-8")
+            elif name in self.LOGS:
                 stages = {}
                 for stage in (1, 2, 3):
-                    tmp = self.root / ".git" / ("harness-merge-%d" % stage)
-                    tmp.write_text(self.git(self.root, "show", ":%d:%s" % (stage, name)).stdout, encoding="utf-8")
+                    tmp = git_dir / ("harness-merge-%d" % stage)
+                    tmp.write_text(show(stage), encoding="utf-8")
                     stages[stage] = tmp
                 subprocess.run(["git", "merge-file", "--union", str(stages[2]), str(stages[1]), str(stages[3])],
-                               cwd=str(self.root), capture_output=True)
+                               cwd=str(cwd), capture_output=True)
                 path.write_text(stages[2].read_text(encoding="utf-8"), encoding="utf-8")
                 for tmp in stages.values():
                     tmp.unlink()
-            self.git(self.root, "add", name)
-        # The gates already passed on the task's own commit (in its worktree); in the merged tree the code of the
-        # tasks merged before it is there too, so the judge's fingerprint can't match here. A clean merge doesn't run
-        # the pre-commit hook either; this commit skips verify the same way, as the user's exception.
-        committed = subprocess.run(["git", "commit", "-q", "-m", message], cwd=str(self.root), capture_output=True,
-                                   text=True, env=dict(os.environ, HARNESS_VERIFY="off"))
-        if committed.returncode == 0:
-            self.log("orca: task %s: resolved the backbone merge conflicts (%s); the task's own commit passed the "
-                     "gates" % (task, ", ".join(conflicted)))
-        else:
-            self.log("orca: task %s: merge commit refused: %s" % (task, (committed.stdout + committed.stderr).strip()[:300]))
-        return committed.returncode == 0
+            else:
+                remaining.append(name)
+                continue
+            self.git(cwd, "add", name)
+        return remaining
 
     def report(self):
         lines = ["harness orca: run %s" % self.run]

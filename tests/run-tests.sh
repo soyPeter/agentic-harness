@@ -1401,7 +1401,7 @@ open(p, "w").write(s.replace(old, new))
 EOF
 out=$(HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.4,9.5 --parallel 2 --merge --wait-ms 10 2>&1; echo "exit=$?")
 contains "orca --merge: parallel tasks are both merged" "task 9.5: done; merged into" "$out"
-contains "the neighbouring task-line conflict was resolved" "resolved the backbone merge conflicts" "$out"
+contains "the neighbouring task-line conflict was resolved" "resolved the backbone and harness conflicts" "$out"
 tasks=$(cat "$O/backbone/3-TASKS.md")
 contains "after the merges both parallel tasks are [x]" "- [x] **Task 9.4" "$tasks"
 contains "and the second one too" "- [x] **Task 9.5" "$tasks"
@@ -1441,6 +1441,49 @@ contains "including the other branch's" "only on 9.7" "$esc"
 contains "an entry resolved on one side stays resolved" "Status: resolved (by the user)" "$esc"
 [ "$(grep -c 'Task 9.0: decision' "$O/backbone/escalations.md")" -eq 1 ] && ok "a shared entry appears once" || bad "a shared entry appears once"
 lacks "no conflict markers in escalations.md" "<<<<<<<" "$esc"
+for id in 9.10 9.11; do
+  printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/$id/g" -e 's/^- python: all code$/- code-quality: all code/' > "$O/backbone/specs/$id.md"
+  printf '%s' "$(python3 -c 'import json,sys; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":sys.argv[1],"questions":[],"summary":"s"})+"\n```"}))' "$id")" \
+    | python3 "$O/scripts/harness/lib/harness.py" hook grill-stop >/dev/null
+done
+printf -- '- [ ] **Task 9.10: Shares A** (spec: backbone/specs/9.10.md)\n- [ ] **Task 9.11: Shares B** (spec: backbone/specs/9.11.md)\n' >> "$O/backbone/3-TASKS.md"
+$OH approve 9.10 >/dev/null; $OH approve 9.11 >/dev/null
+git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: tasks 9.10 and 9.11"
+python3 - "$WORK/fake-orca.py" <<'EOF'
+import sys
+p = sys.argv[1]; s = open(p).read()
+# Both tasks build their own version of a shared module, as parallel tasks do.
+old = '''            state["queue"].append({"id": "q1", "type": "question"'''
+new = '''            if task in ("9.10", "9.11"):
+                open(os.path.join(cwd, "src/shared.py"), "w").write("class LedgerError(Exception):\\n    pass\\n\\n\\nclass From_%s(LedgerError):\\n    pass\\n" % task.replace(".", "_"))
+            state["queue"].append({"id": "q1", "type": "question"'''
+assert s.count(old) == 1
+s = s.replace(old, new)
+# The integrating implementer keeps both sides of each conflict.
+old2 = '''        elif step == "fix":'''
+new2 = '''        elif step == "integrate":
+            import re as _re
+            for name in ("src/shared.py",):
+                f = os.path.join(cwd, name)
+                text = open(f).read()
+                text = _re.sub(r"<<<<<<< [^\\n]*\\n(.*?)=======\\n(.*?)>>>>>>> [^\\n]*\\n", lambda m: m.group(1) + m.group(2), text, flags=_re.S)
+                open(f, "w").write(text)
+            done(d, h)
+        elif step == "fix":'''
+assert s.count(old2) == 1
+s = s.replace(old2, new2)
+open(p, "w").write(s)
+EOF
+out=$(HARNESS_TEST_CMD=true HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.10,9.11 --parallel 2 --merge --wait-ms 10 2>&1)
+contains "a code conflict with the base goes to an integrating implementer" "an implementer integrates them" "$out"
+contains "the integrated task passes the tests" "integrated with the base; the tests pass" "$out"
+contains "and both parallel tasks reach the base" "task 9.11: done; merged into" "$out"
+contains "task 9.10 too" "task 9.10: done; merged into" "$out"
+shared=$(cat "$O/src/shared.py")
+contains "the shared module has both tasks' parts" "From_9_10" "$shared"
+contains "the other task's too" "From_9_11" "$shared"
+lacks "no conflict markers are left" "<<<<<<<" "$shared"
+expect 2 "agents can't refresh the out-of-band snapshot" hook "$O" pre-tool-use "$(bash_json 'python3 scripts/harness/lib/harness.py snapshot')"
 unset FAKE_ORCA_STATE
 
 section "autonomous mode: judging, risk drift, kill switch"

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.15.0 (2026-10-17)
+
+- **Integrating parallel tasks.** In the ledger backlog, three tasks running in parallel each wrote their own `ledger/errors.py`, the project's shared error module, and the coordinator could only refuse the merge. A code conflict now starts an **integrate** step:
+  - The coordinator merges the base into the task's branch in its worktree and resolves what it understands: harness-owned files take the base's version, the task list and logs as before.
+  - An implementer worker resolves only the conflicted code files, with its normal (gated) file tools.
+  - The coordinator commits the merge and runs the tests (`harness.py test-run`) before merging into the base. If markers remain or the tests fail, the task is escalated.
+- New commands: `harness.py test-run` (runs `HARNESS_TEST_CMD`), and `harness.py snapshot` (refreshes the out-of-band snapshot after the coordinator's own git work; refused to agents).
+
 ## 0.14.1 (2026-10-17)
 
 - **Orca coordinator merges finish what they started.** In the ledger backlog run, two parallel tasks both changed `backbone/escalations.md`, and the merge was refused, leaving the tasks after them waiting.
