@@ -152,6 +152,38 @@ Add your toolchain in a Dockerfile that builds `FROM` it.
 
 `HARNESS_AGENT_CMD` defaults to `claude -p --permission-mode acceptEdits --output-format json`. The prompt arrives on stdin. That matters because `--allowedTools` takes any number of values and would swallow a prompt passed as an argument; quote each pattern, as in `--allowedTools 'Bash(git:*)' 'Bash(python3:*)'`. An unattended agent needs its tools pre-approved: allow the build and test commands in `.claude/settings.json`, or run it in a container or VM with `--dangerously-skip-permissions`. The harness hooks apply either way. Work on a branch and let the CI check gate the merge.
 
+## Agent CLIs: Claude Code, Codex, OpenCode
+
+The gates don't depend on the agent CLI. Each CLI's hooks call the same `harness.py hook <event> --from <cli>`, which turns its input into one shape before any gate runs. The git hooks, `verify` and the CI checks apply to every commit whichever agent made it.
+
+| | Claude Code | Codex | OpenCode |
+|---|---|---|---|
+| Hook wiring | `.claude/settings.json`, agent frontmatter | `.codex/hooks.json` | `.opencode/plugins/harness.js` |
+| Role agents | `.claude/agents/*.md` (the source) | `.codex/agents/*.toml` (generated) | `.opencode/agents/*.md` (generated) |
+| File edits seen as | Write / Edit / MultiEdit | `apply_patch` (the patch is parsed and checked file by file) | edit / write / patch |
+| Who may edit what | the agent's tool list and the harness's role scopes | the harness's role scopes only (Codex has no per-agent tool list) | the agent's `permissions` and the harness's role scopes |
+| Verdicts recorded from | the griller's and judge's Stop hook | `SubagentStop` | the result of the `subagent` tool (no stop hook) |
+| Skills | the Skill tool, or Read of the SKILL.md | printing `.claude/skills/<name>/SKILL.md` (cat, sed, head) | the Skill tool |
+| Unattended | `claude -p --output-format json` (cost per session) | `codex exec --json -s workspace-write --dangerously-bypass-hook-trust` (prompt on stdin; turns, no price) | `opencode run --format json --auto "$(cat)"` (cost per step) |
+| Gaps | | Project hooks run only once trusted: `harness.py run` refuses Codex without `--dangerously-bypass-hook-trust` (sandbox it), unless you trusted them with `/hooks` and set `HARNESS_SKIP_TRUST_CHECK=1` | No Stop hook: the "still [WIP]" reminder doesn't fire. Knowledge-server tools are mapped by name (`knowledge_*`), unverified |
+
+A session can also play a single role from start to finish (a coordinator starting one worker per role): set `HARNESS_ROLE=<role>` in its environment. The hooks then hold it to that role's write scope, record the griller's or judge's verdict when it stops, and leave the Definition of Done to the coordinator. The agent can't change the variable: the hooks read it from the session's own environment.
+
+Regenerate the Codex and OpenCode agents after changing a Claude Code agent: `tools/gen_agents.py` (the self-test fails while they are out of date).
+
+## Coordinator API
+
+A coordinator asks the harness what a task needs instead of knowing the workflow. The answers come from the artifacts the gates check.
+
+| Command | Answer |
+|---|---|
+| `harness.py state [--json]` | Every task: state, spec problems, grill and judge verdicts (and whether they are current), approval, open escalations |
+| `harness.py next <id> [--json]` | The next step and who does it: `define` (analyst or architect), `grill` (griller), `answer` (the griller's questions, routed), `approve`, `start`, `implement`, `judge`, `fix`, `finish` (scribe, then `finish`), `blocked`, `done` |
+| `harness.py questions <id> [--json]` | The griller's open questions, each routed: design questions to the architect, the rest to the analyst |
+| `harness.py start <id>` / `finish <id>` | Mark the task `[WIP]` / `[x]` through the same gates as an edit of `3-TASKS.md` (start: spec, grill, approval, one `[WIP]`; finish: a current judge pass) |
+
+Under an Orca coordinator (`HARNESS_ORCA_RUN` set), `escalate` also sends an `escalation` message to the Run's mailbox.
+
 ## Knowledge source (`HARNESS_KNOWLEDGE_ROOT`)
 
 In autonomous mode the griller's questions are answered from `backbone/`. A knowledge source adds a second place to look: a folder of notes (an Obsidian vault, a wiki export) served by an MCP server. Unanswered questions still escalate; the knowledge source only means fewer of them do.

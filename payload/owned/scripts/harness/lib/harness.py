@@ -80,11 +80,13 @@ KNOWLEDGE_TOOL_PREFIX = "mcp__knowledge__"
 KNOWLEDGE_PATH_KEYS = ("path", "paths", "note", "notes", "hub", "name", "file", "files", "target")
 # Paths an agent may change only through the file tools, where the hooks see the change. Shell writes to
 # them are refused: they would skip the gates (task states, approvals, verdicts, settings, skill state).
-SHELL_PROTECTED = (r"^backbone(/|$)", r"^scripts/harness(/|$)", r"^\.claude(/|$)", r"^(AGENTS|CLAUDE)\.md$",
+SHELL_PROTECTED = (r"^backbone(/|$)", r"^scripts/harness(/|$)", r"^\.claude(/|$)", r"^\.codex(/|$)", r"^\.opencode(/|$)",
+                   r"^(AGENTS|CLAUDE)\.md$",
                    r"^\.git/(hooks|harness)(/|$)", r"^\.git/config$")
 # Harness files whose edits change enforcement; verify refuses commits that change them away from the lock.
 ENFORCEMENT_FILES = (r"^scripts/harness/", r"^\.claude/agents/", r"^\.github/workflows/harness-[^/]+\.ya?ml$",
-                     r"^\.devcontainer/harness-agent/")
+                     r"^\.devcontainer/harness-agent/", r"^\.codex/(hooks\.json$|agents/)",
+                     r"^\.opencode/(plugins/harness\.js$|agents/)")
 # What the main session (the orchestrator) may edit itself; specs, ADRs and code go through the role agents.
 ORCHESTRATOR_ALLOW = (r"^backbone/(?!specs/|adr/|\.verdicts/)", r"^\.claude/skills/", r"^CLAUDE\.md$")
 DECISIONS_FILE = ROOT / "scripts/harness/decisions.json"
@@ -99,13 +101,19 @@ AGENT_SCOPES = {
     "architect": ("allow", (r"^backbone/adr/[^/]+\.md$", r"^backbone/specs/[^/]+\.md$",
                             r"^backbone/5-DECISIONS\.md$", r"^backbone/2-PLANNING\.md$")),
     "scribe": ("allow", (r"^backbone/6-MEMORY\.md$", r"^backbone/adr/[^/]+\.md$", r"^backbone/5-DECISIONS\.md$")),
-    "implementer": ("deny", (r"^backbone/", r"^\.claude/", r"^scripts/harness/", r"^(AGENTS|CLAUDE)\.md$")),
+    "implementer": ("deny", (r"^backbone/", r"^\.claude/", r"^\.codex/", r"^\.opencode/", r"^scripts/harness/",
+                             r"^(AGENTS|CLAUDE)\.md$")),
+    # Reviewers never edit. Claude Code enforces this with their tool list; Codex has no per-agent tool list.
+    "griller": ("allow", ()),
+    "judge": ("allow", ()),
 }
 SCOPE_HELP = {
     "analyst": "It writes specs (backbone/specs/) and the PRD only.",
     "architect": "It writes ADRs (backbone/adr/), their index, 2-PLANNING.md and the Architecture section of specs.",
     "scribe": "It writes 6-MEMORY.md and ADRs for decisions taken during implementation.",
     "implementer": "It writes code and tests only; backbone/, .claude/ and harness files belong to other roles.",
+    "griller": "It reviews the spec and asks questions; it never edits files.",
+    "judge": "It judges the code against the spec; it never edits files.",
 }
 
 # A task line, not any mention of the marker (legends and prose must not count).
@@ -1320,7 +1328,24 @@ def escalate(task, kind, reason, needed=None):
                                  "--body", entry.strip(), "--label", "harness-escalation"],
                                 cwd=str(ROOT), capture_output=True, text=True)
         issue = result.stdout.strip() if result.returncode == 0 else None
+    notify_coordinator("escalation", "Task %s: %s" % (task, kind), entry.strip(), task)
     return issue
+
+
+def notify_coordinator(kind, subject, body, task=None):
+    """Under an Orca coordinator (HARNESS_ORCA_RUN, set by `harness.py orca`), tell it too. Best effort."""
+    run_id = os.environ.get("HARNESS_ORCA_RUN", "").strip()
+    orca = shutil.which(os.environ.get("HARNESS_ORCA_BIN", "orca"))
+    if not run_id or not orca:
+        return False
+    argv = [orca, "orchestration", "send", "--run", run_id, "--type", kind, "--subject", subject, "--body", body,
+            "--json"]
+    if task:
+        argv += ["--payload", json.dumps({"harness_task": task})]
+    try:
+        return subprocess.run(argv, cwd=str(ROOT), capture_output=True, text=True, timeout=20).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def open_escalations():
@@ -1412,7 +1437,7 @@ def escalations_command():
 # a snapshot of the protected files, refreshed after every file-tool edit and every write of its own, and
 # compares it after each shell command. A protected file that changed in between, and is not simply back
 # to its committed version, was written some other way.
-SNAPSHOT_ROOTS = ("backbone", "scripts/harness", ".claude")
+SNAPSHOT_ROOTS = ("backbone", "scripts/harness", ".claude", ".codex", ".opencode")
 SNAPSHOT_FILES = ("AGENTS.md", "CLAUDE.md")
 SNAPSHOT_SKIP = (".claude/settings.local.json",)
 
@@ -2196,6 +2221,8 @@ def adopt_command(argv):
 # --------------------------------------------------------------------------- Claude Code hooks
 
 def emit(payload):
+    global EMITTED
+    EMITTED = True
     sys.stdout.write(json.dumps(payload) + "\n")
 
 
@@ -2298,7 +2325,10 @@ def hook_session_start(_data):
         lines.append("Existing code already breaks blocking rules in %d file(s), e.g. %s. Don't copy those "
                      "patterns; fixing them needs its own task (list: python3 scripts/harness/lib/harness.py scan)."
                      % (len(blocks), ", ".join(blocks[:3])))
-    print("\n".join(lines))
+    if HOOK_SOURCE == "codex":
+        add_context("SessionStart", "\n".join(lines))
+    else:
+        print("\n".join(lines))
 
 
 def hook_pre_tool_use(data):
@@ -2309,6 +2339,10 @@ def hook_pre_tool_use(data):
              "removes the file to resume." % halt_file())
     if tool.startswith(KNOWLEDGE_TOOL_PREFIX):
         knowledge_guard(tool, tool_input)
+        return
+    if tool == "apply_patch":
+        for name, call_input in patch_calls(tool_input.get("command") or tool_input.get("patch") or ""):
+            hook_pre_tool_use(dict(data, tool_name=name, tool_input=call_input))
         return
     rules, _ = load_rules()
     if tool == "Bash":
@@ -2326,6 +2360,8 @@ def hook_pre_tool_use(data):
         return
     path_str = tool_input["file_path"]
     path = rel(path_str)
+    if data.get("harness_role"):
+        hook_agent_guard(data, data["harness_role"])
     if path.startswith("backbone/.verdicts/"):
         deny("Harness blocked this change to %s: verdicts are recorded only by the griller's and judge's hooks."
              % path)
@@ -2386,6 +2422,22 @@ def dod_after_commit():
 
 
 def hook_post_tool_use(data):
+    notes = []
+    if data.get("tool_name") == "apply_patch":
+        command = (data.get("tool_input") or {}).get("command") or (data.get("tool_input") or {}).get("patch") or ""
+        for name, call_input in patch_calls(command):
+            notes += post_tool_notes(dict(data, tool_name=name, tool_input=call_input))
+    else:
+        notes = post_tool_notes(data)
+    if notes:
+        add_context("PostToolUse", "\n\n".join(notes))
+
+
+SKILL_FILE = re.compile(r"(?:^|[\s'\"=/])(?:\./)?(?:\.claude|\.agents)/skills/([A-Za-z0-9._-]+)/SKILL\.md\b")
+SKILL_READERS = re.compile(r"^\s*(cat|sed|head|tail|less|more|bat|nl|awk)\b")
+
+
+def post_tool_notes(data):
     tool = data.get("tool_name") or ""
     tool_input = data.get("tool_input") or {}
     notes = []
@@ -2393,11 +2445,11 @@ def hook_post_tool_use(data):
         m = re.match(r"^\.claude/skills/([^/]+)/SKILL\.md$", rel(tool_input.get("file_path") or ""))
         if m:
             remember_skill(data, m.group(1))
-        return
+        return notes
     if tool == "Skill":
         name = str(tool_input.get("skill") or tool_input.get("name") or "").split(":")[-1].strip()
         remember_skill(data, name)
-        return
+        return notes
     if tool in FILE_TOOLS and tool_input.get("file_path"):
         snapshot_refresh()
         path = rel(tool_input["file_path"])
@@ -2417,6 +2469,11 @@ def hook_post_tool_use(data):
                              % (path, "\n  - ".join(problems)))
     elif tool == "Bash":
         command = tool_input.get("command") or ""
+        # Agents without a Read or Skill tool (Codex) load a skill by printing its SKILL.md.
+        for part in re.split(r"&&|;|\|\|", command):
+            if SKILL_READERS.match(part):
+                for name in SKILL_FILE.findall(part):
+                    remember_skill(data, name)
         rules, _ = load_rules()
         hits = check_text(rules, None, rule_text(command), ("warn",))
         if hits:
@@ -2435,8 +2492,7 @@ def hook_post_tool_use(data):
                              % ", ".join(changed[:8]), "a check of what changed them, and a restore")
                     notes.append("Task %s is BLOCKED for review (backbone/escalations.md)." % task)
             snapshot_refresh()
-    if notes:
-        add_context("PostToolUse", "\n\n".join(notes))
+    return notes
 
 
 def uncommitted_count():
@@ -2444,6 +2500,13 @@ def uncommitted_count():
 
 
 def hook_stop(data):
+    role = data.get("harness_role") if session_role() else None
+    if role:
+        # A session that plays one role (HARNESS_ROLE) ends like that role's subagent would: the griller's and
+        # judge's verdicts are recorded; the coordinator, not the role, owns the Definition of Done.
+        if role in ("griller", "judge"):
+            record_verdict(data, "grill" if role == "griller" else "judge")
+        return
     values = conf()
     mode = values["HARNESS_STOP_MODE"]
     if halt_file().exists():
@@ -2481,6 +2544,180 @@ def hook_agent_guard(data, agent):
     hit = any(re.search(pattern, path) for pattern in patterns)
     if (mode == "allow" and not hit) or (mode == "deny" and hit):
         deny("The %s agent may not edit %s. %s" % (agent, path, SCOPE_HELP[agent]))
+
+
+# --------------------------------------------------------------------------- coordinator API
+# A coordinator (harness.py orca, harness.py run, or any script) asks the harness what a task needs next instead of
+# knowing the workflow. The answers come from the artifacts the gates check, so they can't drift from them; start and
+# finish move a task line through the same gates as an edit of 3-TASKS.md.
+
+DESIGN_TOPICS = re.compile(r"(?i)\b(ADR|architecture|design|skills?|tech(nical)?|module|layer|stack|dependenc)")
+
+
+def task_ids():
+    lines = mask_comments(read(TASKS)).splitlines()
+    found = []
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*[-*]\s+\[[^\]]*\]", line) and TASK_REF.search(line):
+            task = task_id_at(lines, i)
+            if task and task not in found:
+                found.append(task)
+    return found
+
+
+def task_title(task):
+    _, line = task_line(task)
+    if not line:
+        return ""
+    title = re.sub(r"^\s*[-*]\s+\[[^\]]*\]\s*\**Task\s+[A-Za-z0-9._-]*[A-Za-z0-9]:?\s*", "", line)
+    return title.split("**")[0].strip()
+
+
+def question_route(question):
+    """Who answers a griller question: the architect for design, the analyst for everything else."""
+    about = "%s %s" % (question.get("about") or "", question.get("question") or "")
+    return "architect" if DESIGN_TOPICS.search(about) else "analyst"
+
+
+def open_questions(task):
+    history = verdict_history(task, "grill")
+    last = history[-1] if history else None
+    if not last or last.get("verdict") == "pass":
+        return []
+    return [dict(q, route=question_route(q)) for q in (last.get("questions") or []) if isinstance(q, dict)]
+
+
+def task_status(task):
+    state = task_state(task)
+    exists = spec_path(task).is_file()
+    text = read(spec_path(task)) if exists else ""
+    grill = verdict_history(task, "grill")
+    judge = verdict_history(task, "judge")
+    last_grill, last_judge = (grill[-1] if grill else None), (judge[-1] if judge else None)
+    return {
+        "task": task, "title": task_title(task), "state": state, "spec": spec_rel(task) if exists else None,
+        "spec_problems": validate_spec(task) if exists else ["no spec yet"],
+        "grill": last_grill and {"verdict": last_grill.get("verdict"),
+                                 "current": last_grill.get("fingerprint") == spec_fingerprint(task)},
+        "approved": bool(exists and approved(text)),
+        "judge": last_judge and {"verdict": last_judge.get("verdict"),
+                                 "current": last_judge.get("fingerprint") == code_fingerprint()},
+        "escalations": [e for e in open_escalations() if re.search(r"\bTask %s:" % re.escape(task), e)],
+    }
+
+
+def code_changed():
+    """Uncommitted changes outside backbone/ (the implementer's work before the judge sees it)."""
+    return any(line[3:] and not line[3:].startswith("backbone/") for line in git("status", "--porcelain").splitlines())
+
+
+def next_step(task):
+    """What task needs next: {step, role (who does it, or null), command (what to run), ...}."""
+    s = task_status(task)
+    step = {"task": task, "title": s["title"], "state": s["state"]}
+    if s["state"] == "missing":
+        return dict(step, step="unknown", role=None, reason="no such task in backbone/3-TASKS.md")
+    if s["state"] == "blocked":
+        return dict(step, step="blocked", role=None, needed="the user", escalations=s["escalations"])
+    if s["state"] == "done":
+        return dict(step, step="done", role=None)
+    if s["state"] == "pending":
+        if not s["spec"]:
+            return dict(step, step="define", role="analyst", reason="no spec yet")
+        if s["spec_problems"]:
+            design = any(re.search(r"(?i)architecture|skills|ADR", p) for p in s["spec_problems"])
+            return dict(step, step="define", role="architect" if design else "analyst", problems=s["spec_problems"])
+        if not (s["grill"] and s["grill"]["current"]):
+            return dict(step, step="grill", role="griller", reason="no griller verdict on the current spec")
+        if s["grill"]["verdict"] != "pass":
+            questions = open_questions(task)
+            roles = sorted({q["route"] for q in questions}) or ["analyst"]
+            return dict(step, step="answer", role=roles[0], roles=roles, questions=questions,
+                        then="grill again (the answers change the spec)")
+        if not s["approved"]:
+            if autonomous():
+                return dict(step, step="approve", role=None, command="python3 scripts/harness/lib/harness.py "
+                                                                       "approve %s" % task)
+            return dict(step, step="approve", role=None, needed="the user's Approved-by: line in %s" % s["spec"])
+        return dict(step, step="start", role=None, command="python3 scripts/harness/lib/harness.py start %s" % task)
+    judge = s["judge"]
+    if judge and judge["current"] and judge["verdict"] == "pass":
+        return dict(step, step="finish", role="scribe", then="python3 scripts/harness/lib/harness.py finish %s, "
+                                                               "then commit" % task)
+    if judge and judge["current"]:
+        last = verdict_history(task, "judge")[-1]
+        return dict(step, step="fix", role="implementer", findings=last.get("findings") or last.get("reasons"))
+    if not judge and not code_changed():
+        return dict(step, step="implement", role="implementer")
+    return dict(step, step="judge", role="judge", reason="no judge verdict on the current code")
+
+
+def set_task_marker(task, marker, checks):
+    """Move task's line to [marker] if the gates allow it (the same checks as an edit of 3-TASKS.md)."""
+    before = read(TASKS)
+    index, line = task_line(task, before)
+    if index is None:
+        return ["no task %s in backbone/3-TASKS.md" % task]
+    lines = before.splitlines()
+    lines[index] = re.sub(r"^(\s*[-*]\s+)\[[^\]]*\]", lambda m: m.group(1) + "[%s]" % marker, line, count=1)
+    after = "\n".join(lines) + ("\n" if before.endswith("\n") else "")
+    problems = [p for p in (check(before, after) for check in checks) if p]
+    if problems:
+        return problems
+    TASKS.write_text(after, encoding="utf-8")
+    snapshot_refresh()
+    log_event("task-%s" % ("start" if marker == "WIP" else "finish"), task=task)
+    return []
+
+
+def start_command(task):
+    problems = set_task_marker(task, "WIP", (blocked_guard, wip_collision, start_gate))
+    print("start: task %s is [WIP]" % task if not problems else "start: task %s can't start:\n%s"
+          % (task, "\n".join(problems)))
+    return 1 if problems else 0
+
+
+def finish_command(task):
+    problems = set_task_marker(task, "x", (blocked_guard, judge_gate))
+    print("finish: task %s is [x]; commit it with its code, tests, spec and verdicts" % task if not problems
+          else "finish: task %s can't finish:\n%s" % (task, "\n".join(problems)))
+    return 1 if problems else 0
+
+
+def state_command(argv):
+    states = [task_status(t) for t in task_ids()]
+    if "--json" in argv:
+        print(json.dumps({"autonomous": autonomous(), "tasks": states, "halted": halt_file().exists()}, indent=2))
+        return 0
+    for s in states:
+        print("%-8s %-8s %s" % (s["task"], s["state"], s["title"]))
+    return 0
+
+
+def next_command(argv):
+    tasks = [a for a in argv if not a.startswith("--")] or [t for t, _, _ in ready_tasks()][:1]
+    steps = [next_step(t) for t in tasks]
+    if "--json" in argv:
+        print(json.dumps(steps[0] if len(steps) == 1 else steps, indent=2))
+        return 0
+    for s in steps:
+        print("next %s: %s%s%s" % (s["task"], s["step"], " (%s)" % s["role"] if s.get("role") else "",
+                                   ": " + s["command"] if s.get("command") else ""))
+    return 0
+
+
+def questions_command(argv):
+    task = next((a for a in argv if not a.startswith("--")), None)
+    if not task:
+        sys.stderr.write("usage: harness.py questions <task> [--json]\n")
+        return 64
+    questions = open_questions(task)
+    if "--json" in argv:
+        print(json.dumps({"task": task, "questions": questions}, indent=2))
+        return 0
+    for q in questions:
+        print("[%s -> %s] %s: %s" % (q.get("severity"), q["route"], q.get("about"), q.get("question")))
+    return 0
 
 
 # --------------------------------------------------------------------------- runner and report
@@ -2541,19 +2778,73 @@ def session_result(log_path):
     return {}
 
 
+def jsonl_events(log_path):
+    """The JSON objects of a JSONL agent log (codex exec --json, opencode run --format json)."""
+    events = []
+    for line in read(log_path).splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+    return events
+
+
+def find_number(value, key):
+    """The first number under `key` anywhere in a JSON value."""
+    if isinstance(value, dict):
+        if isinstance(value.get(key), (int, float)) and not isinstance(value.get(key), bool):
+            return value[key]
+        for item in value.values():
+            found = find_number(item, key)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = find_number(item, key)
+            if found is not None:
+                return found
+    return None
+
+
 def session_usage(log_path):
-    """(cost in USD, turns) from an agent log written with --output-format json, else (None, None)."""
+    """(cost in USD, turns) from an agent log: Claude Code's --output-format json, Codex's exec --json (turns only,
+    it reports tokens and no price) or OpenCode's run --format json (cost per step). (None, None) if unknown."""
     data = session_result(log_path)
-    return data.get("total_cost_usd"), data.get("num_turns")
+    if data:
+        return data.get("total_cost_usd"), data.get("num_turns")
+    events = jsonl_events(log_path)
+    codex_turns = sum(1 for e in events if e.get("type") == "turn.completed")
+    if codex_turns:
+        return None, codex_turns
+    steps = [e for e in events if e.get("type") in ("step_finish", "step-finish")]
+    if steps:
+        return round(sum(find_number(e, "cost") or 0 for e in steps), 6), len(steps)
+    return None, None
 
 
 def agent_start_failure(log_path, code):
     """The agent's error when a session failed without doing any work (not logged in, bad API key), else None.
     Retrying or moving to the next task cannot help then, so the run stops instead of escalating every task."""
-    data = session_result(log_path)
-    if code in (0, None) or not data.get("is_error") or data.get("total_cost_usd") not in (0, 0.0):
+    if code in (0, None):
         return None
-    return str(data.get("result") or "exit %s" % code)
+    data = session_result(log_path)
+    if data:
+        if not data.get("is_error") or data.get("total_cost_usd") not in (0, 0.0):
+            return None
+        return str(data.get("result") or "exit %s" % code)
+    events = jsonl_events(log_path)
+    worked = any(e.get("type") in ("turn.completed", "step_finish", "step-finish", "tool_use") for e in events)
+    errors = [e for e in events if e.get("type") in ("error", "turn.failed")]
+    if worked or not errors:
+        return None
+    error = errors[0]
+    message = error.get("message") or (error.get("error") or {}).get("message") if isinstance(error.get("error"), dict) \
+        else error.get("message") or error.get("error")
+    return str(message or "exit %s" % code)[:300]
 
 
 def run_worktrees(queue, open_prs):
@@ -2661,9 +2952,28 @@ def json_file(path):
     return data if isinstance(data, dict) else None
 
 
-def trust_problem():
+def agent_cli(command):
+    """claude | codex | opencode | other: which agent CLI a HARNESS_*_CMD starts."""
+    words = re.findall(r"[^\s'\"]+", command or "")
+    first = next((w for w in words if "=" not in w and w not in ("env", "caffeinate", "-i", "nice")), "")
+    name = os.path.basename(first)
+    return name if name in ("claude", "codex", "opencode") else "other"
+
+
+def trust_problem(command=None):
     if os.environ.get("HARNESS_SKIP_TRUST_CHECK") == "1":
         return None
+    command = command if command is not None else conf()["HARNESS_AGENT_CMD"]
+    cli = agent_cli(command)
+    if cli == "codex":
+        if "--dangerously-bypass-hook-trust" in command:
+            return None
+        return ("Codex skips project hooks nobody has trusted (and re-skips each one after it changes), so the "
+                "harness hooks in .codex/hooks.json may not run in `codex exec`. Run unattended Codex with "
+                "--dangerously-bypass-hook-trust inside a sandbox, or trust the hooks once with /hooks in Codex and "
+                "set HARNESS_SKIP_TRUST_CHECK=1.")
+    if cli != "claude":
+        return None   # OpenCode loads .opencode/plugins/ without a trust step
     trusted = workspace_trusted()
     if trusted:
         return None
@@ -2799,7 +3109,7 @@ def ci_judge_command(argv):
     if not finished:
         print("ci-judge: no task finished in %s" % argv[1])
         return 0
-    problem = trust_problem()
+    problem = trust_problem(conf()["HARNESS_CI_JUDGE_CMD"])
     if problem:
         print("ci-judge: " + problem)
         return 1
@@ -3054,6 +3364,108 @@ def scope_warning(subject, values):
                          % (scope, len(staged), ", ".join(staged[:3])))
 
 
+# --------------------------------------------------------------------------- agent CLIs
+# The gates are written against Claude Code's hook input. Codex sends almost the same shape (its file edits arrive
+# as one apply_patch call with the raw patch text); the OpenCode plugin (.opencode/plugins/harness.js) translates
+# its tool calls before calling this script. normalize_hook() makes all of them look like Claude Code's.
+
+HOOK_SOURCES = ("claude", "codex", "opencode")
+HOOK_SOURCE = "claude"
+EMITTED = False
+
+
+def session_role():
+    """The pipeline role a whole session plays (HARNESS_ROLE, set by whoever starts the session), or None."""
+    role = os.environ.get("HARNESS_ROLE", "").strip()
+    return role if role in PIPELINE_AGENTS else None
+
+
+def normalize_hook(data, source):
+    data = dict(data)
+    agent = str(data.get("agent_type") or "").split(":")[-1]
+    if agent not in PIPELINE_AGENTS:
+        agent = ""
+        if source != "claude":
+            # OpenCode's primary agents (build, plan) and Codex's built-ins are the main session, not a role.
+            data.pop("agent_type", None)
+            data.pop("agent_id", None)
+    role = agent or session_role()
+    if role:
+        data["agent_type"] = data.get("agent_type") or role
+        data["agent_id"] = data.get("agent_id") or "role-%s" % role
+        data["harness_role"] = role
+    return data
+
+
+def parse_patch(text):
+    """Codex/OpenCode patch grammar (*** Begin Patch ... *** End Patch) -> [{op, path, move_to, content, hunks}]."""
+    ops, current, hunk = [], None, None
+    for line in (text or "").splitlines():
+        header = re.match(r"^\*\*\* (Add|Update|Delete) File: (.+?)\s*$", line)
+        if header:
+            current = {"op": header.group(1).lower(), "path": header.group(2), "move_to": None, "content": [],
+                       "hunks": []}
+            ops.append(current)
+            hunk = None
+            continue
+        if current is None or line.startswith("*** End Patch") or line.startswith("*** Begin Patch"):
+            continue
+        move = re.match(r"^\*\*\* Move to: (.+?)\s*$", line)
+        if move:
+            current["move_to"] = move.group(1)
+            continue
+        if line.startswith("*** End of File"):
+            continue
+        if current["op"] == "add":
+            if line.startswith("+"):
+                current["content"].append(line[1:])
+            continue
+        if current["op"] == "update":
+            if line.startswith("@@") or hunk is None:
+                hunk = {"old": [], "new": []}
+                current["hunks"].append(hunk)
+                if line.startswith("@@"):
+                    continue
+            if line.startswith("-"):
+                hunk["old"].append(line[1:])
+            elif line.startswith("+"):
+                hunk["new"].append(line[1:])
+            else:
+                kept = line[1:] if line.startswith(" ") else line
+                hunk["old"].append(kept)
+                hunk["new"].append(kept)
+    return ops
+
+
+def patch_calls(command):
+    """One apply_patch call as the Write / MultiEdit calls the gates understand (a delete writes empty content)."""
+    calls = []
+    for op in parse_patch(command):
+        if op["op"] == "add":
+            calls.append(("Write", {"file_path": op["path"], "content": "\n".join(op["content"]) + "\n"}))
+        elif op["op"] == "delete":
+            calls.append(("Write", {"file_path": op["path"], "content": ""}))
+        else:
+            edits = [{"old_string": "\n".join(h["old"]), "new_string": "\n".join(h["new"])}
+                     for h in op["hunks"] if h["old"] or h["new"]]
+            if op["move_to"]:
+                calls.append(("Write", {"file_path": op["move_to"],
+                                        "content": resulting_text("MultiEdit", {"edits": edits}, op["path"])}))
+                calls.append(("Write", {"file_path": op["path"], "content": ""}))
+            else:
+                calls.append(("MultiEdit", {"file_path": op["path"], "edits": edits}))
+    return calls
+
+
+def hook_subagent_stop(data):
+    """SubagentStop (Codex) / the subagent tool's result (OpenCode): record the griller's or judge's verdict."""
+    agent = str(data.get("agent_type") or "").split(":")[-1]
+    if agent == "griller":
+        record_verdict(data, "grill")
+    elif agent == "judge":
+        record_verdict(data, "judge")
+
+
 # --------------------------------------------------------------------------- entry point
 
 HOOKS = {
@@ -3063,6 +3475,7 @@ HOOKS = {
     "stop": hook_stop,
     "grill-stop": lambda data: record_verdict(data, "grill"),
     "judge-stop": lambda data: record_verdict(data, "judge"),
+    "subagent-stop": hook_subagent_stop,
 }
 
 
@@ -3095,10 +3508,19 @@ def hook_budget(name):
 
 
 def main(argv):
-    if argv[1:2] == ["hook"] and len(argv) >= 3 and argv[2] not in ("grill-stop", "judge-stop"):
+    global HOOK_SOURCE
+    if argv[1:2] == ["hook"] and "--from" in argv:
+        i = argv.index("--from")
+        HOOK_SOURCE = argv[i + 1] if i + 1 < len(argv) and argv[i + 1] in HOOK_SOURCES else "claude"
+        argv = argv[:i] + argv[i + 2:]
+    if argv[1:2] == ["hook"] and len(argv) >= 3 and argv[2] not in ("grill-stop", "judge-stop", "subagent-stop"):
         hook_budget(argv[2])   # the verdict recorders run the tests and have their own, longer timeout
     if len(argv) == 3 and argv[1] == "hook" and argv[2] in HOOKS:
-        HOOKS[argv[2]](read_hook_input())
+        try:
+            HOOKS[argv[2]](normalize_hook(read_hook_input(), HOOK_SOURCE))
+        finally:
+            if HOOK_SOURCE == "codex" and not EMITTED:
+                sys.stdout.write("{}\n")   # Codex wants JSON on stdout when a hook exits 0
         return 0
     if len(argv) == 4 and argv[1:3] == ["hook", "agent-guard"]:
         hook_agent_guard(read_hook_input(), argv[3])
@@ -3131,6 +3553,16 @@ def main(argv):
         return escalations_command()
     if argv[1:2] == ["run"]:
         return run_command(argv[2:])
+    if argv[1:2] == ["state"]:
+        return state_command(argv[2:])
+    if argv[1:2] == ["next"]:
+        return next_command(argv[2:])
+    if argv[1:2] == ["questions"]:
+        return questions_command(argv[2:])
+    if len(argv) == 3 and argv[1] == "start":
+        return start_command(argv[2])
+    if len(argv) == 3 and argv[1] == "finish":
+        return finish_command(argv[2])
     if argv[1:2] == ["report"]:
         return report_command(argv[2:])
     if argv[1:2] == ["ci-judge"]:
