@@ -1017,6 +1017,15 @@ def verdict_history(task, kind):
         return []
 
 
+def since_last_escalation(task, history):
+    """The verdicts recorded after task's latest escalation: a person answered it, so its rounds start over."""
+    stamps = re.findall(r"(?m)^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) Task %s:" % re.escape(task), read(ESCALATIONS))
+    if not stamps:
+        return history
+    latest = max(stamps).replace(" ", "T")
+    return [e for e in history if str(e.get("at", ""))[:16] > latest]
+
+
 def consecutive_fails(history):
     fails = 0
     for entry in reversed(history):
@@ -1236,11 +1245,12 @@ def record_verdict(data, kind):
         values = conf()
         key = "HARNESS_JUDGE_MAX_ROUNDS" if kind == "judge" else "HARNESS_GRILL_MAX_ROUNDS"
         limit = int(values[key]) if values[key].isdigit() else 2
-        if autonomous() and consecutive_fails(history) >= limit:
-            escalate(task, "%s failed %d times" % (agent_name, consecutive_fails(history)), "; ".join(reasons),
+        recent = since_last_escalation(task, history)
+        if autonomous() and consecutive_fails(recent) >= limit:
+            escalate(task, "%s failed %d times" % (agent_name, consecutive_fails(recent)), "; ".join(reasons),
                      "the user's decision on the findings")
             note += ". Escalated after %d failed rounds: the task is BLOCKED (backbone/escalations.md); " \
-                    "continue with another task." % consecutive_fails(history)
+                    "continue with another task." % consecutive_fails(recent)
     emit({"systemMessage": note})
 
 
@@ -1582,7 +1592,7 @@ def judge_problems(task, current, max_rounds):
     """Why task cannot be finished: no judge pass on the code with fingerprint current. None when it may."""
     history = verdict_history(task, "judge")
     last = history[-1] if history else None
-    fails = consecutive_fails(history)
+    fails = consecutive_fails(since_last_escalation(task, history))
     reasons = "; ".join((last or {}).get("reasons") or [])[:400]
     if last is None:
         return "Task %s has no judge verdict. Ask the judge agent to review task %s." % (task, task)

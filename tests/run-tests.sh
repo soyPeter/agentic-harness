@@ -1177,6 +1177,23 @@ if command -v codex >/dev/null 2>&1; then
   contains "codex rules: nothing else is" "none" "$(decide rm -rf /)"
 fi
 
+section "rounds start over after the user answers an escalation"
+auto_spec 8.6 ""
+gfail() { hook "$A" grill-stop "$(python3 -c 'import json; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"fail","task":"8.6","questions":[{"severity":"major","about":"REQ-8.6-1","question":"Which?","why":"w"}],"summary":"s"})+"\n```"}))')" 2>&1; }
+HARNESS_GRILL_MAX_ROUNDS=2 gfail >/dev/null; out=$(HARNESS_GRILL_MAX_ROUNDS=2 gfail)
+contains "fixture: two failed rounds escalate" "Escalated after 2 failed rounds" "$out"
+python3 - "$AT" "$A/backbone/escalations.md" <<'EOF'
+import re, sys
+t, e = sys.argv[1:3]
+s = open(t).read(); open(t, "w").write(re.sub(r" — BLOCKED: [^\n]*\(backbone/escalations\.md\)", "", s))
+s = open(e).read(); open(e, "w").write(s.replace("- Status: open", "- Status: resolved (user)"))
+EOF
+sleep 61   # verdicts and escalations are stamped to the minute
+out=$(HARNESS_GRILL_MAX_ROUNDS=2 gfail)
+lacks "after the user answered, one more failed round doesn't escalate again" "Escalated after" "$out"
+lacks "the task stays unblocked" "Task 8.6: Item** (spec: backbone/specs/8.6.md) — BLOCKED" "$(cat "$AT")"
+sed -i.bak 's/^- \[ \] \*\*Task 8\.6.*$//' "$AT" && rm -f "$AT.bak"
+
 section "spec size limit"
 python3 - "$A/backbone/specs/8.1.md" "$WORK/big-spec.md" <<'EOF'
 import re, sys
