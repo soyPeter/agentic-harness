@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.1 (2026-10-18)
+
+- **A person's answer gives a task fresh rounds.** In the ledger run, task 1.8 was escalated over the duplicate rule. After the answer, the griller rightly asked for the spec to be rewritten to it, but the round limit still counted the round from before the answer, so the task was escalated again mid-rewrite. The griller's and judge's round limits now count only failures since the task's latest escalation.
+
 ## 0.16.0 (2026-10-18)
 
 ADRs in parallel work, from the ledger backlog run:
