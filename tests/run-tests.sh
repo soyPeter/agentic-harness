@@ -1295,8 +1295,8 @@ elif args[:2] == ["orchestration", "worker-start"]:
         task, step = m.groups()
         if step == "implement":
             os.makedirs(os.path.join(cwd, "src"), exist_ok=True); os.makedirs(os.path.join(cwd, "tests"), exist_ok=True)
-            open(os.path.join(cwd, "src/feature.py"), "w").write("def f():  # AC-%s-1 AC-%s-2\n    return 1\n" % (task, task))
-            open(os.path.join(cwd, "tests/test_feature.py"), "w").write("def test_f():  # AC-%s-1 AC-%s-2\n    assert True\n" % (task, task))
+            open(os.path.join(cwd, "src/feature_%s.py" % task.replace(".", "_")), "w").write("def f():  # AC-%s-1 AC-%s-2\n    return 1\n" % (task, task))
+            open(os.path.join(cwd, "tests/test_feature_%s.py" % task.replace(".", "_")), "w").write("def test_f():  # AC-%s-1 AC-%s-2\n    assert True\n" % (task, task))
             state["queue"].append({"id": "q1", "type": "question", "from_handle": h, "body": "Which module holds f?", "payload": "{}"})
             state["held"][h] = d
         elif step == "judge":
@@ -1309,7 +1309,7 @@ elif args[:2] == ["orchestration", "worker-start"]:
             harness(cwd, "hook", "debug-stop", stdin=report("debugger", {"task": task, "root_causes": [{"criterion": "AC-%s-1" % task, "cause": "c", "fix": "f", "owner": "implementer"}], "confidence": "high", "summary": "s"}))
             done(d, h)
         elif step == "fix":
-            open(os.path.join(cwd, "src/feature.py"), "a").write("# fixed\n")
+            open(os.path.join(cwd, "src/feature_%s.py" % task.replace(".", "_")), "a").write("# fixed\n")
             done(d, h)
         else:
             done(d, h)
@@ -1363,6 +1363,50 @@ n_started=$(python3 -c 'import json,sys; print(sum(1 for c in json.load(open(sys
 n_released=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("released",[])))' "$FAKE_ORCA_STATE")
 [ "$n_started" -eq "$n_released" ] && ok "every worker was released after it settled ($n_released)" || bad "every worker was released after it settled ($n_started started, $n_released released)"
 contains "the debugger diagnosed the failed round" '"kind": "debug"' "$(git -C "$O" show harness-task-9.1:backbone/.verdicts/9.1.debug.json 2>/dev/null)"
+for id in 9.2 9.3; do
+  printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/$id/g" -e 's/^- python: all code$/- code-quality: all code/' > "$O/backbone/specs/$id.md"
+  printf '%s' "$(python3 -c 'import json,sys; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":sys.argv[1],"questions":[],"summary":"s"})+"\n```"}))' "$id")" \
+    | python3 "$O/scripts/harness/lib/harness.py" hook grill-stop >/dev/null
+done
+printf -- '- [ ] **Task 9.3: After** (spec: backbone/specs/9.3.md) (after: 9.2)\n- [ ] **Task 9.2: First** (spec: backbone/specs/9.2.md)\n' >> "$O/backbone/3-TASKS.md"
+$OH approve 9.2 >/dev/null; $OH approve 9.3 >/dev/null
+git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: tasks 9.2 and 9.3"
+contains "orca --dry-run shows a task waiting for its dependency" "would drive task 9.3 (next: start), after 9.2 is done" "$(HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --dry-run --tasks 9.3,9.2 2>&1)"
+out=$(HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.3,9.2 --parallel 2 --merge --wait-ms 10 2>&1; echo "exit=$?")
+contains "orca --merge: the first task is done and merged" "task 9.2: done; merged into" "$out"
+contains "orca: the dependent task ran after it, and was merged too" "task 9.3: done; merged into" "$out"
+order=$(printf '%s\n' "$out" | grep -n "task 9.[23]: start$" | cut -d: -f1 | tr '\n' ' ')
+contains "orca: 9.3 waited for 9.2 although it was listed first" "task 9.2: start" "$(printf '%s\n' "$out" | grep "task 9.[23]: start$" | head -1)"
+contains "the base branch has both merges" "chore: merge task 9.3" "$(git -C "$O" log --oneline -3)"
+contains "the merged base has both tasks [x]" "- [x] **Task 9.3" "$(cat "$O/backbone/3-TASKS.md")"
+for id in 9.4 9.5; do
+  printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/$id/g" -e 's/^- python: all code$/- code-quality: all code/' > "$O/backbone/specs/$id.md"
+  printf '%s' "$(python3 -c 'import json,sys; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":sys.argv[1],"questions":[],"summary":"s"})+"\n```"}))' "$id")" \
+    | python3 "$O/scripts/harness/lib/harness.py" hook grill-stop >/dev/null
+done
+printf -- '- [ ] **Task 9.4: Left** (spec: backbone/specs/9.4.md)\n- [ ] **Task 9.5: Right** (spec: backbone/specs/9.5.md)\n' >> "$O/backbone/3-TASKS.md"
+$OH approve 9.4 >/dev/null; $OH approve 9.5 >/dev/null
+git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: tasks 9.4 and 9.5"
+python3 - "$WORK/fake-orca.py" <<'EOF'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = '        else:\n            done(d, h)\n    result = {"dispatch"'
+new = ('        elif step == "finish":\n'
+       '            open(os.path.join(cwd, "backbone/6-MEMORY.md"), "a").write("\\n- %s: a lesson from task %s\\n" % (task, task))\n'
+       '            done(d, h)\n' + old)
+assert s.count(old) == 1
+open(p, "w").write(s.replace(old, new))
+EOF
+out=$(HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.4,9.5 --parallel 2 --merge --wait-ms 10 2>&1; echo "exit=$?")
+contains "orca --merge: parallel tasks are both merged" "task 9.5: done; merged into" "$out"
+contains "the neighbouring task-line conflict was resolved" "resolved the backbone merge conflicts" "$out"
+tasks=$(cat "$O/backbone/3-TASKS.md")
+contains "after the merges both parallel tasks are [x]" "- [x] **Task 9.4" "$tasks"
+contains "and the second one too" "- [x] **Task 9.5" "$tasks"
+lacks "no conflict markers are left" "<<<<<<<" "$tasks$(cat "$O/backbone/6-MEMORY.md")"
+mem=$(cat "$O/backbone/6-MEMORY.md")
+contains "both scribes' memory entries are kept" "a lesson from task 9.4" "$mem"
+contains "including the second" "a lesson from task 9.5" "$mem"
 unset FAKE_ORCA_STATE
 
 section "autonomous mode: judging, risk drift, kill switch"
