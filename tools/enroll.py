@@ -60,12 +60,14 @@ def orca(*args):
     if not binary:
         return False, "orca is not installed (or set HARNESS_ORCA_BIN)"
     result = run([binary] + list(args) + ["--json"])
-    if result.returncode != 0 and not result.stdout.strip():
-        return False, (result.stderr.strip() or "orca exited with %d" % result.returncode)[:300]
     try:
         data = json.loads(result.stdout)
     except ValueError:
-        return False, (result.stderr or result.stdout).strip()[:300] or "orca printed no JSON"
+        data = None
+    if result.returncode != 0 or not isinstance(data, dict):
+        error = (data or {}).get("error") if isinstance(data, dict) else None
+        return False, (str((error or {}).get("message") or "") or result.stderr.strip() or result.stdout.strip()
+                       or "orca exited with %d" % result.returncode)[:300]
     if data.get("ok") is False:
         return False, str((data.get("error") or {}).get("message") or data.get("error"))
     return True, data.get("result", data)
@@ -134,22 +136,30 @@ def register_in_orca(target, dry_run):
     say("setup", SETUP_HINT)
 
 
-def automation_name(target, project):
-    """The automation's identity: the project name plus a hash of the checkout's path, so two projects that share a
-    name (client-a/api, client-b/api) get one each, and the same checkout always maps to the same automation."""
+def automation_name(target):
+    """The automation's identity comes from the checkout alone (its folder name and a hash of its path): two projects
+    that share a name each get one, and enrolling the same checkout again, with any --name, finds the same one."""
     import hashlib
-    return "harness-%s-%s" % (project, hashlib.sha256(str(target.resolve()).encode("utf-8")).hexdigest()[:8])
+    return "harness-%s-%s" % (target.name, hashlib.sha256(str(target.resolve()).encode("utf-8")).hexdigest()[:8])
+
+
+def automation_path(row):
+    """The checkout an automation runs in, from the fields Orca stores (runContext.path, workspaceId, workspace)."""
+    context = row.get("runContext") if isinstance(row.get("runContext"), dict) else {}
+    for value in (context.get("path"), row.get("workspaceId"), row.get("workspace")):
+        if isinstance(value, str) and value:
+            return value.split("::")[-1].replace("path:", "", 1).rstrip("/")
+    return None
 
 
 def automation(target, project, schedule, dry_run):
-    name = automation_name(target, project)
+    name = automation_name(target)
     ok, listed = orca("automations", "list")
     if not ok:
         raise SystemExit("enroll: can't list Orca automations (%s); not creating one, so none is duplicated" % listed)
     rows = listed if isinstance(listed, list) else (listed.get("automations") if isinstance(listed, dict) else None) or []
     workspace = "path:%s" % target
-    same = [a for a in rows if isinstance(a, dict) and (a.get("name") == name or
-                                                         str(a.get("workspace") or "").rstrip("/") == workspace)]
+    same = [a for a in rows if isinstance(a, dict) and (a.get("name") == name or automation_path(a) == str(target))]
     if same:
         say("automation", "%s exists already for this checkout; not creating another" % (same[0].get("name") or name))
         return
