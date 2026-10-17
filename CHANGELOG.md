@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.0 (2026-10-17)
+
+- **Tester** (`HARNESS_TESTER`, user-only, default `off`): independent acceptance tests.
+  - The new `tester` agent writes at least one acceptance test per AC from the spec, before the code exists, in files matching `HARNESS_ACCEPTANCE_PATHS` (default: paths containing `acceptance`). They should fail at that point.
+  - The tester may write only there, and the implementer may not write there.
+  - On the tester's Stop, the harness records which files cover which criteria, and a fingerprint of them (`backbone/.verdicts/<id>.tests.json`). It refuses to record while a criterion has no acceptance test.
+  - The judge gate refuses to finish a task without recorded tests, with a criterion uncovered, or with the tests changed since, including through the shell. The judge's evidence no longer comes from the code's own author.
+- **Debugger** (`HARNESS_DEBUGGER`, default `on`): after a judge fail, `next` sends the task to the new `debugger` agent before the implementer.
+  - It changes nothing. It reproduces the failure and records a fix brief, with a root cause, a fix and an owner per problem (`backbone/.verdicts/<id>.debug.json`).
+  - `next` hands the brief to the implementer, and flags causes owned by the tester, analyst or user under `needs`.
+- `next` gains the steps `test` (tester) and `diagnose` (debugger). The Codex and OpenCode adapters record both roles, and their agents are generated.
+- Existing projects get the new settings commented out in `harness.conf` on update.
+
 ## 0.10.0 (2026-10-17)
 
 - **Codex and OpenCode reach the same gates as Claude Code.** Every CLI's hooks call `harness.py hook <event> --from <cli>`, which normalises the input before any gate runs.

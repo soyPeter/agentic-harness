@@ -171,6 +171,16 @@ A session can also play a single role from start to finish (a coordinator starti
 
 Regenerate the Codex and OpenCode agents after changing a Claude Code agent: `tools/gen_agents.py` (the self-test fails while they are out of date).
 
+## Tester and debugger
+
+**Tester** (`HARNESS_TESTER`, user-only, default `off`). Without it, the implementer writes both the code and the tests that prove it. With it:
+- The tester writes the acceptance tests from the spec first, at least one per AC, in files matching `HARNESS_ACCEPTANCE_PATHS` (default: any path containing `acceptance`).
+- The tester may write only there; the implementer may not write there at all.
+- On the tester's Stop, the harness records which files cover which criteria, and a fingerprint of them, in `backbone/.verdicts/<id>.tests.json`. It refuses to record while a criterion has no acceptance test.
+- The judge gate refuses to finish the task when no tests were recorded, a criterion lacks one, or the files changed since they were recorded, including through the shell.
+
+**Debugger** (`HARNESS_DEBUGGER`, default `on`). After a judge fail, `next` sends the task to the debugger before the implementer. It changes nothing and records a fix brief with the root causes, each with an owner, in `backbone/.verdicts/<id>.debug.json`. `next` hands that brief to the implementer, and lists any other owner (the tester, analyst or user) under `needs`.
+
 ## Coordinator API
 
 A coordinator asks the harness what a task needs instead of knowing the workflow. The answers come from the artifacts the gates check.
@@ -178,7 +188,7 @@ A coordinator asks the harness what a task needs instead of knowing the workflow
 | Command | Answer |
 |---|---|
 | `harness.py state [--json]` | Every task: state, spec problems, grill and judge verdicts (and whether they are current), approval, open escalations |
-| `harness.py next <id> [--json]` | The next step and who does it: `define` (analyst or architect), `grill` (griller), `answer` (the griller's questions, routed), `approve`, `start`, `implement`, `judge`, `fix`, `finish` (scribe, then `finish`), `blocked`, `done` |
+| `harness.py next <id> [--json]` | The next step and who does it: `define` (analyst or architect), `grill` (griller), `answer` (the griller's questions, routed), `approve`, `start`, `test` (tester), `implement`, `judge`, `diagnose` (debugger), `fix` (implementer, with the debugger's brief), `finish` (scribe, then `finish`), `blocked`, `done` |
 | `harness.py questions <id> [--json]` | The griller's open questions, each routed: design questions to the architect, the rest to the analyst |
 | `harness.py start <id>` / `finish <id>` | Mark the task `[WIP]` / `[x]` through the same gates as an edit of `3-TASKS.md` (start: spec, grill, approval, one `[WIP]`; finish: a current judge pass) |
 

@@ -64,7 +64,7 @@ CATALOG_DIR = ROOT / "scripts/harness/catalog"
 HOOKS_PATH = "scripts/harness/git-hooks"
 HOOK_MARK = "scripts/harness/"
 FILE_TOOLS = ("Write", "Edit", "MultiEdit")
-PIPELINE_AGENTS = ("analyst", "architect", "griller", "implementer", "judge", "scribe")
+PIPELINE_AGENTS = ("analyst", "architect", "griller", "tester", "implementer", "judge", "debugger", "scribe")
 USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE", "HARNESS_JUDGE_MAX_ROUNDS",
                   "HARNESS_VERIFY", "HARNESS_ORCHESTRATOR_SCOPE",
                   "HARNESS_AUTONOMY", "HARNESS_AUTO_APPROVE", "HARNESS_RISK_TERMS", "HARNESS_RISK_PATHS",
@@ -73,7 +73,8 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
                   "HARNESS_RUN_MAX_COST", "HARNESS_CI_JUDGE_CMD",
                   "HARNESS_DECISION_PROVIDER", "HARNESS_DECISION_MODE", "HARNESS_DECISION_ADR",
                   "HARNESS_DECISION_CMD", "HARNESS_DECISION_MODEL", "HARNESS_DECISION_URL",
-                  "HARNESS_KNOWLEDGE_ROOT", "HARNESS_KNOWLEDGE_TOOLS", "HARNESS_KNOWLEDGE_PATHS")
+                  "HARNESS_KNOWLEDGE_ROOT", "HARNESS_KNOWLEDGE_TOOLS", "HARNESS_KNOWLEDGE_PATHS",
+                  "HARNESS_TESTER", "HARNESS_ACCEPTANCE_PATHS")
 # The knowledge source: an MCP server registered as "knowledge" (claude mcp add) over a folder of notes, that the
 # analyst, architect and griller consult when grilling raises questions. Read-only; answers are cited as vault:<path>.
 KNOWLEDGE_TOOL_PREFIX = "mcp__knowledge__"
@@ -106,6 +107,8 @@ AGENT_SCOPES = {
     # Reviewers never edit. Claude Code enforces this with their tool list; Codex has no per-agent tool list.
     "griller": ("allow", ()),
     "judge": ("allow", ()),
+    "debugger": ("allow", ()),
+    "tester": ("allow", ()),   # plus HARNESS_ACCEPTANCE_PATHS (see role_scope)
 }
 SCOPE_HELP = {
     "analyst": "It writes specs (backbone/specs/) and the PRD only.",
@@ -114,6 +117,8 @@ SCOPE_HELP = {
     "implementer": "It writes code and tests only; backbone/, .claude/ and harness files belong to other roles.",
     "griller": "It reviews the spec and asks questions; it never edits files.",
     "judge": "It judges the code against the spec; it never edits files.",
+    "debugger": "It diagnoses the judge's failures and writes a fix brief; it never edits files.",
+    "tester": "It writes acceptance tests only, in files matching HARNESS_ACCEPTANCE_PATHS.",
 }
 
 # A task line, not any mention of the marker (legends and prose must not count).
@@ -178,6 +183,9 @@ DEFAULTS = {
     "HARNESS_KNOWLEDGE_TOOLS": r"^((search|read|get|list|find|query|lookup|fetch)\w*|note_meta|batch_read|backlinks|"
                                r"hub_children|decisions_status|pending_questions)$",
     "HARNESS_KNOWLEDGE_PATHS": "",
+    "HARNESS_TESTER": "off",
+    "HARNESS_ACCEPTANCE_PATHS": r"(^|/)acceptance([/._-]|$)",
+    "HARNESS_DEBUGGER": "on",
 }
 STOP_MODES = ("remind", "block", "off")
 
@@ -1029,8 +1037,9 @@ def code_fingerprint():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def extract_report(message):
-    """The agent's verdict: the last JSON object in the message that has a 'verdict' key."""
+def extract_report(message, key="verdict"):
+    """The agent's report: the last JSON object in the message that has `key` (the griller's and judge's verdict,
+    the tester's "tests", the debugger's "root_causes")."""
     if not message:
         return None
     for block in reversed(re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", message, re.S)):
@@ -1038,7 +1047,7 @@ def extract_report(message):
             data = json.loads(block)
         except ValueError:
             continue
-        if isinstance(data, dict) and "verdict" in data:
+        if isinstance(data, dict) and key in data:
             return data
     decoder = json.JSONDecoder()
     for start in reversed([m.start() for m in re.finditer(r"\{", message)]):
@@ -1046,7 +1055,7 @@ def extract_report(message):
             data, _ = decoder.raw_decode(message[start:])
         except ValueError:
             continue
-        if isinstance(data, dict) and "verdict" in data:
+        if isinstance(data, dict) and key in data:
             return data
     return None
 
@@ -1567,6 +1576,9 @@ def judge_problems(task, current, max_rounds):
     if last.get("verdict") != "pass":
         return ("The judge failed task %s (round %d of %d): %s. Have the implementer fix the findings, "
                 "then run the judge again." % (task, fails, max_rounds, reasons))
+    problem = acceptance_problem(task)
+    if problem:
+        return problem
     if current and last.get("fingerprint") != current:
         return "The code changed after the judge passed task %s. Run the judge again on the current code." % task
     report = dict(last, verdict=last.get("claimed"))
@@ -1580,6 +1592,25 @@ def judge_problems(task, current, max_rounds):
             return ("Task %s was approved by policy as low-risk, but %s. Escalate it: python3 "
                     "scripts/harness/lib/harness.py escalate %s --kind approval --reason \"...\""
                     % (task, "; ".join(risks), task))
+    return None
+
+
+def acceptance_problem(task):
+    """With HARNESS_TESTER on: the tester's acceptance tests exist, cover every AC, and are unchanged."""
+    if not tester_on():
+        return None
+    history = verdict_history(task, "tests")
+    if not history:
+        return ("Task %s has no acceptance tests from the tester (HARNESS_TESTER is on). Ask the tester to write "
+                "them; the implementer may not." % task)
+    acs = [ac for ac, _ in spec_items(strip_comments(read(spec_path(task))), "AC", task)]
+    missing = [ac for ac in acs if ac not in acceptance_files(task)]
+    if missing:
+        return "No acceptance test covers %s of task %s. Ask the tester to add them." % (", ".join(missing), task)
+    if acceptance_fingerprint(task) != history[-1].get("fingerprint"):
+        return ("The acceptance tests of task %s changed after the tester recorded them. Only the tester may change "
+                "them: restore them (git checkout -- <file>), or ask the tester to revise and re-record them."
+                % task)
     return None
 
 
@@ -1865,6 +1896,12 @@ def health():
             issues.append(("error", "autonomous mode needs HARNESS_VERIFY, HARNESS_SPEC_GATE and HARNESS_JUDGE_GATE on"))
     if values["HARNESS_AUTO_APPROVE"] not in ("low", "off"):
         issues.append(("error", "HARNESS_AUTO_APPROVE must be low or off"))
+    if values["HARNESS_TESTER"] not in ("on", "off"):
+        issues.append(("error", "HARNESS_TESTER must be on or off"))
+    try:
+        re.compile(values["HARNESS_ACCEPTANCE_PATHS"])
+    except re.error as exc:
+        issues.append(("error", "HARNESS_ACCEPTANCE_PATHS is not a valid regex (%s)" % exc))
     root = knowledge_root()
     if root is not None:
         if not root.is_dir():
@@ -2504,8 +2541,8 @@ def hook_stop(data):
     if role:
         # A session that plays one role (HARNESS_ROLE) ends like that role's subagent would: the griller's and
         # judge's verdicts are recorded; the coordinator, not the role, owns the Definition of Done.
-        if role in ("griller", "judge"):
-            record_verdict(data, "grill" if role == "griller" else "judge")
+        if role in ROLE_RECORDERS:
+            ROLE_RECORDERS[role](data)
         return
     values = conf()
     mode = values["HARNESS_STOP_MODE"]
@@ -2533,17 +2570,40 @@ def hook_stop(data):
     emit({"systemMessage": "harness: still [WIP]: %s (Definition of Done: backbone/8-WORKFLOW.md)" % titles})
 
 
+def role_scope(agent):
+    """(mode, patterns) for agent's writes. The acceptance tests belong to the tester when HARNESS_TESTER is on."""
+    scope = AGENT_SCOPES.get(agent)
+    if scope is None:
+        return None
+    mode, patterns = scope
+    acceptance = conf()["HARNESS_ACCEPTANCE_PATHS"]
+    if agent == "tester":
+        patterns = patterns + (acceptance,)
+    elif agent == "implementer" and tester_on():
+        patterns = patterns + (acceptance,)
+    return mode, patterns
+
+
+def tester_on():
+    return conf()["HARNESS_TESTER"] == "on"
+
+
 def hook_agent_guard(data, agent):
     """PreToolUse scoped to one agent: keep its edits inside its role."""
-    scope = AGENT_SCOPES.get(agent)
+    scope = role_scope(agent)
     tool_input = data.get("tool_input") or {}
     if scope is None or data.get("tool_name") not in FILE_TOOLS or not tool_input.get("file_path"):
         return
     path = rel(tool_input["file_path"])
     mode, patterns = scope
-    hit = any(re.search(pattern, path) for pattern in patterns)
+    try:
+        hit = any(re.search(pattern, path) for pattern in patterns)
+    except re.error:
+        hit = mode == "deny"
     if (mode == "allow" and not hit) or (mode == "deny" and hit):
-        deny("The %s agent may not edit %s. %s" % (agent, path, SCOPE_HELP[agent]))
+        extra = (" The acceptance tests (HARNESS_ACCEPTANCE_PATHS) belong to the tester; if one contradicts the "
+                 "spec, say so and the coordinator sends it back." if agent == "implementer" and tester_on() else "")
+        deny("The %s agent may not edit %s. %s%s" % (agent, path, SCOPE_HELP[agent], extra))
 
 
 # --------------------------------------------------------------------------- coordinator API
@@ -2640,13 +2700,26 @@ def next_step(task):
                                                                        "approve %s" % task)
             return dict(step, step="approve", role=None, needed="the user's Approved-by: line in %s" % s["spec"])
         return dict(step, step="start", role=None, command="python3 scripts/harness/lib/harness.py start %s" % task)
+    if tester_on():
+        tests = verdict_history(task, "tests")
+        if not tests or acceptance_fingerprint(task) != tests[-1].get("fingerprint"):
+            return dict(step, step="test", role="tester",
+                        reason="no acceptance tests yet" if not tests else "the acceptance tests changed since the "
+                                                                          "tester recorded them")
     judge = s["judge"]
     if judge and judge["current"] and judge["verdict"] == "pass":
         return dict(step, step="finish", role="scribe", then="python3 scripts/harness/lib/harness.py finish %s, "
                                                                "then commit" % task)
     if judge and judge["current"]:
         last = verdict_history(task, "judge")[-1]
-        return dict(step, step="fix", role="implementer", findings=last.get("findings") or last.get("reasons"))
+        briefs = [b for b in verdict_history(task, "debug") if b.get("judge_at") == last.get("at")]
+        if conf()["HARNESS_DEBUGGER"] == "on" and not briefs:
+            return dict(step, step="diagnose", role="debugger", reasons=last.get("reasons"))
+        owners = sorted({str(c.get("owner")) for c in (briefs[-1] if briefs else {}).get("root_causes") or []
+                         if isinstance(c, dict)} - {"implementer", "None"})
+        return dict(step, step="fix", role="implementer", findings=last.get("findings") or last.get("reasons"),
+                    brief=briefs[-1] if briefs else None,
+                    **({"needs": owners} if owners else {}))
     if not judge and not code_changed():
         return dict(step, step="implement", role="implementer")
     return dict(step, step="judge", role="judge", reason="no judge verdict on the current code")
@@ -2732,7 +2805,8 @@ Drive Task {task} ("{title}") through the whole pipeline in backbone/8-WORKFLOW.
   backbone/, the architect complete Architecture and Skills, and the griller grill it. Answer the griller's
   questions from backbone/ and the knowledge source (if on) as Assumptions; escalate what they cannot answer.
 - Approve: python3 scripts/harness/lib/harness.py approve {task}
-- Build, judge and record with the implementer, judge and scribe; then mark the task [x] and commit.
+- Build, judge and record: the tester first when HARNESS_TESTER is on, then the implementer and the judge; after a
+  judge fail, the debugger's brief goes to the implementer; then the scribe. Mark the task [x] and commit.
 - When anything needs a human, escalate: python3 scripts/harness/lib/harness.py escalate {task} --reason "..."
 Stop when the task is [x] and committed, or BLOCKED. Do not start other tasks."""
 
@@ -3458,12 +3532,110 @@ def patch_calls(command):
 
 
 def hook_subagent_stop(data):
-    """SubagentStop (Codex) / the subagent tool's result (OpenCode): record the griller's or judge's verdict."""
+    """SubagentStop (Codex) / the subagent tool's result (OpenCode): run the role's recorder."""
     agent = str(data.get("agent_type") or "").split(":")[-1]
-    if agent == "griller":
-        record_verdict(data, "grill")
-    elif agent == "judge":
-        record_verdict(data, "judge")
+    recorder = ROLE_RECORDERS.get(agent)
+    if recorder:
+        recorder(data)
+
+
+def acceptance_files(task):
+    """{AC id: [acceptance test files mentioning it]} for task (files matching HARNESS_ACCEPTANCE_PATHS)."""
+    try:
+        acceptance = re.compile(conf()["HARNESS_ACCEPTANCE_PATHS"])
+    except re.error:
+        return {}
+    return {ac: [f for f in files if acceptance.search(f)] for ac, files in ac_test_references(task).items()
+            if any(acceptance.search(f) for f in files)}
+
+
+def acceptance_fingerprint(task):
+    """Hash of every acceptance test file that mentions one of task's AC ids (content and path)."""
+    files = sorted({f for names in acceptance_files(task).values() for f in names})
+    digest = hashlib.sha256()
+    for name in files:
+        digest.update(name.encode("utf-8") + b"\0")
+        try:
+            digest.update((ROOT / name).read_bytes())
+        except OSError:
+            digest.update(b"<missing>")
+        digest.update(b"\0")
+    return digest.hexdigest() if files else None
+
+
+def task_for_role(report):
+    claimed = re.sub(r"(?i)^task\s+", "", str(report.get("task") or "")).strip()
+    candidates = wip_task_ids()
+    return claimed if claimed in candidates else (candidates[0] if len(candidates) == 1 else None)
+
+
+def record_tests(data):
+    """The tester's Stop: record which acceptance tests cover which criteria, and fingerprint them."""
+    retry = not data.get("stop_hook_active")
+    report = extract_report(data.get("last_assistant_message")
+                            or last_message_from_transcript(data.get("transcript_path")), "tests")
+    if report is None:
+        if retry:
+            deny("End your final message with the JSON block described in your instructions.")
+        return
+    task = task_for_role(report)
+    if task is None:
+        if retry:
+            deny("Set \"task\" in the JSON to the [WIP] task you wrote tests for.")
+        return
+    acs = [ac for ac, _ in spec_items(strip_comments(read(spec_path(task))), "AC", task)]
+    covered = acceptance_files(task)
+    missing = [ac for ac in acs if ac not in covered]
+    if missing and retry:
+        deny("No acceptance test file (HARNESS_ACCEPTANCE_PATHS) mentions %s yet. Write a test for each, naming its "
+             "AC id, then stop again." % ", ".join(missing))
+    history = verdict_history(task, "tests")
+    entry = {"fingerprint": acceptance_fingerprint(task), "files": covered, "missing": missing,
+             "red": report.get("red"), "problems": report.get("problems") or [],
+             "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "summary": report.get("summary")}
+    history.append(entry)
+    VERDICTS.mkdir(parents=True, exist_ok=True)
+    verdict_path(task, "tests").write_text(json.dumps({"task": task, "kind": "tests", "history": history}, indent=2)
+                                           + "\n", encoding="utf-8")
+    snapshot_refresh()
+    log_event("tests", task=task, criteria=len(covered), missing=missing, red=report.get("red"))
+    note = "harness: recorded the acceptance tests for task %s (%d criteria covered%s)." % (
+        task, len(covered), "; missing: " + ", ".join(missing) if missing else "")
+    if report.get("red") is False:
+        note += " They passed before implementation, so they may not prove the new behaviour."
+    emit({"systemMessage": note})
+
+
+def record_debug(data):
+    """The debugger's Stop: keep its fix brief next to the judge verdict it diagnosed."""
+    report = extract_report(data.get("last_assistant_message")
+                            or last_message_from_transcript(data.get("transcript_path")), "root_causes")
+    if report is None:
+        if not data.get("stop_hook_active"):
+            deny("End your final message with the JSON block described in your instructions.")
+        return
+    task = task_for_role(report)
+    if task is None:
+        return
+    judge = verdict_history(task, "judge")
+    history = verdict_history(task, "debug")
+    history.append({"code": code_fingerprint(), "judge_at": (judge[-1] if judge else {}).get("at"),
+                    "root_causes": report.get("root_causes") or [], "confidence": report.get("confidence"),
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "summary": report.get("summary")})
+    VERDICTS.mkdir(parents=True, exist_ok=True)
+    verdict_path(task, "debug").write_text(json.dumps({"task": task, "kind": "debug", "history": history}, indent=2)
+                                           + "\n", encoding="utf-8")
+    snapshot_refresh()
+    owners = sorted({str(c.get("owner")) for c in report.get("root_causes") or [] if isinstance(c, dict)})
+    log_event("debug", task=task, confidence=report.get("confidence"), owners=owners)
+
+
+ROLE_RECORDERS = {
+    "griller": lambda data: record_verdict(data, "grill"),
+    "judge": lambda data: record_verdict(data, "judge"),
+    "tester": record_tests,
+    "debugger": record_debug,
+}
 
 
 # --------------------------------------------------------------------------- entry point
@@ -3476,6 +3648,8 @@ HOOKS = {
     "grill-stop": lambda data: record_verdict(data, "grill"),
     "judge-stop": lambda data: record_verdict(data, "judge"),
     "subagent-stop": hook_subagent_stop,
+    "tester-stop": record_tests,
+    "debug-stop": record_debug,
 }
 
 
@@ -3513,7 +3687,8 @@ def main(argv):
         i = argv.index("--from")
         HOOK_SOURCE = argv[i + 1] if i + 1 < len(argv) and argv[i + 1] in HOOK_SOURCES else "claude"
         argv = argv[:i] + argv[i + 2:]
-    if argv[1:2] == ["hook"] and len(argv) >= 3 and argv[2] not in ("grill-stop", "judge-stop", "subagent-stop"):
+    if argv[1:2] == ["hook"] and len(argv) >= 3 and argv[2] not in ("grill-stop", "judge-stop", "subagent-stop",
+                                                                    "tester-stop", "debug-stop"):
         hook_budget(argv[2])   # the verdict recorders run the tests and have their own, longer timeout
     if len(argv) == 3 and argv[1] == "hook" and argv[2] in HOOKS:
         try:
