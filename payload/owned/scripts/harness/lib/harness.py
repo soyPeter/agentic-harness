@@ -957,11 +957,12 @@ def shell_findings(command, cwd=None, depth=0):
         elif prog == "eval" and depth < 3:
             found.extend(shell_findings(" ".join(words[1:]), cwd, depth + 1))
         elif prog in INTERPRETERS:
-            command = next((w for w in words[2:4] if w in ("run", "ci-judge", "ci-protect", "orca", "orca-nightly")), None)
+            command = next((w for w in words[2:4] if w in ("run", "ci-judge", "ci-protect", "orca", "orca-nightly",
+                                                         "snapshot")), None)
             planning = command in ("orca", "orca-nightly") and "--dry-run" in words   # these dry runs change nothing
             if any(w.endswith("harness.py") for w in words[1:3]) and command and not planning:
-                found.append("harness.py run, orca, orca-nightly, ci-judge and ci-protect are for the user, CI or an "
-                             "Orca automation's precheck, not agents.")
+                found.append("harness.py run, orca, orca-nightly, snapshot, ci-judge and ci-protect are for the user, "
+                             "CI or an Orca automation's precheck, not agents.")
             flag = next((f for f in ("-c", "-e", "-pe", "-ne") if f in words), None)
             if flag and words.index(flag) + 1 < len(words):
                 found.extend(code_findings(words[words.index(flag) + 1], "That %s one-liner" % prog))
@@ -4024,6 +4025,16 @@ def main(argv):
         return orca_nightly_command(argv[2:])
     if argv[1:2] == ["orca-digest"]:
         return orca_digest_command(argv[2:])
+    if argv[1:] == ["test-run"]:
+        run = run_tests()
+        print(json.dumps(run or {"error": "no HARNESS_TEST_CMD"}))
+        return 0 if run and run.get("exit") == 0 else 1
+    if argv[1:] == ["snapshot"]:
+        # The coordinator's own git operations (an integration merge) change protected files on purpose; refreshing the
+        # out-of-band snapshot records them. Refused to agents by the shell gate.
+        snapshot_refresh()
+        print("snapshot: refreshed")
+        return 0
     if argv[1:2] == ["next"]:
         return next_command(argv[2:])
     if argv[1:2] == ["questions"]:
