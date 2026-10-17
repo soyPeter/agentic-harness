@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.12.0 (2026-10-17)
+
+- **Orca coordinator: `harness.py orca`.** It drives ready tasks in parallel with Orca supervised workers, one Orca worktree per task and one worker per step. It asks `harness.py next` what each task needs, and runs approve, start, finish and the commit itself, through the gates.
+  - **Questions between agents:** a worker asks the coordinator. An analyst or architect worker answers from the sources into the spec, with its source, and the reply says where. What nobody can answer is escalated.
+  - **Griller questions** spanning both roles are answered by each role before the next grill, the blocker's owner first. A spec with only placeholder tech requirements goes to the architect.
+  - **The agent per role** is set by `HARNESS_ORCA_AGENTS` (for example `judge=codex`). Launch commands come from `HARNESS_ORCA_LAUNCH`: Codex starts with the hook-trust bypass and without its update prompt.
+  - **`--trust`** marks the task worktrees trusted for Claude Code and Codex.
+  - **Lifecycle:** every delivery is acknowledged, and a worker is released only after it settles. A worker that Orca reports failed without a report (for example a blocked startup) escalates its task. A worker waiting at a permission prompt is logged and never answered. A step that comes back 3 times without progress is escalated.
+- **Live run with Orca:** two tasks in parallel, Claude Code for the roles and Codex as the judge.
+  - Both finished: analyst, architect, griller (with answer rounds), policy approval, tester, implementer, Codex judge (verdicts recorded through Codex's `SubagentStop` hook), scribe, commit.
+  - One question the sources didn't settle was escalated and answered.
+  - The run found and fixed these bugs:
+    - the out-of-band snapshot was shared between worktrees, so parallel tasks saw each other's files as tampering;
+    - the tester's acceptance files, and harness files, made `next` skip the implementer;
+    - "permission" and "role" in ordinary prose made a spec risky (the defaults now name access-control phrases: RBAC, access control, user or admin roles, permission model);
+    - Codex's directory-trust and update prompts blocked unattended starts.
+  - **Still manual:** Codex asks before each `orca orchestration` command until you allow them once (see `backbone/HOOKS.md`).
+- `next` sends a `[WIP]` task back to the griller when its spec changed during the build.
+
 ## 0.11.0 (2026-10-17)
 
 - **Tester** (`HARNESS_TESTER`, user-only, default `off`): independent acceptance tests.

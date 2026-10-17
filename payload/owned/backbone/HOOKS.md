@@ -194,6 +194,19 @@ A coordinator asks the harness what a task needs instead of knowing the workflow
 
 Under an Orca coordinator (`HARNESS_ORCA_RUN` set), `escalate` also sends an `escalation` message to the Run's mailbox.
 
+## Orca coordinator (`harness.py orca`)
+
+`python3 scripts/harness/lib/harness.py orca [--tasks 1.3,1.4] [--parallel 2] [--agents default=claude,judge=codex] [--trust] [--pr] [--dry-run]` drives ready tasks with [Orca](https://github.com/stablyai/orca) supervised workers. It needs autonomous mode and a running Orca.
+
+- **One Orca worktree per task** (`harness-task-<id>`, from the current branch), so tasks run in parallel without sharing `3-TASKS.md`. The repository is registered with Orca if it isn't yet.
+- **One worker per step.** The coordinator asks `harness.py next <id>` what the task needs. For a role step it starts a worker with a self-contained spec: target, change, ownership, constraints and the acceptance check. The worker delegates the step to the role agent, and the hooks hold that agent to its role. Approve, start, finish and the commit the coordinator runs itself, through the same gates.
+- **Questions between agents.** A worker that needs an answer asks the coordinator (`orca orchestration ask`). The coordinator starts an analyst worker, or an architect worker for design questions, to answer from `backbone/` and the knowledge source. The answer goes into the spec under Assumptions, with its source, and the reply tells the asker where it is. A question nobody can answer from the sources is escalated. A spec that changed during the build is grilled again before the task goes on.
+- **Agents per role** (`--agents` or `HARNESS_ORCA_AGENTS`, user-only): for example `default=claude,judge=codex` runs the judge on a different model from the implementer. Agents that need launch flags get their own terminal (`HARNESS_ORCA_LAUNCH`, default `codex=codex --dangerously-bypass-hook-trust -c check_for_update_on_startup=false`: an update prompt would block an unattended start). Codex otherwise skips the hooks of every new worktree until someone trusts them, and the harness's hooks are lock-checked.
+- **Permission prompts.** A worker must run Orca's own commands (`orca orchestration check`, `worker_done`) to report back. Codex asks before each one by default, and the worker waits at that prompt. The coordinator logs every worker it finds waiting at a prompt, but never answers one. In Codex, choose "don't ask again for commands that start with `orca orchestration`" once. Inside the sandbox, launch it with `--dangerously-bypass-approvals-and-sandbox` instead (`HARNESS_ORCA_LAUNCH`).
+- **`--trust`** marks each task worktree trusted for Claude Code (`~/.claude.json`) and Codex (`~/.codex/config.toml`). Without it, a worker in a new worktree waits at its trust dialog, which Orca reports as `Agent startup blocked: agent-trust-workspace`.
+- **Safety.** The coordinator follows Orca's lifecycle rules: it acknowledges every delivery after processing it, and releases a worker only after it settles. It never stops, abandons or retries a worker by itself. A step that comes back 3 times without progress is escalated. `.git/harness/STOP` halts it.
+- **The end.** It commits each finished task on its branch (and opens a PR with `--pr`), then reports every task's outcome and the open escalations. Answer those, then run it again: it picks up where the tasks stand.
+
 ## Knowledge source (`HARNESS_KNOWLEDGE_ROOT`)
 
 In autonomous mode the griller's questions are answered from `backbone/`. A knowledge source adds a second place to look: a folder of notes (an Obsidian vault, a wiki export) served by an MCP server. Unanswered questions still escalate; the knowledge source only means fewer of them do.

@@ -1000,6 +1000,8 @@ expect 2 "agents cannot edit escalations.md" hook "$A" pre-tool-use "$(edit_json
 auto_spec 3.3 ""
 sed -i.bak 's/^- code-quality: all code$/&\
 - `security` is not listed: titles are trusted input and no auth, secret or personal data is handled./' "$A/backbone/specs/3.3.md" && rm -f "$A/backbone/specs/3.3.md.bak"
+out=$(HARNESS_ROOT="$A" python3 -c 'import importlib.util as u,sys; s=u.spec_from_file_location("h",sys.argv[1]); m=u.module_from_spec(s); s.loader.exec_module(m); import re; t=re.compile(m.conf()["HARNESS_RISK_TERMS"]); print([bool(t.search(x)) for x in sys.argv[2:]])' "$A/scripts/harness/lib/harness.py" "so the scope is fixed and the permission to add files is closed" "the admin roles can delete users" "add an RBAC check" "Passwords are hashed")
+contains "risk terms: everyday 'permission' prose isn't risk; roles, RBAC and passwords are" "[False, True, True, True]" "$out"
 contains "fixture: the Skills section rules out risks by name" "no auth, secret or personal data" "$(cat "$A/backbone/specs/3.3.md")"
 grill_pass 3.3 >/dev/null
 expect 0 "approve: risk words in the Skills section don't escalate" $AH approve 3.3
@@ -1116,6 +1118,10 @@ out=$(hookf "$A" pre-tool-use opencode "$(cj Edit '{"file_path":"backbone/specs/
 contains "opencode: a subagent is held to its role" "implementer agent may not edit backbone/specs/3.1.md" "$out"
 
 section "coordinator API: state, next, questions, start, finish"
+auto_spec 8.0 ""
+python3 -c 'import re,sys; p=sys.argv[1]; t=open(p).read(); open(p,"w").write(re.sub(r"(?m)^- The endpoint lives in .*$", "- To be added by the architect.", t))' "$A/backbone/specs/8.0.md"
+contains "next: a spec without tech requirements goes to the architect" '"role": "architect"' "$($AH next 8.0 --json)"
+sed -i.bak 's/^- \[ \] \*\*Task 8\.0.*$//' "$AT" && rm -f "$AT.bak"
 auto_spec 8.1 ""
 contains "next: a spec nobody grilled goes to the griller" '"role": "griller"' "$($AH next 8.1 --json)"
 grill_pass 8.1 >/dev/null
@@ -1131,6 +1137,10 @@ step=$($AH next 8.1 --json)
 expect 0 "next: a started task goes to the implementer or the judge" python3 -c 'import json,sys; sys.exit(json.loads(sys.argv[1])["role"] not in ("implementer","judge"))' "$step"
 out=$($AH finish 8.1; echo "exit=$?")
 contains "finish refuses without a judge pass (the judge gate)" "can't finish" "$out"
+cp "$A/backbone/specs/8.1.md" "$WORK/spec-8.1.bak"
+python3 -c 'import sys; p=sys.argv[1]; t=open(p).read(); open(p,"w").write(t.replace("\n## Approval", "\n- A9: an answer recorded during the build (source: backbone/4-KNOWLEDGE.md)\n\n## Approval", 1))' "$A/backbone/specs/8.1.md"
+contains "next: a spec changed during the build is grilled again" "the spec changed during the build" "$($AH next 8.1 --json)"
+cp "$WORK/spec-8.1.bak" "$A/backbone/specs/8.1.md"
 lacks "the task is not marked done" "- [x] **Task 8.1" "$(cat "$AT")"
 sed -i.bak 's/^- \[WIP\] \*\*Task 8\.1/- [ ] **Task 8.1/' "$AT" && rm -f "$AT.bak"
 auto_spec 8.2 ""
@@ -1139,6 +1149,10 @@ q=$($AH questions 8.2 --json)
 contains "questions: a design question goes to the architect" '"route": "architect"' "$q"
 contains "questions: a requirements question goes to the analyst" '"route": "analyst"' "$q"
 contains "next: open questions are answered before grilling again" '"step": "answer"' "$($AH next 8.2 --json)"
+contains "next: the design question's owner answers first" '"roles": [
+    "architect",
+    "analyst"
+  ]' "$($AH next 8.2 --json)"
 contains "state lists every task" "8.2" "$($AH state)"
 expect 0 "state --json parses" python3 -c 'import json,sys; json.loads(sys.argv[1])["tasks"]' "$($AH state --json)"
 printf '#!/bin/sh\necho "$@" >> "%s/orca-calls"\necho "{}"\n' "$WORK" > "$WORK/fake-orca"; chmod +x "$WORK/fake-orca"
@@ -1176,6 +1190,17 @@ expect 0 "the tester's tests are recorded" hook "$A" tester-stop "$(treport 8.1)
 contains "the record lists the covered criteria" '"AC-8.1-2"' "$(cat "$A/backbone/.verdicts/8.1.tests.json")"
 step=$($AH next 8.1 --json)
 expect 0 "next: after the tester, the implementer" python3 -c 'import json,sys; sys.exit(json.loads(sys.argv[1])["role"] not in ("implementer","judge"))' "$step"
+T2="$WORK/tester-only"; new_repo "$T2"; "$HARNESS/bootstrap.sh" "$T2" --name t2 >/dev/null
+mkdir -p "$T2/backbone/specs"; printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/7.1/g" -e 's/^- python: all code$/- code-quality: all code/' > "$T2/backbone/specs/7.1.md"
+printf -- '- [WIP] **Task 7.1: Item** (spec: backbone/specs/7.1.md)\n' >> "$T2/backbone/3-TASKS.md"
+printf '%s' "$(python3 -c 'import json; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":"7.1","questions":[],"summary":"s"})+"\n```"}))')" | python3 "$T2/scripts/harness/lib/harness.py" hook grill-stop >/dev/null 2>&1
+git -C "$T2" add -A && HARNESS_VERIFY=off git -C "$T2" commit -qm "chore: fixture"
+mkdir -p "$T2/tests/acceptance"; printf '# AC-7.1-1 AC-7.1-2\n' > "$T2/tests/acceptance/test_7_1.py"
+printf '%s' "$(python3 -c 'import json; print(json.dumps({"agent_type":"tester","last_assistant_message":"```json\n"+json.dumps({"task":"7.1","tests":[],"red":True})+"\n```"}))')" | python3 "$T2/scripts/harness/lib/harness.py" hook tester-stop >/dev/null 2>&1
+step=$(cd "$T2" && python3 "$T2/scripts/harness/lib/harness.py" next 7.1 --json)
+contains "next: the tester's new acceptance files don't count as the implementer's work" '"step": "implement"' "$step"
+echo "# local" >> "$T2/.claude/agents/judge.md"
+contains "next: a harness update in the worktree doesn't count as the implementer's work" '"step": "implement"' "$(cd "$T2" && python3 "$T2/scripts/harness/lib/harness.py" next 7.1 --json)"
 printf 'def a():  # AC-8.1-1 AC-8.1-2\n    return 1\n' > "$A/src/feature.py"
 hook "$A" judge-stop "$(judge_report 8.1 pass)" >/dev/null 2>&1
 contains "fixture: the judge passed 8.1" '"verdict": "pass"' "$(cat "$A/backbone/.verdicts/8.1.judge.json")"
@@ -1205,6 +1230,132 @@ hookf "$A" subagent-stop codex "$(treport 8.4 | python3 -c 'import json,sys; d=j
 [ "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["history"]))' "$A/backbone/.verdicts/8.4.tests.json")" -eq 2 ] && ok "codex: the tester's SubagentStop records too" || bad "codex: the tester's SubagentStop records too"
 sed -i.bak 's/^- \[WIP\] \*\*Task 8\.4/- [ ] **Task 8.4/' "$AT" && rm -f "$AT.bak"
 unset HARNESS_TESTER
+
+section "worktrees keep their own out-of-band snapshot"
+WT="$WORK/wt-main"; new_repo "$WT"; "$HARNESS/bootstrap.sh" "$WT" --name wt >/dev/null
+git -C "$WT" add -A && HARNESS_VERIFY=off git -C "$WT" commit -qm "chore: adopt"
+git -C "$WT" worktree add -q -b other "$WORK/wt-other"
+snap() { HARNESS_ROOT="$1" python3 -c 'import importlib.util as u,sys; s=u.spec_from_file_location("h",sys.argv[1]); m=u.module_from_spec(s); s.loader.exec_module(m); print(m.snapshot_file())' "$1/scripts/harness/lib/harness.py"; }
+[ "$(snap "$WT")" != "$(snap "$WORK/wt-other")" ] && ok "each worktree has its own snapshot" || bad "each worktree has its own snapshot"
+echo "edited in the other worktree" >> "$WORK/wt-other/backbone/4-KNOWLEDGE.md"
+HARNESS_AUTONOMY=autonomous HARNESS_TEST_CMD=true python3 "$WORK/wt-other/scripts/harness/lib/harness.py" hook post-tool-use "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s/backbone/4-KNOWLEDGE.md","content":"x"}}' "$WORK/wt-other")" < /dev/null >/dev/null 2>&1
+printf '{"tool_name":"Write","tool_input":{"file_path":"%s/backbone/4-KNOWLEDGE.md","content":"x"}}' "$WORK/wt-other" | HARNESS_AUTONOMY=autonomous HARNESS_TEST_CMD=true python3 "$WORK/wt-other/scripts/harness/lib/harness.py" hook post-tool-use >/dev/null 2>&1
+out=$(printf '{"tool_name":"Bash","tool_input":{"command":"ls"}}' | HARNESS_AUTONOMY=autonomous HARNESS_TEST_CMD=true python3 "$WT/scripts/harness/lib/harness.py" hook post-tool-use 2>&1)
+lacks "a worktree's edits are not out-of-band changes in another worktree" "changed outside the Write/Edit tools" "$out"
+
+section "Orca coordinator (fake orca CLI)"
+O="$WORK/orca-project"
+new_repo "$O"
+"$HARNESS/bootstrap.sh" "$O" --name orca >/dev/null
+OH="python3 $O/scripts/harness/lib/harness.py"
+mkdir -p "$O/backbone/specs" "$O/src" "$O/tests"
+printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/9.1/g" -e 's/^- python: all code$/- code-quality: all code/' > "$O/backbone/specs/9.1.md"
+printf -- '- [ ] **Task 9.1: Item** (spec: backbone/specs/9.1.md)\n' >> "$O/backbone/3-TASKS.md"
+printf '%s' "$(python3 -c 'import json; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":"9.1","questions":[],"summary":"s"})+"\n```"}))')" \
+  | python3 "$O/scripts/harness/lib/harness.py" hook grill-stop >/dev/null
+$OH approve 9.1 >/dev/null
+git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: adopt agentic harness"
+cat > "$WORK/fake-orca.py" <<'EOF'
+#!/usr/bin/env python3
+# Stands in for the orca CLI: records calls, and plays each worker's step through the real harness hooks.
+import json, os, re, subprocess, sys
+state_path = os.environ["FAKE_ORCA_STATE"]
+state = json.load(open(state_path)) if os.path.exists(state_path) else {"n": 0, "queue": [], "held": {}, "calls": [], "judged": 0}
+args = [a for a in sys.argv[1:] if a != "--json"]
+state["calls"].append(args[:2])
+opt = lambda k: args[args.index(k) + 1] if k in args else None
+def harness(cwd, *a, stdin=""):
+    return subprocess.run(["python3", os.path.join(cwd, "scripts/harness/lib/harness.py")] + list(a), cwd=cwd, input=stdin, capture_output=True, text=True)
+def done(d, h, body="ok", outcome="succeeded"):
+    state["queue"].append({"id": "m%d" % len(state["calls"]), "type": "worker_done", "from_handle": h, "body": body, "payload": json.dumps({"dispatchId": d, "outcome": outcome})})
+def report(agent, body):
+    return json.dumps({"agent_type": agent, "last_assistant_message": "```json\n" + json.dumps(body) + "\n```"})
+result = {}
+if args[:2] == ["orchestration", "run-create"]:
+    result = {"run": {"id": "run_test"}}
+elif args[:2] == ["orchestration", "worker-start"]:
+    state["n"] += 1
+    d, h = "dispatch_%d" % state["n"], "term_%d" % state["n"]
+    sel = opt("--worktree")
+    cwd = next(w["path"] for w in state["worktrees"] if "id:" + w["id"] == sel) if sel.startswith("id:") else sel[len("path:"):]
+    spec = opt("--spec")
+    state.setdefault("agents", []).append(opt("--agent") or opt("--terminal"))
+    m = re.match(r"Harness step for task (\S+) \(\"[^\"]*\"\): (\w+)\.", spec)
+    if spec.startswith("Harness question"):
+        done(d, h, "ANSWER: recorded as A1 in the spec")
+    elif m:
+        task, step = m.groups()
+        if step == "implement":
+            os.makedirs(os.path.join(cwd, "src"), exist_ok=True); os.makedirs(os.path.join(cwd, "tests"), exist_ok=True)
+            open(os.path.join(cwd, "src/feature.py"), "w").write("def f():  # AC-%s-1 AC-%s-2\n    return 1\n" % (task, task))
+            open(os.path.join(cwd, "tests/test_feature.py"), "w").write("def test_f():  # AC-%s-1 AC-%s-2\n    assert True\n" % (task, task))
+            state["queue"].append({"id": "q1", "type": "question", "from_handle": h, "body": "Which module holds f?", "payload": "{}"})
+            state["held"][h] = d
+        elif step == "judge":
+            state["judged"] += 1
+            verdict = "fail" if state["judged"] == 1 else "pass"
+            crit = [{"id": "AC-%s-%d" % (task, n), "met": verdict == "pass", "evidence": "src/feature.py:1", "tests": ["test_f"]} for n in (1, 2)]
+            harness(cwd, "hook", "judge-stop", stdin=report("judge", {"verdict": verdict, "task": task, "criteria": crit, "findings": [], "tests": {"command": "true", "result": "passed"}, "summary": "s"}))
+            done(d, h)
+        elif step == "diagnose":
+            harness(cwd, "hook", "debug-stop", stdin=report("debugger", {"task": task, "root_causes": [{"criterion": "AC-%s-1" % task, "cause": "c", "fix": "f", "owner": "implementer"}], "confidence": "high", "summary": "s"}))
+            done(d, h)
+        elif step == "fix":
+            open(os.path.join(cwd, "src/feature.py"), "a").write("# fixed\n")
+            done(d, h)
+        else:
+            done(d, h)
+    result = {"dispatch": {"dispatchId": d, "terminalHandle": h}}
+elif args[:2] == ["repo", "add"]:
+    result = {"repo": {"id": "repo1", "path": opt("--path")}}
+elif args[:2] == ["worktree", "list"]:
+    result = {"worktrees": state.get("worktrees", [])}
+elif args[:2] == ["worktree", "create"]:
+    name, repo = opt("--name"), opt("--repo")[len("path:"):]
+    path = os.path.join(os.environ["FAKE_ORCA_WT"], name)
+    subprocess.run(["git", "-C", repo, "worktree", "add", "-q", "-b", name, path, opt("--base-branch")], check=True)
+    wt = {"id": "repo1::" + path, "path": path, "branch": "refs/heads/" + name, "displayName": name}
+    state.setdefault("worktrees", []).append(wt)
+    result = {"worktree": wt}
+elif args[:2] == ["terminal", "create"]:
+    state.setdefault("terminals", []).append(opt("--command"))
+    result = {"terminal": {"handle": "term_launched_%d" % len(state["terminals"])}}
+elif args[:2] == ["orchestration", "check"]:
+    messages, state["queue"] = state["queue"], []
+    result = {"deliveryId": "delivery_%d" % len(state["calls"]), "messages": messages}
+elif args[:2] == ["orchestration", "reply"]:
+    state.setdefault("replies", []).append([opt("--id"), opt("--body")])
+    for h, d in list(state["held"].items()):
+        done(d, h)
+        del state["held"][h]
+elif args[:2] == ["orchestration", "worker-show"]:
+    result = {"dispatch": {"id": opt("--dispatch"), "status": "running"}}
+elif args[:2] == ["orchestration", "worker-release"]:
+    state.setdefault("released", []).append(opt("--dispatch"))
+json.dump(state, open(state_path, "w"))
+print(json.dumps({"ok": True, "result": result}))
+EOF
+chmod +x "$WORK/fake-orca.py"
+export FAKE_ORCA_STATE="$WORK/orca-state.json" FAKE_ORCA_WT="$WORK/orca-worktrees"
+out=$(HARNESS_AUTONOMY=supervised HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca 2>&1; echo "exit=$?")
+contains "orca needs autonomous mode" "needs HARNESS_AUTONOMY" "$out"
+out=$(HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --dry-run --agents "default=claude,judge=codex" 2>&1)
+contains "orca --dry-run shows the next step per task" "would drive task 9.1 (next: start)" "$out"
+out=$(HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --agents "default=claude,judge=codex" --wait-ms 10 2>&1; echo "exit=$?")
+contains "orca drives the task to done" "task 9.1: done" "$out"
+contains "orca ends cleanly" "exit=0" "$out"
+contains "the task was committed on its own branch" "feat: task 9.1: Item" "$(git -C "$O" log --oneline harness-task-9.1)"
+lacks "the base branch is untouched" "feat: task 9.1" "$(git -C "$O" log --oneline HEAD)"
+contains "the committed task line is [x]" "- [x] **Task 9.1" "$(git -C "$O" show harness-task-9.1:backbone/3-TASKS.md)"
+st=$(cat "$FAKE_ORCA_STATE")
+contains "the worker's question was answered" '"q1", "ANSWER: recorded as A1 in the spec"' "$st"
+contains "Codex is opened with the hook-trust bypass (its worktree's hooks would be skipped otherwise)" '"codex --dangerously-bypass-hook-trust -c check_for_update_on_startup=false"' "$st"
+contains "then supervised in that terminal" '"term_launched_1"' "$st"
+n_started=$(python3 -c 'import json,sys; print(sum(1 for c in json.load(open(sys.argv[1]))["calls"] if c==["orchestration","worker-start"]))' "$FAKE_ORCA_STATE")
+n_released=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("released",[])))' "$FAKE_ORCA_STATE")
+[ "$n_started" -eq "$n_released" ] && ok "every worker was released after it settled ($n_released)" || bad "every worker was released after it settled ($n_started started, $n_released released)"
+contains "the debugger diagnosed the failed round" '"kind": "debug"' "$(git -C "$O" show harness-task-9.1:backbone/.verdicts/9.1.debug.json 2>/dev/null)"
+unset FAKE_ORCA_STATE
 
 section "autonomous mode: judging, risk drift, kill switch"
 printf 'def a():  # AC-3.1-1 AC-3.1-2\n    return 1\n' > "$A/src/a.py"

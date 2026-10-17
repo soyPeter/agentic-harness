@@ -74,7 +74,7 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
                   "HARNESS_DECISION_PROVIDER", "HARNESS_DECISION_MODE", "HARNESS_DECISION_ADR",
                   "HARNESS_DECISION_CMD", "HARNESS_DECISION_MODEL", "HARNESS_DECISION_URL",
                   "HARNESS_KNOWLEDGE_ROOT", "HARNESS_KNOWLEDGE_TOOLS", "HARNESS_KNOWLEDGE_PATHS",
-                  "HARNESS_TESTER", "HARNESS_ACCEPTANCE_PATHS")
+                  "HARNESS_TESTER", "HARNESS_ACCEPTANCE_PATHS", "HARNESS_ORCA_AGENTS", "HARNESS_ORCA_LAUNCH")
 # The knowledge source: an MCP server registered as "knowledge" (claude mcp add) over a folder of notes, that the
 # analyst, architect and griller consult when grilling raises questions. Read-only; answers are cited as vault:<path>.
 KNOWLEDGE_TOOL_PREFIX = "mcp__knowledge__"
@@ -154,7 +154,8 @@ DEFAULTS = {
     "HARNESS_AUTONOMY": "supervised",
     "HARNESS_AUTO_APPROVE": "low",
     "HARNESS_RISK_TERMS": r"(?i)\b(auth(entication|orization)?|logins?|passwords?|secrets?|tokens?|credentials?|"
-                          r"encrypt\w*|permissions?|roles?|payments?|billing|personal data|PII|GDPR|migrations?|"
+                          r"encrypt\w*|access control|RBAC|role-based|(user|admin) roles?|permission (model|check|system)s?|"
+                          r"payments?|billing|personal data|PII|GDPR|migrations?|"
                           r"schema changes?|breaking changes?|public API|deletes? (all|every))\b",
     "HARNESS_RISK_PATHS": r"(?i)(^|/)(auth|security|migrations?|db/migration|infra|deploy|\.github)/|openapi|swagger"
                           r"|Dockerfile|(^|/)(pom\.xml|build\.gradle(\.kts)?|settings\.gradle(\.kts)?|package\.json|"
@@ -186,6 +187,8 @@ DEFAULTS = {
     "HARNESS_TESTER": "off",
     "HARNESS_ACCEPTANCE_PATHS": r"(^|/)acceptance([/._-]|$)",
     "HARNESS_DEBUGGER": "on",
+    "HARNESS_ORCA_AGENTS": "default=claude",
+    "HARNESS_ORCA_LAUNCH": "codex=codex --dangerously-bypass-hook-trust -c check_for_update_on_startup=false",
 }
 STOP_MODES = ("remind", "block", "off")
 
@@ -1452,7 +1455,10 @@ SNAPSHOT_SKIP = (".claude/settings.local.json",)
 
 
 def snapshot_file():
-    return events_file().parent / "snapshot.json"
+    """Per worktree (its own git dir), not in the shared .git/harness: each worktree has its own protected files,
+    and worktrees sharing one snapshot see each other's files as out-of-band changes."""
+    git_dir = git("rev-parse", "--absolute-git-dir").strip()
+    return (Path(git_dir) / "harness" / "snapshot.json") if git_dir else events_file().parent / "snapshot.json"
 
 
 def protected_hashes():
@@ -2666,9 +2672,27 @@ def task_status(task):
     }
 
 
+TECH_PLACEHOLDER = re.compile(r"(?i)^<.*>$|\b(to be (added|filled|decided|defined)|tbd|todo|fill(ed)? in later|pending)\b")
+
+
+def architecture_pending(text):
+    """The architect hasn't filled in the spec yet: no tech requirement beyond the template's placeholders."""
+    section = md_section(strip_comments(text), "Architecture") or ""
+    tech = section.split("Tech requirements:", 1)[1] if "Tech requirements:" in section else ""
+    items = [b for b in bullets(tech) if b]
+    return not items or all(TECH_PLACEHOLDER.search(b) for b in items)
+
+
 def code_changed():
-    """Uncommitted changes outside backbone/ (the implementer's work before the judge sees it)."""
-    return any(line[3:] and not line[3:].startswith("backbone/") for line in git("status", "--porcelain").splitlines())
+    """Uncommitted changes outside backbone/ and the tester's acceptance tests (the implementer's work)."""
+    try:
+        acceptance = re.compile(conf()["HARNESS_ACCEPTANCE_PATHS"]) if tester_on() else None
+    except re.error:
+        acceptance = None
+    names = [n for n in git("status", "--porcelain", "-uall").splitlines()]
+    harness_files = [p for p in SHELL_PROTECTED] + list(ENFORCEMENT_FILES)
+    return any(n[3:] and not n[3:].startswith("backbone/") and not (acceptance and acceptance.search(n[3:]))
+               and not any(re.search(p, n[3:]) for p in harness_files) for n in names)
 
 
 def next_step(task):
@@ -2687,11 +2711,17 @@ def next_step(task):
         if s["spec_problems"]:
             design = any(re.search(r"(?i)architecture|skills|ADR", p) for p in s["spec_problems"])
             return dict(step, step="define", role="architect" if design else "analyst", problems=s["spec_problems"])
+        if architecture_pending(read(spec_path(task))):
+            return dict(step, step="define", role="architect",
+                        reason="the Architecture section has no tech requirements yet (the architect designs next)")
         if not (s["grill"] and s["grill"]["current"]):
             return dict(step, step="grill", role="griller", reason="no griller verdict on the current spec")
         if s["grill"]["verdict"] != "pass":
             questions = open_questions(task)
-            roles = sorted({q["route"] for q in questions}) or ["analyst"]
+            # The role that owns a blocker answers first; then design before requirements.
+            rank = lambda r: (not any(q["route"] == r and q.get("severity") == "blocker" for q in questions),
+                              r != "architect")
+            roles = sorted({q["route"] for q in questions}, key=rank) or ["analyst"]
             return dict(step, step="answer", role=roles[0], roles=roles, questions=questions,
                         then="grill again (the answers change the spec)")
         if not s["approved"]:
@@ -2700,6 +2730,9 @@ def next_step(task):
                                                                        "approve %s" % task)
             return dict(step, step="approve", role=None, needed="the user's Approved-by: line in %s" % s["spec"])
         return dict(step, step="start", role=None, command="python3 scripts/harness/lib/harness.py start %s" % task)
+    if s["spec"] and not (s["grill"] and s["grill"]["current"] and s["grill"]["verdict"] == "pass"):
+        return dict(step, step="grill", role="griller", reason="the spec changed during the build (an answered "
+                                                                 "question); grill it again before going on")
     if tester_on():
         tests = verdict_history(task, "tests")
         if not tests or acceptance_fingerprint(task) != tests[-1].get("fingerprint"):
@@ -2791,6 +2824,51 @@ def questions_command(argv):
     for q in questions:
         print("[%s -> %s] %s: %s" % (q.get("severity"), q["route"], q.get("about"), q.get("question")))
     return 0
+
+
+def orca_command(argv):
+    """harness.py orca: drive ready tasks with Orca supervised workers (scripts/harness/lib/coordinator.py)."""
+    import coordinator
+    if not autonomous():
+        print("orca: needs HARNESS_AUTONOMY=\"autonomous\" (set by the user in backbone/harness.conf): the workers "
+              "answer the griller's questions and approve low-risk specs by policy")
+        return 1
+    errors = [m for level, m in health() if level == "error"]
+    if errors:
+        print("orca: fix the harness first:\n  " + "\n  ".join(errors))
+        return 1
+    value = lambda flag: argv[argv.index(flag) + 1] if flag in argv and argv.index(flag) + 1 < len(argv) else None
+    agents = dict(pair.split("=", 1) for pair in (value("--agents") or conf()["HARNESS_ORCA_AGENTS"]).replace(
+        ",", " ").split() if "=" in pair)
+    ready = [t for t, _, _ in ready_tasks()]
+    tasks = [t for t in (value("--tasks") or "").split(",") if t] or ready
+    tasks = [t for t in tasks if t in ready]
+    limit = int(value("--parallel")) if (value("--parallel") or "").isdigit() else 2
+    tasks = tasks[:1] if "--here" in argv else tasks[:limit]
+    if not tasks:
+        print("orca: no ready task (pending or [WIP], not BLOCKED)")
+        return 0
+    if "--dry-run" in argv:
+        for task in tasks:
+            step = next_step(task)
+            print("orca: would drive task %s (next: %s%s), agents %s" % (task, step["step"],
+                  " by the %s" % step["role"] if step.get("role") else "", agents))
+        return 0
+    launch = dict(part.strip().split("=", 1) for part in conf()["HARNESS_ORCA_LAUNCH"].split(";") if "=" in part)
+    opts = {"run": value("--run"), "agents": agents, "launch": launch, "trust": "--trust" in argv,
+            "launch_wait": int(os.environ.get("HARNESS_ORCA_LAUNCH_WAIT", "8")), "here": "--here" in argv, "pr": "--pr" in argv,
+            "orca": os.environ.get("HARNESS_ORCA_BIN"),
+            "wait_ms": int(value("--wait-ms")) if (value("--wait-ms") or "").isdigit() else 900000,
+            "timeout": int(value("--timeout")) if (value("--timeout") or "").isdigit() else 4 * 3600}
+    log_event("orca-start", tasks=tasks, agents=agents)
+    try:
+        code = coordinator.Coordinator(ROOT, opts, log=lambda line: print(line, flush=True)).drive(tasks)
+    except coordinator.CoordinatorError as exc:
+        print("orca: stopped: %s" % exc)
+        log_event("orca-error", error=str(exc)[:500])
+        return 1
+    log_event("orca-end", code=code)
+    return code
 
 
 # --------------------------------------------------------------------------- runner and report
@@ -3730,6 +3808,8 @@ def main(argv):
         return run_command(argv[2:])
     if argv[1:2] == ["state"]:
         return state_command(argv[2:])
+    if argv[1:2] == ["orca"]:
+        return orca_command(argv[2:])
     if argv[1:2] == ["next"]:
         return next_command(argv[2:])
     if argv[1:2] == ["questions"]:
