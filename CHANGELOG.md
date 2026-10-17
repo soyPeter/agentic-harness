@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.3 (2026-10-17)
+
+More from the ledger backlog run: **false escalations from over-adversarial grilling.**
+- `format_money` was escalated over `Decimal('1E+100000000')`, and `parse_amount` over `str` subclasses and a CLI file-size limit (task 1.9's business). The griller's instruction to cover "abuse cases" applied hostile-input thinking to a local tool reading its own user's bank file.
+- Now the griller judges abuse cases by the product's threat model (who supplies the input, across which trust boundary). It doesn't ask about inputs outside the PRD's domain or about another task's scope (at most a minor suggesting "out of scope").
+- The analyst settles such questions under Out of scope with their source, instead of escalating them.
+
 ## 0.13.2 (2026-10-17)
 
 Findings from the 10-task ledger backlog run:
