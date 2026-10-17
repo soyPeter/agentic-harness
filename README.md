@@ -120,8 +120,9 @@ The hard floor stays CI: an agent without hooks, or a human with `--no-verify`, 
 
 The guard's limits: it needs `python3` and `git` on the PATH, and when its own lookup fails (no git, a broken
 config) it lets the call through rather than stop every agent on the machine. It checks the repository of each file
-a tool writes and, for shell commands, the working directory; a command that writes into another repository is only
-caught there by that repository's own hooks.
+a tool writes and, for shell commands, the working directory plus every path and `cd` target the command names. A
+shell command that builds a path at run time (a variable, a computed string) can still reach another repository unseen.
+In block mode the only shell command it lets run in an unenrolled repository is the harness's own `enroll.sh`.
 
 ## What gets installed
 

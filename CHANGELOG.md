@@ -7,9 +7,9 @@
 - **Automation precheck**: executes `harness.py orca-nightly`, which opens an Orca terminal running `harness.py orca --merge --trust`; the automation agent reports only `harness.py orca-digest` (the last finished run's summary, kept in its own file).
 - **Coordinator Lock**: ensures one coordinator per repository via an OS file lock; agents may not start `harness.py orca` or `orca-nightly`, but may run `orca --dry-run` and `orca-digest`.
 - **CI Protect**: uses the default branch, preserves existing checks (including app bindings), reviews, and rules, and changes nothing if it cannot read current protection.
-- **Machine guard**: in block mode, refuses every shell command in an unenrolled repository except running `enroll.sh`; it fails open when its own lookup fails; it checks the repository of each written file and, for shell, the working directory.
+- **Machine guard**: in block mode, allows only the harness's own enroll.sh (the path machine.sh install records), and checks the paths and cd targets a shell command names; it fails open when its own lookup fails; it checks the repository of each written file and, for shell, the working directory.
 - **Orca skill**: tells coordinators to plan with `--dry-run` and to ask the user to start runs.
-- **Reviews**: Two Codex review rounds: 19 findings, then 9 more after the first fixes; all addressed, with behaviour tests.
+- **Reviews**: Three Codex review rounds: 19 findings, then 9, then 3; all fixed with behaviour tests, except two documented limits: the machine guard can't see a shell command's paths built at run time, and it fails open when its own lookup fails.
 
 ## 0.13.3 (2026-10-17)
 
