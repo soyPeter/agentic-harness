@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.14.0 (2026-10-17)
+
+**Project Enrollment and Shell Gating.** The harness now provides opt-in project enrollment and enforces shell gates for agents:
+- `enroll.sh`: installs or updates the harness, runs doctor, and registers the project in Orca with `--orca` (including automation schedule, one automation per checkout).
+- **Automation precheck**: executes `harness.py orca-nightly`, which opens an Orca terminal running `harness.py orca --merge --trust`; the automation agent reports only `harness.py orca-digest` (the last finished run's summary, kept in its own file).
+- **Coordinator Lock**: ensures one coordinator per repository via an OS file lock; agents may not start `harness.py orca` or `orca-nightly`, but may run `orca --dry-run` and `orca-digest`.
+- **CI Protect**: uses the default branch, preserves existing checks (including app bindings), reviews, and rules, and changes nothing if it cannot read current protection.
+- **Machine guard**: in block mode, allows only the harness's own enroll.sh (the path machine.sh install records), and checks the paths and cd targets a shell command names; it fails open when its own lookup fails; it checks the repository of each written file and, for shell, the working directory.
+- **Orca skill**: tells coordinators to plan with `--dry-run` and to ask the user to start runs.
+- **Reviews**: Three Codex review rounds: 19 findings, then 9, then 3; all fixed with behaviour tests, except two documented limits: the machine guard can't see a shell command's paths built at run time, and it fails open when its own lookup fails.
+
 ## 0.13.3 (2026-10-17)
 
 More from the ledger backlog run: **false escalations from over-adversarial grilling.**
@@ -217,7 +228,7 @@ The stack is decided in design, not at install; the reviewed skill library from 
   - `harness.py catalog` lists the packs. `harness.py adopt <pack> --adr ADR-NNN --with ... --without ...` adopts them only from an **Accepted** ADR that names them, and only with every pack option decided.
   - Adopted rules and routes are written into the project's `guardrails.conf` and `routing.conf` as blocks citing the ADR, and options set `harness.conf` values.
   - `adopt --remove` undoes an adoption. Updates refresh adopted packs' files. Doctor warns when a pack's ADR is no longer Accepted.
-- **Catalog packs** were rewritten against the review findings (Java 25 API fixes, no Spring/Lombok/JPA in examples), with every tool choice made conditional on an option:
+- **Catalog packs** were rewritten against the review findings (Java 25 API fixes, no Spring/Lombok/JPA in examples), with every tool choice conditional on an option:
 
   | Pack | Skills | Options |
   |---|---|---|

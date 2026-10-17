@@ -90,6 +90,40 @@ git config core.hooksPath scripts/harness/git-hooks
 | Project file (`seed`) | Never rewritten; missing ones are created. New `harness.conf` settings are appended commented out, with their explanation, so nothing changes until you uncomment one |
 | `.claude/settings.json` | Harness hook entries replaced; everything else kept |
 
+## Enforce it everywhere
+
+The harness enforces itself inside each project (agent hooks, git hooks, CI). Three tools make sure every project
+has it and every agent loads it:
+
+- **`./enroll.sh <project> [--orca] [--automation daily] [--agents "default=claude judge=codex"] [--protect]`**:
+  - installs or updates the harness and runs the doctor;
+  - registers the project in Orca;
+  - with `--automation <schedule>`, creates one Orca automation per checkout: its precheck, which Orca runs itself, starts `harness.py orca --merge --trust` in its own Orca terminal (`harness.py orca-nightly`), and its agent reports the previous run's digest (`harness.py orca-digest`);
+  - sets the agent per role;
+  - with `--protect`, requires the CI checks on the GitHub default branch, keeping its existing checks and rules.
+
+  `--dry-run` shows what it would do. Enrolling again is safe.
+- **`./machine.sh install [--roots ~/Work/repos] [--mode warn|block]`**: a user-level guard hook for Claude Code and
+  Codex on this machine. In a git repository under the roots that has no harness, it reminds you (warn) or refuses
+  file edits (block) until the repository is enrolled; enrolled repositories are left to their own hooks. Codex asks
+  you to trust the new hook once (`/hooks`). `machine.sh status` and `machine.sh remove` show and undo it.
+  - `machine.sh managed --out DIR` writes the same guard as Claude Code `managed-settings.json` and Codex
+    `requirements.toml`, which nobody on the machine can switch off. Review them and install with sudo (see the
+    generated INSTALL.md); the tool never writes system files.
+- **`orca/skills/agentic-harness/SKILL.md`**: the Orca skill for coordinators you run by hand. It says to check for
+  the harness, prefer `harness.py orca`, and otherwise follow the gates (`harness.py next` before every step, command
+  steps through the harness, answers recorded in the spec with their source, prompts left to the user). Share it with
+  `orca skills share`.
+
+The hard floor stays CI: an agent without hooks, or a human with `--no-verify`, still can't merge past
+`harness-verify` once the branch is protected.
+
+The guard's limits: it needs `python3` and `git` on the PATH, and when its own lookup fails (no git, a broken
+config) it lets the call through rather than stop every agent on the machine. It checks the repository of each file
+a tool writes and, for shell commands, the working directory plus every path and `cd` target the command names. A
+shell command that builds a path at run time (a variable, a computed string) can still reach another repository unseen.
+In block mode the only shell command it lets run in an unenrolled repository is the harness's own `enroll.sh`.
+
 ## What gets installed
 
 | Path | Owner | Notes |
@@ -121,6 +155,10 @@ Check the state of a task's definition with `python3 scripts/harness/lib/harness
 bootstrap.sh, update.sh         entry points (thin wrappers)
 tools/installer.py              install, update and status logic
 tools/gen_agents.py             generates the Codex and OpenCode agents from .claude/agents/
+tools/enroll.py, enroll.sh      enroll a project (install or update, Orca, automation, CI protection)
+tools/machine.py, machine.sh    the machine guard (user level, or managed files to install)
+machine/guard.py                the guard hook itself
+orca/skills/agentic-harness/    the Orca skill for coordinators
 payload/owned/                  harness-owned files, replaced on update
 payload/seed/                   project-owned templates, created once
 payload/settings.fragment.json  hooks and permissions merged into .claude/settings.json

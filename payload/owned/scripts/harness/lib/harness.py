@@ -957,8 +957,11 @@ def shell_findings(command, cwd=None, depth=0):
         elif prog == "eval" and depth < 3:
             found.extend(shell_findings(" ".join(words[1:]), cwd, depth + 1))
         elif prog in INTERPRETERS:
-            if any(w.endswith("harness.py") for w in words[1:3]) and set(words[2:4]) & {"run", "ci-judge", "ci-protect"}:
-                found.append("harness.py run, ci-judge and ci-protect are for the user or CI, not agents.")
+            command = next((w for w in words[2:4] if w in ("run", "ci-judge", "ci-protect", "orca", "orca-nightly")), None)
+            planning = command in ("orca", "orca-nightly") and "--dry-run" in words   # these dry runs change nothing
+            if any(w.endswith("harness.py") for w in words[1:3]) and command and not planning:
+                found.append("harness.py run, orca, orca-nightly, ci-judge and ci-protect are for the user, CI or an "
+                             "Orca automation's precheck, not agents.")
             flag = next((f for f in ("-c", "-e", "-pe", "-ne") if f in words), None)
             if flag and words.index(flag) + 1 < len(words):
                 found.extend(code_findings(words[words.index(flag) + 1], "That %s one-liner" % prog))
@@ -2826,6 +2829,122 @@ def questions_command(argv):
     return 0
 
 
+def orca_dir(create=False):
+    """<git common dir>/harness: shared by the repository's worktrees. Reads don't create it."""
+    common = git("rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+    path = Path(common) / "harness" if common else ROOT / ".git" / "harness"
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+ORCA_LOCK = {"fd": None}
+
+
+def orca_lock_holder():
+    """The pid recorded by a live coordinator of this repository (it holds an OS lock on orca.lock), or None."""
+    path = orca_dir() / "orca.lock"
+    if not path.exists():
+        return None
+    try:
+        import fcntl
+        fd = os.open(str(path), os.O_RDONLY)
+    except (ImportError, OSError):
+        return None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:
+            try:
+                return int(json.loads(os.read(fd, 4096).decode("utf-8") or "{}").get("pid")) or -1
+            except (ValueError, TypeError):
+                return -1
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return None
+    finally:
+        os.close(fd)
+
+
+def orca_lock_acquire():
+    """One coordinator per repository: an exclusive OS lock on orca.lock, held until the process ends. A stale file
+    (its process gone) holds no lock, so nothing needs deleting and there is no window between check and claim."""
+    import fcntl
+    fd = os.open(str(orca_dir(create=True) / "orca.lock"), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return False
+    os.ftruncate(fd, 0)
+    os.write(fd, json.dumps({"pid": os.getpid(), "started": time.strftime("%Y-%m-%dT%H:%M:%S%z")}).encode("utf-8"))
+    ORCA_LOCK["fd"] = fd
+    return True
+
+
+def orca_lock_release():
+    if ORCA_LOCK["fd"] is not None:
+        try:
+            os.ftruncate(ORCA_LOCK["fd"], 0)
+            os.close(ORCA_LOCK["fd"])
+        except OSError:
+            pass
+        ORCA_LOCK["fd"] = None
+
+
+def orca_digest():
+    """The summary of the last finished backlog run (orca-digest.txt, written when a run ends), or None."""
+    text = read(orca_dir() / "orca-digest.txt").strip()
+    return text or None
+
+
+def orca_digest_publish(text):
+    path = orca_dir(create=True) / "orca-digest.txt"
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text.strip() + "\n", encoding="utf-8")
+    os.replace(str(tmp), str(path))
+
+
+def orca_digest_command(_argv):
+    digest = orca_digest()
+    holder = orca_lock_holder()
+    print(digest or "orca-digest: no finished backlog run yet")
+    if holder:
+        print("orca-digest: a backlog run is going now (pid %s)" % holder)
+    return 0
+
+
+def orca_nightly_command(argv):
+    """For a scheduled Orca automation (its --precheck): print the last digest, then start the coordinator in its
+    own Orca terminal unless one is still running for this repository. Never runs from an agent's shell."""
+    print(orca_digest() or "orca-nightly: no earlier run")
+    holder = orca_lock_holder()
+    if holder:
+        print("orca-nightly: a backlog run is still going (pid %d); not starting another" % holder)
+        return 0
+    binary = shutil.which(os.environ.get("HARNESS_ORCA_BIN", "orca"))
+    if not binary:
+        print("orca-nightly: orca is not installed")
+        return 1
+    log = orca_dir() / "orca-latest.log"
+    extra = [a for a in argv if a not in ("--dry-run",)] or ["--merge", "--trust"]
+    if "--dry-run" not in argv:
+        orca_dir(create=True)
+    command = "%s %s orca %s > %s 2>&1" % (shlex.quote(sys.executable), shlex.quote(str(Path(__file__).resolve())),
+                                            " ".join(shlex.quote(a) for a in extra), shlex.quote(str(log)))
+    if "--dry-run" in argv:
+        print("orca-nightly: would open an Orca terminal running: %s" % command)
+        return 0
+    # Its own terminal: an Orca terminal coordinates one Run, so the coordinator must not share the caller's.
+    result = subprocess.run([binary, "terminal", "create", "--worktree", "path:%s" % ROOT, "--title",
+                             "harness backlog", "--command", command, "--json"], cwd=str(ROOT), capture_output=True,
+                            text=True)
+    ok = result.returncode == 0 and '"ok": false' not in result.stdout and '"ok":false' not in result.stdout
+    print("orca-nightly: %s" % ("started the backlog run in an Orca terminal; log: %s" % log if ok
+                                 else "could not open a terminal: %s" % (result.stderr or result.stdout).strip()[:300]))
+    log_event("orca-nightly", started=ok)
+    return 0 if ok else 1
+
+
 AFTER_NOTE = re.compile(r"\(after:\s*([^)]+)\)", re.I)
 
 
@@ -2880,13 +2999,29 @@ def orca_command(argv):
             "orca": os.environ.get("HARNESS_ORCA_BIN"),
             "wait_ms": int(value("--wait-ms")) if (value("--wait-ms") or "").isdigit() else 900000,
             "timeout": int(value("--timeout")) if (value("--timeout") or "").isdigit() else 4 * 3600}
+    if not orca_lock_acquire():
+        print("orca: a backlog run is already going for this repository (pid %s); not starting another"
+              % orca_lock_holder())
+        return 1
     log_event("orca-start", tasks=tasks, agents=agents)
+    lines = []
+
+    def log(line):
+        lines.append(line)
+        print(line, flush=True)
     try:
-        code = coordinator.Coordinator(ROOT, opts, log=lambda line: print(line, flush=True)).drive(tasks)
+        code = coordinator.Coordinator(ROOT, opts, log=log).drive(tasks)
+        summary = next((l for l in reversed(lines) if l.startswith("harness orca: run ")), None)
+        if summary:
+            orca_digest_publish("%s (finished %s)" % (summary, time.strftime("%Y-%m-%d %H:%M")))
     except coordinator.CoordinatorError as exc:
-        print("orca: stopped: %s" % exc)
+        hint = (" An Orca terminal coordinates one Run at a time, and this one was bound to another. Run harness.py "
+                "orca in its own terminal (harness.py orca-nightly opens one)." if "consumer_fenced" in str(exc) else "")
+        print("orca: stopped: %s%s" % (exc, hint))
         log_event("orca-error", error=str(exc)[:500])
         return 1
+    finally:
+        orca_lock_release()
     log_event("orca-end", code=code)
     return code
 
@@ -3317,16 +3452,71 @@ def ci_judge_command(argv):
     return 1 if problems else 0
 
 
+def protection_payload(current, contexts):
+    """The PUT body that adds contexts to a branch's existing protection without weakening any of it."""
+    checks = current.get("required_status_checks") or {}
+    kept_checks = [{"context": c["context"], **({"app_id": c["app_id"]} if c.get("app_id") is not None else {})}
+                   for c in checks.get("checks") or [] if c.get("context")]
+    named = {c["context"] for c in kept_checks}
+    kept_checks += [{"context": c} for c in checks.get("contexts") or [] if c not in named]
+    named |= set(checks.get("contexts") or [])
+    kept_checks += [{"context": c} for c in contexts if c not in named]
+    reviews = current.get("required_pull_request_reviews")
+    kept_reviews = None
+    if reviews:
+        kept_reviews = {k: reviews[k] for k in ("dismiss_stale_reviews", "require_code_owner_reviews",
+                                                "required_approving_review_count", "require_last_push_approval")
+                        if k in reviews}
+        for key in ("dismissal_restrictions", "bypass_pull_request_allowances"):
+            if isinstance(reviews.get(key), dict):
+                kept_reviews[key] = {"users": [u.get("login") for u in reviews[key].get("users") or []],
+                                     "teams": [t.get("slug") for t in reviews[key].get("teams") or []],
+                                     "apps": [a.get("slug") for a in reviews[key].get("apps") or []]}
+    restrictions = current.get("restrictions")
+    kept_restrictions = None
+    if restrictions:
+        kept_restrictions = {"users": [u.get("login") for u in restrictions.get("users") or []],
+                             "teams": [t.get("slug") for t in restrictions.get("teams") or []],
+                             "apps": [a.get("slug") for a in restrictions.get("apps") or []]}
+    payload = {"required_status_checks": {"strict": True if not checks else bool(checks.get("strict", True)),
+                                          "checks": kept_checks},
+               "enforce_admins": bool((current.get("enforce_admins") or {}).get("enabled")),
+               "required_pull_request_reviews": kept_reviews, "restrictions": kept_restrictions}
+    for key in ("required_linear_history", "allow_force_pushes", "allow_deletions",
+                "required_conversation_resolution", "block_creations", "lock_branch"):
+        if isinstance(current.get(key), dict) and "enabled" in current[key]:
+            payload[key] = bool(current[key]["enabled"])
+    return payload
+
+
 def ci_protect_command(argv):
     """Make the harness-verify check required on a branch and create the approval label (needs gh)."""
-    branch = argv[argv.index("--branch") + 1] if "--branch" in argv and argv.index("--branch") + 1 < len(argv) else "main"
     contexts = ["verify"] + (["judge"] if "--with-judge" in argv else [])
-    payload = {"required_status_checks": {"strict": True, "contexts": contexts}, "enforce_admins": False,
-               "required_pull_request_reviews": None, "restrictions": None}
-    repo = subprocess.run(["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], cwd=str(ROOT),
+    repo = subprocess.run(["gh", "repo", "view", "--json", "nameWithOwner,defaultBranchRef"], cwd=str(ROOT),
                           capture_output=True, text=True) if shutil.which("gh") else None
-    name = repo.stdout.strip() if repo is not None and repo.returncode == 0 else "<owner>/<repo>"
+    try:
+        info = json.loads(repo.stdout) if repo is not None and repo.returncode == 0 else {}
+    except ValueError:
+        info = {}
+    name = info.get("nameWithOwner") or "<owner>/<repo>"
+    default = (info.get("defaultBranchRef") or {}).get("name") or "main"
+    branch = argv[argv.index("--branch") + 1] if "--branch" in argv and argv.index("--branch") + 1 < len(argv) else default
     endpoint = "repos/%s/branches/%s/protection" % (name, branch)
+    current = {}
+    if not name.startswith("<"):
+        got = subprocess.run(["gh", "api", endpoint], cwd=str(ROOT), capture_output=True, text=True)
+        if got.returncode != 0:
+            if "Branch not protected" not in got.stdout + got.stderr:
+                print("ci-protect: can't read %s's current protection, so nothing was changed: %s"
+                      % (branch, (got.stderr or got.stdout).strip()[:300]))
+                return 1
+        else:
+            try:
+                current = json.loads(got.stdout)
+            except ValueError:
+                print("ci-protect: %s's current protection isn't JSON, so nothing was changed" % branch)
+                return 1
+    payload = protection_payload(current, contexts)
     if "--dry-run" in argv or name.startswith("<"):
         print("ci-protect: would PUT %s\n%s" % (endpoint, json.dumps(payload, indent=2)))
         print("ci-protect: would create the label harness-change-approved")
@@ -3830,6 +4020,10 @@ def main(argv):
         return state_command(argv[2:])
     if argv[1:2] == ["orca"]:
         return orca_command(argv[2:])
+    if argv[1:2] == ["orca-nightly"]:
+        return orca_nightly_command(argv[2:])
+    if argv[1:2] == ["orca-digest"]:
+        return orca_digest_command(argv[2:])
     if argv[1:2] == ["next"]:
         return next_command(argv[2:])
     if argv[1:2] == ["questions"]:
