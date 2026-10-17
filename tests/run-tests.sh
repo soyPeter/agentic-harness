@@ -1065,6 +1065,10 @@ kspec 9.3 "- A1: Card data is tokenised (source: vault:40-Security/pci.md)"
 contains "approve refuses a citation outside HARNESS_KNOWLEDGE_PATHS" "outside HARNESS_KNOWLEDGE_PATHS" "$($AH approve 9.3)"
 kspec 9.4 "- A1: Endpoints are versioned in the path (source: vault:../../etc/passwd)"
 contains "approve refuses a citation escaping the vault" "outside HARNESS_KNOWLEDGE_PATHS" "$($AH approve 9.4)"
+kspec 9.7 "- A1: The layout, sourced once for its parts:
+  - the heading comes first;
+  - then the lines. (source: backbone/1-PRD.md)"
+expect 0 "approve: an assumption's nested list shares its one source" $AH approve 9.7
 kspec 9.5 "- A1: Endpoints are versioned in the path"
 contains "approve refuses an assumption without a source" "A1 has no (source: ...)" "$($AH approve 9.5)"
 contains "the session-start note says the knowledge source is on" "Knowledge source on" "$(hook "$A" session-start '{}')"

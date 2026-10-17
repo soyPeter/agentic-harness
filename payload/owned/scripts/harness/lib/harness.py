@@ -448,11 +448,23 @@ def knowledge_path_allowed(path):
     return not prefixes or any(path == p or path.startswith(p + "/") for p in prefixes)
 
 
+def top_level_items(section):
+    """The section's top-level bullets, each with its indented continuation and sub-bullets joined to it (a nested
+    list belongs to the item above it)."""
+    items = []
+    for line in (section or "").splitlines():
+        if re.match(r"^[-*]\s+\S", line):
+            items.append(re.sub(r"^[-*]\s+", "", line).strip())
+        elif items and line.strip():
+            items[-1] += " " + line.strip()
+    return items
+
+
 def knowledge_citation_problems(text):
     """Assumptions without a source, or citing vault:<path> notes that don't exist or aren't allowed."""
     problems = []
     root = knowledge_root()
-    for n, item in enumerate(bullets(md_section(strip_comments(text), "Assumptions")), 1):
+    for n, item in enumerate(top_level_items(md_section(strip_comments(text), "Assumptions")), 1):
         if item.lower().rstrip(".") in ("none", "n/a"):
             continue
         label = (re.match(r"^(A\d+)", item) or [None, "assumption %d" % n])[1]
@@ -1408,7 +1420,7 @@ def approve_command(task):
         print("approve: the spec must be valid and have a current griller pass first (spec-check %s)" % task)
         return 1
     asked = sum(len(entry.get("questions") or []) for entry in history)
-    assumptions = [a for a in bullets(md_section(strip_comments(text), "Assumptions"))
+    assumptions = [a for a in top_level_items(md_section(strip_comments(text), "Assumptions"))
                    if a.lower().rstrip(".") not in ("none", "n/a")]
     if asked and not assumptions:
         print("approve: the griller asked %d question(s); record how each was settled under '## Assumptions' "
