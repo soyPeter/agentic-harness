@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.15.1 (2026-10-17)
+
+- **Integrate again when the base moves.** In the ledger run, task 1.6 was integrated with `main`, then 1.1 merged first and `main` moved on, so 1.6's merge conflicted again (`ledger/money.py`, which both tasks had built). The coordinator now integrates again whenever the base has moved since the last integration, up to 3 times, before escalating.
+
 ## 0.15.0 (2026-10-17)
 
 - **Integrating parallel tasks.** In the ledger backlog, three tasks running in parallel each wrote their own `ledger/errors.py`, the project's shared error module, and the coordinator could only refuse the merge. A code conflict now starts an **integrate** step:
