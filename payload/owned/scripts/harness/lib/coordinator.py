@@ -422,6 +422,9 @@ class Coordinator(object):
             self.run = find(created, "id")
             self.log("orca: run %s" % self.run)
         self.ensure_repo()
+        if self.opts.get("trust"):
+            # Claude Code decides trust for a git worktree by its main repository, so trust that too.
+            self.trust(self.root)
         self.queue = list(task_ids)
         self.start_next()
         empty = 0

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13.1 (2026-10-17)
+
+- **`harness.py orca --trust` also trusts the repository itself.** Claude Code decides trust for a git worktree by its main repository, so trusting only the task worktrees still blocked every Claude Code worker (`Agent startup blocked: agent-trust-workspace`). Found on the first run of the 10-task ledger backlog.
+
 ## 0.13.0 (2026-10-17)
 
 - **`harness.py orca` runs a backlog, not just a batch.**
