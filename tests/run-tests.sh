@@ -1498,6 +1498,40 @@ contains "the shared module has both tasks' parts" "From_9_10" "$shared"
 contains "the other task's too" "From_9_11" "$shared"
 lacks "no conflict markers are left" "<<<<<<<" "$shared"
 expect 2 "agents can't refresh the out-of-band snapshot" hook "$O" pre-tool-use "$(bash_json 'python3 scripts/harness/lib/harness.py snapshot')"
+a1=$($OH adr-number); a2=$($OH adr-number)
+[ "$a1" != "$a2" ] && ok "adr-number never hands out a number twice ($a1, $a2)" || bad "adr-number never hands out a number twice"
+W1=$(ls -d "$WORK"/orca-worktrees/harness-task-9.1 2>/dev/null | head -1)
+printf '# ADR-090: elsewhere\n\n## Status\nProposed\n' > "$W1/backbone/adr/ADR-090-elsewhere.md"
+contains "it counts the ADRs of every worktree" "ADR-091" "$($OH adr-number)"
+rm -f "$W1/backbone/adr/ADR-090-elsewhere.md"
+for id in 9.14 9.15; do
+  printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/$id/g" -e 's/^- python: all code$/- code-quality: all code/' > "$O/backbone/specs/$id.md"
+  printf '%s' "$(python3 -c 'import json,sys; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":sys.argv[1],"questions":[],"summary":"s"})+"\n```"}))' "$id")" \
+    | python3 "$O/scripts/harness/lib/harness.py" hook grill-stop >/dev/null
+done
+printf -- '- [ ] **Task 9.14: Decides A** (spec: backbone/specs/9.14.md)\n- [ ] **Task 9.15: Decides B** (spec: backbone/specs/9.15.md)\n' >> "$O/backbone/3-TASKS.md"
+$OH approve 9.14 >/dev/null; $OH approve 9.15 >/dev/null
+git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: tasks 9.14 and 9.15"
+python3 - "$WORK/fake-orca.py" <<'EOF'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = '''            state["queue"].append({"id": "q1", "type": "question"'''
+new = '''            if task in ("9.14", "9.15"):
+                # Both tasks take the same ADR number, as parallel tasks did before adr-number.
+                slug = "choice-" + task.replace(".", "-")
+                open(os.path.join(cwd, "backbone/adr/ADR-020-%s.md" % slug), "w").write("# ADR-020: %s\\n\\n## Status\\nProposed\\n" % slug)
+                open(os.path.join(cwd, "src/uses_%s.py" % task.replace(".", "_")), "w").write("# follows ADR-020\\n")
+            state["queue"].append({"id": "q1", "type": "question"'''
+assert s.count(old) == 1
+open(p, "w").write(s.replace(old, new))
+EOF
+out=$(HARNESS_TEST_CMD=true HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.14,9.15 --parallel 2 --merge --wait-ms 10 2>&1)
+contains "the second task's colliding ADR is renumbered before its merge" "renumbered ADR-020 -> ADR-" "$out"
+[ "$(ls "$O"/backbone/adr/ADR-020-*.md | wc -l | tr -d ' ')" -eq 1 ] && ok "the base has one ADR-020" || bad "the base has one ADR-020"
+renamed=$(ls "$O"/backbone/adr/ | grep -E "choice-9-1[45]" | grep -v '^ADR-020')
+[ -n "$renamed" ] && ok "the other decision kept its own file under a new number ($renamed)" || bad "the other decision kept its own file under a new number"
+contains "references in the task's own files follow the new number" "${renamed%%-choice*}" "$(cat "$O"/src/uses_9_1[45].py)"
+contains "the digest lists ADRs waiting for acceptance" "ADRs on the base waiting for your acceptance" "$out"
 unset FAKE_ORCA_STATE
 
 section "autonomous mode: judging, risk drift, kill switch"

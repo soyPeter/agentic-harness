@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.0 (2026-10-18)
+
+ADRs in parallel work, from the ledger backlog run:
+- **ADR numbers no longer collide.** Each parallel task took "the next ADR number" in its own worktree, so `ADR-006` and `ADR-007` meant different decisions on different branches. Now:
+  - `harness.py adr-number` hands out numbers from a counter all of a repository's worktrees share, under a lock; the architect and the scribe use it.
+  - Before merging a task, the coordinator renumbers any new ADR whose number the base already uses for another ADR, and updates the references in the files the task changed.
+- **Proposed ADRs are visible.** ADRs written during builds reached the base still Proposed, decisions nobody had accepted. The coordinator's digest now lists them. The architect writes an ADR only for decisions that are hard to reverse and matter beyond the task.
+
 ## 0.15.3 (2026-10-18)
 
 **Specs that converge.** The dominant failure in the ledger backlog was spec bloat. Task 1.10 ("export and import as JSON") grew to 49 requirements and acceptance criteria and 7 ADRs, and the griller found new detail in every round until its limit escalated the task. Task 1.2 shipped a hand-written CSV reader. Instructions alone (0.13.2) didn't stop it, so:

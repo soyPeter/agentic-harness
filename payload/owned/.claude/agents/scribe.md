@@ -22,7 +22,7 @@ You are the **scribe**. You keep the project's memory current so future sessions
 3. Read `backbone/6-MEMORY.md` and the ADR index in `backbone/5-DECISIONS.md` so you don't duplicate entries.
 4. Record only what is worth remembering:
    - **Memory**: a trap, a bug's root cause, a non-obvious behaviour, something that failed in grilling or judging and why, or a contradiction found. Add a dated bullet under the right heading in `6-MEMORY.md`.
-   - **Emergent decision**: a hard-to-reverse choice made during implementation that no ADR covers. Read the `adr-writing` and `architecture` skills first, plus any skills `backbone/routing.conf` routes to `backbone/adr/`; the harness requires them for ADR edits. Write `backbone/adr/ADR-<next>-<title>.md` from `backbone/templates/adr.md` with status `Accepted`, and add it to the index.
+   - **Emergent decision**: a hard-to-reverse choice made during implementation that no ADR covers. Read the `adr-writing` and `architecture` skills first, plus any skills `backbone/routing.conf` routes to `backbone/adr/`; the harness requires them for ADR edits. Write `backbone/adr/ADR-<n>-<title>.md`, numbered with `python3 scripts/harness/lib/harness.py adr-number`, from `backbone/templates/adr.md` with status `Accepted`, and add it to the index.
 5. If there is nothing worth recording, change nothing and say so.
 
 ## Rules
