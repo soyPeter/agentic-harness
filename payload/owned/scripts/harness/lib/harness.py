@@ -2898,6 +2898,34 @@ def orca_lock_release():
         ORCA_LOCK["fd"] = None
 
 
+def adr_numbers(folder):
+    return {int(m.group(1)) for p in Path(folder).glob("ADR-*.md") for m in [re.match(r"ADR-(\d+)", p.name)] if m}
+
+
+def adr_next():
+    """The next free ADR number for this repository, shared by all its worktrees (parallel tasks would otherwise
+    each take "the next one" and collide). Under a lock in the shared git directory; returns the number."""
+    import fcntl
+    folder = orca_dir(create=True)
+    fd = os.open(str(folder / "adr.lock"), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        used = adr_numbers(ADRS)
+        for line in git("worktree", "list", "--porcelain").splitlines():
+            if line.startswith("worktree "):
+                used |= adr_numbers(Path(line[len("worktree "):]) / "backbone" / "adr")
+        counter = folder / "adr-next"
+        try:
+            used.add(int(counter.read_text(encoding="utf-8").strip()) - 1)
+        except (OSError, ValueError):
+            pass
+        number = max(used, default=0) + 1
+        counter.write_text("%d\n" % (number + 1), encoding="utf-8")
+        return number
+    finally:
+        os.close(fd)
+
+
 def orca_digest():
     """The summary of the last finished backlog run (orca-digest.txt, written when a run ends), or None."""
     text = read(orca_dir() / "orca-digest.txt").strip()
@@ -4031,6 +4059,9 @@ def main(argv):
         return orca_nightly_command(argv[2:])
     if argv[1:2] == ["orca-digest"]:
         return orca_digest_command(argv[2:])
+    if argv[1:] == ["adr-number"]:
+        print("ADR-%03d" % adr_next())
+        return 0
     if argv[1:] == ["test-run"]:
         run = run_tests()
         print(json.dumps(run or {"error": "no HARNESS_TEST_CMD"}))

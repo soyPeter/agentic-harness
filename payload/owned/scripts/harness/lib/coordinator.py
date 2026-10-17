@@ -547,6 +547,7 @@ class Coordinator(object):
         if self.git(self.root, "status", "--porcelain", "--untracked-files=no").stdout.strip():
             info["outcome"] += "; not merged: the base checkout has uncommitted changes"
             return False
+        self.renumber_adrs(task)
         message = "chore: merge task %s (%s)" % (task, info["branch"])
         merged = self.git(self.root, "merge", "--no-ff", "-m", message, info["branch"])
         if merged.returncode != 0:
@@ -567,6 +568,42 @@ class Coordinator(object):
         info["outcome"] += "; merged into %s" % self.git(self.root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
         self.log("orca: task %s merged" % task)
         return False
+
+    def renumber_adrs(self, task):
+        """Give the branch's new ADRs numbers the base doesn't already use for another ADR (tasks numbered in
+        parallel), updating the references in the files the branch changed. Committed on the task's branch."""
+        info = self.tasks[task]
+        base = self.git(self.root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        added = [n for n in self.git(info["path"], "diff", "--name-only", "--diff-filter=A", "%s...HEAD" % base,
+                                     "--", "backbone/adr/").stdout.splitlines() if re.match(r"backbone/adr/ADR-\d+", n)]
+        base_files = [n for n in self.git(self.root, "ls-files", "backbone/adr/").stdout.splitlines()]
+        changed = [n for n in self.git(info["path"], "diff", "--name-only", "%s...HEAD" % base).stdout.splitlines() if n]
+        renamed = []
+        for name in added:
+            number = re.match(r"backbone/adr/ADR-(\d+)", name).group(1)
+            clash = [b for b in base_files if re.match(r"backbone/adr/ADR-%s\b" % number, b) and b != name]
+            if not clash:
+                continue
+            new_id = self.harness(info["path"], "adr-number").stdout.strip()
+            old_id = "ADR-%s" % number
+            new_name = name.replace(old_id, new_id, 1)
+            self.git(info["path"], "mv", name, new_name)
+            for path in set(changed + [new_name]) - {name}:
+                full = info["path"] / path
+                if full.is_file():
+                    try:
+                        text = full.read_text(encoding="utf-8")
+                    except (UnicodeDecodeError, OSError):
+                        continue   # binary files don't name ADRs
+                    updated = re.sub(r"\b%s\b" % old_id, new_id, text)
+                    if updated != text:
+                        full.write_text(updated, encoding="utf-8")
+            renamed.append("%s -> %s" % (old_id, new_id))
+        if renamed:
+            self.git(info["path"], "add", "-A")
+            self.commit_merge(info["path"], "chore(adr): renumber %s (taken on %s)" % (", ".join(renamed), base))
+            self.harness(info["path"], "snapshot")
+            self.log("orca: task %s: renumbered %s (another task took the number)" % (task, ", ".join(renamed)))
 
     def integrate(self, task):
         """The task's code conflicts with what the base gained meanwhile (parallel tasks built the same module).
@@ -701,6 +738,14 @@ class Coordinator(object):
             state = info["outcome"] or ("in progress (%s)" % ", ".join(
                 e["role"] for e in self.active.values() if e["task"] == task) or "unknown")
             lines.append("  task %s: %s%s" % (task, state, ("  " + info["pr"]) if info.get("pr") else ""))
+        proposed = []
+        for adr in sorted((self.root / "backbone" / "adr").glob("ADR-*.md")):
+            text = adr.read_text(encoding="utf-8", errors="replace")
+            status = re.search(r"(?m)^## Status\s*\n+\s*(\S+)", text)
+            if status and status.group(1).lower().startswith("proposed"):
+                proposed.append(adr.stem)
+        if proposed:
+            lines.append("ADRs on the base waiting for your acceptance: %s" % ", ".join(proposed))
         escalations = []
         for task, info in self.tasks.items():
             out = [line for line in self.harness(info["path"], "escalations").stdout.splitlines()
