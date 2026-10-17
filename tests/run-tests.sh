@@ -1364,6 +1364,7 @@ n_started=$(python3 -c 'import json,sys; print(sum(1 for c in json.load(open(sys
 n_released=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("released",[])))' "$FAKE_ORCA_STATE")
 [ "$n_started" -eq "$n_released" ] && ok "every worker was released after it settled ($n_released)" || bad "every worker was released after it settled ($n_started started, $n_released released)"
 contains "the debugger diagnosed the failed round" '"kind": "debug"' "$(git -C "$O" show harness-task-9.1:backbone/.verdicts/9.1.debug.json 2>/dev/null)"
+contains "a finished run publishes its digest" "task 9.1: done" "$(python3 "$O/scripts/harness/lib/harness.py" orca-digest)"
 for id in 9.2 9.3; do
   printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/$id/g" -e 's/^- python: all code$/- code-quality: all code/' > "$O/backbone/specs/$id.md"
   printf '%s' "$(python3 -c 'import json,sys; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":sys.argv[1],"questions":[],"summary":"s"})+"\n```"}))' "$id")" \
@@ -1725,8 +1726,9 @@ unset FAKE_GH_PUT
 
 section "one backlog run per repository, and its digest"
 HP="$EN/scripts/harness/lib/harness.py"
-expect 1 "orca-digest creates no metadata in a fresh repository" test -e "$(git -C "$EN" rev-parse --path-format=absolute --git-common-dir)/harness/orca-digest.txt"
+rm -rf "$(git -C "$EN" rev-parse --path-format=absolute --git-common-dir)/harness"
 contains "orca-digest says when there's no finished run" "no finished backlog run yet" "$(python3 "$HP" orca-digest)"
+expect 1 "orca-digest creates no metadata" test -d "$(git -C "$EN" rev-parse --path-format=absolute --git-common-dir)/harness"
 rm -rf "$(git -C "$EN" rev-parse --path-format=absolute --git-common-dir)/harness"
 HARNESS_ORCA_BIN=/usr/bin/true python3 "$HP" orca-nightly --dry-run >/dev/null 2>&1
 expect 1 "orca-nightly --dry-run creates no metadata" test -d "$(git -C "$EN" rev-parse --path-format=absolute --git-common-dir)/harness"
@@ -1750,6 +1752,16 @@ HARNESS_ROOT="$EN" python3 -c 'import importlib.util as u,sys; s=u.spec_from_fil
 contains "the last finished run's digest survives a new run's log" "task 1.1: done" "$(python3 "$HP" orca-digest)"
 contains "orca-nightly prints that digest before starting" "task 1.1: done" "$(HARNESS_ORCA_BIN=/usr/bin/true python3 "$HP" orca-nightly --dry-run 2>&1)"
 expect 0 "agents may plan with orca --dry-run" hook "$EN" pre-tool-use "$(bash_json 'python3 scripts/harness/lib/harness.py orca --dry-run')"
+expect 2 "an inert --dry-run doesn't let an agent run the CI judge" hook "$EN" pre-tool-use "$(bash_json 'python3 scripts/harness/lib/harness.py ci-judge --range a..b --dry-run')"
+expect 2 "nor the runner" hook "$EN" pre-tool-use "$(bash_json 'python3 scripts/harness/lib/harness.py run --dry-run')"
+rm -f "$WORK/terminal-calls"
+printf '#!/bin/sh\necho "$@" >> "%s/terminal-calls"\necho '"'"'{"ok":true,"result":{"terminal":{"handle":"t1"}}}'"'"'\n' "$WORK" > "$WORK/terminal-orca"; chmod +x "$WORK/terminal-orca"
+out=$(HARNESS_ORCA_BIN="$WORK/terminal-orca" python3 "$HP" orca-nightly 2>&1; echo "exit=$?")
+contains "orca-nightly opens an Orca terminal" "started the backlog run in an Orca terminal" "$out"
+calls=$(cat "$WORK/terminal-calls")
+contains "in the repository" "terminal create --worktree path:$EN" "$calls"
+contains "running the coordinator with --merge --trust" "orca --merge --trust >" "$calls"
+contains "logging to the git directory" "harness/orca-latest.log" "$calls"
 
 section "the Orca skill names only commands that exist"
 SK="$HARNESS/orca/skills/agentic-harness/SKILL.md"
@@ -1797,8 +1809,14 @@ expect 2 "block mode: sed -i is refused" sh -c "printf '%s' '$(bj "sed -i s/a/b/
 for c in "find . -delete" "printf x 1>src.py" "printf x &>src.py" "env python3 -c pass" "git branch -D x" 'echo $(touch x)' "git status"; do
   expect 2 "block mode: no shell command runs in an unenrolled repo: $c" sh -c "printf '%s' '$(bj "$c" "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
 done
-expect 0 "block mode: enrolling is allowed" sh -c "printf '%s' '$(bj "/opt/agentic-harness/enroll.sh ." "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
-expect 2 "block mode: enroll chained with anything else is not" sh -c "printf '%s' '$(bj "/opt/agentic-harness/enroll.sh . && rm -rf x" "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
+expect 0 "block mode: the harness's own enroll.sh is allowed" sh -c "printf '%s' '$(bj "$HARNESS/enroll.sh ." "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
+expect 2 "block mode: enroll.sh chained with anything else is not" sh -c "printf '%s' '$(bj "$HARNESS/enroll.sh . && rm -rf x" "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
+printf '#!/bin/sh\ntouch "$1/owned"\n' > "$WORK/not-enroll.sh"; cp "$WORK/not-enroll.sh" "$WORK/enroll.sh"; chmod +x "$WORK/not-enroll.sh" "$WORK/enroll.sh"
+expect 2 "block mode: another script with a matching name isn't enrolling" sh -c "printf '%s' '$(bj "$WORK/not-enroll.sh ." "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
+expect 2 "block mode: nor is a different enroll.sh" sh -c "printf '%s' '$(bj "$WORK/enroll.sh ." "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
+expect 2 "a shell command from an enrolled repo that names a path in an unenrolled one is refused" sh -c "printf '%s' '$(bj "python3 -c \"open('$MH/work/other/src.py','w')\"" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
+expect 2 "and so is cd into one" sh -c "printf '%s' '$(bj "cd ../other && make" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
+expect 0 "a shell command in an enrolled repo that names only its own paths runs" sh -c "printf '%s' '$(bj "ls $MH/work/plain/src" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
 xj() { python3 -c 'import json,sys; print(json.dumps({"session_id":"s1","tool_name":"Write","tool_input":{"file_path":sys.argv[1],"content":"x"},"cwd":sys.argv[2]}))' "$1" "$2"; }
 expect 2 "a write into an unenrolled repo from an enrolled session is refused" sh -c "printf '%s' '$(xj "$MH/work/other/x.py" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
 expect 0 "a write outside the roots from a session in an unenrolled repo is allowed" sh -c "printf '%s' '$(xj "$MH/elsewhere/x.py" "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
