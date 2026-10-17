@@ -111,7 +111,8 @@ def install(argv):
     guard = home(".agentic-harness", "guard.py")
     guard.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(str(HARNESS / "machine" / "guard.py"), str(guard))
-    write_json(home(".agentic-harness", "machine.json"), {"roots": roots, "mode": mode, "exempt": [str(HARNESS)]})
+    write_json(home(".agentic-harness", "machine.json"), {"roots": roots, "mode": mode, "exempt": [str(HARNESS)],
+                                                          "enroll": str((HARNESS / "enroll.sh").resolve())})
     set_hook(home(".claude", "settings.json"), "claude", guard, True)
     print("  install    guard %s (mode %s, roots %s; exempt: %s)" % (guard, mode, ", ".join(roots), HARNESS))
     print("  claude     PreToolUse hook in ~/.claude/settings.json (applies to new sessions)")
@@ -173,7 +174,8 @@ def managed(argv):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(str(HARNESS / "machine" / "guard.py"), str(out / "guard.py"))
-    write_json(out / "machine.json", {"roots": roots, "mode": mode, "exempt": [str(HARNESS)]})
+    write_json(out / "machine.json", {"roots": roots, "mode": mode, "exempt": [str(HARNESS)],
+                                      "enroll": str((HARNESS / "enroll.sh").resolve())})
     claude_dir = paths["claude_dir"]
     write_json(out / "managed-settings.json", {
         "hooks": {"PreToolUse": [hook_group("claude", claude_dir + "/guard.py", claude_dir + "/machine.json")]},

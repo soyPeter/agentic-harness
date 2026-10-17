@@ -64,7 +64,8 @@ def targets(data, base):
     elif tool == "apply_patch":
         paths = [a or b for a, b in patch_paths(tool_input.get("command") or tool_input.get("patch"))]
     elif tool == "Bash":
-        paths = [tool_input.get("workdir") or base]
+        workdir = tool_input.get("workdir") or base
+        return [Path(workdir)] + shell_paths(tool_input.get("command"), workdir)
     return [Path(p) if os.path.isabs(p) else Path(base) / p for p in paths if p]
 
 
@@ -75,17 +76,38 @@ def nearest_dir(path):
     return str(path)
 
 
-def enrolls(command):
-    """True only for a single, plain `.../enroll.sh <args>` command (no operators, redirections or substitutions)."""
+def enrolls(command, base, enroll_path):
+    """True only for a single, plain run of the harness's own enroll.sh (the path machine.sh install recorded),
+    with no operators, redirections or substitutions. A script that merely has the same name doesn't count."""
     import re
     import shlex
-    if re.search(r"[;&|<>`$()\n]", command or ""):
+    if not enroll_path or re.search(r"[;&|<>`$()\n]", command or ""):
         return False
     try:
         words = shlex.split(command)
     except ValueError:
         return False
-    return bool(words) and words[0].endswith("enroll.sh")
+    if not words:
+        return False
+    program = Path(os.path.expanduser(words[0]))
+    program = program if program.is_absolute() else Path(base) / program
+    try:
+        return program.resolve() == Path(enroll_path).resolve()
+    except OSError:
+        return False
+
+
+def shell_paths(command, base):
+    """Best effort: the paths a shell command names (absolute, ~, ../ and cd targets), so a command run from one
+    repository that writes into another is judged by that other one. Paths built at run time aren't visible."""
+    import re
+    found = re.findall(r"(?:^|[\s'\"=(:,])((?:~|\.\.)?/[^\s'\"<>|;&()`$,]+|\.\.(?=[\s'\"]|$))", command or "")
+    found += re.findall(r"\bcd\s+([^\s;&|]+)", command or "")
+    paths = []
+    for item in found:
+        item = os.path.expanduser(item.strip("'\""))
+        paths.append(Path(item) if os.path.isabs(item) else Path(base) / item)
+    return paths
 
 
 def warned_once(root, session):
@@ -129,7 +151,9 @@ def main(argv):
     message = ("%s is not enrolled in the agentic harness, so no spec, review or judge gates apply here. Enroll it "
                "first: <agentic-harness>/enroll.sh %s" % (root, root))
     writes = data.get("tool_name") in EDIT_TOOLS or (
-        data.get("tool_name") == "Bash" and not enrolls((data.get("tool_input") or {}).get("command") or ""))
+        data.get("tool_name") == "Bash" and not enrolls((data.get("tool_input") or {}).get("command") or "",
+                                                        (data.get("tool_input") or {}).get("workdir") or base,
+                                                        settings.get("enroll")))
     if settings.get("mode") == "block" and writes:
         sys.stderr.write("Harness machine guard: refused this %s. %s\n" % (
             "command" if data.get("tool_name") == "Bash" else "edit", message))
