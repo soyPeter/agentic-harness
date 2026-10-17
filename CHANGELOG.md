@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.13.2 (2026-10-17)
+
+Findings from the 10-task ledger backlog run:
+- **Specs that never converge.** For `parse_amount`, the analyst and architect wrote 31 acceptance criteria, an exact regex and an error-message length cap. The griller kept finding blocker-level contradictions inside that detail, and the task was escalated after 3 rounds. Now:
+  - the analyst specifies behaviour, not internals;
+  - the architect keeps implementation out of the spec;
+  - the griller asks for detail nobody asked for to be removed (major), not perfected, and reserves "blocker" for behaviour that would be wrong for users.
+- **Codex in a worktree:** the worktree's git metadata lives in the main repository's `.git`, outside Codex's workspace-write sandbox, so `harness.py next` (and any git write) asked for approval. The coordinator now starts Codex with that `.git` as a writable root.
+- **Coordinator log:** it now says when and why a task settles (blocked, done), and it watches the terminals it opened itself for approval prompts (the handle was missing).
+
 ## 0.13.1 (2026-10-17)
 
 - **`harness.py orca --trust` also trusts the repository itself.** Claude Code decides trust for a git worktree by its main repository, so trusting only the task worktrees still blocked every Claude Code worker (`Agent startup blocked: agent-trust-workspace`). Found on the first run of the 10-task ledger backlog.

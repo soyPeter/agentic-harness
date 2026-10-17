@@ -1357,8 +1357,9 @@ lacks "the base branch is untouched" "feat: task 9.1" "$(git -C "$O" log --oneli
 contains "the committed task line is [x]" "- [x] **Task 9.1" "$(git -C "$O" show harness-task-9.1:backbone/3-TASKS.md)"
 st=$(cat "$FAKE_ORCA_STATE")
 contains "the worker's question was answered" '"q1", "ANSWER: recorded as A1 in the spec"' "$st"
-contains "Codex is opened with the hook-trust bypass (its worktree's hooks would be skipped otherwise)" '"codex --dangerously-bypass-hook-trust -c check_for_update_on_startup=false"' "$st"
+contains "Codex is opened with the hook-trust bypass (its worktree's hooks would be skipped otherwise)" '"codex --dangerously-bypass-hook-trust -c check_for_update_on_startup=false' "$st"
 contains "then supervised in that terminal" '"term_launched_1"' "$st"
+contains "Codex may write the repository's .git (a worktree's git metadata lives there)" "sandbox_workspace_write.writable_roots" "$st"
 n_started=$(python3 -c 'import json,sys; print(sum(1 for c in json.load(open(sys.argv[1]))["calls"] if c==["orchestration","worker-start"]))' "$FAKE_ORCA_STATE")
 n_released=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("released",[])))' "$FAKE_ORCA_STATE")
 [ "$n_started" -eq "$n_released" ] && ok "every worker was released after it settled ($n_released)" || bad "every worker was released after it settled ($n_started started, $n_released released)"
