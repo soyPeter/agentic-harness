@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.16.2 (2026-10-18)
+
+- **Assumptions with nested lists.** `approve` read each sub-bullet of an assumption as its own assumption "without a source", so task 1.7's spec, with one assumption listing its parts and citing its source once, could never be approved. The source check now joins nested lines and sub-bullets to the item above them.
+- **The coordinator explains a refused approval.** It retried `approve` until its "no progress" guard escalated, without showing why. Now it logs `approve`'s own message and escalates with it right away.
+
 ## 0.16.1 (2026-10-18)
 
 - **A person's answer gives a task fresh rounds.** In the ledger run, task 1.8 was escalated over the duplicate rule. After the answer, the griller rightly asked for the spec to be rewritten to it, but the round limit still counted the round from before the answer, so the task was escalated again mid-rewrite. The griller's and judge's round limits now count only failures since the task's latest escalation.

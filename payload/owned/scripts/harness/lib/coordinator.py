@@ -334,7 +334,17 @@ class Coordinator(object):
                     info["outcome"] = "waiting for the user's approval"
                     return False
                 self.log("orca: task %s: approve" % task)
-                self.harness(info["path"], "approve", task)
+                approved = self.harness(info["path"], "approve", task)
+                if approved.returncode != 0 and self.next_step(task).get("step") == "approve":
+                    # Refused without escalating (approve escalates risky specs itself): say why and park it,
+                    # rather than asking again and again.
+                    why = (approved.stdout + approved.stderr).strip()
+                    self.log("orca: task %s: approve refused: %s" % (task, why[:400]))
+                    self.harness(info["path"], "escalate", task, "--kind", "approval", "--reason",
+                                 "policy approval refused the spec: %s" % why[:800],
+                                 "--needed", "the spec fixed (or the user's Approved-by: line)")
+                    info["outcome"] = "escalated (approve refused)"
+                    return False
                 continue
             if name == "start":
                 self.log("orca: task %s: start" % task)
