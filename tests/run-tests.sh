@@ -1818,11 +1818,15 @@ expect 2 "block mode: enroll.sh chained with anything else is not" sh -c "printf
 printf '#!/bin/sh\ntouch "$1/owned"\n' > "$WORK/not-enroll.sh"; cp "$WORK/not-enroll.sh" "$WORK/enroll.sh"; chmod +x "$WORK/not-enroll.sh" "$WORK/enroll.sh"
 expect 2 "block mode: another script with a matching name isn't enrolling" sh -c "printf '%s' '$(bj "$WORK/not-enroll.sh ." "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
 expect 2 "block mode: nor is a different enroll.sh" sh -c "printf '%s' '$(bj "$WORK/enroll.sh ." "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
-expect 2 "a shell command from an enrolled repo that names a path in an unenrolled one is refused" sh -c "printf '%s' '$(bj "python3 -c \"open('$MH/work/other/src.py','w')\"" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
+python3 -c 'import json,sys; print(json.dumps({"session_id":"s9","tool_name":"Bash","tool_input":{"command":"python3 -c \"open(%r,%r)\"" % (sys.argv[1] + "/work/other/src.py", "w")},"cwd":sys.argv[1]+"/work/plain"}))' "$MH" > "$WORK/foreign.json"
+expect 2 "a shell command from an enrolled repo that names a path in an unenrolled one is refused" sh -c "HOME='$MH' python3 '$G' --from claude < '$WORK/foreign.json'"
+expect 0 "(control: the same command naming the enrolled repo runs)" sh -c "sed 's#/work/other/#/work/plain/#' '$WORK/foreign.json' | HOME='$MH' python3 '$G' --from claude"
 expect 2 "and so is cd into one" sh -c "printf '%s' '$(bj "cd ../other && make" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
 mkdir -p "$MH/work/my repo" && git -C "$MH/work/my repo" init -q
 expect 2 "a redirection straight into an unenrolled repo is refused" sh -c "printf '%s' '$(bj "printf x >$MH/work/other/src.py" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
 expect 2 "so is a quoted path with spaces into one" sh -c "printf '%s' '$(bj "cp a.txt \"$MH/work/my repo/a.txt\"" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
+python3 -c 'import json,sys; print(json.dumps({"session_id":"s9","tool_name":"Bash","tool_input":{"command":"python3 -c \"open(%r,%r)\"" % (sys.argv[1] + "/work/my repo/a.py", "w")},"cwd":sys.argv[1]+"/work/plain"}))' "$MH" > "$WORK/interp.json"
+expect 2 "a quoted path with spaces inside interpreter code is refused" sh -c "HOME='$MH' python3 '$G' --from claude < '$WORK/interp.json'"
 expect 2 "and cd into a quoted path with spaces" sh -c "printf '%s' '$(bj "cd \"$MH/work/my repo\" && make" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
 expect 0 "a shell command in an enrolled repo that names only its own paths runs" sh -c "printf '%s' '$(bj "ls $MH/work/plain/src" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
 xj() { python3 -c 'import json,sys; print(json.dumps({"session_id":"s1","tool_name":"Write","tool_input":{"file_path":sys.argv[1],"content":"x"},"cwd":sys.argv[2]}))' "$1" "$2"; }
