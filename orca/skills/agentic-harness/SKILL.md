@@ -17,21 +17,21 @@ test -f scripts/harness/lib/harness.py && python3 scripts/harness/lib/harness.py
 
 No file: this skill doesn't apply. Doctor errors: report them to the user and stop.
 
-## 2. Prefer the built-in coordinator
+## 2. Prefer the built-in coordinator, started by the user
 
-The harness ships its own Orca coordinator. It follows every rule below, so use it unless the user asks you to
-coordinate by hand:
+The harness ships its own Orca coordinator, which follows every rule below. Agents may not start it: the hooks
+refuse `harness.py orca` and `harness.py orca-nightly` from an agent, and only one runs per repository (a lock).
+You may plan with it and read its results:
 
 ```text
-python3 scripts/harness/lib/harness.py orca --dry-run          # what each ready task needs next
-python3 scripts/harness/lib/harness.py orca --merge --trust    # drive the backlog
+python3 scripts/harness/lib/harness.py orca --dry-run    # what each ready task needs next (allowed)
+python3 scripts/harness/lib/harness.py orca-digest       # the last finished run's summary (allowed)
 ```
 
-It needs `HARNESS_AUTONOMY="autonomous"` in `backbone/harness.conf`, which only the user sets. Useful options:
-`--tasks 1.3,1.4`, `--parallel N`, `--agents default=claude,judge=codex`, `--pr` instead of `--merge`. It runs for
-hours and must run in an Orca terminal of its own (a terminal coordinates one Run at a time):
-`harness.py orca-nightly` opens one and logs to the repository's git directory; `harness.py orca-digest` reports the
-last run. Scheduled runs come from `enroll.sh --orca --automation <schedule>`.
+Then ask the user to start it, in an Orca terminal of its own (a terminal coordinates one Run at a time):
+`python3 scripts/harness/lib/harness.py orca --merge --trust`, or `harness.py orca-nightly`, which opens one. Scheduled
+runs come from `enroll.sh --orca --automation <schedule>`: Orca's precheck starts them, not an agent. The coordinator
+needs `HARNESS_AUTONOMY="autonomous"` in `backbone/harness.conf`, which only the user sets.
 
 ## 3. Rules when coordinating by hand
 
