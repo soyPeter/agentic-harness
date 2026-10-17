@@ -115,7 +115,11 @@ def shell_paths(command, base):
         if re.match(r"^(~|\.\.?)?/|^\.\.$", token) or (i > 0 and tokens[i - 1] == "cd"):
             found.append(token)
         else:
-            found += re.findall(r"(?:^|[\s'\"=(:,])(/[^\s'\"<>|;&()`$,]+)", token)
+            # Code passed to an interpreter (python3 -c "...", node -e '...'): quoted literal paths, spaces and all,
+            # then unquoted absolute paths.
+            quoted = re.findall(r"""(['"])((?:~|/)[^'"\n]*)\1""", token)
+            found += [path for _, path in quoted]
+            found += re.findall(r"(?:^|[\s=(:,])(/[^\s'\"<>|;&()`$,]+)", token)
     paths = []
     for item in found:
         item = os.path.expanduser(item)
