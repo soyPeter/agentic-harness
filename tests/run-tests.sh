@@ -1177,6 +1177,20 @@ if command -v codex >/dev/null 2>&1; then
   contains "codex rules: nothing else is" "none" "$(decide rm -rf /)"
 fi
 
+section "spec size limit"
+python3 - "$A/backbone/specs/8.1.md" "$WORK/big-spec.md" <<'EOF'
+import re, sys
+src, dst = sys.argv[1:3]; s = open(src).read()
+extra = "".join("- REQ-8.9-%d: The system shall do thing %d.\n" % (n, n) for n in range(3, 40))
+s = s.replace("8.1", "8.9")
+s = re.sub(r"(?m)^(- REQ-8\.9-1:.*)$", lambda m: m.group(1) + "\n" + extra.rstrip("\n"), s, count=1)
+open(dst, "w").write(s)
+EOF
+cp "$WORK/big-spec.md" "$A/backbone/specs/8.9.md"
+contains "spec-check refuses a spec over HARNESS_SPEC_MAX_ITEMS" "cut it to what the task needs, or split the task" "$($AH spec-check 8.9 2>&1)"
+lacks "a spec under the limit is fine" "HARNESS_SPEC_MAX_ITEMS" "$(HARNESS_SPEC_MAX_ITEMS=100 $AH spec-check 8.9 2>&1)"
+rm -f "$A/backbone/specs/8.9.md"
+
 section "tester and debugger"
 export HARNESS_TESTER=on
 out=$(HARNESS_ALLOW_PARALLEL_WIP=1 $AH start 8.1)
