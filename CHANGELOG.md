@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.14.0 (2026-10-17)
+
+**Enforce it everywhere.** The harness now makes sure every project is enrolled and every agent follows the gates:
+- `enroll.sh`: installs or updates the harness, registers the project in Orca, creates a daily automation, and requires CI checks.
+- **Machine guard**: `machine.sh` adds user-level hooks for Claude Code and Codex that warn or block edits in unenrolled repositories; also supports managed system-wide installation.
+- **Orca skill**: `orca/skills/agentic-harness/SKILL.md` provides instructions for coordinators to enforce the gated pipeline.
+- The test suite covers the enrollment flow, machine guard behavior, and skill command validity.
+
 ## 0.13.3 (2026-10-17)
 
 More from the ledger backlog run: **false escalations from over-adversarial grilling.**
@@ -217,7 +225,7 @@ The stack is decided in design, not at install; the reviewed skill library from 
   - `harness.py catalog` lists the packs. `harness.py adopt <pack> --adr ADR-NNN --with ... --without ...` adopts them only from an **Accepted** ADR that names them, and only with every pack option decided.
   - Adopted rules and routes are written into the project's `guardrails.conf` and `routing.conf` as blocks citing the ADR, and options set `harness.conf` values.
   - `adopt --remove` undoes an adoption. Updates refresh adopted packs' files. Doctor warns when a pack's ADR is no longer Accepted.
-- **Catalog packs** were rewritten against the review findings (Java 25 API fixes, no Spring/Lombok/JPA in examples), with every tool choice made conditional on an option:
+- **Catalog packs** were rewritten against the review findings (Java 25 API fixes, no Spring/Lombok/JPA in examples), with every tool choice conditional on an option:
 
   | Pack | Skills | Options |
   |---|---|---|
