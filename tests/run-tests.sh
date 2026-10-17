@@ -1155,6 +1155,57 @@ if command -v node >/dev/null 2>&1; then
   expect 0 "the OpenCode plugin is valid JavaScript" node --check "$A/.opencode/plugins/harness.js"
 fi
 
+section "tester and debugger"
+export HARNESS_TESTER=on
+out=$(HARNESS_ALLOW_PARALLEL_WIP=1 $AH start 8.1)
+contains "fixture: task 8.1 starts" "is [WIP]" "$out"
+contains "next: with the tester on, a started task goes to the tester first" '"role": "tester"' "$($AH next 8.1 --json)"
+wj() { python3 -c 'import json,sys; print(json.dumps({"tool_name":"Write","tool_input":{"file_path":sys.argv[1],"content":"x"}}))' "$1"; }
+expect 2 "the tester may not write code" guard "$A" tester "$(wj "$A/src/feature.py")"
+expect 0 "the tester writes acceptance tests" guard "$A" tester "$(wj "$A/tests/acceptance/test_8_1.py")"
+out=$(guard "$A" implementer "$(wj "$A/tests/acceptance/test_8_1.py")" 2>&1; echo "exit=$?")
+contains "the implementer may not touch the acceptance tests" "acceptance tests (HARNESS_ACCEPTANCE_PATHS) belong to the tester" "$out"
+expect 0 "with the tester off, the implementer writes all tests" env HARNESS_TESTER=off bash -c "$(declare -f guard wj); guard '$A' implementer \"\$(wj '$A/tests/acceptance/test_8_1.py')\""
+expect 2 "the debugger may not edit" guard "$A" debugger "$(wj "$A/src/feature.py")"
+treport() { python3 -c 'import json,sys; print(json.dumps({"agent_type":"tester","last_assistant_message":"```json\n"+json.dumps({"task":sys.argv[1],"tests":[],"red":True,"problems":[],"summary":"s"})+"\n```"}))' "$1"; }
+out=$(hook "$A" tester-stop "$(treport 8.1)" 2>&1; echo "exit=$?")
+contains "the tester can't stop while a criterion has no acceptance test" "No acceptance test file (HARNESS_ACCEPTANCE_PATHS) mentions AC-8.1-1" "$out"
+mkdir -p "$A/tests/acceptance"
+printf 'def test_ac_8_1_1():  # AC-8.1-1\n    assert False\n\ndef test_ac_8_1_2():  # AC-8.1-2\n    assert False\n' > "$A/tests/acceptance/test_8_1.py"
+expect 0 "the tester's tests are recorded" hook "$A" tester-stop "$(treport 8.1)"
+contains "the record lists the covered criteria" '"AC-8.1-2"' "$(cat "$A/backbone/.verdicts/8.1.tests.json")"
+step=$($AH next 8.1 --json)
+expect 0 "next: after the tester, the implementer" python3 -c 'import json,sys; sys.exit(json.loads(sys.argv[1])["role"] not in ("implementer","judge"))' "$step"
+printf 'def a():  # AC-8.1-1 AC-8.1-2\n    return 1\n' > "$A/src/feature.py"
+hook "$A" judge-stop "$(judge_report 8.1 pass)" >/dev/null 2>&1
+contains "fixture: the judge passed 8.1" '"verdict": "pass"' "$(cat "$A/backbone/.verdicts/8.1.judge.json")"
+cp "$A/tests/acceptance/test_8_1.py" "$WORK/acceptance-backup.py"
+printf 'def test_ac_8_1_1():  # AC-8.1-1\n    assert True\n\ndef test_ac_8_1_2():  # AC-8.1-2\n    assert True\n' > "$A/tests/acceptance/test_8_1.py"
+contains "next: changed acceptance tests go back to the tester" '"step": "test"' "$($AH next 8.1 --json)"
+out=$($AH finish 8.1; echo "exit=$?")
+contains "finish refuses acceptance tests changed after the tester recorded them" "changed after the tester recorded them" "$out"
+cp "$WORK/acceptance-backup.py" "$A/tests/acceptance/test_8_1.py"
+out=$($AH finish 8.1; echo "exit=$?")
+contains "with the tests restored, the task finishes" "finish: task 8.1 is [x]" "$out"
+auto_spec 8.4 ""
+grill_pass 8.4 >/dev/null; $AH approve 8.4 >/dev/null
+HARNESS_ALLOW_PARALLEL_WIP=1 $AH start 8.4 >/dev/null
+printf 'def test_ac_8_4_1():  # AC-8.4-1\n    pass\n\ndef test_ac_8_4_2():  # AC-8.4-2\n    pass\n' > "$A/tests/acceptance/test_8_4.py"
+hook "$A" tester-stop "$(treport 8.4)" >/dev/null 2>&1
+printf 'def b():  # AC-8.4-1 AC-8.4-2\n    return 2\n' > "$A/src/b4.py"
+hook "$A" judge-stop "$(judge_report 8.4 fail)" >/dev/null 2>&1
+contains "next: after a judge fail, the debugger diagnoses first" '"role": "debugger"' "$($AH next 8.4 --json)"
+contains "with the debugger off, the implementer fixes directly" '"step": "fix"' "$(HARNESS_DEBUGGER=off $AH next 8.4 --json)"
+dreport() { python3 -c 'import json,sys; print(json.dumps({"agent_type":"debugger","last_assistant_message":"```json\n"+json.dumps({"task":"8.4","root_causes":[{"criterion":"AC-8.4-1","file":"src/b4.py","line":2,"cause":"returns 2","fix":"return 1","owner":"implementer"},{"criterion":"AC-8.4-2","cause":"the test asserts nothing","fix":"assert the Then","owner":"tester"}],"confidence":"high","summary":"s"})+"\n```"}))'; }
+expect 0 "the debugger's brief is recorded" hook "$A" debug-stop "$(dreport)"
+step=$($AH next 8.4 --json)
+contains "next: the implementer gets the debugger's brief" '"cause": "returns 2"' "$step"
+contains "next: causes owned by others are flagged" '"tester"' "$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1]).get("needs")))' "$step")"
+hookf "$A" subagent-stop codex "$(treport 8.4 | python3 -c 'import json,sys; d=json.load(sys.stdin); d["session_id"]="cx"; print(json.dumps(d))')" >/dev/null 2>&1
+[ "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["history"]))' "$A/backbone/.verdicts/8.4.tests.json")" -eq 2 ] && ok "codex: the tester's SubagentStop records too" || bad "codex: the tester's SubagentStop records too"
+sed -i.bak 's/^- \[WIP\] \*\*Task 8\.4/- [ ] **Task 8.4/' "$AT" && rm -f "$AT.bak"
+unset HARNESS_TESTER
+
 section "autonomous mode: judging, risk drift, kill switch"
 printf 'def a():  # AC-3.1-1 AC-3.1-2\n    return 1\n' > "$A/src/a.py"
 printf 'def test_a():  # AC-3.1-1 AC-3.1-2\n    assert True\n' > "$A/tests/test_a.py"

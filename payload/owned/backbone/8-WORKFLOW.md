@@ -20,17 +20,21 @@ Check the state at any time with `python3 scripts/harness/lib/harness.py spec-ch
 ### Phase 2: Build
 
 7. **Start:** change the task line to `- [WIP]`. The start gate checks the spec, the grill pass and the approval.
-8. **Implementer:** "Implement task `<id>`." It loads the routed and spec-listed skills (the skill gate enforces this), then writes the code and the tests that mention the AC ids. It runs `HARNESS_BUILD_CMD` and `HARNESS_TEST_CMD`.
+8. **Tester** (when `HARNESS_TESTER="on"`): "Write the acceptance tests for task `<id>`." It writes at least one test per AC in files matching `HARNESS_ACCEPTANCE_PATHS`, before any code exists, and they should fail. The harness records and fingerprints them in `backbone/.verdicts/<id>.tests.json`. The implementer may not change them, and the judge gate refuses to finish the task if they changed afterwards.
+9. **Implementer:** "Implement task `<id>`." It loads the routed and spec-listed skills (the skill gate enforces this), then writes the code and the tests that mention the AC ids. It runs `HARNESS_BUILD_CMD` and `HARNESS_TEST_CMD`.
 
 ### Phase 3: Judge
 
-9. **Judge:** "Judge task `<id>`." Its verdict is recorded in `backbone/.verdicts/<id>.judge.json`. On a fail, pass the findings to the implementer and judge again. After `HARNESS_JUDGE_MAX_ROUNDS` fails, stop and take the findings to the user.
+10. **Judge:** "Judge task `<id>`." Its verdict is recorded in `backbone/.verdicts/<id>.judge.json`. On a fail:
+    - **Debugger** (`HARNESS_DEBUGGER`, default `on`): "Diagnose the judge's failure of task `<id>`." It reproduces the failure, finds the root causes and writes a fix brief (`backbone/.verdicts/<id>.debug.json`), without changing anything. Each cause names its owner: the implementer (code), the tester (an acceptance test contradicts the spec), the analyst (the spec) or the user.
+    - Give the brief to whoever owns each cause, usually the implementer, then judge again.
+    - After `HARNESS_JUDGE_MAX_ROUNDS` fails, stop and take the findings and the brief to the user.
 
 ### Phase 4: Record and finish
 
-10. **Scribe:** "Record task `<id>`." It adds memory entries and ADRs for emergent decisions.
-11. **Finish:** change the task line to `[x]`. The judge gate requires a pass on the current code. Then commit the code, tests, spec, ADRs, verdicts and backbone updates together.
-12. **Report** to the user:
+11. **Scribe:** "Record task `<id>`." It adds memory entries and ADRs for emergent decisions.
+12. **Finish:** change the task line to `[x]`. The judge gate requires a pass on the current code. Then commit the code, tests, spec, ADRs, verdicts and backbone updates together.
+13. **Report** to the user:
     - what was built (REQ ids);
     - the judge's verdict, with each AC and its tests;
     - the ADRs added;

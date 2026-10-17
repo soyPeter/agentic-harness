@@ -95,7 +95,7 @@ git config core.hooksPath scripts/harness/git-hooks
 |---|---|---|
 | `AGENTS.md` | harness | Agent instructions: setup, pipeline, protocol, guardrails |
 | `CLAUDE.md` | project | `@AGENTS.md` import plus Claude-specific notes |
-| `.claude/agents/` | harness | `analyst`, `architect`, `griller`, `implementer`, `judge`, `scribe`, with scoped hooks |
+| `.claude/agents/` | harness | `analyst`, `architect`, `griller`, `tester`, `implementer`, `judge`, `debugger`, `scribe`, with scoped hooks |
 | `.codex/hooks.json`, `.codex/agents/` | harness | Codex: the harness hooks and the role agents (generated) |
 | `.opencode/plugins/harness.js`, `.opencode/agents/` | harness | OpenCode: the adapter plugin and the role agents (generated) |
 | `.claude/skills/` | harness + project | Core: `requirements-writing`, `adr-writing`, `architecture`, `api-design`, `openapi`, `code-quality`, `module-testing`, `security`, `changelog`. Adopted pack skills. Yours: anything else |

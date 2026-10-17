@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 const SCRIPT = "scripts/harness/lib/harness.py";
 const NAMES = { shell: "Bash", bash: "Bash", edit: "Edit", write: "Write", read: "Read", skill: "Skill",
   patch: "apply_patch", apply_patch: "apply_patch" };
-const VERDICT_AGENTS = new Set(["griller", "judge"]);
+const VERDICT_AGENTS = new Set(["griller", "judge", "tester", "debugger"]);
 
 function projectRoot(start) {
   let dir = start || process.cwd();
