@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.15.2 (2026-10-18)
+
+From the ledger backlog run:
+- **The architect designs against the product's threat model.** For `import_json` (task 1.10), the architect proposed a hand-written JSON parser to accept any nesting depth, for a file the tool writes itself, and the choice had to be escalated. The architect now builds no defences against inputs the PRD's formats rule out, and uses the standard library's behaviour instead.
+- **Minor questions get a default, not an escalation.** The analyst escalated a minor question (who else reads the export format). It now records a sensible default as its own choice, and escalates only blocker and major questions the sources can't settle.
+
 ## 0.15.1 (2026-10-17)
 
 - **Integrate again when the base moves.** In the ledger run, task 1.6 was integrated with `main`, then 1.1 merged first and `main` moved on, so 1.6's merge conflicted again (`ledger/money.py`, which both tasks had built). The coordinator now integrates again whenever the base has moved since the last integration, up to 3 times, before escalating.
