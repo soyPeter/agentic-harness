@@ -1,0 +1,27 @@
+# Agentic harness (harness-owned): commands Codex may run outside its sandbox without asking.
+# A harness worker under Orca must report through Orca's own CLI (check its mailbox, send worker_done, ask the
+# coordinator); Codex otherwise stops at a permission prompt before each one. Nothing else is allowed here.
+# Loaded only when the project's .codex/ layer is trusted (harness.py orca --trust does that for task worktrees).
+
+prefix_rule(
+    pattern = ["orca", "orchestration", "check"],
+    decision = "allow",
+    justification = "A harness worker reads its coordinator's follow-ups",
+    match = ["orca orchestration check --terminal term_1 --json"],
+    not_match = ["orca orchestration worker-stop --dispatch ctx_1", "orca worktree rm --worktree id:x"],
+)
+
+prefix_rule(
+    pattern = ["orca", "orchestration", "send"],
+    decision = "allow",
+    justification = "A harness worker reports worker_done and heartbeats",
+    match = ["orca orchestration send --type worker_done --subject done --json"],
+    not_match = ["orca orchestration reply --id m1 --body x"],
+)
+
+prefix_rule(
+    pattern = ["orca", "orchestration", "ask"],
+    decision = "allow",
+    justification = "A harness worker asks the coordinator instead of guessing",
+    match = ["orca orchestration ask --question 'Which module?' --json"],
+)

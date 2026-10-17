@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.1 (2026-10-17)
+
+- **Codex workers report to Orca without permission prompts.** `.codex/rules/harness.rules` (harness-owned and lock-checked) allows exactly `orca orchestration check`, `send` and `ask` outside Codex's sandbox; everything else keeps Codex's own approvals (checked with `codex execpolicy check`). Codex loads it once the project's `.codex/` layer is trusted, which `harness.py orca --trust` does for task worktrees. This removes the manual approvals of the 0.12.0 live run.
+
 ## 0.12.0 (2026-10-17)
 
 - **Orca coordinator: `harness.py orca`.** It drives ready tasks in parallel with Orca supervised workers, one Orca worktree per task and one worker per step. It asks `harness.py next` what each task needs, and runs approve, start, finish and the commit itself, through the gates.
