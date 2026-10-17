@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.15.3 (2026-10-18)
+
+**Specs that converge.** The dominant failure in the ledger backlog was spec bloat. Task 1.10 ("export and import as JSON") grew to 49 requirements and acceptance criteria and 7 ADRs, and the griller found new detail in every round until its limit escalated the task. Task 1.2 shipped a hand-written CSV reader. Instructions alone (0.13.2) didn't stop it, so:
+- **`HARNESS_SPEC_MAX_ITEMS`** (user-only, default 30): spec-check refuses a spec with more requirements plus acceptance criteria than that, so it goes back to the analyst to be cut or split.
+- **The griller's later rounds narrow:** only what changed and its own open questions, at most 5 questions, and a spec good enough to build correctly passes.
+
 ## 0.15.2 (2026-10-18)
 
 From the ledger backlog run:

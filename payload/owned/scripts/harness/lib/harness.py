@@ -74,7 +74,8 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
                   "HARNESS_DECISION_PROVIDER", "HARNESS_DECISION_MODE", "HARNESS_DECISION_ADR",
                   "HARNESS_DECISION_CMD", "HARNESS_DECISION_MODEL", "HARNESS_DECISION_URL",
                   "HARNESS_KNOWLEDGE_ROOT", "HARNESS_KNOWLEDGE_TOOLS", "HARNESS_KNOWLEDGE_PATHS",
-                  "HARNESS_TESTER", "HARNESS_ACCEPTANCE_PATHS", "HARNESS_ORCA_AGENTS", "HARNESS_ORCA_LAUNCH")
+                  "HARNESS_TESTER", "HARNESS_ACCEPTANCE_PATHS", "HARNESS_ORCA_AGENTS", "HARNESS_ORCA_LAUNCH",
+                  "HARNESS_SPEC_MAX_ITEMS")
 # The knowledge source: an MCP server registered as "knowledge" (claude mcp add) over a folder of notes, that the
 # analyst, architect and griller consult when grilling raises questions. Read-only; answers are cited as vault:<path>.
 KNOWLEDGE_TOOL_PREFIX = "mcp__knowledge__"
@@ -187,6 +188,7 @@ DEFAULTS = {
     "HARNESS_TESTER": "off",
     "HARNESS_ACCEPTANCE_PATHS": r"(^|/)acceptance([/._-]|$)",
     "HARNESS_DEBUGGER": "on",
+    "HARNESS_SPEC_MAX_ITEMS": "30",
     "HARNESS_ORCA_AGENTS": "default=claude",
     "HARNESS_ORCA_LAUNCH": "codex=codex --dangerously-bypass-hook-trust -c check_for_update_on_startup=false",
 }
@@ -530,6 +532,10 @@ def validate_spec(task, text=None):
         problems.append("no requirements: add '- REQ-%s-1: The system shall ...'" % task)
     if not acs:
         problems.append("no acceptance criteria: add '- AC-%s-1 (REQ-%s-1): Given ..., when ..., then ...'" % (task, task))
+    limit = conf()["HARNESS_SPEC_MAX_ITEMS"]
+    if limit.isdigit() and int(limit) and len(reqs) + len(acs) > int(limit):
+        problems.append("the spec has %d requirements and acceptance criteria (HARNESS_SPEC_MAX_ITEMS %s): cut it to "
+                        "what the task needs, or split the task" % (len(reqs) + len(acs), limit))
     covered = set()
     for ac, rest in acs:
         refs = set(re.findall(r"REQ-%s-\d+" % re.escape(task), rest))
