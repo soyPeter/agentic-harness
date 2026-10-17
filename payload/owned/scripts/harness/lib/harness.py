@@ -86,7 +86,7 @@ SHELL_PROTECTED = (r"^backbone(/|$)", r"^scripts/harness(/|$)", r"^\.claude(/|$)
                    r"^\.git/(hooks|harness)(/|$)", r"^\.git/config$")
 # Harness files whose edits change enforcement; verify refuses commits that change them away from the lock.
 ENFORCEMENT_FILES = (r"^scripts/harness/", r"^\.claude/agents/", r"^\.github/workflows/harness-[^/]+\.ya?ml$",
-                     r"^\.devcontainer/harness-agent/", r"^\.codex/(hooks\.json$|agents/)",
+                     r"^\.devcontainer/harness-agent/", r"^\.codex/(hooks\.json$|agents/|rules/harness\.rules$)",
                      r"^\.opencode/(plugins/harness\.js$|agents/)")
 # What the main session (the orchestrator) may edit itself; specs, ADRs and code go through the role agents.
 ORCHESTRATOR_ALLOW = (r"^backbone/(?!specs/|adr/|\.verdicts/)", r"^\.claude/skills/", r"^CLAUDE\.md$")

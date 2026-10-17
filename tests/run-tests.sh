@@ -1162,11 +1162,19 @@ contains "escalate also tells the Orca coordinator" "orchestration send --run ru
 $AH escalate 8.3 --reason "again, outside Orca" >/dev/null
 [ "$(grep -c "orchestration send" "$WORK/orca-calls")" -eq 1 ] && ok "outside Orca nothing is sent" || bad "outside Orca nothing is sent"
 expect 0 "the Codex and OpenCode agents are generated from the Claude Code ones" python3 "$HARNESS/tools/gen_agents.py" --check
-for f in .codex/hooks.json .codex/agents/judge.toml .opencode/plugins/harness.js .opencode/agents/griller.md; do
+for f in .codex/hooks.json .codex/agents/judge.toml .codex/rules/harness.rules .opencode/plugins/harness.js .opencode/agents/griller.md; do
   [ -f "$A/$f" ] && ok "installed: $f" || bad "installed: $f"
 done
 if command -v node >/dev/null 2>&1; then
   expect 0 "the OpenCode plugin is valid JavaScript" node --check "$A/.opencode/plugins/harness.js"
+fi
+expect 2 "agents can't widen the Codex rules" hookf "$A" pre-tool-use codex "$(cj Bash '{"command":"echo x >> .codex/rules/harness.rules"}' implementer)"
+if command -v codex >/dev/null 2>&1; then
+  decide() { codex execpolicy check --rules "$A/.codex/rules/harness.rules" -- "$@" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("decision") or "none")'; }
+  contains "codex rules: a worker's mailbox check is allowed" "allow" "$(decide orca orchestration check --terminal t --json)"
+  contains "codex rules: worker_done is allowed" "allow" "$(decide orca orchestration send --type worker_done --subject x)"
+  contains "codex rules: stopping workers is not" "none" "$(decide orca orchestration worker-stop --dispatch d)"
+  contains "codex rules: nothing else is" "none" "$(decide rm -rf /)"
 fi
 
 section "tester and debugger"
