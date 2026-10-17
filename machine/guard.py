@@ -98,14 +98,27 @@ def enrolls(command, base, enroll_path):
 
 
 def shell_paths(command, base):
-    """Best effort: the paths a shell command names (absolute, ~, ../ and cd targets), so a command run from one
-    repository that writes into another is judged by that other one. Paths built at run time aren't visible."""
+    """Best effort: the paths a shell command names, so a command run from one repository that writes into another
+    is judged by that other one. Tokens come from a shell-aware split (redirections become their own tokens, quoted
+    paths keep their spaces); a token that is a path, a cd target, or code containing a literal absolute path counts.
+    Paths built at run time (variables, computed strings) aren't visible."""
     import re
-    found = re.findall(r"(?:^|[\s'\"=(:,])((?:~|\.\.)?/[^\s'\"<>|;&()`$,]+|\.\.(?=[\s'\"]|$))", command or "")
-    found += re.findall(r"\bcd\s+([^\s;&|]+)", command or "")
+    import shlex
+    try:
+        lexer = shlex.shlex(command or "", posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        tokens = (command or "").split()
+    found = []
+    for i, token in enumerate(tokens):
+        if re.match(r"^(~|\.\.?)?/|^\.\.$", token) or (i > 0 and tokens[i - 1] == "cd"):
+            found.append(token)
+        else:
+            found += re.findall(r"(?:^|[\s'\"=(:,])(/[^\s'\"<>|;&()`$,]+)", token)
     paths = []
     for item in found:
-        item = os.path.expanduser(item.strip("'\""))
+        item = os.path.expanduser(item)
         paths.append(Path(item) if os.path.isabs(item) else Path(base) / item)
     return paths
 
