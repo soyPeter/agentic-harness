@@ -1075,6 +1075,86 @@ contains "with the source off, vault citations are refused" "knowledge source is
 contains "the agents can use the knowledge server's tools" "mcp__knowledge" "$(sed -n 1,6p "$A/.claude/agents/analyst.md")"
 contains "unattended sessions may call it (the hook keeps it read-only)" '"mcp__knowledge"' "$(cat "$A/.claude/settings.json")"
 
+section "agent CLIs: Codex and OpenCode reach the same gates"
+hookf() {  # hookf <project> <event> <source> <json>
+  printf '%s' "$4" | python3 "$1/scripts/harness/lib/harness.py" hook "$2" --from "$3"
+}
+cj() {  # cj <tool> <tool_input json> [agent_type]: a Codex/OpenCode-shaped hook input
+  python3 -c 'import json,sys; d={"session_id":"cx","tool_name":sys.argv[1],"tool_input":json.loads(sys.argv[2]),"cwd":sys.argv[4]}
+if sys.argv[3]: d["agent_type"]=sys.argv[3]
+print(json.dumps(d))' "$1" "$2" "${3:-}" "$A"
+}
+patch() { python3 -c 'import json,sys; print(json.dumps({"command": sys.argv[1]}))' "$1"; }
+expect 2 "codex: git commit -n is refused" hookf "$A" pre-tool-use codex "$(cj Bash '{"command":"git commit -n -m x"}' implementer)"
+expect 2 "codex: the harness's Codex hooks can't be rewritten from the shell" hookf "$A" pre-tool-use codex "$(cj Bash '{"command":"echo {} > .codex/hooks.json"}' implementer)"
+out=$(hookf "$A" pre-tool-use codex "$(cj apply_patch "$(patch $'*** Begin Patch\n*** Update File: .opencode/plugins/harness.js\n@@\n-a\n+b\n*** End Patch')" implementer)" 2>&1)
+contains "the implementer may not edit the OpenCode plugin" "implementer agent may not edit .opencode/plugins/harness.js" "$out"
+expect 0 "codex: an ordinary command passes" hookf "$A" pre-tool-use codex "$(cj Bash '{"command":"ls"}' implementer)"
+out=$(hookf "$A" pre-tool-use codex "$(cj apply_patch "$(patch $'*** Begin Patch\n*** Add File: backbone/.verdicts/9.1.judge.json\n+{}\n*** End Patch')" judge)" 2>&1; echo "exit=$?")
+contains "codex: apply_patch is checked file by file (a forged verdict)" "exit=2" "$out"
+out=$(hookf "$A" pre-tool-use codex "$(cj apply_patch "$(patch $'*** Begin Patch\n*** Update File: src/a.py\n@@\n-x\n+y\n*** End Patch')" griller)" 2>&1; echo "exit=$?")
+contains "codex: the griller may not edit (Codex has no per-agent tool list)" "griller agent may not edit src/a.py" "$out"
+out=$(hookf "$A" pre-tool-use codex "$(cj apply_patch "$(patch $'*** Begin Patch\n*** Update File: backbone/3-TASKS.md\n@@\n-a\n+b\n*** End Patch')" implementer)" 2>&1)
+contains "codex: the implementer may not edit backbone/" "implementer agent may not edit backbone/3-TASKS.md" "$out"
+out=$(hookf "$A" pre-tool-use codex "$(cj apply_patch "$(patch $'*** Begin Patch\n*** Delete File: backbone/escalations.md\n*** End Patch')" "")" 2>&1)
+contains "codex: deleting escalations.md is refused" "escalations are written by harness.py escalate" "$out"
+out=$(hookf "$A" pre-tool-use codex "$(cj apply_patch "$(patch $'*** Begin Patch\n*** Add File: src/new.py\n+x = 1\n*** End Patch')" "")" 2>&1)
+contains "codex: the main session doesn't write code" "main session orchestrates" "$out"
+out=$(HARNESS_ROLE=analyst hookf "$A" pre-tool-use codex "$(cj apply_patch "$(patch $'*** Begin Patch\n*** Add File: src/new.py\n+x = 1\n*** End Patch')" "")" 2>&1)
+contains "a session started as one role (HARNESS_ROLE) is held to that role" "analyst agent may not edit src/new.py" "$out"
+out=$(HARNESS_ROLE=nobody hookf "$A" pre-tool-use codex "$(cj apply_patch "$(patch $'*** Begin Patch\n*** Add File: src/new.py\n+x = 1\n*** End Patch')" "")" 2>&1)
+contains "an unknown HARNESS_ROLE is the main session, not a role" "main session orchestrates" "$out"
+out=$(hookf "$A" stop codex '{"session_id":"cx","stop_hook_active":false}')
+expect 0 "codex: the stop hook always prints JSON" python3 -c 'import json,sys; [json.loads(l) for l in sys.argv[1].splitlines() if l.strip()] or sys.exit(1)' "$out"
+out=$(hookf "$A" session-start codex '{}')
+contains "codex: session start is sent as additionalContext" '"hookEventName": "SessionStart"' "$out"
+hookf "$A" post-tool-use codex "$(python3 -c 'import json; print(json.dumps({"session_id":"skl","agent_type":"implementer","tool_name":"Bash","tool_input":{"command":"cat .claude/skills/code-quality/SKILL.md | head -50"}}))')" >/dev/null
+contains "a skill printed with cat counts as loaded (Codex has no Skill tool)" "code-quality" "$(cat "$A"/.git/harness/sessions/skl-*.json 2>/dev/null)"
+out=$(hookf "$A" pre-tool-use opencode "$(cj Write '{"file_path":"src/b.py","content":"x = 1\n"}' build)" 2>&1)
+contains "opencode: its primary agent (build) is the main session" "main session orchestrates" "$out"
+out=$(hookf "$A" pre-tool-use opencode "$(cj Edit '{"file_path":"backbone/specs/3.1.md","old_string":"a","new_string":"b"}' implementer)" 2>&1)
+contains "opencode: a subagent is held to its role" "implementer agent may not edit backbone/specs/3.1.md" "$out"
+
+section "coordinator API: state, next, questions, start, finish"
+auto_spec 8.1 ""
+contains "next: a spec nobody grilled goes to the griller" '"role": "griller"' "$($AH next 8.1 --json)"
+grill_pass 8.1 >/dev/null
+contains "next: a grilled spec is approved by policy in autonomous mode" "harness.py approve 8.1" "$($AH next 8.1 --json)"
+$AH approve 8.1 >/dev/null
+contains "next: an approved task starts" '"step": "start"' "$($AH next 8.1 --json)"
+out=$($AH start 8.1; echo "exit=$?")
+contains "start refuses a second [WIP] task (the same gate as an edit)" "exit=1" "$out"
+out=$(HARNESS_ALLOW_PARALLEL_WIP=1 $AH start 8.1; echo "exit=$?")
+contains "start marks the task [WIP]" "start: task 8.1 is [WIP]" "$out"
+contains "the task line is [WIP]" "- [WIP] **Task 8.1" "$(cat "$AT")"
+step=$($AH next 8.1 --json)
+expect 0 "next: a started task goes to the implementer or the judge" python3 -c 'import json,sys; sys.exit(json.loads(sys.argv[1])["role"] not in ("implementer","judge"))' "$step"
+out=$($AH finish 8.1; echo "exit=$?")
+contains "finish refuses without a judge pass (the judge gate)" "can't finish" "$out"
+lacks "the task is not marked done" "- [x] **Task 8.1" "$(cat "$AT")"
+sed -i.bak 's/^- \[WIP\] \*\*Task 8\.1/- [ ] **Task 8.1/' "$AT" && rm -f "$AT.bak"
+auto_spec 8.2 ""
+hook "$A" grill-stop "$(python3 -c 'import json; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"needs-answers","task":"8.2","questions":[{"severity":"major","about":"ADR-001","question":"Which module holds it?","why":"design"},{"severity":"major","about":"AC-8.2-1","question":"Is it case-insensitive?","why":"unstated"}],"summary":"s"})+"\n```"}))')" >/dev/null 2>&1
+q=$($AH questions 8.2 --json)
+contains "questions: a design question goes to the architect" '"route": "architect"' "$q"
+contains "questions: a requirements question goes to the analyst" '"route": "analyst"' "$q"
+contains "next: open questions are answered before grilling again" '"step": "answer"' "$($AH next 8.2 --json)"
+contains "state lists every task" "8.2" "$($AH state)"
+expect 0 "state --json parses" python3 -c 'import json,sys; json.loads(sys.argv[1])["tasks"]' "$($AH state --json)"
+printf '#!/bin/sh\necho "$@" >> "%s/orca-calls"\necho "{}"\n' "$WORK" > "$WORK/fake-orca"; chmod +x "$WORK/fake-orca"
+auto_spec 8.3 ""
+HARNESS_ORCA_RUN=run-1 HARNESS_ORCA_BIN="$WORK/fake-orca" $AH escalate 8.3 --reason "needs a product decision" >/dev/null
+contains "escalate also tells the Orca coordinator" "orchestration send --run run-1 --type escalation" "$(cat "$WORK/orca-calls" 2>/dev/null)"
+$AH escalate 8.3 --reason "again, outside Orca" >/dev/null
+[ "$(grep -c "orchestration send" "$WORK/orca-calls")" -eq 1 ] && ok "outside Orca nothing is sent" || bad "outside Orca nothing is sent"
+expect 0 "the Codex and OpenCode agents are generated from the Claude Code ones" python3 "$HARNESS/tools/gen_agents.py" --check
+for f in .codex/hooks.json .codex/agents/judge.toml .opencode/plugins/harness.js .opencode/agents/griller.md; do
+  [ -f "$A/$f" ] && ok "installed: $f" || bad "installed: $f"
+done
+if command -v node >/dev/null 2>&1; then
+  expect 0 "the OpenCode plugin is valid JavaScript" node --check "$A/.opencode/plugins/harness.js"
+fi
+
 section "autonomous mode: judging, risk drift, kill switch"
 printf 'def a():  # AC-3.1-1 AC-3.1-2\n    return 1\n' > "$A/src/a.py"
 printf 'def test_a():  # AC-3.1-1 AC-3.1-2\n    assert True\n' > "$A/tests/test_a.py"
@@ -1158,8 +1238,12 @@ EOF
 chmod +x "$WORK/fake-agent.sh"
 export HARNESS_AGENT_CMD="$WORK/fake-agent.sh" HARNESS_AUTONOMY=autonomous HARNESS_TEST_CMD=true
 REAL_HOME="$HOME"; export HOME="$WORK/home"; mkdir -p "$HOME"
-out=$(python3 "$R/scripts/harness/lib/harness.py" run 2>&1; echo "exit=$?")
+out=$(HARNESS_AGENT_CMD="claude -p --output-format json" python3 "$R/scripts/harness/lib/harness.py" run 2>&1; echo "exit=$?")
 contains "run refuses an untrusted workspace (claude -p would skip the hooks)" "has not trusted" "$out"
+out=$(python3 "$R/scripts/harness/lib/harness.py" run --dry-run 2>&1)
+lacks "the trust check applies only to Claude Code" "has not trusted" "$out"
+out=$(HARNESS_AGENT_CMD="codex exec --json -s workspace-write" python3 "$R/scripts/harness/lib/harness.py" run 2>&1; echo "exit=$?")
+contains "run refuses Codex without hook trust (its project hooks would be skipped)" "skips project hooks nobody has trusted" "$out"
 trust() { python3 - "$HOME/.claude.json" "$@" <<'EOF'
 import json, os, sys
 path = sys.argv[1]
@@ -1219,6 +1303,29 @@ lacks "run: it is not retried" "attempt 2" "$out"
 lacks "run: no task is escalated for it" "escalated    task" "$out"
 contains "run: the run fails" "exit=1" "$out"
 contains "run: the task stays ready for the next run" "- [ ] **Task 5.2: B**" "$(cat "$RT")"
+cat > "$WORK/codex-no-login.sh" <<'EOF'
+#!/bin/sh
+# What `codex exec --json` prints when it can't authenticate.
+cat >/dev/null
+echo '{"type":"thread.started","thread_id":"t1"}'
+echo '{"type":"error","message":"401 Unauthorized: please run codex login"}'
+exit 1
+EOF
+chmod +x "$WORK/codex-no-login.sh"
+out=$(HARNESS_AGENT_CMD="$WORK/codex-no-login.sh" python3 "$R/scripts/harness/lib/harness.py" run 2>&1; echo "exit=$?")
+contains "run: a Codex session that can't start stops the run" "the agent could not start (401 Unauthorized" "$out"
+cat > "$WORK/opencode-agent.sh" <<'EOF'
+#!/bin/sh
+# What `opencode run --format json` prints: one step_finish per step, with its cost.
+cat >/dev/null
+echo '{"type":"step_start"}'
+echo '{"type":"step_finish","part":{"cost":0.25,"tokens":{"input":10}}}'
+echo '{"type":"step_finish","part":{"cost":0.5}}'
+EOF
+chmod +x "$WORK/opencode-agent.sh"
+HARNESS_AGENT_CMD="$WORK/opencode-agent.sh" HARNESS_RUN_ATTEMPTS=1 python3 "$R/scripts/harness/lib/harness.py" run >/dev/null 2>&1
+contains "run: OpenCode's step costs are added up" '"cost_usd": 0.75' "$(grep run-attempt "$R/.git/harness/events.jsonl" | tail -1)"
+contains "run: OpenCode's steps count as turns" '"turns": 2' "$(grep run-attempt "$R/.git/harness/events.jsonl" | tail -1)"
 printf -- '- [ ] **Task 6.1: Branch work** (spec: backbone/specs/6.1.md)\n' >> "$RT"
 git -C "$R" add -A; HARNESS_VERIFY=off git -C "$R" commit -qm "docs(backbone): add tasks" >/dev/null 2>&1
 out=$(python3 "$R/scripts/harness/lib/harness.py" run --worktree --only 6.1 2>&1)

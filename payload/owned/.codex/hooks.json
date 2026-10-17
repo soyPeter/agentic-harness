@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/harness/lib/harness.py\" hook session-start --from codex", "timeout": 15}]}
+    ],
+    "PreToolUse": [
+      {"matcher": "Bash|apply_patch|mcp__knowledge__.*", "hooks": [{"type": "command", "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/harness/lib/harness.py\" hook pre-tool-use --from codex", "timeout": 30}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "Bash|apply_patch", "hooks": [{"type": "command", "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/harness/lib/harness.py\" hook post-tool-use --from codex", "timeout": 30}]}
+    ],
+    "SubagentStop": [
+      {"matcher": "griller|judge", "hooks": [{"type": "command", "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/harness/lib/harness.py\" hook subagent-stop --from codex", "timeout": 1200}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/harness/lib/harness.py\" hook stop --from codex", "timeout": 1200}]}
+    ]
+  }
+}

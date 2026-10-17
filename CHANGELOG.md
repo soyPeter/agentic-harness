@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.0 (2026-10-17)
+
+- **Codex and OpenCode reach the same gates as Claude Code.** Every CLI's hooks call `harness.py hook <event> --from <cli>`, which normalises the input before any gate runs.
+  - Codex: `.codex/hooks.json`. Its `apply_patch` edits are parsed and checked file by file; verdicts come from `SubagentStop`; a skill counts as loaded when its SKILL.md is printed; the Stop hook always answers with JSON, as Codex requires.
+  - OpenCode 2 (and 1): `.opencode/plugins/harness.js` translates `shell`, `edit`, `write` and `patch` calls and refuses blocked ones by throwing (fail closed on crashes and timeouts). Verdicts come from the `subagent` tool's result. Its primary agents (`build`, `plan`) count as the main session.
+  - The role agents for both are generated from `.claude/agents/` by `tools/gen_agents.py`. Codex has no per-agent tool list, so the harness now holds the griller and judge to "no edits" itself, by role.
+  - Live checks: in both Codex 0.162 and OpenCode 2.0.26, a `git commit -n` and a forged verdict file were refused by the harness hooks.
+- **Role sessions:** `HARNESS_ROLE=<role>` makes a whole session one role (a coordinator's worker). It is held to that role's write scope, records the griller's or judge's verdict when it stops, and leaves the Definition of Done to the coordinator.
+- **Coordinator API:** `harness.py state`, `next <id>`, `questions <id>`, `start <id>` and `finish <id>`. A coordinator learns the next step and its role from the artifacts the gates check, and moves task lines through the same gates as an edit. Griller questions are routed: design to the architect, the rest to the analyst.
+- **Orca:** with `HARNESS_ORCA_RUN` set, `escalate` also posts an `escalation` message to the Orca Run.
+- **Runner:** reads Codex's `exec --json` (turns) and OpenCode's `run --format json` (cost per step) logs, and stops when either can't start. The Claude Code trust check applies only to `claude` commands. A Codex command without `--dangerously-bypass-hook-trust` is refused, because Codex would skip untrusted project hooks.
+
 ## 0.9.1 (2026-10-13)
 
 - **`update.sh` brings new settings into `harness.conf`.** The file is project-owned, so update never rewrote it, and every new setting meant copying lines from the template by hand. Update now appends any setting the template has and the project's file lacks, **commented out** and with the template's explanation, and reports it as `migrate`. Nothing changes until you uncomment a line; a key you commented out yourself counts as present and isn't added again. User-only settings still need a commit as the user once you uncomment them.

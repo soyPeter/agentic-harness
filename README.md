@@ -20,6 +20,8 @@ A stack-agnostic harness for AI coding agents such as Claude Code. Install it in
 - **Judging**: an independent `judge` checks every requirement and acceptance criterion against the code and tests. The verdict is recorded by a hook, which re-derives it from the evidence: an AC without a test that mentions its id, unmet criteria or failing tests all turn a claimed pass into a fail. The recorder runs the test command itself rather than trusting the judge's report. Verdicts are tied to a fingerprint of the code, so any later change makes them stale.
 - **Guardrails** throughout: destructive commands, secrets and project rules are blocked. Each agent can only write its own files, and the main session only orchestrates. Shell commands can't write harness state or switch off checks. One task is `[WIP]` at a time. Commits follow Conventional Commits. The gates are on by default and only the user can switch them off.
 - **Autonomous mode** (opt-in, user-only): no human in the loop. The harness approves low-risk specs by policy, from the spec and later the diff. Everything else, including repeated griller or judge failures, is escalated: the task is parked as BLOCKED, an entry goes into `backbone/escalations.md` (optionally a GitHub issue), and work continues. A kill switch halts everything.
+- **Agent CLIs**: the same gates for Claude Code, Codex and OpenCode. Each CLI's hooks (`.claude/settings.json`, `.codex/hooks.json`, `.opencode/plugins/harness.js`) call one normalising entry point, and the Codex and OpenCode role agents are generated from the Claude Code ones.
+- **Coordinator API**: `state`, `next`, `questions`, `start` and `finish` let a coordinator (Orca, a script) drive tasks without knowing the workflow.
 - **Knowledge source** (opt-in, user-only): in autonomous mode, griller questions `backbone/` can't answer are looked up in a read-only notes vault behind an MCP server (`knowledge`). Clear answers are recorded with a `vault:<path>` citation the harness checks; the rest are escalated.
 - **Runner and CI**: `harness.py run` drives ready tasks unattended (optionally one worktree, branch and PR per task, with a cost budget), one fresh agent session per task, with time and attempt budgets, escalating stalls. The installed `harness-verify` workflow re-checks every pull request with the **base branch's** verifier, so a pull request can't weaken the check that gates it. `harness.py report` summarises the event log.
 - **Verify**: the pre-commit hook re-checks the gates on the staged state, and CI runs the same check on a pull request's commits (`harness.py verify --range`), so a change made any other way is still caught.
@@ -94,6 +96,8 @@ git config core.hooksPath scripts/harness/git-hooks
 | `AGENTS.md` | harness | Agent instructions: setup, pipeline, protocol, guardrails |
 | `CLAUDE.md` | project | `@AGENTS.md` import plus Claude-specific notes |
 | `.claude/agents/` | harness | `analyst`, `architect`, `griller`, `implementer`, `judge`, `scribe`, with scoped hooks |
+| `.codex/hooks.json`, `.codex/agents/` | harness | Codex: the harness hooks and the role agents (generated) |
+| `.opencode/plugins/harness.js`, `.opencode/agents/` | harness | OpenCode: the adapter plugin and the role agents (generated) |
 | `.claude/skills/` | harness + project | Core: `requirements-writing`, `adr-writing`, `architecture`, `api-design`, `openapi`, `code-quality`, `module-testing`, `security`, `changelog`. Adopted pack skills. Yours: anything else |
 | `scripts/harness/catalog/` | harness | Stack packs, inert until adopted from an accepted ADR |
 | `backbone/0-START-HERE.md`, `8-WORKFLOW.md`, `HOOKS.md`, `SKILLS.md`, `templates/` | harness | Map, pipeline and DoD, hooks and gates, skill format, spec and ADR templates |
@@ -115,6 +119,7 @@ Check the state of a task's definition with `python3 scripts/harness/lib/harness
 ```
 bootstrap.sh, update.sh         entry points (thin wrappers)
 tools/installer.py              install, update and status logic
+tools/gen_agents.py             generates the Codex and OpenCode agents from .claude/agents/
 payload/owned/                  harness-owned files, replaced on update
 payload/seed/                   project-owned templates, created once
 payload/settings.fragment.json  hooks and permissions merged into .claude/settings.json
