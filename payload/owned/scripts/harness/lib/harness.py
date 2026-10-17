@@ -957,8 +957,9 @@ def shell_findings(command, cwd=None, depth=0):
         elif prog == "eval" and depth < 3:
             found.extend(shell_findings(" ".join(words[1:]), cwd, depth + 1))
         elif prog in INTERPRETERS:
-            if any(w.endswith("harness.py") for w in words[1:3]) and set(words[2:4]) & {
-                    "run", "ci-judge", "ci-protect", "orca", "orca-nightly"} and "--dry-run" not in words:
+            command = next((w for w in words[2:4] if w in ("run", "ci-judge", "ci-protect", "orca", "orca-nightly")), None)
+            planning = command in ("orca", "orca-nightly") and "--dry-run" in words   # these dry runs change nothing
+            if any(w.endswith("harness.py") for w in words[1:3]) and command and not planning:
                 found.append("harness.py run, orca, orca-nightly, ci-judge and ci-protect are for the user, CI or an "
                              "Orca automation's precheck, not agents.")
             flag = next((f for f in ("-c", "-e", "-pe", "-ne") if f in words), None)
