@@ -553,7 +553,9 @@ class Coordinator(object):
             remaining = self.resolve_conflicts(self.root, task, base_stage=2)
             if remaining:
                 self.git(self.root, "merge", "--abort")
-                if not info.get("integrated"):
+                base_head = self.git(self.root, "rev-parse", "HEAD").stdout.strip()
+                # Integrate again while the base keeps moving (other tasks merged in meanwhile), up to 3 times.
+                if info.get("integrated_at") != base_head and info.get("integrations", 0) < 3:
                     return self.integrate(task)
                 info["outcome"] += "; not merged: code conflicts remain in %s" % ", ".join(remaining[:5])
                 return False
@@ -571,7 +573,8 @@ class Coordinator(object):
         Merge the base into the task's branch in its worktree, resolve what the harness can, and hand the remaining
         code conflicts to an implementer worker; the result must pass the tests before the task is merged."""
         info = self.tasks[task]
-        info["integrated"] = True
+        info["integrations"] = info.get("integrations", 0) + 1
+        info["integrated_at"] = self.git(self.root, "rev-parse", "HEAD").stdout.strip()
         base = self.git(self.root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
         message = "chore: merge %s into task %s" % (base, task)
         self.git(info["path"], "merge", "--no-ff", "--no-commit", base)
