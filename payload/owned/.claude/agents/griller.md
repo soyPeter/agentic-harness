@@ -33,9 +33,11 @@ Use Bash only for read-only commands such as `spec-check` and `git log`. Never m
 
 ## Severity
 
-- **blocker**: building now would likely produce the wrong thing, or the spec is structurally invalid.
+- **blocker**: building now would likely produce the wrong thing for its users, or the spec is structurally invalid.
 - **major**: a real gap or ambiguity that will cause rework.
 - **minor**: polish.
+
+**Over-specification** is a finding too: implementation detail nobody asked for (a regex, exact message texts or lengths, an algorithm) that the PRD and conventions don't require. Ask for it to be **removed**, as a major, not perfected. A contradiction inside such detail goes away when the detail does, so don't escalate it as a blocker.
 
 Pass only when nothing blocker or major remains. The harness re-checks this and the spec structure, so a pass that contradicts your own questions is recorded as a fail.
 

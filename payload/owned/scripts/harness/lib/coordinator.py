@@ -21,6 +21,7 @@ unclear the coordinator stops and reports instead of guessing.
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -262,15 +263,24 @@ class Coordinator(object):
         agent = self.agent_for(role)
         args = ["orchestration", "worker-start", "--spec", spec, "--worktree", info["selector"],
                 "--task-title", "%s %s: %s" % (kind, task, role)]
+        launched = None
         if self.launch.get(agent):
             # Orca's own launch can't add flags; open the agent in a terminal with its command, then supervise it.
+            command = self.launch[agent]
+            if agent == "codex":
+                # A worktree's git metadata lives in the main repository's .git, outside the worktree: let Codex's
+                # workspace-write sandbox write there too, or every git and harness command asks for approval.
+                common = self.git(info["path"], "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+                if common:
+                    command += " -c %s" % shlex.quote('sandbox_workspace_write.writable_roots=["%s"]' % common)
             terminal = self.orca("terminal", "create", "--worktree", info["selector"], "--title",
-                                 "harness %s %s" % (task, role), "--command", self.launch[agent])
+                                 "harness %s %s" % (task, role), "--command", command)
             handle = find(terminal, "handle", "terminalHandle", "terminal_handle")
             if not handle:
                 raise CoordinatorError("terminal create for %s returned no handle: %s" % (agent, json.dumps(terminal)[:300]))
             time.sleep(self.opts.get("launch_wait", 8))
             args += ["--terminal", handle]
+            launched = handle
         else:
             args += ["--agent", agent]
         if self.run:
@@ -280,7 +290,7 @@ class Coordinator(object):
         if not dispatch:
             raise CoordinatorError("worker-start for task %s returned no dispatch id: %s" % (task, json.dumps(receipt)[:300]))
         entry = {"task": task, "role": role, "kind": kind, "started": time.time(),
-                 "handle": find(receipt, "terminalHandle", "terminal_handle", "handle")}
+                 "handle": find(receipt, "terminalHandle", "terminal_handle", "agentTerminalHandle", "handle") or launched}
         entry.update(extra or {})
         self.active[dispatch] = entry
         self.log("orca: task %s: %s worker (%s, %s) started: %s" % (task, role, kind, agent, dispatch))
@@ -310,6 +320,8 @@ class Coordinator(object):
                 return False
             if name in END_STEPS:
                 info["outcome"] = name
+                self.log("orca: task %s: %s%s" % (task, name, (": " + "; ".join(step.get("escalations") or []))[:300]
+                                                  if step.get("escalations") else ""))
                 return False
             if name == "approve":
                 if not step.get("command"):
