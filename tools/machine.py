@@ -19,6 +19,7 @@ never does that.
 """
 import json
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -57,10 +58,18 @@ def write_json(path, data):
     os.replace(str(tmp), str(path))
 
 
+LEGACY = re.compile(r'^python3 "[^"]*/\.agentic-harness/guard\.py" --from (claude|codex)$')   # 0.14.0-dev commands
+
+
+def owned(command):
+    command = str(command or "").strip()
+    return MARK in command.split() or bool(LEGACY.match(command))
+
+
 def without_guard(groups):
     kept = []
     for group in groups or []:
-        hooks = [h for h in group.get("hooks", []) if MARK not in str(h.get("command", "")).split()]
+        hooks = [h for h in group.get("hooks", []) if not owned(h.get("command"))]
         if hooks:
             kept.append(dict(group, hooks=hooks))
     return kept
@@ -137,7 +146,7 @@ def status(_argv):
     print("  config     %s" % shown)
     for path in (home(".claude", "settings.json"), home(".codex", "hooks.json")):
         groups = (read_json(path).get("hooks") or {}).get("PreToolUse") if path.exists() else []
-        found = any(MARK in str(h.get("command", "")).split() for g in groups or [] for h in g.get("hooks", []))
+        found = any(owned(h.get("command")) for g in groups or [] for h in g.get("hooks", []))
         print("  %-10s %s" % ("claude" if ".claude" in str(path) else "codex", "guard hook present" if found
                               else "no guard hook"))
     return 0

@@ -18,11 +18,9 @@ from pathlib import Path
 
 EDIT_TOOLS = ("Write", "Edit", "MultiEdit", "apply_patch")
 HARNESS_FILE = "scripts/harness/lib/harness.py"
-# In block mode a shell command in an unenrolled repository runs only if every part of it is one of these, without
-# output redirection; anything else might write. Enrolling (enroll.sh) is always allowed.
-READ_ONLY = {"ls", "cat", "head", "tail", "grep", "rg", "find", "pwd", "wc", "which", "file", "stat", "tree", "less",
-             "more", "echo", "printf", "env", "date", "true"}
-READ_ONLY_GIT = {"status", "log", "diff", "show", "branch", "remote", "rev-parse", "ls-files", "blame", "describe"}
+# In block mode, a shell command in an unenrolled repository runs only if it enrolls it: a shell can write in too many
+# ways (redirections, wrappers, substitutions, tools with delete flags) for an allowlist to be safe. Reads work through
+# the agents' file tools.
 
 
 def config():
@@ -77,25 +75,17 @@ def nearest_dir(path):
     return str(path)
 
 
-def read_only_shell(command):
+def enrolls(command):
+    """True only for a single, plain `.../enroll.sh <args>` command (no operators, redirections or substitutions)."""
     import re
     import shlex
-    if re.search(r"(^|[^0-9&])>|\btee\b", command):
+    if re.search(r"[;&|<>`$()\n]", command or ""):
         return False
-    for part in re.split(r"&&|\|\||;|\||\n", command):
-        try:
-            words = shlex.split(part)
-        except ValueError:
-            return False
-        if not words:
-            continue
-        if words[0].endswith("enroll.sh"):
-            continue
-        if words[0] == "git" and len(words) > 1 and words[1] in READ_ONLY_GIT:
-            continue
-        if words[0] not in READ_ONLY:
-            return False
-    return True
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    return bool(words) and words[0].endswith("enroll.sh")
 
 
 def warned_once(root, session):
@@ -139,7 +129,7 @@ def main(argv):
     message = ("%s is not enrolled in the agentic harness, so no spec, review or judge gates apply here. Enroll it "
                "first: <agentic-harness>/enroll.sh %s" % (root, root))
     writes = data.get("tool_name") in EDIT_TOOLS or (
-        data.get("tool_name") == "Bash" and not read_only_shell((data.get("tool_input") or {}).get("command") or ""))
+        data.get("tool_name") == "Bash" and not enrolls((data.get("tool_input") or {}).get("command") or ""))
     if settings.get("mode") == "block" and writes:
         sys.stderr.write("Harness machine guard: refused this %s. %s\n" % (
             "command" if data.get("tool_name") == "Bash" else "edit", message))
