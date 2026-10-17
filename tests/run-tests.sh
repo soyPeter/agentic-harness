@@ -1762,6 +1762,10 @@ calls=$(cat "$WORK/terminal-calls")
 contains "in the repository" "terminal create --worktree path:$EN" "$calls"
 contains "running the coordinator with --merge --trust" "orca --merge --trust >" "$calls"
 contains "logging to the git directory" "harness/orca-latest.log" "$calls"
+git -C "$EN" worktree add -q -b nightly-wt "$WORK/en-linked" 2>/dev/null
+rm -f "$WORK/terminal-calls"
+HARNESS_ORCA_BIN="$WORK/terminal-orca" python3 "$WORK/en-linked/scripts/harness/lib/harness.py" orca-nightly >/dev/null 2>&1
+contains "from a linked worktree, the log goes to the shared git directory" "$(git -C "$EN" rev-parse --path-format=absolute --git-common-dir)/harness/orca-latest.log" "$(cat "$WORK/terminal-calls")"
 
 section "the Orca skill names only commands that exist"
 SK="$HARNESS/orca/skills/agentic-harness/SKILL.md"
@@ -1816,6 +1820,10 @@ expect 2 "block mode: another script with a matching name isn't enrolling" sh -c
 expect 2 "block mode: nor is a different enroll.sh" sh -c "printf '%s' '$(bj "$WORK/enroll.sh ." "$MH/work/other")' | HOME='$MH' python3 '$G' --from claude"
 expect 2 "a shell command from an enrolled repo that names a path in an unenrolled one is refused" sh -c "printf '%s' '$(bj "python3 -c \"open('$MH/work/other/src.py','w')\"" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
 expect 2 "and so is cd into one" sh -c "printf '%s' '$(bj "cd ../other && make" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
+mkdir -p "$MH/work/my repo" && git -C "$MH/work/my repo" init -q
+expect 2 "a redirection straight into an unenrolled repo is refused" sh -c "printf '%s' '$(bj "printf x >$MH/work/other/src.py" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
+expect 2 "so is a quoted path with spaces into one" sh -c "printf '%s' '$(bj "cp a.txt \"$MH/work/my repo/a.txt\"" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
+expect 2 "and cd into a quoted path with spaces" sh -c "printf '%s' '$(bj "cd \"$MH/work/my repo\" && make" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
 expect 0 "a shell command in an enrolled repo that names only its own paths runs" sh -c "printf '%s' '$(bj "ls $MH/work/plain/src" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
 xj() { python3 -c 'import json,sys; print(json.dumps({"session_id":"s1","tool_name":"Write","tool_input":{"file_path":sys.argv[1],"content":"x"},"cwd":sys.argv[2]}))' "$1" "$2"; }
 expect 2 "a write into an unenrolled repo from an enrolled session is refused" sh -c "printf '%s' '$(xj "$MH/work/other/x.py" "$MH/work/plain")' | HOME='$MH' python3 '$G' --from claude"
