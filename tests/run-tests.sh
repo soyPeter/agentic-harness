@@ -1409,6 +1409,38 @@ lacks "no conflict markers are left" "<<<<<<<" "$tasks$(cat "$O/backbone/6-MEMOR
 mem=$(cat "$O/backbone/6-MEMORY.md")
 contains "both scribes' memory entries are kept" "a lesson from task 9.4" "$mem"
 contains "including the second" "a lesson from task 9.5" "$mem"
+for id in 9.6 9.7; do
+  printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/$id/g" -e 's/^- python: all code$/- code-quality: all code/' > "$O/backbone/specs/$id.md"
+  printf '%s' "$(python3 -c 'import json,sys; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":sys.argv[1],"questions":[],"summary":"s"})+"\n```"}))' "$id")" \
+    | python3 "$O/scripts/harness/lib/harness.py" hook grill-stop >/dev/null
+done
+printf -- '- [ ] **Task 9.6: Up** (spec: backbone/specs/9.6.md)\n- [ ] **Task 9.7: Down** (spec: backbone/specs/9.7.md)\n' >> "$O/backbone/3-TASKS.md"
+printf '# Escalations\n\nWritten by the harness.\n\n## 2026-10-17 10:00 Task 9.0: decision\n\n- Status: open\n- Reason: shared\n' > "$O/backbone/escalations.md"
+$OH approve 9.6 >/dev/null; $OH approve 9.7 >/dev/null
+git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: tasks 9.6 and 9.7"
+out=$(HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.6,9.7 --parallel 2 --wait-ms 10 2>&1)
+contains "fixture: 9.6 and 9.7 finish on their branches without --merge" "task 9.7: done" "$out"
+for id in 9.6 9.7; do
+  W="$WORK/orca-worktrees/harness-task-$id"
+  python3 - "$W/backbone/escalations.md" "$id" <<'EOF'
+import sys
+p, t = sys.argv[1:3]; s = open(p).read()
+if t == "9.6":
+    s = s.replace("- Status: open", "- Status: resolved (by the user)")
+s += "\n## 2026-10-17 11:00 Task %s: decision\n\n- Status: open\n- Reason: only on %s\n" % (t, t)
+open(p, "w").write(s)
+EOF
+  git -C "$W" add -A && HARNESS_VERIFY=off git -C "$W" commit -qm "chore: escalation on $id"
+done
+out=$(HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.6,9.7 --parallel 2 --merge --wait-ms 10 2>&1)
+contains "a resumed run merges a task that finished on its branch earlier" "task 9.6: done on its branch, not yet on the base; merging" "$out"
+contains "both are merged" "task 9.7: done; merged into" "$out"
+esc=$(cat "$O/backbone/escalations.md")
+contains "escalation entries from both branches are kept" "only on 9.6" "$esc"
+contains "including the other branch's" "only on 9.7" "$esc"
+contains "an entry resolved on one side stays resolved" "Status: resolved (by the user)" "$esc"
+[ "$(grep -c 'Task 9.0: decision' "$O/backbone/escalations.md")" -eq 1 ] && ok "a shared entry appears once" || bad "a shared entry appears once"
+lacks "no conflict markers in escalations.md" "<<<<<<<" "$esc"
 unset FAKE_ORCA_STATE
 
 section "autonomous mode: judging, risk drift, kill switch"

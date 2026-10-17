@@ -318,6 +318,13 @@ class Coordinator(object):
                              "--needed", "a look at the task's verdicts and the workers' transcripts")
                 info["outcome"] = "escalated (no progress at %s)" % name
                 return False
+            if name == "done" and self.opts.get("merge") and not self.opts.get("here") and task not in self.base_done():
+                # Finished on its branch in an earlier run but never reached the base (a merge that was refused, a
+                # run that stopped): merge it now, so the tasks after it can start.
+                info["outcome"] = "done"
+                self.log("orca: task %s: done on its branch, not yet on the base; merging" % task)
+                self.merge(task)
+                return False
             if name in END_STEPS:
                 info["outcome"] = name
                 self.log("orca: task %s: %s%s" % (task, name, (": " + "; ".join(step.get("escalations") or []))[:300]
@@ -537,17 +544,41 @@ class Coordinator(object):
         self.log("orca: task %s merged" % task)
 
     LOGS = ("backbone/6-MEMORY.md", "backbone/5-DECISIONS.md")
+    ESCALATIONS = "backbone/escalations.md"
+
+    @staticmethod
+    def merge_escalations(ours, theirs):
+        """Both sides' escalation entries, by heading, in order; an entry resolved on either side stays resolved."""
+        def split(text):
+            head, _, rest = text.partition("\n## ")
+            parts = ("## " + rest).split("\n## ") if rest else []
+            return head, ["## " + p if not p.startswith("## ") else p for p in parts]
+        head, mine = split(ours)
+        _, other = split(theirs)
+        entries, order = {}, []
+        for entry in mine + other:
+            key = entry.splitlines()[0].strip()
+            if key not in entries:
+                order.append(key)
+                entries[key] = entry
+            elif "Status: open" in entries[key] and "Status: open" not in entry:
+                entries[key] = entry
+        return head.rstrip("\n") + "\n\n" + "\n".join(e.rstrip("\n") + "\n" for e in (entries[k] for k in order))
 
     def resolve_backbone_conflicts(self, task, message):
         """Parallel tasks both edit 3-TASKS.md (neighbouring task lines) and append to the memory and decision logs.
         Resolve only those: the base's task list with this task marked [x], and both sides of each log. Any other
         conflict is left for a person (the merge is aborted)."""
         conflicted = [n for n in self.git(self.root, "diff", "--name-only", "--diff-filter=U").stdout.splitlines() if n]
-        if not conflicted or any(n not in ("backbone/3-TASKS.md",) + self.LOGS for n in conflicted):
+        if not conflicted or any(n not in ("backbone/3-TASKS.md", self.ESCALATIONS) + self.LOGS for n in conflicted):
             return False
         for name in conflicted:
             path = self.root / name
-            if name == "backbone/3-TASKS.md":
+            if name == self.ESCALATIONS:
+                path.write_text(self.merge_escalations(self.git(self.root, "show", ":2:%s" % name).stdout,
+                                                       self.git(self.root, "show", ":3:%s" % name).stdout),
+                                encoding="utf-8")
+            elif name == "backbone/3-TASKS.md":
                 ours = self.git(self.root, "show", ":2:%s" % name).stdout
                 marked = re.sub(r"(?m)^(\s*[-*]\s+)\[[^\]]*\](\s*\**Task %s\b)" % re.escape(task), r"\1[x]\2", ours,
                                 count=1)

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.14.1 (2026-10-17)
+
+- **Orca coordinator merges finish what they started.** In the ledger backlog run, two parallel tasks both changed `backbone/escalations.md`, and the merge was refused, leaving the tasks after them waiting.
+  - `escalations.md` is now merged by entry: both sides' entries are kept, and one resolved on either side stays resolved.
+  - A resumed `harness.py orca --merge` merges tasks that finished on their branch in an earlier run but never reached the base.
+
 ## 0.14.0 (2026-10-17)
 
 **Project Enrollment and Shell Gating.** The harness now provides opt-in project enrollment and enforces shell gates for agents:
