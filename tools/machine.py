@@ -19,25 +19,27 @@ never does that.
 """
 import json
 import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
 
 HARNESS = Path(__file__).resolve().parent.parent
-MARK = ".agentic-harness/guard.py"
+MARK = "--harness-machine-guard"   # the token that identifies the guard's own hook entries
 
 
 def home(*parts):
     return Path(os.path.expanduser("~")).joinpath(*parts)
 
 
-def guard_command(source, guard_path):
-    return 'python3 "%s" --from %s' % (guard_path, source)
+def guard_command(source, guard_path, config=None):
+    prefix = "HARNESS_MACHINE_CONFIG=%s " % shlex.quote(str(config)) if config else ""
+    return "%spython3 %s --from %s %s" % (prefix, shlex.quote(str(guard_path)), source, MARK)
 
 
-def hook_group(source, guard_path):
+def hook_group(source, guard_path, config=None):
     matcher = "Write|Edit|MultiEdit|Bash" if source == "claude" else "apply_patch|Bash"
-    return {"matcher": matcher, "hooks": [{"type": "command", "command": guard_command(source, guard_path),
+    return {"matcher": matcher, "hooks": [{"type": "command", "command": guard_command(source, guard_path, config),
                                            "timeout": 10}]}
 
 
@@ -58,7 +60,7 @@ def write_json(path, data):
 def without_guard(groups):
     kept = []
     for group in groups or []:
-        hooks = [h for h in group.get("hooks", []) if MARK not in str(h.get("command", ""))]
+        hooks = [h for h in group.get("hooks", []) if MARK not in str(h.get("command", "")).split()]
         if hooks:
             kept.append(dict(group, hooks=hooks))
     return kept
@@ -80,7 +82,7 @@ def set_hook(path, source, guard_path, install):
 def parse(argv):
     roots, mode, out, key = [], "warn", None, None
     for arg in argv:
-        if arg in ("--roots", "--mode", "--out"):
+        if arg in ("--roots", "--mode", "--out", "--platform"):
             key = arg
         elif key == "--roots":
             roots.append(arg)
@@ -88,6 +90,8 @@ def parse(argv):
             mode, key = arg, None
         elif key == "--out":
             out, key = arg, None
+        elif key == "--platform":
+            key = None
     if mode not in ("warn", "block"):
         raise SystemExit("machine: --mode is warn or block")
     return roots or ["~/Work/repos"], mode, out
@@ -133,29 +137,40 @@ def status(_argv):
     print("  config     %s" % shown)
     for path in (home(".claude", "settings.json"), home(".codex", "hooks.json")):
         groups = (read_json(path).get("hooks") or {}).get("PreToolUse") if path.exists() else []
-        found = any(MARK in str(h.get("command", "")) for g in groups or [] for h in g.get("hooks", []))
+        found = any(MARK in str(h.get("command", "")).split() for g in groups or [] for h in g.get("hooks", []))
         print("  %-10s %s" % ("claude" if ".claude" in str(path) else "codex", "guard hook present" if found
                               else "no guard hook"))
     return 0
+
+
+PLATFORMS = {
+    "macos": {"claude_dir": "/Library/Application Support/AgenticHarness",
+              "claude_settings": "/Library/Application Support/ClaudeCode/managed-settings.json"},
+    "linux": {"claude_dir": "/etc/claude-code/agentic-harness",
+              "claude_settings": "/etc/claude-code/managed-settings.json"},
+}
+CODEX_DIR = "/etc/codex/agentic-harness"
 
 
 def managed(argv):
     roots, mode, out = parse(argv)
     if not out:
         raise SystemExit("machine: managed needs --out DIR")
+    platform = argv[argv.index("--platform") + 1] if "--platform" in argv and argv.index("--platform") + 1 < len(argv) \
+        else ("macos" if sys.platform == "darwin" else "linux")
+    if platform not in PLATFORMS:
+        raise SystemExit("machine: --platform is macos or linux")
+    paths = PLATFORMS[platform]
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(str(HARNESS / "machine" / "guard.py"), str(out / "guard.py"))
-    claude_guard = "/Library/Application Support/AgenticHarness/guard.py"
-    codex_guard = "/etc/codex/agentic-harness/guard.py"
     write_json(out / "machine.json", {"roots": roots, "mode": mode, "exempt": [str(HARNESS)]})
-    claude_hook = hook_group("claude", claude_guard)
-    claude_hook["hooks"][0]["command"] = ('HARNESS_MACHINE_CONFIG="/Library/Application Support/AgenticHarness/'
-                                          'machine.json" ' + claude_hook["hooks"][0]["command"])
+    claude_dir = paths["claude_dir"]
     write_json(out / "managed-settings.json", {
-        "hooks": {"PreToolUse": [claude_hook]},
+        "hooks": {"PreToolUse": [hook_group("claude", claude_dir + "/guard.py", claude_dir + "/machine.json")]},
         "permissions": {"disableBypassPermissionsMode": "disable"},
     })
+    codex_command = guard_command("codex", CODEX_DIR + "/guard.py", CODEX_DIR + "/machine.json")
     (out / "requirements.toml").write_text("""# Agentic harness: Codex managed requirements (review, then install as /etc/codex/requirements.toml).
 # Managed hooks are trusted by policy and can't be switched off from a user or project config.
 # Don't set allow_managed_hooks_only: it would also skip each project's own harness hooks.
@@ -166,23 +181,26 @@ hooks = true
 matcher = "apply_patch|Bash"
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = "HARNESS_MACHINE_CONFIG=/etc/codex/agentic-harness/machine.json python3 %s --from codex"
+command = %s
 timeout = 10
-""" % codex_guard, encoding="utf-8")
-    (out / "INSTALL.md").write_text("""# Installing the managed guard (needs admin rights)
+""" % json.dumps(codex_command), encoding="utf-8")
+    (out / "INSTALL.md").write_text("""# Installing the managed guard (%(platform)s, needs admin rights)
 
 Review every file here first. Then:
 
-    sudo mkdir -p "/Library/Application Support/AgenticHarness" /etc/codex/agentic-harness
-    sudo cp guard.py machine.json "/Library/Application Support/AgenticHarness/"
-    sudo cp guard.py machine.json /etc/codex/agentic-harness/
-    sudo cp managed-settings.json "/Library/Application Support/ClaudeCode/managed-settings.json"
+    sudo mkdir -p "%(claude_dir)s" %(codex_dir)s
+    sudo cp guard.py machine.json "%(claude_dir)s/"
+    sudo cp guard.py machine.json %(codex_dir)s/
+    sudo cp managed-settings.json "%(claude_settings)s"
     sudo cp requirements.toml /etc/codex/requirements.toml
 
 Claude Code's managed-settings.json replaces any existing one: merge by hand if you already have one. Both hooks read
 the managed machine.json next to their guard, so users can't widen it. It also disables bypassPermissions mode.
-Linux: use /etc/claude-code/managed-settings.json and /etc/claude-code/agentic-harness/ instead of the /Library paths.
-""", encoding="utf-8")
+
+Limits: the guard needs python3 and git on the PATH. If its own lookup fails (no git, a broken config), it lets the call
+through rather than stop every agent on the machine; the repositories' own hooks and CI stay the enforcement.
+""" % {"platform": platform, "claude_dir": claude_dir, "codex_dir": CODEX_DIR,
+       "claude_settings": paths["claude_settings"]}, encoding="utf-8")
     for name in ("guard.py", "machine.json", "managed-settings.json", "requirements.toml", "INSTALL.md"):
         print("  wrote      %s" % (out / name))
     print("Review them, then follow INSTALL.md (sudo). Nothing was installed.")

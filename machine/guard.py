@@ -18,6 +18,11 @@ from pathlib import Path
 
 EDIT_TOOLS = ("Write", "Edit", "MultiEdit", "apply_patch")
 HARNESS_FILE = "scripts/harness/lib/harness.py"
+# In block mode a shell command in an unenrolled repository runs only if every part of it is one of these, without
+# output redirection; anything else might write. Enrolling (enroll.sh) is always allowed.
+READ_ONLY = {"ls", "cat", "head", "tail", "grep", "rg", "find", "pwd", "wc", "which", "file", "stat", "tree", "less",
+             "more", "echo", "printf", "env", "date", "true"}
+READ_ONLY_GIT = {"status", "log", "diff", "show", "branch", "remote", "rev-parse", "ls-files", "blame", "describe"}
 
 
 def config():
@@ -46,6 +51,53 @@ def inside(path, folders):
     return False
 
 
+def patch_paths(command):
+    import re
+    return re.findall(r"(?m)^\*\*\* (?:Add|Update|Delete) File: (.+?)\s*$|^\*\*\* Move to: (.+?)\s*$", command or "")
+
+
+def targets(data, base):
+    """The paths a tool call writes (Bash: its working directory). Relative paths resolve against the session's cwd."""
+    tool = data.get("tool_name")
+    tool_input = data.get("tool_input") or {}
+    paths = []
+    if tool in ("Write", "Edit", "MultiEdit") and tool_input.get("file_path"):
+        paths = [tool_input["file_path"]]
+    elif tool == "apply_patch":
+        paths = [a or b for a, b in patch_paths(tool_input.get("command") or tool_input.get("patch"))]
+    elif tool == "Bash":
+        paths = [tool_input.get("workdir") or base]
+    return [Path(p) if os.path.isabs(p) else Path(base) / p for p in paths if p]
+
+
+def nearest_dir(path):
+    path = path.resolve()
+    while not path.is_dir() and path != path.parent:
+        path = path.parent
+    return str(path)
+
+
+def read_only_shell(command):
+    import re
+    import shlex
+    if re.search(r"(^|[^0-9&])>|\btee\b", command):
+        return False
+    for part in re.split(r"&&|\|\||;|\||\n", command):
+        try:
+            words = shlex.split(part)
+        except ValueError:
+            return False
+        if not words:
+            continue
+        if words[0].endswith("enroll.sh"):
+            continue
+        if words[0] == "git" and len(words) > 1 and words[1] in READ_ONLY_GIT:
+            continue
+        if words[0] not in READ_ONLY:
+            return False
+    return True
+
+
 def warned_once(root, session):
     """True if this session was already reminded about root (one reminder per session and repository)."""
     marker = Path(os.path.expanduser("~/.agentic-harness/warned")) / ("%s-%s" % (session or "session",
@@ -71,21 +123,35 @@ def main(argv):
     if not settings or not isinstance(data, dict):
         sys.stdout.write(quiet)
         return 0
-    start = os.environ.get("CLAUDE_PROJECT_DIR") or data.get("cwd") or os.getcwd()
-    root = repo_root(start)
-    if (root is None or not inside(root, settings.get("roots") or []) or inside(root, settings.get("exempt") or [])
-            or (root / HARNESS_FILE).is_file()):
+    base = data.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    unenrolled = []
+    for target in targets(data, base):
+        root = repo_root(nearest_dir(target))
+        if (root is None or not inside(root, settings.get("roots") or []) or inside(root, settings.get("exempt") or [])
+                or (root / HARNESS_FILE).is_file()):
+            continue
+        if root not in unenrolled:
+            unenrolled.append(root)
+    if not unenrolled:
         sys.stdout.write(quiet)
         return 0
+    root = unenrolled[0]
     message = ("%s is not enrolled in the agentic harness, so no spec, review or judge gates apply here. Enroll it "
                "first: <agentic-harness>/enroll.sh %s" % (root, root))
-    if settings.get("mode") == "block" and data.get("tool_name") in EDIT_TOOLS:
-        sys.stderr.write("Harness machine guard: refused this edit. %s\n" % message)
+    writes = data.get("tool_name") in EDIT_TOOLS or (
+        data.get("tool_name") == "Bash" and not read_only_shell((data.get("tool_input") or {}).get("command") or ""))
+    if settings.get("mode") == "block" and writes:
+        sys.stderr.write("Harness machine guard: refused this %s. %s\n" % (
+            "command" if data.get("tool_name") == "Bash" else "edit", message))
         return 2
-    if source == "codex" or warned_once(root, data.get("session_id")):
+    if warned_once(root, data.get("session_id")):
         sys.stdout.write(quiet)
         return 0
-    sys.stdout.write(json.dumps({"systemMessage": "harness: " + message}) + "\n")
+    if source == "codex":
+        sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                                            "additionalContext": "harness: " + message}}) + "\n")
+    else:
+        sys.stdout.write(json.dumps({"systemMessage": "harness: " + message}) + "\n")
     return 0
 
 
