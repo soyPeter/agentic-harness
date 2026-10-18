@@ -1409,6 +1409,18 @@ for id in 9.2 9.3; do
     | python3 "$O/scripts/harness/lib/harness.py" hook grill-stop >/dev/null
 done
 printf -- '- [ ] **Task 9.3: After** (spec: backbone/specs/9.3.md) (after: 9.2)\n- [ ] **Task 9.2: First** (spec: backbone/specs/9.2.md)\n' >> "$O/backbone/3-TASKS.md"
+printf -- '- [ ] **Task 6.1c: C** (spec: backbone/specs/6.1c.md) (after 6.1a)\n- [ ] **Task 6.1d: D** (spec: backbone/specs/6.1d.md) (after: 6.1a, 6.1c)\n- [ ] **Task 6.2: E** (spec: backbone/specs/6.2.md) (afterwards, see the notes)\n' > "$WORK/deps-tasks.md"
+deps=$(python3 - "$O/scripts/harness/lib" "$WORK/deps-tasks.md" <<'PYEOF'
+import json, sys, importlib.util
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("h", sys.argv[1] + "/harness.py"); h = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(h); h.TASKS = Path(sys.argv[2])
+print(json.dumps(h.task_dependencies(), sort_keys=True))
+PYEOF
+)
+contains "dependencies: '(after 6.1a)' without a colon counts" '"6.1c": ["6.1a"]' "$deps"
+contains "dependencies: a list after 'after:'" '"6.1d": ["6.1a", "6.1c"]' "$deps"
+lacks "dependencies: 'afterwards' in a note isn't one" '"6.2"' "$deps"
 $OH approve 9.2 >/dev/null; $OH approve 9.3 >/dev/null
 git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: tasks 9.2 and 9.3"
 contains "orca --dry-run shows a task waiting for its dependency" "would drive task 9.3 (next: start), after 9.2 is done" "$(HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --dry-run --tasks 9.3,9.2 2>&1)"

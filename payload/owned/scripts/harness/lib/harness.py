@@ -3005,17 +3005,18 @@ def orca_nightly_command(argv):
     return 0 if ok else 1
 
 
-AFTER_NOTE = re.compile(r"\(after:\s*([^)]+)\)", re.I)
+AFTER_NOTE = re.compile(r"\(after(?::\s*|\s+)([^)]+)\)", re.I)   # "(after: 1.1, 1.2)" or "(after 1.1)"
 
 
 def task_dependencies():
-    """{task: [tasks it waits for]} from "(after: 1.1, 1.2)" on its line in 3-TASKS.md."""
+    """{task: [tasks it waits for]} from "(after: 1.1, 1.2)" or "(after 1.1)" on its line in 3-TASKS.md."""
     lines = mask_comments(read(TASKS)).splitlines()
     deps = {}
     for i, line in enumerate(lines):
         m = AFTER_NOTE.search(line)
         if m and re.match(r"^\s*[-*]\s+\[[^\]]*\]", line):
-            deps[task_id_at(lines, i)] = [d.strip() for d in re.split(r"[,\s]+", m.group(1)) if d.strip()]
+            deps[task_id_at(lines, i)] = [d.rstrip(".") for d in re.split(r"[,\s]+", m.group(1))
+                                          if re.match(r"^\d+(\.\d+[a-z]?)*\.?$", d)]
     return deps
 
 
