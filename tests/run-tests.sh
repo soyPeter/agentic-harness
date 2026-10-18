@@ -36,7 +36,7 @@ bash_json() { python3 -c 'import json,sys; print(json.dumps({"tool_name":"Bash",
 write_json() { python3 -c 'import json,sys; print(json.dumps({"agent_id":"session","tool_name":"Write","tool_input":{"file_path":sys.argv[1],"content":sys.argv[2]}}))' "$1" "$2"; }
 edit_json() { python3 -c 'import json,sys; print(json.dumps({"agent_id":"session","tool_name":"Edit","tool_input":{"file_path":sys.argv[1],"old_string":sys.argv[2],"new_string":sys.argv[3]}}))' "$1" "$2" "$3"; }
 main_write() { python3 -c 'import json,sys; print(json.dumps({"session_id":"session","tool_name":"Write","tool_input":{"file_path":sys.argv[1],"content":sys.argv[2]}}))' "$1" "$2"; }
-new_repo() { mkdir -p "$1" && git -C "$1" init -q; }
+new_repo() { mkdir -p "$1" && git -C "$1" init -q -b main; }
 guard() {  # guard <project> <agent> <json>: the write-scope hook scoped to one agent
   printf '%s' "$3" | CLAUDE_PROJECT_DIR="$1" python3 "$1/scripts/harness/lib/harness.py" hook agent-guard "$2"
 }
