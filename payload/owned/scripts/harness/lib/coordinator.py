@@ -329,6 +329,10 @@ class Coordinator(object):
                 self.log("orca: task %s: %s%s" % (task, name, (": " + "; ".join(step.get("escalations") or []))[:300]
                                                   if step.get("escalations") else ""))
                 return False
+            if name in ("approve", "start") and not info.get("synced"):
+                info["synced"] = True
+                self.sync(task)
+                continue
             if name == "approve":
                 if not step.get("command"):
                     info["outcome"] = "waiting for the user's approval"
@@ -578,6 +582,28 @@ class Coordinator(object):
         info["outcome"] += "; merged into %s" % self.git(self.root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
         self.log("orca: task %s merged" % task)
         return False
+
+    def sync(self, task):
+        """Bring a task's branch up to date with the base before it is approved: decisions taken on the base since
+        the worktree was made (accepted ADRs, answered questions, other tasks' code) apply to it, and later merges
+        conflict less. Only conflicts the harness understands are resolved; with a code conflict the branch stays as
+        it is, and the integrate step deals with it at merge time."""
+        if self.opts.get("here"):
+            return
+        info = self.tasks[task]
+        base = self.git(self.root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        behind = self.git(info["path"], "rev-list", "--count", "HEAD..%s" % base).stdout.strip()
+        if not behind or behind == "0" or self.git(info["path"], "status", "--porcelain", "--untracked-files=no").stdout.strip():
+            return
+        merged = self.git(info["path"], "merge", "--no-ff", "--no-commit", base)
+        if merged.returncode != 0 and self.resolve_conflicts(info["path"], task, base_stage=3):
+            self.git(info["path"], "merge", "--abort")
+            self.log("orca: task %s: not synced with %s (code conflicts; integrated at merge time)" % (task, base))
+            return
+        if self.git(info["path"], "diff", "--cached", "--quiet").returncode != 0 or merged.returncode != 0:
+            self.commit_merge(info["path"], "chore: sync task %s with %s" % (task, base))
+        self.harness(info["path"], "snapshot")
+        self.log("orca: task %s: synced with %s (%s commit(s))" % (task, base, behind))
 
     def renumber_adrs(self, task):
         """Give the branch's new ADRs numbers the base doesn't already use for another ADR (tasks numbered in

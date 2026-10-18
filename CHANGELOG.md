@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.3 (2026-10-18)
+
+From the ledger run:
+- **Task branches are brought up to date before approval.** Decisions taken on the base after a task's worktree was made, such as ADRs the user accepted or other tasks' code, didn't reach the task. Task 1.10 was escalated over ADRs already accepted on `main`. The coordinator now merges the base into a task's branch before approving or starting it, resolving the conflicts it understands. With a code conflict it leaves the branch as it is, and the integrate step deals with it at merge time.
+- **Citing a skill isn't touching a sensitive path.** The risk check flagged task 1.10 because its spec cited `.claude/skills/security/SKILL.md` as a source. Harness files a spec cites (skills, backbone docs, harness scripts) no longer count as paths the change touches.
+
 ## 0.16.2 (2026-10-18)
 
 - **Assumptions with nested lists.** `approve` read each sub-bullet of an assumption as its own assumption "without a source", so task 1.7's spec, with one assumption listing its parts and citing its source once, could never be approved. The source check now joins nested lines and sub-bullets to the item above them.

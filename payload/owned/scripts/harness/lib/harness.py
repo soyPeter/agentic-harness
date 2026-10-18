@@ -1327,7 +1327,9 @@ def risk_reasons(task, base=None):
     hits = sorted({m.group(0).lower() for m in terms.finditer(body)})
     if hits:
         reasons.append("the spec involves %s" % ", ".join(hits[:6]))
-    named = sorted({w for w in re.findall(r"[\w.-]+(?:/[\w.-]+)+", body) if paths.search(w)})
+    # Harness files the spec cites as sources (skills, backbone docs) aren't code the change touches.
+    named = sorted({w for w in re.findall(r"[\w.-]+(?:/[\w.-]+)+", body) if paths.search(w)
+                    and not re.match(r"^\.?(claude/skills|backbone|scripts/harness)/", w.lstrip("./"))})
     if named:
         reasons.append("the spec names sensitive paths: %s" % ", ".join(named[:6]))
     for adr in spec_adrs(text):

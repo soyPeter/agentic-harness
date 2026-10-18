@@ -1065,6 +1065,9 @@ kspec 9.3 "- A1: Card data is tokenised (source: vault:40-Security/pci.md)"
 contains "approve refuses a citation outside HARNESS_KNOWLEDGE_PATHS" "outside HARNESS_KNOWLEDGE_PATHS" "$($AH approve 9.3)"
 kspec 9.4 "- A1: Endpoints are versioned in the path (source: vault:../../etc/passwd)"
 contains "approve refuses a citation escaping the vault" "outside HARNESS_KNOWLEDGE_PATHS" "$($AH approve 9.4)"
+auto_spec 9.8 "See .claude/skills/security/SKILL.md for the input rules."
+grill_pass 9.8 >/dev/null
+contains "citing a skill file isn't a sensitive path" "risk 9.8: low" "$($AH risk 9.8)"
 kspec 9.7 "- A1: The layout, sourced once for its parts:
   - the heading comes first;
   - then the lines. (source: backbone/1-PRD.md)"
@@ -1553,6 +1556,22 @@ renamed=$(ls "$O"/backbone/adr/ | grep -E "choice-9-1[45]" | grep -v '^ADR-020')
 [ -n "$renamed" ] && ok "the other decision kept its own file under a new number ($renamed)" || bad "the other decision kept its own file under a new number"
 contains "references in the task's own files follow the new number" "${renamed%%-choice*}" "$(cat "$O"/src/uses_9_1[45].py)"
 contains "the digest lists ADRs waiting for acceptance" "ADRs on the base waiting for your acceptance" "$out"
+for id in 9.16; do
+  printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/$id/g" -e 's/^- python: all code$/- code-quality: all code/' > "$O/backbone/specs/$id.md"
+  printf '%s' "$(python3 -c 'import json,sys; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":sys.argv[1],"questions":[],"summary":"s"})+"\n```"}))' "$id")" \
+    | python3 "$O/scripts/harness/lib/harness.py" hook grill-stop >/dev/null
+done
+printf -- '- [ ] **Task 9.16: Late** (spec: backbone/specs/9.16.md)\n' >> "$O/backbone/3-TASKS.md"
+git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: task 9.16"
+HARNESS_ORCA_BIN="$WORK/fake-orca.py" python3 - "$WORK/fake-orca.py" <<'EOF'
+EOF
+python3 "$WORK/fake-orca.py" worktree create --name harness-task-9.16 --repo "path:$O" --base-branch main --json >/dev/null
+echo "decided on the base later" > "$O/backbone/late-decision.md"
+git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "docs: a decision on the base after the task's worktree was made"
+$OH approve 9.16 >/dev/null 2>&1 || true
+out=$(HARNESS_TEST_CMD=true HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.16 --merge --wait-ms 10 2>&1)
+contains "a task's branch is synced with the base before it is approved" "task 9.16: synced with main" "$out"
+contains "so it sees what the base decided meanwhile" "decided on the base later" "$(git -C "$O" show harness-task-9.16:backbone/late-decision.md 2>/dev/null)"
 unset FAKE_ORCA_STATE
 
 section "autonomous mode: judging, risk drift, kill switch"
