@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.17.0 (2026-10-18)
+
+From the end of the ledger run (10 of 10 tasks merged; 785 tests and 10 ADRs for a small CLI):
+- **The judge checks proportion.** Over-engineering got past every gate: the judge asked only whether the spec was met. It now also asks whether the change is the simplest one that meets it. Code the task doesn't need is a major finding, so the judge fails the task. That covers a hand-written replacement for the standard library, an option or layer nobody asked for, defences against inputs the threat model rules out, and duplicated tests.
+- **Fewer, non-duplicated tests.** The tester writes a criterion's own examples, not a matrix of variations. When the tester has covered a criterion, the implementer doesn't write a second copy, and adds unit tests only for logic of its own.
+- **Decisions stay decided.** Task 1.9 re-raised a file-size limit the user had already decided, because older notes in `3-TASKS.md` and `6-MEMORY.md` still called it open. A recorded user decision now wins over such notes, and the scribe marks memory questions a task settled.
+- **The scribe proposes ADRs.** It was told to write emergent ADRs as `Accepted`, which the harness refuses (only the user accepts an ADR). It now writes them `Proposed`.
+- **Missing sources are caught at spec-check.** Task 1.9's spec passed spec-check and the griller, then `approve` refused it because one assumption had no `(source: ...)`. The analyst had been told to write "the analyst's choice" without a source. Spec-check now reports a missing source, and the analyst writes `(source: the analyst's choice; ...)`.
+- **The sync before approval runs on work in progress.** It skipped every task with uncommitted changes, so in practice it never ran. It now merges the base in around the task's own work, and logs why when git refuses. It leaves a merge already in progress in the worktree alone, and a refused sync commit is undone and reported, not logged as a sync.
+- **Updates no longer conflict in `harness.conf`.** The comment the update adds over new settings named the harness version, so tasks updated at different versions conflicted on that line (tasks 1.7, 1.8 and 1.10).
+- **`harness.py report` counts Orca runs.** It showed "0 tasks finished" after the backlog because only the old runner recorded events. The coordinator now records each worker's outcome (answer workers and workers that failed at startup included), each integration and each merge, and the report shows them.
+
 ## 0.16.3 (2026-10-18)
 
 From the ledger run:

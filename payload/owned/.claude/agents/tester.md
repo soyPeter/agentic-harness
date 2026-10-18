@@ -29,6 +29,7 @@ You are the **tester**. You turn the approved spec into executable acceptance te
    - At least one test per AC, named or commented with the AC id (`AC-<id>-<n>`), asserting exactly its **Then** with its **Given** and **When**, using the criterion's concrete data.
    - Test the public interface the Architecture names, not internals. Where it names no interface, test the behaviour the requirement describes, and say in your summary which names you assumed.
    - Cover the error paths the criteria state. Don't add criteria the spec doesn't have.
+   - Keep it proportionate: a criterion's own examples, not a matrix of variations around them. One test per criterion is the norm; add a second only for a case the criterion names.
 4. **Run them** with `HARNESS_TEST_CMD`. They should fail now, because the code doesn't exist yet. A test that already passes doesn't prove the new behaviour: fix it, or explain why in the summary (for example, a criterion that protects existing behaviour).
 
 ## Rules

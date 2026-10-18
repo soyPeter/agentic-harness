@@ -957,7 +957,7 @@ AT="$A/backbone/3-TASKS.md"
 mkdir -p "$A/backbone/specs" "$A/src" "$A/tests"
 auto_spec() {  # auto_spec <id> <extra requirement text> [ADR]
   printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/$1/g" -e 's/^- python: all code$/- code-quality: all code/' \
-    -e "s/^ADRs: ADR-001$/ADRs: ${3:-ADR-001}/" -e "s/ignoring case\./ignoring case. $2/" > "$A/backbone/specs/$1.md"
+    -e "s/^ADRs: ADR-001$/ADRs: ${3:-ADR-001}/" -e "s|ignoring case\.|ignoring case. $2|" > "$A/backbone/specs/$1.md"
   printf -- '- [ ] **Task %s: Item** (spec: backbone/specs/%s.md)\n' "$1" "$1" >> "$AT"
 }
 grill_pass() {  # grill_pass <id>
@@ -1517,6 +1517,10 @@ contains "a code conflict with the base goes to an integrating implementer" "an 
 contains "the integrated task passes the tests" "integrated with the base; the tests pass" "$out"
 contains "and both parallel tasks reach the base" "task 9.11: done; merged into" "$out"
 contains "task 9.10 too" "task 9.10: done; merged into" "$out"
+report=$($OH report)
+contains "report counts the tasks Orca merged and the integrations" "9.10, 9.11" "$report"
+contains "and the workers and integrations" "integration(s)" "$report"
+expect 0 "report --json has the Orca counts" python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert "9.11" in d["orca_merged"] and d["orca_workers"] > 0 and d["orca_integrations"] >= 1' "$($OH report --json)"
 shared=$(cat "$O/src/shared.py")
 contains "the shared module has both tasks' parts" "From_9_10" "$shared"
 contains "the other task's too" "From_9_11" "$shared"
@@ -1566,12 +1570,29 @@ git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: task 9.1
 HARNESS_ORCA_BIN="$WORK/fake-orca.py" python3 - "$WORK/fake-orca.py" <<'EOF'
 EOF
 python3 "$WORK/fake-orca.py" worktree create --name harness-task-9.16 --repo "path:$O" --base-branch main --json >/dev/null
+echo "the task's own uncommitted work" > "$WORK/orca-worktrees/harness-task-9.16/src/wip_9_16.py"
 echo "decided on the base later" > "$O/backbone/late-decision.md"
 git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "docs: a decision on the base after the task's worktree was made"
 $OH approve 9.16 >/dev/null 2>&1 || true
 out=$(HARNESS_TEST_CMD=true HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.16 --merge --wait-ms 10 2>&1)
 contains "a task's branch is synced with the base before it is approved" "task 9.16: synced with main" "$out"
 contains "so it sees what the base decided meanwhile" "decided on the base later" "$(git -C "$O" show harness-task-9.16:backbone/late-decision.md 2>/dev/null)"
+contains "even with the task's own work uncommitted, which is kept" "uncommitted work" "$(cat "$WORK/orca-worktrees/harness-task-9.16/src/wip_9_16.py" 2>/dev/null; git -C "$O" show harness-task-9.16:src/wip_9_16.py 2>/dev/null)"
+for id in 9.17; do
+  printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/$id/g" -e 's/^- python: all code$/- code-quality: all code/' > "$O/backbone/specs/$id.md"
+  printf '%s' "$(python3 -c 'import json,sys; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":sys.argv[1],"questions":[],"summary":"s"})+"\n```"}))' "$id")" \
+    | python3 "$O/scripts/harness/lib/harness.py" hook grill-stop >/dev/null
+done
+printf -- '- [ ] **Task 9.17: Mid-merge** (spec: backbone/specs/9.17.md)\n' >> "$O/backbone/3-TASKS.md"
+git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: task 9.17"
+python3 "$WORK/fake-orca.py" worktree create --name harness-task-9.17 --repo "path:$O" --base-branch main --json >/dev/null
+W17="$WORK/orca-worktrees/harness-task-9.17"
+side=$(git -C "$O" commit-tree "main^{tree}" -p main -m "side" </dev/null)
+git -C "$W17" merge -q --no-ff --no-commit "$side" >/dev/null 2>&1
+echo "later" > "$O/backbone/later-9-17.md" && git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "docs: later"
+out=$(HARNESS_TEST_CMD=true HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.17 --wait-ms 10 2>&1)
+contains "a merge left in progress in the worktree is not touched by the sync" "a merge is already in progress" "$out"
+lacks "and it doesn't sync over it" "task 9.17: synced with" "$out"
 unset FAKE_ORCA_STATE
 
 section "autonomous mode: judging, risk drift, kill switch"

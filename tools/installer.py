@@ -224,8 +224,8 @@ def migrate_conf(plan, context):
             comments.append(line)
     if not added:
         return
-    text = current.rstrip("\n") + "\n\n# Added by harness update %s, commented out so nothing changes until you uncomment\n" \
-        "# a setting (user-only ones: commit as the user, HARNESS_VERIFY=off git commit ...).\n" % VERSION
+    text = current.rstrip("\n") + "\n\n# Added by a harness update, commented out so nothing changes until you uncomment\n" \
+        "# a setting (user-only ones: commit as the user, HARNESS_VERIFY=off git commit ...).\n"
     text += "\n".join("\n".join(block) for block in blocks) + "\n"
     plan.write(CONF_REL, text.encode("utf-8"))
     plan.note("migrate", CONF_REL, "new setting(s), commented out: %s" % ", ".join(added))

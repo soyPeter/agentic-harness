@@ -558,6 +558,7 @@ def validate_spec(task, text=None):
         if not all(re.search(r"\b%s\b" % word, rest, re.I) for word in ("given", "when", "then")):
             problems.append("%s is not written as Given ..., when ..., then ..." % ac)
     problems.extend("%s has no acceptance criterion" % req for req in sorted(req_ids - covered))
+    problems.extend(knowledge_citation_problems(text))
     adrs = spec_adrs(text)
     if not adrs:
         problems.append("the Architecture section must reference at least one ADR (e.g. 'ADRs: ADR-002'); "
@@ -1415,6 +1416,10 @@ def approve_command(task):
     if task in blocked_tasks(read(TASKS)):
         print("approve: task %s is BLOCKED; see backbone/escalations.md" % task)
         return 1
+    cited = knowledge_citation_problems(text)
+    if cited:
+        print("approve: fix the Assumptions' sources first:\n  " + "\n  ".join(cited))
+        return 1
     invalid = validate_spec(task)
     history = verdict_history(task, "grill")
     last = history[-1] if history else None
@@ -1428,10 +1433,6 @@ def approve_command(task):
         print("approve: the griller asked %d question(s); record how each was settled under '## Assumptions' "
               "(with its source in backbone/ or vault:<path>), grill again, then approve. Escalate what the "
               "sources cannot answer." % asked)
-        return 1
-    cited = knowledge_citation_problems(text)
-    if cited:
-        print("approve: fix the Assumptions' sources first:\n  " + "\n  ".join(cited))
         return 1
     reasons = risk_reasons(task)
     if reasons:
@@ -3069,7 +3070,7 @@ def orca_command(argv):
         lines.append(line)
         print(line, flush=True)
     try:
-        code = coordinator.Coordinator(ROOT, opts, log=log).drive(tasks)
+        code = coordinator.Coordinator(ROOT, opts, log=log, event=log_event).drive(tasks)
         summary = next((l for l in reversed(lines) if l.startswith("harness orca: run ")), None)
         if summary:
             orca_digest_publish("%s (finished %s)" % (summary, time.strftime("%Y-%m-%d %H:%M")))
@@ -3613,6 +3614,9 @@ def report_command(argv):
     overturned = sum(1 for e in verdicts if e.get("claimed") == "pass" and e.get("verdict") != "pass")
     attempts = [e for e in events if e.get("kind") == "run-attempt"]
     done = sorted({e.get("task") for e in attempts if e.get("state") == "done"})
+    merged = sorted({e.get("task") for e in events if e.get("kind") == "orca-merge"})
+    workers = [e for e in events if e.get("kind") == "orca-worker"]
+    failed_workers = sum(1 for e in workers if e.get("outcome") != "succeeded")
     reasons = {}
     for e in events:
         if e.get("kind") in ("block", "verify"):
@@ -3624,7 +3628,9 @@ def report_command(argv):
                           "escalations": count("escalation"), "open_escalations": len(open_escalations()),
                           "policy_approvals": count("approval"), "blocked_tool_calls": count("block"),
                           "verify_refusals": count("verify"), "out_of_band_changes": count("tamper"),
-                          "knowledge_lookups": count("knowledge"),
+                          "knowledge_lookups": count("knowledge"), "orca_merged": merged,
+                          "orca_workers": len(workers), "orca_failed_workers": failed_workers,
+                          "orca_integrations": count("orca-integrate"),
                           "cost_usd": round(sum(e.get("cost_usd") or 0 for e in attempts), 4),
                           "block_reasons": reasons}, indent=2, sort_keys=True))
         return 0
@@ -3636,6 +3642,9 @@ def report_command(argv):
                                                                        count("approval")))
     print("  blocked tool calls: %d; commits refused by verify: %d; out-of-band changes: %d"
           % (count("block"), count("verify"), count("tamper")))
+    if workers or merged:
+        print("  orca: %d task(s) merged %s; %d worker(s), %d not succeeded; %d integration(s)"
+              % (len(merged), ", ".join(merged), len(workers), failed_workers, count("orca-integrate")))
     print("  knowledge source lookups: %d" % count("knowledge"))
     print("  agent cost: $%.2f over %d session(s)" % (sum(e.get("cost_usd") or 0 for e in attempts), len(attempts)))
     for reason, n in sorted(reasons.items(), key=lambda kv: -kv[1])[:8]:

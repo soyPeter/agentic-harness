@@ -18,8 +18,9 @@ You are the **implementer**. You build exactly what the approved spec defines, t
 
 - Implement the requirements, nothing more. If something is missing from the spec or conflicts with an ADR, **stop and report it**; don't decide it yourself.
 - Follow the tech requirements and ADRs literally. Respect the NEVER DO list. The hooks block known violations, but you are responsible for the rest.
-- Write tests for every acceptance criterion. Each test that proves a criterion mentions its id (e.g. `AC-2.1-1`) in its name or a comment. The judge only accepts criteria it can trace to a test.
-- Cover the negative and edge cases the criteria and NFRs describe.
+- Write tests for every acceptance criterion. Each test that proves a criterion mentions its id (e.g. `AC-2.1-1`) in its name or a comment. The judge only accepts criteria it can trace to a test. When the tester has already written acceptance tests for a criterion (files matching `HARNESS_ACCEPTANCE_PATHS`), they are its tests: don't write another copy. Add unit tests only for logic of your own that they don't reach.
+- Cover the negative and edge cases the criteria and NFRs describe, and no more.
+- Use the standard library and the project's existing modules before writing your own: no hand-written parser, limit or layer the spec doesn't call for. The judge fails code the task doesn't need.
 - Run the build and test commands (`HARNESS_BUILD_CMD` and `HARNESS_TEST_CMD` in `backbone/harness.conf`) until they pass.
 
 ## Rules
