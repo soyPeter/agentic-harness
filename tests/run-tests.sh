@@ -36,7 +36,7 @@ bash_json() { python3 -c 'import json,sys; print(json.dumps({"tool_name":"Bash",
 write_json() { python3 -c 'import json,sys; print(json.dumps({"agent_id":"session","tool_name":"Write","tool_input":{"file_path":sys.argv[1],"content":sys.argv[2]}}))' "$1" "$2"; }
 edit_json() { python3 -c 'import json,sys; print(json.dumps({"agent_id":"session","tool_name":"Edit","tool_input":{"file_path":sys.argv[1],"old_string":sys.argv[2],"new_string":sys.argv[3]}}))' "$1" "$2" "$3"; }
 main_write() { python3 -c 'import json,sys; print(json.dumps({"session_id":"session","tool_name":"Write","tool_input":{"file_path":sys.argv[1],"content":sys.argv[2]}}))' "$1" "$2"; }
-new_repo() { mkdir -p "$1" && git -C "$1" init -q; }
+new_repo() { mkdir -p "$1" && git -C "$1" init -q -b main; }
 guard() {  # guard <project> <agent> <json>: the write-scope hook scoped to one agent
   printf '%s' "$3" | CLAUDE_PROJECT_DIR="$1" python3 "$1/scripts/harness/lib/harness.py" hook agent-guard "$2"
 }
@@ -957,7 +957,7 @@ AT="$A/backbone/3-TASKS.md"
 mkdir -p "$A/backbone/specs" "$A/src" "$A/tests"
 auto_spec() {  # auto_spec <id> <extra requirement text> [ADR]
   printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/$1/g" -e 's/^- python: all code$/- code-quality: all code/' \
-    -e "s/^ADRs: ADR-001$/ADRs: ${3:-ADR-001}/" -e "s/ignoring case\./ignoring case. $2/" > "$A/backbone/specs/$1.md"
+    -e "s/^ADRs: ADR-001$/ADRs: ${3:-ADR-001}/" -e "s|ignoring case\.|ignoring case. $2|" > "$A/backbone/specs/$1.md"
   printf -- '- [ ] **Task %s: Item** (spec: backbone/specs/%s.md)\n' "$1" "$1" >> "$AT"
 }
 grill_pass() {  # grill_pass <id>
@@ -1065,6 +1065,9 @@ kspec 9.3 "- A1: Card data is tokenised (source: vault:40-Security/pci.md)"
 contains "approve refuses a citation outside HARNESS_KNOWLEDGE_PATHS" "outside HARNESS_KNOWLEDGE_PATHS" "$($AH approve 9.3)"
 kspec 9.4 "- A1: Endpoints are versioned in the path (source: vault:../../etc/passwd)"
 contains "approve refuses a citation escaping the vault" "outside HARNESS_KNOWLEDGE_PATHS" "$($AH approve 9.4)"
+auto_spec 9.8 "See .claude/skills/security/SKILL.md for the input rules."
+grill_pass 9.8 >/dev/null
+contains "citing a skill file isn't a sensitive path" "risk 9.8: low" "$($AH risk 9.8)"
 kspec 9.7 "- A1: The layout, sourced once for its parts:
   - the heading comes first;
   - then the lines. (source: backbone/1-PRD.md)"
@@ -1406,6 +1409,18 @@ for id in 9.2 9.3; do
     | python3 "$O/scripts/harness/lib/harness.py" hook grill-stop >/dev/null
 done
 printf -- '- [ ] **Task 9.3: After** (spec: backbone/specs/9.3.md) (after: 9.2)\n- [ ] **Task 9.2: First** (spec: backbone/specs/9.2.md)\n' >> "$O/backbone/3-TASKS.md"
+printf -- '- [ ] **Task 6.1c: C** (spec: backbone/specs/6.1c.md) (after 6.1a)\n- [ ] **Task 6.1d: D** (spec: backbone/specs/6.1d.md) (after: 6.1a, 6.1c)\n- [ ] **Task 6.2: E** (spec: backbone/specs/6.2.md) (afterwards, see the notes)\n' > "$WORK/deps-tasks.md"
+deps=$(python3 - "$O/scripts/harness/lib" "$WORK/deps-tasks.md" <<'PYEOF'
+import json, sys, importlib.util
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("h", sys.argv[1] + "/harness.py"); h = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(h); h.TASKS = Path(sys.argv[2])
+print(json.dumps(h.task_dependencies(), sort_keys=True))
+PYEOF
+)
+contains "dependencies: '(after 6.1a)' without a colon counts" '"6.1c": ["6.1a"]' "$deps"
+contains "dependencies: a list after 'after:'" '"6.1d": ["6.1a", "6.1c"]' "$deps"
+lacks "dependencies: 'afterwards' in a note isn't one" '"6.2"' "$deps"
 $OH approve 9.2 >/dev/null; $OH approve 9.3 >/dev/null
 git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: tasks 9.2 and 9.3"
 contains "orca --dry-run shows a task waiting for its dependency" "would drive task 9.3 (next: start), after 9.2 is done" "$(HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --dry-run --tasks 9.3,9.2 2>&1)"
@@ -1514,6 +1529,10 @@ contains "a code conflict with the base goes to an integrating implementer" "an 
 contains "the integrated task passes the tests" "integrated with the base; the tests pass" "$out"
 contains "and both parallel tasks reach the base" "task 9.11: done; merged into" "$out"
 contains "task 9.10 too" "task 9.10: done; merged into" "$out"
+report=$($OH report)
+contains "report counts the tasks Orca merged and the integrations" "9.10, 9.11" "$report"
+contains "and the workers and integrations" "integration(s)" "$report"
+expect 0 "report --json has the Orca counts" python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert "9.11" in d["orca_merged"] and d["orca_workers"] > 0 and d["orca_integrations"] >= 1' "$($OH report --json)"
 shared=$(cat "$O/src/shared.py")
 contains "the shared module has both tasks' parts" "From_9_10" "$shared"
 contains "the other task's too" "From_9_11" "$shared"
@@ -1553,6 +1572,39 @@ renamed=$(ls "$O"/backbone/adr/ | grep -E "choice-9-1[45]" | grep -v '^ADR-020')
 [ -n "$renamed" ] && ok "the other decision kept its own file under a new number ($renamed)" || bad "the other decision kept its own file under a new number"
 contains "references in the task's own files follow the new number" "${renamed%%-choice*}" "$(cat "$O"/src/uses_9_1[45].py)"
 contains "the digest lists ADRs waiting for acceptance" "ADRs on the base waiting for your acceptance" "$out"
+for id in 9.16; do
+  printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/$id/g" -e 's/^- python: all code$/- code-quality: all code/' > "$O/backbone/specs/$id.md"
+  printf '%s' "$(python3 -c 'import json,sys; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":sys.argv[1],"questions":[],"summary":"s"})+"\n```"}))' "$id")" \
+    | python3 "$O/scripts/harness/lib/harness.py" hook grill-stop >/dev/null
+done
+printf -- '- [ ] **Task 9.16: Late** (spec: backbone/specs/9.16.md)\n' >> "$O/backbone/3-TASKS.md"
+git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: task 9.16"
+HARNESS_ORCA_BIN="$WORK/fake-orca.py" python3 - "$WORK/fake-orca.py" <<'EOF'
+EOF
+python3 "$WORK/fake-orca.py" worktree create --name harness-task-9.16 --repo "path:$O" --base-branch main --json >/dev/null
+echo "the task's own uncommitted work" > "$WORK/orca-worktrees/harness-task-9.16/src/wip_9_16.py"
+echo "decided on the base later" > "$O/backbone/late-decision.md"
+git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "docs: a decision on the base after the task's worktree was made"
+$OH approve 9.16 >/dev/null 2>&1 || true
+out=$(HARNESS_TEST_CMD=true HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.16 --merge --wait-ms 10 2>&1)
+contains "a task's branch is synced with the base before it is approved" "task 9.16: synced with main" "$out"
+contains "so it sees what the base decided meanwhile" "decided on the base later" "$(git -C "$O" show harness-task-9.16:backbone/late-decision.md 2>/dev/null)"
+contains "even with the task's own work uncommitted, which is kept" "uncommitted work" "$(cat "$WORK/orca-worktrees/harness-task-9.16/src/wip_9_16.py" 2>/dev/null; git -C "$O" show harness-task-9.16:src/wip_9_16.py 2>/dev/null)"
+for id in 9.17; do
+  printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/$id/g" -e 's/^- python: all code$/- code-quality: all code/' > "$O/backbone/specs/$id.md"
+  printf '%s' "$(python3 -c 'import json,sys; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":sys.argv[1],"questions":[],"summary":"s"})+"\n```"}))' "$id")" \
+    | python3 "$O/scripts/harness/lib/harness.py" hook grill-stop >/dev/null
+done
+printf -- '- [ ] **Task 9.17: Mid-merge** (spec: backbone/specs/9.17.md)\n' >> "$O/backbone/3-TASKS.md"
+git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: task 9.17"
+python3 "$WORK/fake-orca.py" worktree create --name harness-task-9.17 --repo "path:$O" --base-branch main --json >/dev/null
+W17="$WORK/orca-worktrees/harness-task-9.17"
+side=$(git -C "$O" commit-tree "main^{tree}" -p main -m "side" </dev/null)
+git -C "$W17" merge -q --no-ff --no-commit "$side" >/dev/null 2>&1
+echo "later" > "$O/backbone/later-9-17.md" && git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "docs: later"
+out=$(HARNESS_TEST_CMD=true HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.17 --wait-ms 10 2>&1)
+contains "a merge left in progress in the worktree is not touched by the sync" "a merge is already in progress" "$out"
+lacks "and it doesn't sync over it" "task 9.17: synced with" "$out"
 unset FAKE_ORCA_STATE
 
 section "autonomous mode: judging, risk drift, kill switch"

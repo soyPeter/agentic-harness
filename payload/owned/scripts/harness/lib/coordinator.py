@@ -132,10 +132,11 @@ class Orca(object):
 
 
 class Coordinator(object):
-    def __init__(self, root, opts, log=print):
+    def __init__(self, root, opts, log=print, event=lambda kind, **fields: None):
         self.root = Path(root)
         self.opts = opts
         self.log = log
+        self.event = event       # records what happened in the harness's events, for harness.py report
         self.orca = Orca(opts.get("orca") or shutil.which("orca") or "orca", self.root)
         self.agents = opts.get("agents") or {}
         self.launch = opts.get("launch") or {}   # agent -> command to start it with (Codex: the hook-trust bypass)
@@ -289,7 +290,7 @@ class Coordinator(object):
         dispatch = find(receipt, "dispatchId", "dispatch_id")
         if not dispatch:
             raise CoordinatorError("worker-start for task %s returned no dispatch id: %s" % (task, json.dumps(receipt)[:300]))
-        entry = {"task": task, "role": role, "kind": kind, "started": time.time(),
+        entry = {"task": task, "role": role, "kind": kind, "agent": agent, "started": time.time(),
                  "handle": find(receipt, "terminalHandle", "terminal_handle", "agentTerminalHandle", "handle") or launched}
         entry.update(extra or {})
         self.active[dispatch] = entry
@@ -329,6 +330,10 @@ class Coordinator(object):
                 self.log("orca: task %s: %s%s" % (task, name, (": " + "; ".join(step.get("escalations") or []))[:300]
                                                   if step.get("escalations") else ""))
                 return False
+            if name in ("approve", "start") and not info.get("synced"):
+                info["synced"] = True
+                self.sync(task)
+                continue
             if name == "approve":
                 if not step.get("command"):
                     info["outcome"] = "waiting for the user's approval"
@@ -401,6 +406,8 @@ class Coordinator(object):
         outcome = str(find(payload_of(message), "outcome") or "").lower()
         summary = (message.get("body") or "").strip()
         self.release(dispatch)
+        self.event("orca-worker", task=task, role=entry["role"], worker=entry["kind"], agent=entry.get("agent"),
+                   outcome=outcome or "none", seconds=int(time.time() - entry.get("started", time.time())))
         if entry["kind"] == "answer":
             answer = summary if summary else "The answer worker reported nothing."
             if outcome == "failed" or answer.upper().startswith("ESCALATED"):
@@ -495,6 +502,8 @@ class Coordinator(object):
                 entry = self.active.pop(dispatch)
                 self.release(dispatch)
                 task = entry["task"]
+                self.event("orca-worker", task=task, role=entry["role"], worker=entry["kind"], agent=entry.get("agent"),
+                           outcome="failed-before-reporting", seconds=int(time.time() - entry.get("started", time.time())))
                 self.log("orca: task %s: the %s worker failed before reporting: %s" % (task, entry["role"], why))
                 self.harness(self.tasks[task]["path"], "escalate", task, "--kind", "coordinator", "--reason",
                              "the %s worker (%s) failed: %s" % (entry["role"], self.agent_for(entry["role"]), why),
@@ -576,8 +585,44 @@ class Coordinator(object):
                 return False
             self.log("orca: task %s: resolved the backbone and harness conflicts" % task)
         info["outcome"] += "; merged into %s" % self.git(self.root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        self.event("orca-merge", task=task, integrations=info.get("integrations", 0))
         self.log("orca: task %s merged" % task)
         return False
+
+    def sync(self, task):
+        """Bring a task's branch up to date with the base before it is approved: decisions taken on the base since
+        the worktree was made (accepted ADRs, answered questions, other tasks' code) apply to it, and later merges
+        conflict less. Only conflicts the harness understands are resolved; with a code conflict the branch stays as
+        it is, and the integrate step deals with it at merge time."""
+        if self.opts.get("here"):
+            return
+        info = self.tasks[task]
+        base = self.git(self.root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        behind = self.git(info["path"], "rev-list", "--count", "HEAD..%s" % base).stdout.strip()
+        if not behind or behind == "0":
+            return
+        if self.git(info["path"], "rev-parse", "-q", "--verify", "MERGE_HEAD").stdout.strip():
+            # A merge someone left unfinished in the worktree: aborting it could lose their conflict resolution.
+            self.log("orca: task %s: not synced with %s: a merge is already in progress in the worktree" % (task, base))
+            return
+        # The task's own work is usually uncommitted until it finishes; git merges around it, and refuses only
+        # when the base changed one of those files too.
+        merged = self.git(info["path"], "merge", "--no-ff", "--no-commit", base)
+        if merged.returncode != 0 and not self.git(info["path"], "rev-parse", "-q", "--verify", "MERGE_HEAD").stdout.strip():
+            self.log("orca: task %s: not synced with %s: %s" % (task, base, (merged.stdout + merged.stderr).strip()[:200]))
+            return
+        if merged.returncode != 0 and self.resolve_conflicts(info["path"], task, base_stage=3):
+            self.git(info["path"], "merge", "--abort")
+            self.log("orca: task %s: not synced with %s (code conflicts; integrated at merge time)" % (task, base))
+            return
+        if self.git(info["path"], "rev-parse", "-q", "--verify", "MERGE_HEAD").stdout.strip():
+            # Commit the merge even when it brings no change, so the branch records that it has the base.
+            if not self.commit_merge(info["path"], "chore: sync task %s with %s" % (task, base)):
+                self.git(info["path"], "merge", "--abort")
+                self.log("orca: task %s: not synced with %s: the sync commit was refused" % (task, base))
+                return
+        self.harness(info["path"], "snapshot")
+        self.log("orca: task %s: synced with %s (%s commit(s))" % (task, base, behind))
 
     def renumber_adrs(self, task):
         """Give the branch's new ADRs numbers the base doesn't already use for another ADR (tasks numbered in
@@ -621,6 +666,7 @@ class Coordinator(object):
         code conflicts to an implementer worker; the result must pass the tests before the task is merged."""
         info = self.tasks[task]
         info["integrations"] = info.get("integrations", 0) + 1
+        self.event("orca-integrate", task=task)
         info["integrated_at"] = self.git(self.root, "rev-parse", "HEAD").stdout.strip()
         base = self.git(self.root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
         message = "chore: merge %s into task %s" % (base, task)
