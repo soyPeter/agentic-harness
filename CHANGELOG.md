@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.18.0 (2026-10-19)
+
+- **The griller's recommendations settle themselves; only blockers ask.** Every griller question can now carry a
+  `recommendation`: the exact fix its author would accept. The griller's recorder adopts a **non-blocker**'s
+  recommendation into the spec's Assumptions (`source: griller-recommended`) the moment the verdict is recorded —
+  nobody is asked, no answer round runs. A **blocker** is never adopted, even with a recommendation: it is asked of
+  the user (interactive) or answered from the sources and otherwise escalated (autonomous/Orca); its recommendation
+  only informs the answerer. Questions with no recommendation follow the old path. `next`, `questions`, the start
+  gate and the Orca coordinator see only what is still open; re-raising the same recommendation does not duplicate
+  it, and an approved (frozen) spec is never written. A griller that recommends fixes for everything serious can
+  pass in the round that adopted them — no extra grilling round for its own answers.
+
 ## 0.17.0 (2026-10-18)
 
 From the end of the ledger run (10 of 10 tasks merged; 785 tests and 10 ADRs for a small CLI):
