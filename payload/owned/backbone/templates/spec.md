@@ -32,7 +32,9 @@ Tech requirements:
 
 ## Assumptions
 <!-- How questions were settled without the user, each with its source (a backbone/ file, an ADR, the PRD).
-     In autonomous mode, every question the griller raised must end up here or be escalated. -->
+     A non-blocker question the griller recommended a fix for is settled here by the harness itself
+     (source: griller-recommended). In autonomous mode, every other question the griller raised must end
+     up here or be escalated. -->
 - none
 
 ## Open questions
