@@ -267,30 +267,42 @@ echo "- Revisit if more modules adopt it." >> "$F/backbone/adr/ADR-001-adopt-age
 out=$(hook "$F" pre-tool-use "$START" 2>&1)
 contains "start gate: changing a referenced ADR makes the grill stale" "changed after the griller passed" "$out"
 hook "$F" grill-stop "$(stop_json griller "$(greport pass none)")" >/dev/null
-# A non-blocker question the griller attaches a recommendation to is settled into the spec's Assumptions
-# by the recorder itself; a blocker's recommendation is only a hint to the answerer, and the question stays open.
-greport_rec() {  # three questions: recommended blocker, recommended major, unanswered minor
+# A non-blocker question with the griller's recommendation is marked apply: nobody is asked, the analyst or
+# architect applies it. A blocker's recommendation is only a proposal. The hook never writes into the spec.
+greport_rec() {  # recommended blocker, recommended edit-type major, short recommended minor, unrecommended minor
   python3 -c 'import json,sys
 qs = [
- {"severity": "blocker", "about": "AC-2.1-1", "question": "Is the search accent-insensitive?", "why": "unstated", "recommendation": "No: compare case-folded, leave accents."},
- {"severity": "major", "about": "REQ-2.1-1", "question": "How long may a query be?", "why": "unstated", "recommendation": "Queries are trimmed and limited to 100 characters."},
+ {"severity": "blocker", "about": "AC-2.1-1", "question": "Is the search accent-insensitive?", "why": "unstated", "recommendation": "No: compare case-folded, leave accents.", "apply": True},
+ {"severity": "major", "about": "REQ-2.1-1", "question": "How long may a query be?", "why": "unstated", "recommendation": "Remove the length limit from REQ-2.1-1."},
+ {"severity": "minor", "about": "AC-2.1-2", "question": "Is the match exact?", "why": "unstated", "recommendation": "No."},
  {"severity": "minor", "about": "AC-2.1-2", "question": "Which body does the 400 carry?", "why": "unstated"}]
-print("Grilled.\n\n```json\n" + json.dumps({"verdict": "fail", "task": "2.1", "questions": qs, "summary": "s"}, indent=2) + "\n```")'
+print("Grilled.\n\n```json\n" + json.dumps({"verdict": sys.argv[1], "task": "2.1", "questions": qs, "summary": "s"}, indent=2) + "\n```")' "${1:-fail}"
 }
+before=$(cat "$SPEC")
 out=$(hook "$F" grill-stop "$(stop_json griller "$(greport_rec)")")
-contains "grill: a recommended non-blocker is settled on the spot" "settled by the griller's own recommendation" "$out"
-contains "settle: the recommendation is recorded in the spec" "Queries are trimmed and limited to 100 characters." "$(cat "$SPEC")"
-if grep -q "compare case-folded, leave accents" "$SPEC"; then bad "settle: a blocker is never adopted"; else ok "settle: a blocker is never adopted"; fi
+contains "grill: recommended non-blockers are applied without asking" "applies 2 recommendation(s) without asking anyone" "$out"
+[ "$(cat "$SPEC")" = "$before" ] && ok "grill: the recorder never writes into the spec" || bad "grill: the recorder never writes into the spec"
 out=$(python3 "$F/scripts/harness/lib/harness.py" questions 2.1)
-contains "questions: the blocker stays open" "[blocker -> analyst] AC-2.1-1" "$out"
-if echo "$out" | grep -q "100 characters"; then bad "questions: a settled question is not asked"; else ok "questions: a settled question is not asked"; fi
+contains "questions: the blocker is asked, not applied" "[blocker -> analyst] AC-2.1-1" "$out"
+contains "questions: an edit-type recommendation is applied" "[major -> analyst, apply] REQ-2.1-1: How long may a query be? Recommendation: Remove the length limit" "$out"
+contains "questions: a short recommendation is applied" "[minor -> analyst, apply] AC-2.1-2: Is the match exact? Recommendation: No." "$out"
+contains "questions: a question without a recommendation is asked" "[minor -> analyst] AC-2.1-2: Which body" "$out"
 out=$(python3 "$F/scripts/harness/lib/harness.py" next 2.1 --json)
-contains "next: the answer step gets the open questions only" '"step": "answer"' "$out"
-if echo "$out" | grep -q "100 characters"; then bad "next: settled questions are not routed to an answerer"; else ok "next: settled questions are not routed to an answerer"; fi
-out=$(hook "$F" grill-stop "$(stop_json griller "$(greport_rec)")")
-[ "$(grep -c "Queries are trimmed" "$SPEC")" = "1" ] && ok "settle: re-raising the same recommendation does not duplicate it" || bad "settle: re-raising the same recommendation does not duplicate it"
-out=$(hook "$F" grill-stop "$(stop_json griller "$(greport pass none)")")
-contains "grill: the settled spec then passes" "task 2.1: PASS" "$out"
+contains "next: open questions go to an answer step" '"step": "answer"' "$out"
+contains "next: a blocker needs the user" '"needs_user": true' "$out"
+out=$(hook "$F" grill-stop "$(stop_json griller "$(greport_rec pass)")")
+contains "grill: a pass with an unapplied recommended major is a fail" "major question: How long may a query be?" "$out"
+contains "grill: a pass with an unapplied recommended minor is a fail" "recommendation to apply: Is the match exact?" "$out"
+out=$(python3 "$F/scripts/harness/lib/harness.py" questions 2.1)
+contains "questions: a blocker the griller flagged apply itself is still asked" "[blocker -> analyst] AC-2.1-1" "$out"
+greport_apply_only() {
+  python3 -c 'import json
+print("```json\n" + json.dumps({"verdict": "fail", "task": "2.1", "questions": [{"severity": "major", "about": "REQ-2.1-1", "question": "Limit?", "why": "w", "recommendation": "Remove the limit."}], "summary": "s"}) + "\n```")'
+}
+hook "$F" grill-stop "$(stop_json griller "$(greport_apply_only)")" >/dev/null
+out=$(python3 "$F/scripts/harness/lib/harness.py" next 2.1 --json)
+contains "next: only recommendations to apply need no user" '"needs_user": false' "$out"
+hook "$F" grill-stop "$(stop_json griller "$(greport pass none)")" >/dev/null
 APPROVE_MARK='<!-- The user approves by adding a line "Approved-by: <name> (<date>)" below. Agents cannot. -->'
 out=$(hook "$F" pre-tool-use "$(edit_json "$SPEC" "$APPROVE_MARK" "$APPROVE_MARK
 Approved-by: Claude")" 2>&1)

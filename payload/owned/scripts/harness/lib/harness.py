@@ -1121,76 +1121,28 @@ def serious(items):
 
 
 def effective_grill(task, report):
-    """Pass only if the griller passed, nothing serious is open and the spec is structurally valid. A question the
-    recorder settled by adopting the griller's own recommendation (GRILL_SETTLED) is no longer open."""
+    """Pass only if the griller passed, nothing serious is open and the spec is structurally valid."""
     reasons = []
     if str(report.get("verdict", "")).lower() != "pass":
         reasons.append("griller verdict: %s" % report.get("verdict"))
-    open_questions = [q for q in report.get("questions") or [] if isinstance(q, dict) and not q.get("settled")]
-    reasons.extend("%s question: %s" % (q.get("severity"), q.get("question", "?")) for q in serious(open_questions))
+    reasons.extend("%s question: %s" % (q.get("severity"), q.get("question", "?")) for q in serious(report.get("questions")))
+    reasons.extend("recommendation to apply: %s" % q.get("question", "?") for q in report.get("questions") or []
+                   if isinstance(q, dict) and q.get("apply") and not serious([q]))
     reasons.extend("spec: " + problem for problem in validate_spec(task))
     return ("pass" if not reasons else "fail"), reasons
 
 
-def squeeze(text):
-    """One line of the text's whitespace, for matching recommendation texts already in the spec."""
-    return re.sub(r"\s+", " ", str(text or "")).strip()
-
-
-GRILL_SETTLED = "griller-recommended"
-
-
-def settle_recommendations(task, questions, round_no):
-    """Grilling stops asking for its own answers: every non-blocker question that carries the griller's
-    `recommendation` is settled on the spot — the recommendation is recorded in the spec's Assumptions
-    (source: griller-recommended) and the question is marked settled, never asked of the user or an answerer.
-    Blockers and questions without a recommendation stay open; a blocker's recommendation is only a hint for
-    whoever answers it. Nothing is written to an approved (frozen) spec. Returns how many Assumptions were
-    newly written."""
-    if not questions:
-        return 0
-    path = spec_path(task)
-    text = read(path)
-    if not text or approved(text):
-        return 0
-    items = top_level_items(md_section(strip_comments(text), "Assumptions") or "")
-    numbers = [int(m.group(1)) for m in (re.match(r"^A(\d+)", squeeze(i)) for i in items) if m]
-    lines, written = [], 0
-    for q in questions:
-        if not isinstance(q, dict):
-            continue
-        rec = squeeze(q.get("recommendation"))
-        if not rec or str(q.get("severity", "")).lower() == "blocker":
-            continue
-        if any(rec.lower() in squeeze(i).lower() for i in items):
-            q["settled"] = GRILL_SETTLED   # an earlier round already recorded this recommendation
-            continue
-        about, question = squeeze(q.get("about") or "the spec"), squeeze(q.get("question"))
-        lines.append('- A%d: %s (source: griller-recommended on %s, grill round %d%s)' % (
-            max(numbers + [0]) + len(lines) + 1, rec, about, round_no,
-            '; question: "%s"' % question if question else ""))
-        q["settled"] = GRILL_SETTLED
-        written += 1
-    if not lines:
-        return 0
-    block = "\n".join(lines) + "\n"
-    has_real = [i for i in items if squeeze(i).rstrip(".").lower() not in ("none", "n/a")]
-    m = re.search(r"(?im)^##\s+Assumptions\s*$", text)
-    if m:
-        nxt = re.search(r"^##\s", text[m.end():], re.M)
-        end = m.end() + (nxt.start() if nxt else len(text) - m.end())
-        body = text[m.end():end]
-        if not has_real:
-            body = re.sub(r"(?m)^[ \t]*[-*][ \t]+(?:none|n/?a)\.?[ \t]*$", "", body)
-        text = text[:m.end()] + body.rstrip() + "\n" + block + "\n" + text[end:]
-    else:
-        anchor = re.search(r"(?im)^##\s+(Open questions|Approval)\s*$", text)
-        if anchor:
-            text = text[:anchor.start()] + "## Assumptions\n" + block + "\n" + text[anchor.start():]
-        else:
-            text = text.rstrip("\n") + "\n\n## Assumptions\n" + block
-    path.write_text(text, encoding="utf-8")
-    return written
+def mark_recommendations(questions):
+    """A non-blocker question that carries the griller's recommendation needs nobody's answer: it is marked
+    `apply`, and the analyst or architect applies the recommendation without asking. A blocker is always asked
+    or escalated; its recommendation is only a proposal. Returns how many questions were marked."""
+    marked = 0
+    for q in questions or []:
+        if isinstance(q, dict):
+            q["apply"] = bool(str(q.get("recommendation") or "").strip()) and \
+                str(q.get("severity", "")).lower() != "blocker"
+            marked += q["apply"]
+    return marked
 
 
 def ac_test_references(task):
@@ -1289,12 +1241,9 @@ def record_verdict(data, kind):
             deny("Set \"task\" in the verdict JSON to %s." % hint)
         emit({"systemMessage": "harness: the %s verdict names no valid task; nothing was recorded." % agent_name})
         return
-    adopted = 0
+    to_apply = 0
     if kind == "grill":
-        # A non-blocker question carrying the griller's recommendation is settled here and now (its recommendation
-        # goes into the spec's Assumptions); the verdict below sees only what is still open, and the fingerprint is
-        # taken after the settlement so it matches the spec as it now stands.
-        adopted = settle_recommendations(task, report.get("questions"), len(verdict_history(task, "grill")) + 1)
+        to_apply = mark_recommendations(report.get("questions"))
         verdict, reasons = effective_grill(task, report)
         fingerprint = spec_fingerprint(task)
         details = {"questions": report.get("questions")}
@@ -1315,15 +1264,14 @@ def record_verdict(data, kind):
     entry.update(details)
     history.append(entry)
     log_event("verdict", agent=agent_name, task=task, verdict=verdict, claimed=report.get("verdict"),
-              reasons=reasons[:10], settled=adopted if kind == "grill" else 0)
+              reasons=reasons[:10], to_apply=to_apply)
     VERDICTS.mkdir(parents=True, exist_ok=True)
     verdict_path(task, kind).write_text(json.dumps({"task": task, "kind": kind, "history": history}, indent=2) + "\n",
                                         encoding="utf-8")
     snapshot_refresh()
     note = "harness: %s verdict for task %s: %s" % (agent_name, task, verdict.upper())
-    if kind == "grill" and adopted:
-        note += ": %d question(s) settled by the griller's own recommendation, recorded in the spec's Assumptions " \
-                "and not asked of anyone" % adopted
+    if to_apply:
+        note += ": the analyst or architect applies %d recommendation(s) without asking anyone" % to_apply
     if verdict == "fail":
         note += " (%s)" % "; ".join(reasons)[:500]
         values = conf()
@@ -1652,9 +1600,9 @@ def start_problems(task):
     if last is None:
         return "Task %s cannot start: the spec has not been grilled. Ask the griller agent to review %s." % (task, spec)
     if last.get("verdict") != "pass":
-        return ("Task %s cannot start: the griller failed the spec (%s). Take its open questions to the user (a "
-                "non-blocker it gave a recommendation for was settled into the spec's Assumptions already), update "
-                "the spec and grill again." % (task, "; ".join(last.get("reasons") or [])[:400]))
+        return ("Task %s cannot start: the griller failed the spec (%s). Take its open questions to the user (have "
+                "the analyst or architect apply the recommendations marked apply without asking), update the spec "
+                "and grill again." % (task, "; ".join(last.get("reasons") or [])[:400]))
     if last.get("fingerprint") != spec_fingerprint(task):
         return "Task %s cannot start: the spec or its ADRs changed after the griller passed it. Grill again." % task
     report = dict(last, verdict=last.get("claimed"))
@@ -2757,8 +2705,7 @@ def open_questions(task):
     last = history[-1] if history else None
     if not last or last.get("verdict") == "pass":
         return []
-    return [dict(q, route=question_route(q)) for q in (last.get("questions") or [])
-            if isinstance(q, dict) and not q.get("settled")]
+    return [dict(q, route=question_route(q)) for q in (last.get("questions") or []) if isinstance(q, dict)]
 
 
 def task_status(task):
@@ -2826,14 +2773,13 @@ def next_step(task):
             return dict(step, step="grill", role="griller", reason="no griller verdict on the current spec")
         if s["grill"]["verdict"] != "pass":
             questions = open_questions(task)
-            if not questions:
-                return dict(step, step="grill", role="griller", reason="the griller's recommendations settled every "
-                                                                       "question it raised; grill the spec again")
             # The role that owns a blocker answers first; then design before requirements.
             rank = lambda r: (not any(q["route"] == r and q.get("severity") == "blocker" for q in questions),
                               r != "architect")
             roles = sorted({q["route"] for q in questions}, key=rank) or ["analyst"]
+            asked = [q for q in questions if not q.get("apply")]
             return dict(step, step="answer", role=roles[0], roles=roles, questions=questions,
+                        needs_user=bool(asked) and not autonomous(),
                         then="grill again (the answers change the spec)")
         if not s["approved"]:
             if autonomous():
@@ -2933,7 +2879,11 @@ def questions_command(argv):
         print(json.dumps({"task": task, "questions": questions}, indent=2))
         return 0
     for q in questions:
-        print("[%s -> %s] %s: %s" % (q.get("severity"), q["route"], q.get("about"), q.get("question")))
+        if q.get("apply"):
+            print("[%s -> %s, apply] %s: %s Recommendation: %s" % (q.get("severity"), q["route"], q.get("about"),
+                                                                   q.get("question"), q.get("recommendation")))
+        else:
+            print("[%s -> %s] %s: %s" % (q.get("severity"), q["route"], q.get("about"), q.get("question")))
     return 0
 
 

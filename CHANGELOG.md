@@ -1,16 +1,14 @@
 # Changelog
 
-## 0.18.0 (2026-10-19)
+## 0.18.0 (2026-10-25)
 
-- **The griller's recommendations settle themselves; only blockers ask.** Every griller question can now carry a
-  `recommendation`: the exact fix its author would accept. The griller's recorder adopts a **non-blocker**'s
-  recommendation into the spec's Assumptions (`source: griller-recommended`) the moment the verdict is recorded —
-  nobody is asked, no answer round runs. A **blocker** is never adopted, even with a recommendation: it is asked of
-  the user (interactive) or answered from the sources and otherwise escalated (autonomous/Orca); its recommendation
-  only informs the answerer. Questions with no recommendation follow the old path. `next`, `questions`, the start
-  gate and the Orca coordinator see only what is still open; re-raising the same recommendation does not duplicate
-  it, and an approved (frozen) spec is never written. A griller that recommends fixes for everything serious can
-  pass in the round that adopted them — no extra grilling round for its own answers.
+- **Only blockers are asked; the griller's recommendations are applied.** A griller question can now carry a
+  `recommendation`, the exact fix it would accept. The recorder marks a non-blocker with a recommendation `apply`.
+  The analyst or architect makes that change as a real edit to the spec or ADR, without asking the user or
+  escalating, and records it under Assumptions (`source: the griller's recommendation, grill round N`). A blocker
+  is still asked, or escalated in autonomous mode; its recommendation is only a proposal. `harness.py questions`
+  shows which questions are to apply, and `next` reports `needs_user`. The hook never writes into the spec, and
+  the spec is grilled again after the changes, so the griller checks the recommended text before the spec passes.
 
 ## 0.17.0 (2026-10-18)
 

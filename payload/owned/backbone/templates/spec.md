@@ -32,9 +32,9 @@ Tech requirements:
 
 ## Assumptions
 <!-- How questions were settled without the user, each with its source (a backbone/ file, an ADR, the PRD).
-     A non-blocker question the griller recommended a fix for is settled here by the harness itself
-     (source: griller-recommended). In autonomous mode, every other question the griller raised must end
-     up here or be escalated. -->
+     A question marked apply records the griller's recommendation it applied (source: the griller's
+     recommendation, grill round N). In autonomous mode, every question the griller raised must end up here
+     or be escalated. -->
 - none
 
 ## Open questions
