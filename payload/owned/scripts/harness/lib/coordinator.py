@@ -36,8 +36,9 @@ INSTRUCTIONS = {
     "define": "Write or complete the spec backbone/specs/{task}.md for this task: {detail}",
     "grill": "Grill the spec backbone/specs/{task}.md. The harness records the griller's verdict.",
     "answer": "Answer the griller's open questions on backbone/specs/{task}.md from backbone/ and, when it is on, the "
-              "knowledge source. Record each answer under Assumptions with its source; leave what the sources don't "
-              "settle as an open question and escalate it. The questions: {detail}",
+              "knowledge source. Apply the recommendation of each question marked apply as written, without escalating it. "
+              "Record each answer, and each applied recommendation, under Assumptions with its source; leave what "
+              "the sources don't settle as an open question and escalate it. The questions: {detail}",
     "test": "Write the acceptance tests for task {task} from its approved spec (HARNESS_ACCEPTANCE_PATHS). The "
             "harness records them.",
     "implement": "Implement task {task} from its approved spec, loading the skills it needs.",

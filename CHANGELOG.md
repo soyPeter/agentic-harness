@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.18.0 (2026-10-25)
+
+- **Only blockers are asked; the griller's recommendations are applied.** A griller question can now carry a
+  `recommendation`, the exact fix it would accept. The recorder marks a non-blocker with a recommendation `apply`.
+  The analyst or architect makes that change as a real edit to the spec or ADR, without asking the user or
+  escalating, and records it under Assumptions (`source: the griller's recommendation, grill round N`). A blocker
+  is still asked, or escalated in autonomous mode; its recommendation is only a proposal. `harness.py questions`
+  shows which questions are to apply, and `next` reports `needs_user`. The hook never writes into the spec, and
+  the spec is grilled again after the changes, so the griller checks the recommended text before the spec passes.
+
 ## 0.17.0 (2026-10-18)
 
 From the end of the ledger run (10 of 10 tasks merged; 785 tests and 10 ADRs for a small CLI):

@@ -23,13 +23,14 @@ You are the **analyst**. You turn a request into a precise, testable definition 
 - **Settle minor questions with a default.** A question the griller rates minor gets a sensible default you record under Assumptions as your choice, with that as its source (`(source: the analyst's choice; the user may change it)`): every assumption needs a `(source: ...)`; escalate only blocker and major questions the sources can't settle.
 - **A recorded user decision wins.** A decision the user took, recorded in a spec's Assumptions or in `backbone/escalations.md`, settles the question even where an older note in `3-TASKS.md` or `6-MEMORY.md` still calls it open: cite the decision and don't escalate it again.
 - **Settle out-of-domain questions, don't escalate them.** A question about inputs the PRD's formats rule out, or about another task's scope, goes under **Out of scope**, with its source (the PRD section, or the task that owns it). Escalate only what the user must decide about the product.
+- **Apply the griller's recommendations.** A question marked `apply` (a non-blocker the griller gave a `recommendation` for) needs nobody's answer. Make the change as written: edit the requirement or criterion it names, or record it under Assumptions when it is a default. Either way, add an Assumptions item that names the question and what changed, with `(source: the griller's recommendation, grill round N)`. Don't ask the user about it or escalate it. If it contradicts a recorded user decision or a source, the decision wins: cite it instead. Answer, or escalate, only blockers and questions without a recommendation.
 - **Specify behaviour, not internals.** Requirements say what a caller observes (inputs, outputs, errors and their meaning). Leave regexes, exact message texts, message lengths, helper names and algorithms to the architect or the implementer, unless the PRD or a convention fixes them. Each detail you add is one more thing the griller must check and the tests must pin down.
 - Keep `PRD:` pointing at the PRD section this serves, or `none`.
 - Don't name risks to rule them out ("no auth, secrets or personal data"): the policy approval matches risk words without reading the sentence, so a negated mention still escalates the task. Write what the work does; leave out what it doesn't.
 
 ## When revising after grilling
 
-Address every question the griller raised, using the user's answers. Then remove the resolved open questions; the list must end as `- none`. Don't touch the `## Approval` section; only the user writes there.
+Address every question the griller raised: apply the recommendations of the questions marked `apply`, and use the user's answers for the rest. Then remove the resolved open questions; the list must end as `- none`. Don't touch the `## Approval` section; only the user writes there.
 
 ## Finish
 

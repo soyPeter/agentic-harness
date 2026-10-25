@@ -40,7 +40,7 @@ Per-file checks in PreToolUse:
 | Agent | Event | What it does |
 |---|---|---|
 | `analyst`, `architect`, `implementer`, `scribe` | PreToolUse | Write scope: analyst may edit specs and the PRD; architect ADRs, the ADR index, `2-PLANNING.md` and specs; scribe `6-MEMORY.md`, ADRs and the index; implementer anything except `backbone/`, `.claude/` and harness files |
-| `griller` | Stop (as SubagentStop) | Records the grill verdict with the spec fingerprint in `.verdicts/<id>.grill.json` |
+| `griller` | Stop (as SubagentStop) | Records the grill verdict with the spec fingerprint in `.verdicts/<id>.grill.json`. It marks each non-blocker that carries a recommendation `apply`, so that question is applied without being asked |
 | `judge` | Stop (as SubagentStop) | Records the judge verdict with the code fingerprint in `.verdicts/<id>.judge.json` |
 
 Both recorders take the verdict JSON from the agent's final message, falling back to the transcript. If there is no valid JSON, they send the agent back once. A claimed pass is **re-derived** from the agent's own evidence and the files before it is recorded, as described below. Project subagents and their hooks only load once Claude Code trusts the project folder.
@@ -188,8 +188,8 @@ A coordinator asks the harness what a task needs instead of knowing the workflow
 | Command | Answer |
 |---|---|
 | `harness.py state [--json]` | Every task: state, spec problems, grill and judge verdicts (and whether they are current), approval, open escalations |
-| `harness.py next <id> [--json]` | The next step and who does it: `define` (analyst or architect), `grill` (griller), `answer` (the griller's questions, routed), `approve`, `start`, `test` (tester), `implement`, `judge`, `diagnose` (debugger), `fix` (implementer, with the debugger's brief), `finish` (scribe, then `finish`), `blocked`, `done` |
-| `harness.py questions <id> [--json]` | The griller's open questions, each routed: design questions to the architect, the rest to the analyst |
+| `harness.py next <id> [--json]` | The next step and who does it: `define` (analyst or architect), `grill` (griller), `answer` (the griller's questions, routed; `needs_user` says whether any must go to the user), `approve`, `start`, `test` (tester), `implement`, `judge`, `diagnose` (debugger), `fix` (implementer, with the debugger's brief), `finish` (scribe, then `finish`), `blocked`, `done` |
+| `harness.py questions <id> [--json]` | The griller's open questions, each routed: design questions to the architect, the rest to the analyst. A question marked `apply` (a non-blocker with the griller's recommendation) is applied by that role without asking |
 | `harness.py start <id>` / `finish <id>` | Mark the task `[WIP]` / `[x]` through the same gates as an edit of `3-TASKS.md` (start: spec, grill, approval, one `[WIP]`; finish: a current judge pass) |
 
 Under an Orca coordinator (`HARNESS_ORCA_RUN` set), `escalate` also sends an `escalation` message to the Run's mailbox.

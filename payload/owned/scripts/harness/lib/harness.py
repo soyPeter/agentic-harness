@@ -1126,8 +1126,23 @@ def effective_grill(task, report):
     if str(report.get("verdict", "")).lower() != "pass":
         reasons.append("griller verdict: %s" % report.get("verdict"))
     reasons.extend("%s question: %s" % (q.get("severity"), q.get("question", "?")) for q in serious(report.get("questions")))
+    reasons.extend("recommendation to apply: %s" % q.get("question", "?") for q in report.get("questions") or []
+                   if isinstance(q, dict) and q.get("apply") and not serious([q]))
     reasons.extend("spec: " + problem for problem in validate_spec(task))
     return ("pass" if not reasons else "fail"), reasons
+
+
+def mark_recommendations(questions):
+    """A non-blocker question that carries the griller's recommendation needs nobody's answer: it is marked
+    `apply`, and the analyst or architect applies the recommendation without asking. A blocker is always asked
+    or escalated; its recommendation is only a proposal. Returns how many questions were marked."""
+    marked = 0
+    for q in questions or []:
+        if isinstance(q, dict):
+            q["apply"] = bool(str(q.get("recommendation") or "").strip()) and \
+                str(q.get("severity", "")).lower() != "blocker"
+            marked += q["apply"]
+    return marked
 
 
 def ac_test_references(task):
@@ -1226,7 +1241,9 @@ def record_verdict(data, kind):
             deny("Set \"task\" in the verdict JSON to %s." % hint)
         emit({"systemMessage": "harness: the %s verdict names no valid task; nothing was recorded." % agent_name})
         return
+    to_apply = 0
     if kind == "grill":
+        to_apply = mark_recommendations(report.get("questions"))
         verdict, reasons = effective_grill(task, report)
         fingerprint = spec_fingerprint(task)
         details = {"questions": report.get("questions")}
@@ -1247,12 +1264,14 @@ def record_verdict(data, kind):
     entry.update(details)
     history.append(entry)
     log_event("verdict", agent=agent_name, task=task, verdict=verdict, claimed=report.get("verdict"),
-              reasons=reasons[:10])
+              reasons=reasons[:10], to_apply=to_apply)
     VERDICTS.mkdir(parents=True, exist_ok=True)
     verdict_path(task, kind).write_text(json.dumps({"task": task, "kind": kind, "history": history}, indent=2) + "\n",
                                         encoding="utf-8")
     snapshot_refresh()
     note = "harness: %s verdict for task %s: %s" % (agent_name, task, verdict.upper())
+    if to_apply:
+        note += ": the analyst or architect applies %d recommendation(s) without asking anyone" % to_apply
     if verdict == "fail":
         note += " (%s)" % "; ".join(reasons)[:500]
         values = conf()
@@ -1581,8 +1600,9 @@ def start_problems(task):
     if last is None:
         return "Task %s cannot start: the spec has not been grilled. Ask the griller agent to review %s." % (task, spec)
     if last.get("verdict") != "pass":
-        return ("Task %s cannot start: the griller failed the spec (%s). Take its questions to the user, "
-                "update the spec and grill again." % (task, "; ".join(last.get("reasons") or [])[:400]))
+        return ("Task %s cannot start: the griller failed the spec (%s). Take its open questions to the user (have "
+                "the analyst or architect apply the recommendations marked apply without asking), update the spec "
+                "and grill again." % (task, "; ".join(last.get("reasons") or [])[:400]))
     if last.get("fingerprint") != spec_fingerprint(task):
         return "Task %s cannot start: the spec or its ADRs changed after the griller passed it. Grill again." % task
     report = dict(last, verdict=last.get("claimed"))
@@ -2757,7 +2777,9 @@ def next_step(task):
             rank = lambda r: (not any(q["route"] == r and q.get("severity") == "blocker" for q in questions),
                               r != "architect")
             roles = sorted({q["route"] for q in questions}, key=rank) or ["analyst"]
+            asked = [q for q in questions if not q.get("apply")]
             return dict(step, step="answer", role=roles[0], roles=roles, questions=questions,
+                        needs_user=bool(asked) and not autonomous(),
                         then="grill again (the answers change the spec)")
         if not s["approved"]:
             if autonomous():
@@ -2857,7 +2879,11 @@ def questions_command(argv):
         print(json.dumps({"task": task, "questions": questions}, indent=2))
         return 0
     for q in questions:
-        print("[%s -> %s] %s: %s" % (q.get("severity"), q["route"], q.get("about"), q.get("question")))
+        if q.get("apply"):
+            print("[%s -> %s, apply] %s: %s Recommendation: %s" % (q.get("severity"), q["route"], q.get("about"),
+                                                                   q.get("question"), q.get("recommendation")))
+        else:
+            print("[%s -> %s] %s: %s" % (q.get("severity"), q["route"], q.get("about"), q.get("question")))
     return 0
 
 
