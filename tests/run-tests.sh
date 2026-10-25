@@ -1423,6 +1423,10 @@ out=$(HARNESS_AUTONOMY=supervised HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca
 contains "orca needs autonomous mode" "needs HARNESS_AUTONOMY" "$out"
 out=$(HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --dry-run --agents "default=claude,judge=codex" 2>&1)
 contains "orca --dry-run shows the next step per task" "would drive task 9.1 (next: start)" "$out"
+out=$(HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --help 2>&1); code=$?
+[ $code = 0 ] && contains "orca --help prints the usage and starts nothing" "usage: harness.py orca" "$out" || bad "orca --help prints the usage and starts nothing"
+out=$(HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --merg 2>&1); code=$?
+[ $code = 2 ] && contains "orca refuses an unknown argument" "unknown argument --merg" "$out" || bad "orca refuses an unknown argument"
 out=$(HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --agents "default=claude,judge=codex" --wait-ms 10 2>&1; echo "exit=$?")
 contains "orca drives the task to done" "task 9.1: done" "$out"
 contains "orca ends cleanly" "exit=0" "$out"

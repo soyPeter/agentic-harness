@@ -3049,6 +3049,22 @@ def task_dependencies():
 def orca_command(argv):
     """harness.py orca: drive ready tasks with Orca supervised workers (scripts/harness/lib/coordinator.py)."""
     import coordinator
+    valued = ("--agents", "--tasks", "--parallel", "--run", "--wait-ms", "--timeout")
+    flags = ("--here", "--dry-run", "--trust", "--merge", "--pr")
+    usage = ("usage: harness.py orca [--tasks 1.3,1.4] [--parallel N] [--agents default=claude,judge=codex] "
+             "[--trust] [--merge | --pr] [--here] [--run ID] [--wait-ms MS] [--timeout S] [--dry-run]")
+    unknown, i = [], 0
+    while i < len(argv):
+        if argv[i] in valued:
+            i += 2
+            continue
+        if argv[i] not in flags:
+            unknown.append(argv[i])
+        i += 1
+    if unknown:
+        print(usage if any(a in ("-h", "--help") for a in unknown) else "orca: unknown argument %s\n%s"
+              % (", ".join(unknown), usage))
+        return 0 if any(a in ("-h", "--help") for a in unknown) else 2
     if not autonomous():
         print("orca: needs HARNESS_AUTONOMY=\"autonomous\" (set by the user in backbone/harness.conf): the workers "
               "answer the griller's questions and approve low-risk specs by policy")
