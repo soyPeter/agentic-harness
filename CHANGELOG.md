@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.18.1 (2026-10-25)
+
+- **`harness.py orca --help` no longer starts a run.** It prints the usage. An unknown argument, such as a
+  misspelled `--merg`, is refused with exit code 2 instead of being ignored by a run that then starts.
+
 ## 0.18.0 (2026-10-25)
 
 - **Only blockers are asked; the griller's recommendations are applied.** A griller question can now carry a
