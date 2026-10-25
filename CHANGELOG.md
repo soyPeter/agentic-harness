@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.18.2 (2026-10-25)
+
+- **The analyst goes with its own recommendation too.** An open question the analyst has a recommendation for,
+  and that isn't a blocker, is recorded under Assumptions (`source: the analyst's recommendation; the user may
+  change it`) instead of being left open and escalated. Found in a trial: the analyst escalated whether empty
+  cells count as 0, although its draft already said so.
+
 ## 0.18.1 (2026-10-25)
 
 - **`harness.py orca --help` no longer starts a run.** It prints the usage. An unknown argument, such as a
