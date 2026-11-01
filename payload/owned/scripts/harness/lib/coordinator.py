@@ -390,16 +390,35 @@ class Coordinator(object):
             info["outcome"] = "done, but the commit was refused: %s" % (commit.stderr + commit.stdout).strip()[:400]
             return False
         info["outcome"] = "done"
+        receipt = self.save_receipt(task)
         if self.opts.get("merge") and not self.opts.get("here"):
             self.merge(task)
         if self.opts.get("pr") and not self.opts.get("here"):
             pushed = self.git(info["path"], "push", "-q", "-u", "origin", info["branch"])
             if pushed.returncode == 0 and shutil.which("gh"):
+                body = "Opened by the harness Orca coordinator: task %s passed the judge and the gates." % task
+                if receipt:
+                    body += "\n\n```\n%s\n```" % receipt
                 pr = subprocess.run(["gh", "pr", "create", "--head", info["branch"], "--title", subject, "--body",
-                                     "Opened by the harness Orca coordinator: task %s passed the judge and the gates."
-                                     % task], cwd=str(info["path"]), capture_output=True, text=True)
+                                     body], cwd=str(info["path"]), capture_output=True, text=True)
                 info["pr"] = (pr.stdout or pr.stderr).strip()
         return True
+
+    def save_receipt(self, task):
+        """The task's change receipt, taken on its branch right after the commit (later merges make it stale), and
+        kept in <git common dir>/harness/receipts/ for the digest. None when the harness refuses one."""
+        info = self.tasks[task]
+        result = self.harness(info["path"], "receipt", task)
+        if result.returncode != 0:
+            self.log("orca: task %s: no receipt: %s" % (task, result.stdout.strip()[:300]))
+            return None
+        common = self.git(self.root, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        folder = (Path(common) if common else self.root / ".git") / "harness" / "receipts"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / ("%s.txt" % re.sub(r"[^A-Za-z0-9._-]+", "-", task))
+        path.write_text(result.stdout, encoding="utf-8")
+        info["receipt"] = str(path)
+        return result.stdout.strip()
 
     def on_done(self, dispatch, message):
         entry = self.active.pop(dispatch)
@@ -795,6 +814,8 @@ class Coordinator(object):
             state = info["outcome"] or ("in progress (%s)" % ", ".join(
                 e["role"] for e in self.active.values() if e["task"] == task) or "unknown")
             lines.append("  task %s: %s%s" % (task, state, ("  " + info["pr"]) if info.get("pr") else ""))
+            if info.get("receipt"):
+                lines.append("    receipt: %s" % info["receipt"])
         proposed = []
         for adr in sorted((self.root / "backbone" / "adr").glob("ADR-*.md")):
             text = adr.read_text(encoding="utf-8", errors="replace")

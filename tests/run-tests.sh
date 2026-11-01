@@ -2208,5 +2208,92 @@ contains "other hooks that run out of time exit quietly" "exit=0" "$out"
 export HOME="$REAL_HOME"
 unset HARNESS_AGENT_CMD HARNESS_AUTONOMY HARNESS_TEST_CMD
 
+section "change receipt: what the harness can prove about a finished task"
+C="$WORK/receipt"
+new_repo "$C"
+"$HARNESS/bootstrap.sh" "$C" --name receipt >/dev/null
+CH="python3 $C/scripts/harness/lib/harness.py"
+export HARNESS_TEST_CMD=true
+git -C "$C" add -A && HARNESS_VERIFY=off git -C "$C" commit -qm "chore: adopt agentic harness"
+mkdir -p "$C/backbone/specs" "$C/src" "$C/tests"
+cat > "$C/backbone/specs/7.1.md" <<'EOF'
+# Spec 7.1: Customer search
+
+Task: 7.1
+PRD: none
+
+## Context
+Support needs to find customers by name.
+
+## Requirements
+- REQ-7.1-1: The system shall return customers whose name contains the query, ignoring case.
+- REQ-7.1-2: The system shall reject queries shorter than 2 characters.
+
+## Acceptance criteria
+- AC-7.1-1 (REQ-7.1-1): Given customers "Ana" and "Bob", when searching "an", then only "Ana" is returned.
+- AC-7.1-2 (REQ-7.1-2): Given any customers, when searching "a", then the search is refused.
+
+## Non-functional requirements
+- A search answers within 200 ms for 10,000 customers.
+
+## Architecture
+ADRs: ADR-001
+Tech requirements:
+- The search lives in src/search.py.
+
+## Skills
+- code-quality: all code
+
+## Out of scope
+- Fuzzy matching.
+
+## Assumptions
+- A1: Names are ASCII only (source: backbone/4-KNOWLEDGE.md).
+
+## Open questions
+- none
+
+## Approval
+EOF
+printf -- '- [ ] **Task 7.1: Customer search** (spec: backbone/specs/7.1.md)\n- [ ] **Task 7.2: Not judged** (spec: backbone/specs/7.2.md)\n' >> "$C/backbone/3-TASKS.md"
+git -C "$C" add -A && HARNESS_VERIFY=off git -C "$C" commit -qm "docs: spec for task 7.1"
+hook "$C" grill-stop "$(stop_json griller '```json
+{"verdict":"pass","task":"7.1","questions":[],"summary":"s"}
+```')" >/dev/null
+echo "Approved-by: Ana (2026-11-01)" >> "$C/backbone/specs/7.1.md"
+sed -i.bak 's/^- \[ \] \*\*Task 7\.1/- [WIP] **Task 7.1/' "$C/backbone/3-TASKS.md" && rm -f "$C/backbone/3-TASKS.md.bak"
+printf 'def search(names, q):  # AC-7.1-1 AC-7.1-2\n    return [n for n in names if q.lower() in n.lower()]\n' > "$C/src/search.py"
+printf 'def test_contains():  # AC-7.1-1\n    assert True\ndef test_short():  # AC-7.1-2\n    assert True\n' > "$C/tests/test_search.py"
+printf '# ADR-002: Search index\n\n## Status\nProposed\n\n## Context\nc\n\n## Decision\nd\n\n## Alternatives considered\na\n\n## Consequences\nq\n' \
+  > "$C/backbone/adr/ADR-002-search-index.md"
+out=$($CH receipt 7.1; echo "exit=$?")
+contains "receipt: refused without a judge pass" "no judge pass" "$out"
+contains "receipt: the refusal exits non-zero" "exit=1" "$out"
+hook "$C" judge-stop "$(stop_json judge '```json
+{"verdict":"pass","task":"7.1","criteria":[{"id":"AC-7.1-1","met":true,"evidence":"src/search.py:2","tests":["test_contains"]},{"id":"AC-7.1-2","met":true,"evidence":"src/search.py:2","tests":["test_short"]}],"findings":[{"severity":"minor","file":"src/search.py","line":2,"issue":"No docstring","fix":"Add one"}],"tests":{"command":"true","result":"passed"},"summary":"s"}
+```')" >/dev/null
+out=$($CH receipt 7.1; echo "exit=$?")
+contains "receipt: names the task" "Task 7.1: Customer search" "$out"
+contains "receipt: states the objective from the spec" "Support needs to find customers by name." "$out"
+contains "receipt: lists changed code" "src/search.py" "$out"
+contains "receipt: each criterion with the tests that prove it" "AC-7.1-1 (REQ-7.1-1): met; tests: test_contains" "$out"
+contains "receipt: the test run is the harness's own" "HARNESS_TEST_CMD (true) run by the harness: exit 0" "$out"
+contains "receipt: an NFR without a criterion is not verified" "NFR not covered by any acceptance criterion: A search answers within 200 ms" "$out"
+contains "receipt: findings left open are not verified" "minor finding left open: No docstring (src/search.py:2)" "$out"
+contains "receipt: ADRs added by the task, with status" "ADR-002 (Proposed)" "$out"
+contains "receipt: a Proposed ADR needs the user's acceptance" "accept or reject ADR-002" "$out"
+contains "receipt: assumptions carry their source" "A1: Names are ASCII only (source: backbone/4-KNOWLEDGE.md)." "$out"
+contains "receipt: who approved" "Approved-by: Ana (2026-11-01)" "$out"
+contains "receipt: rounds it took" "grill rounds: 1; judge rounds: 1" "$out"
+contains "receipt: exits zero" "exit=0" "$out"
+out=$($CH receipt 7.1 --json)
+expect 0 "receipt --json parses" python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["task"]=="7.1" and d["not_verified"] and d["verified"]' "$out"
+echo "# later edit" >> "$C/src/search.py"
+out=$($CH receipt 7.1; echo "exit=$?")
+contains "receipt: refused when the code changed after the judge pass" "code changed after the judge passed" "$out"
+contains "receipt: the stale refusal exits non-zero" "exit=1" "$out"
+contains "receipt: a task that was never judged is refused" "no judge pass" "$($CH receipt 7.2)"
+unset HARNESS_TEST_CMD
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
