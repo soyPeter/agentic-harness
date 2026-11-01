@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.22.0 (2026-11-01)
+
+- **`harness.py report` measures what the harness buys.** Accepted work: the first-pass judge rate, griller fails
+  that led to a spec change, the median time from start to finish, cost and escalations per finished task. What the
+  gates and rules catch: refusals per gate, fires per guardrail rule, and the project rules that never fired
+  (`report --rules` lists them all). Slow hook calls.
+- **Harness candidates.** The report lists failures that keep coming back across tasks: the same refusal in 3 or
+  more tasks, the same judge failure in 2 or more, the same escalation kind in 2 or more. Each points at a missing
+  instruction, rule or skill; the user decides the fix.
+- **The scribe proposes rules.** A lesson a regex can catch comes back as a `guardrails.conf` line for the user to
+  add.
+- New events: `rule` (a guardrail rule matched), `gate` (a gate refused), and `task-start` / `task-finish` when a
+  task line is edited through the gates.
+
 ## 0.21.0 (2026-11-01)
 
 - **Trace a task.** `harness.py trace <id> [--json]` prints what happened during a task, in order: the project

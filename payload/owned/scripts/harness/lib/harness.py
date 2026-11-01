@@ -22,7 +22,7 @@ Usage:
   harness.py escalations                                          (open escalations for the user)
   harness.py risk <task-id>
   harness.py run [--max-tasks N] [--only <task>] [--worktree [--pr]] [--dry-run]   (autonomous, unattended)
-  harness.py report [--days N] [--json]                           (events: verdicts, escalations, blocks, runs)
+  harness.py report [--days N] [--json | --rules]                 (events: verdicts, gates, rules, lift, candidates)
   harness.py receipt <task-id> [--base <rev>] [--json]            (what the harness can prove about a judged task)
   harness.py trace <task-id> [--json]                             (the task's events: context, skills, edits, refusals, tests)
   harness.py ci-judge --range <base>..<tip>                       (CI: independent re-judging of finished tasks)
@@ -774,6 +774,12 @@ def scan_report(quiet=False):
     print("scan: %d file(s) checked, %d blocking and %d warning violation(s) already in the codebase"
           % (checked, len(blocks), len(found) - len(blocks)))
     return 1 if blocks else 0
+
+
+def log_rule_hits(hits):
+    """One `rule` event per rule that matched, so harness.py report can tell which rules earn their place."""
+    for rule, _ in hits:
+        log_event("rule", rule=rule.message[:120], origin=rule.origin, severity=rule.severity)
 
 
 def describe(hits):
@@ -2470,6 +2476,7 @@ def hook_pre_tool_use(data):
         problems = ["  - " + p for p in shell_findings(command, data.get("cwd"))]
         hits = check_text(rules, None, rule_text(command), ("block",))
         if hits:
+            log_rule_hits(hits)
             problems.append(describe(hits))
         if problems:
             deny("Harness blocked this command:\n%s\nIf the user really wants it, ask them to run it "
@@ -2488,6 +2495,7 @@ def hook_pre_tool_use(data):
     problems = []
     hits = check_text(rules, path, added_text(tool, tool_input), ("block",))
     if hits:
+        log_rule_hits(hits)
         problems.append(describe(hits))
     checks = ()
     if path == LOCK_FILE.relative_to(ROOT).as_posix():
@@ -2504,18 +2512,31 @@ def hook_pre_tool_use(data):
         checks = (spec_guard,)
     elif re.match(r"^backbone/adr/[^/]+\.md$", path):
         checks = (adr_guard,)
+    before = after = None
     if checks:
         before = read(ROOT / path)
         after = resulting_text(tool, tool_input, path_str)
-        problems.extend(p for p in (check(before, after) for check in checks) if p)
+        for check in checks:
+            problem = check(before, after)
+            if problem:
+                log_event("gate", gate=check.__name__)
+                problems.append(problem)
     scope = orchestrator_scope(data, path)
     if scope:
+        log_event("gate", gate="orchestrator_scope")
         problems.append(scope)
     skills = skill_gate(data, path)
     if skills:
+        log_event("gate", gate="skill_gate")
         problems.append(skills)
     if problems:
         deny("Harness blocked this change to %s:\n%s" % (path, "\n".join(problems)))
+    if path == "backbone/3-TASKS.md":
+        for task in started_tasks(before, after):
+            log_event("task-start", task=task)
+        for task in finished_tasks(before, after):
+            if task_state_in(after, task) == "done":
+                log_event("task-finish", task=task)
 
 
 def fresh_commit(max_age=120):
@@ -2582,6 +2603,7 @@ def post_tool_notes(data):
         rules, _ = load_rules()
         hits = check_text(rules, path, added_text(tool, tool_input), ("warn",))
         if hits:
+            log_rule_hits(hits)
             notes.append("Guardrail warnings for %s:\n%s" % (path, describe(hits)))
         if path in owned_files():
             notes.append("%s is harness-owned: the next harness update will flag this edit as a conflict. "
@@ -2603,6 +2625,7 @@ def post_tool_notes(data):
         rules, _ = load_rules()
         hits = check_text(rules, None, rule_text(command), ("warn",))
         if hits:
+            log_rule_hits(hits)
             notes.append("Guardrail warnings for that command:\n%s" % describe(hits))
         if re.search(r"\bgit\b[^\n;&|]*\bcommit\b", command) and fresh_commit():
             notes.extend(dod_after_commit())
@@ -2857,7 +2880,12 @@ def set_task_marker(task, marker, checks):
     lines = before.splitlines()
     lines[index] = re.sub(r"^(\s*[-*]\s+)\[[^\]]*\]", lambda m: m.group(1) + "[%s]" % marker, line, count=1)
     after = "\n".join(lines) + ("\n" if before.endswith("\n") else "")
-    problems = [p for p in (check(before, after) for check in checks) if p]
+    problems = []
+    for check in checks:
+        problem = check(before, after)
+        if problem:
+            log_event("gate", gate=check.__name__)
+            problems.append(problem)
     if problems:
         return problems
     TASKS.write_text(after, encoding="utf-8")
@@ -3247,6 +3275,14 @@ def ready_tasks(text=None):
         title = title.split("**")[0].strip()
         found.append((task, title, "wip" if WIP_LINE.match(line) else "pending"))
     return sorted(found, key=lambda t: t[2] != "wip")
+
+
+def task_state_in(text, task):
+    """task_state for the given 3-TASKS.md text."""
+    _, line = task_line(task, text)
+    if line is None:
+        return "missing"
+    return "done" if DONE_LINE.match(line) else "wip" if WIP_LINE.match(line) else "pending"
 
 
 def task_state(task):
@@ -3749,19 +3785,115 @@ def ci_protect_command(argv):
     return 0
 
 
-def report_command(argv):
-    days = (int(argv[argv.index("--days") + 1]) if "--days" in argv and argv.index("--days") + 1 < len(argv)
-            and argv[argv.index("--days") + 1].isdigit() else 7)
+def report_events(days):
     cutoff = time.time() - days * 86400
     events = []
     for line in read(events_file()).splitlines():
         try:
             event = json.loads(line)
             stamp = time.mktime(time.strptime(event["at"][:19], "%Y-%m-%dT%H:%M:%S"))
-        except (ValueError, KeyError):
+        except (ValueError, KeyError, TypeError):
             continue
         if stamp >= cutoff:
             events.append(event)
+    return events
+
+
+def by_tasks(pairs):
+    """{key: sorted task ids} from (key, task) pairs, tasks deduplicated."""
+    found = {}
+    for key, task in pairs:
+        if key and task:
+            found.setdefault(key, set()).add(task)
+    return {k: sorted(v) for k, v in found.items()}
+
+
+# A candidate is a failure seen in several tasks: the instruction, rule or skill that would prevent it is missing.
+CANDIDATE_TASKS = {"block": 3, "judge": 2, "escalation": 2}
+
+
+def lift(events):
+    """What the harness buys and what it costs: accepted work, refusals per gate and per rule, slow hooks, and the
+    failures that keep coming back across tasks (harness candidates)."""
+    stamp = lambda e: time.mktime(time.strptime(e["at"][:19], "%Y-%m-%dT%H:%M:%S"))
+    judged = {}
+    for e in events:
+        if e.get("kind") == "verdict" and e.get("agent") == "judge" and e.get("task"):
+            judged.setdefault(e["task"], []).append(e)
+    first_pass = {"tasks": len(judged), "passed": sum(1 for v in judged.values() if v[0].get("verdict") == "pass")}
+    fails = changed = 0
+    for path in sorted(VERDICTS.glob("*.grill.json")):
+        history = verdict_history(path.name[:-len(".grill.json")], "grill")
+        for entry, after in zip(history, history[1:]):
+            if entry.get("verdict") != "pass":
+                fails += 1
+                changed += entry.get("fingerprint") != after.get("fingerprint")
+    started = {}
+    durations = []
+    for e in events:
+        if e.get("kind") == "task-start" and e.get("task"):
+            started[e["task"]] = stamp(e)
+        elif e.get("kind") == "task-finish" and e.get("task") in started:
+            durations.append(stamp(e) - started.pop(e["task"]))
+    finished = {e.get("task") for e in events if e.get("kind") in ("task-finish", "orca-merge")
+                or (e.get("kind") == "run-attempt" and e.get("state") == "done")} - {None}
+    cost = sum(e.get("cost_usd") or 0 for e in events if e.get("kind") == "run-attempt")
+    escalations = [e for e in events if e.get("kind") == "escalation"]
+    gates = {}
+    for e in events:
+        if e.get("kind") == "gate":
+            gates[e.get("gate")] = gates.get(e.get("gate"), 0) + 1
+    fired = {}
+    for e in events:
+        if e.get("kind") == "rule":
+            fired[e.get("rule")] = fired.get(e.get("rule"), 0) + 1
+    rules, _ = load_rules()
+    # Core rules guard against rare disasters and are meant to stay quiet; a project rule that never fires may no
+    # longer apply.
+    never = sorted({r.message[:120] for r in rules} - set(fired))
+    project = {r.message[:120] for r in rules if not r.origin.startswith("scripts/harness/")}
+    slow = [e for e in events if e.get("kind") == "hook-slow"]
+    candidates = []
+    for reason, tasks in sorted(by_tasks((re.sub(r"\s+", " ", e.get("reason", "")).strip(), e.get("task"))
+                                         for e in events if e.get("kind") == "block").items()):
+        if len(tasks) >= CANDIDATE_TASKS["block"]:
+            candidates.append("\"%s\" was refused in %d tasks (%s): agents keep trying it; say why in "
+                              "backbone/4-KNOWLEDGE.md or the skill they use" % (reason[:100], len(tasks), ", ".join(tasks)))
+    judge_fails = []
+    for e in events:
+        if e.get("kind") == "verdict" and e.get("agent") == "judge" and e.get("verdict") != "pass":
+            for reason in e.get("reasons") or []:
+                if str(reason).startswith("judge verdict:"):
+                    continue   # the judge's own "fail", not a cause
+                judge_fails.append((re.sub(r"\b(AC|REQ)-[\w.]+?-\d+\b", r"<\1>", str(reason)), e.get("task")))
+    for reason, tasks in sorted(by_tasks(judge_fails).items()):
+        if len(tasks) >= CANDIDATE_TASKS["judge"]:
+            candidates.append("the judge failed %d tasks (%s) for: %s; a skill, test convention or rule could prevent "
+                              "it" % (len(tasks), ", ".join(tasks), reason[:120]))
+    for kind, tasks in sorted(by_tasks((e.get("escalation"), e.get("task")) for e in escalations).items()):
+        if len(tasks) >= CANDIDATE_TASKS["escalation"]:
+            candidates.append("the harness escalated %d tasks (%s) as %s; look for the common cause"
+                              % (len(tasks), ", ".join(tasks), kind))
+    return {
+        "first_pass_judge": first_pass,
+        "grill": {"fails": fails, "fails_followed_by_spec_change": changed},
+        "start_to_finish": {"tasks": len(durations),
+                            "median_minutes": round(sorted(durations)[len(durations) // 2] / 60, 1) if durations else None},
+        "finished_tasks": sorted(finished),
+        "cost_per_finished_task": round(cost / len(finished), 4) if finished and cost else None,
+        "escalations_per_finished_task": round(len(escalations) / len(finished), 2) if finished else None,
+        "gate_refusals": gates,
+        "rules": {"loaded": len({r.message[:120] for r in rules}), "fired": fired, "never_fired": never,
+                  "project_never_fired": [r for r in never if r in project]},
+        "slow_hooks": {"count": len(slow), "slowest": max(slow, key=lambda e: e.get("seconds") or 0) if slow else None},
+        "candidates": candidates,
+    }
+
+
+def report_command(argv):
+    days = (int(argv[argv.index("--days") + 1]) if "--days" in argv and argv.index("--days") + 1 < len(argv)
+            and argv[argv.index("--days") + 1].isdigit() else 7)
+    events = report_events(days)
     count = lambda kind: sum(1 for e in events if e.get("kind") == kind)
     verdicts = [e for e in events if e.get("kind") == "verdict"]
     judged = [e for e in verdicts if e.get("agent") == "judge"]
@@ -3777,17 +3909,27 @@ def report_command(argv):
         if e.get("kind") in ("block", "verify"):
             key = re.sub(r"\s+", " ", e.get("reason", ""))[:70]
             reasons[key] = reasons.get(key, 0) + 1
+    measures = lift(events)
+    if "--rules" in argv:
+        print("rules, last %d day(s): %d loaded" % (days, measures["rules"]["loaded"]))
+        for rule, n in sorted(measures["rules"]["fired"].items(), key=lambda kv: -kv[1]):
+            print("  %4d  %s" % (n, rule))
+        for rule in measures["rules"]["never_fired"]:
+            print("     0  %s%s" % (rule, "" if rule in measures["rules"]["project_never_fired"] else "  (core)"))
+        return 0
     if "--json" in argv:
-        print(json.dumps({"days": days, "events": len(events), "tasks_finished": done,
-                          "judge_verdicts": len(judged), "judge_passes": passes, "overturned_passes": overturned,
-                          "escalations": count("escalation"), "open_escalations": len(open_escalations()),
-                          "policy_approvals": count("approval"), "blocked_tool_calls": count("block"),
-                          "verify_refusals": count("verify"), "out_of_band_changes": count("tamper"),
-                          "knowledge_lookups": count("knowledge"), "orca_merged": merged,
-                          "orca_workers": len(workers), "orca_failed_workers": failed_workers,
-                          "orca_integrations": count("orca-integrate"),
-                          "cost_usd": round(sum(e.get("cost_usd") or 0 for e in attempts), 4),
-                          "block_reasons": reasons}, indent=2, sort_keys=True))
+        data = {"days": days, "events": len(events), "tasks_finished": done,
+                "judge_verdicts": len(judged), "judge_passes": passes, "overturned_passes": overturned,
+                "escalations": count("escalation"), "open_escalations": len(open_escalations()),
+                "policy_approvals": count("approval"), "blocked_tool_calls": count("block"),
+                "verify_refusals": count("verify"), "out_of_band_changes": count("tamper"),
+                "knowledge_lookups": count("knowledge"), "orca_merged": merged,
+                "orca_workers": len(workers), "orca_failed_workers": failed_workers,
+                "orca_integrations": count("orca-integrate"),
+                "cost_usd": round(sum(e.get("cost_usd") or 0 for e in attempts), 4),
+                "block_reasons": reasons}
+        data.update(measures)
+        print(json.dumps(data, indent=2, sort_keys=True))
         return 0
     print("harness report, last %d day(s), %d event(s)" % (days, len(events)))
     print("  tasks finished by the runner: %d %s" % (len(done), ", ".join(done)))
@@ -3804,6 +3946,34 @@ def report_command(argv):
     print("  agent cost: $%.2f over %d session(s)" % (sum(e.get("cost_usd") or 0 for e in attempts), len(attempts)))
     for reason, n in sorted(reasons.items(), key=lambda kv: -kv[1])[:8]:
         print("    %4d  %s" % (n, reason))
+    m = measures
+    fp = m["first_pass_judge"]
+    print("  accepted work:")
+    print("    first-pass judge rate: %d of %d task(s)%s" % (fp["passed"], fp["tasks"],
+                                                           " (%d%%)" % (100 * fp["passed"] // fp["tasks"]) if fp["tasks"] else ""))
+    print("    griller fails followed by a spec change: %d of %d (all time)" % (m["grill"]["fails_followed_by_spec_change"],
+                                                                            m["grill"]["fails"]))
+    if m["start_to_finish"]["tasks"]:
+        print("    start to finish: %d task(s), median %s min" % (m["start_to_finish"]["tasks"],
+                                                              m["start_to_finish"]["median_minutes"]))
+    if m["cost_per_finished_task"] is not None:
+        print("    cost per finished task: $%.2f" % m["cost_per_finished_task"])
+    if m["escalations_per_finished_task"] is not None:
+        print("    escalations per finished task: %.1f (%d finished)" % (m["escalations_per_finished_task"],
+                                                                        len(m["finished_tasks"])))
+    print("  gate refusals: %s" % (", ".join("%s %d" % kv for kv in sorted(m["gate_refusals"].items())) or "none"))
+    fired = m["rules"]["fired"]
+    print("  rules: %d loaded; fired: %s" % (m["rules"]["loaded"], "; ".join(
+        "%s (%d)" % kv for kv in sorted(fired.items(), key=lambda kv: -kv[1])[:5]) or "none"))
+    print("    never fired in %d day(s): %d, of them project rules: %d (do they still apply? harness.py report --rules)"
+          % (days, len(m["rules"]["never_fired"]), len(m["rules"]["project_never_fired"])))
+    slow = m["slow_hooks"]
+    print("  slow hook calls: %d%s" % (slow["count"], " (slowest %ss, %s)" % (slow["slowest"].get("seconds"),
+                                                                           slow["slowest"].get("hook"))
+                                      if slow["slowest"] else ""))
+    print("  harness candidates (a failure seen in several tasks):")
+    for line in m["candidates"] or ["none"]:
+        print("    - %s" % line)
     return 0
 
 
