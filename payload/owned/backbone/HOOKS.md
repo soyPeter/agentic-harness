@@ -125,6 +125,8 @@ The user (or a scheduled job) runs `python3 scripts/harness/lib/harness.py run [
   - `[x]` with a clean working tree means done;
   - a `BLOCKED` note means the agent escalated;
   - anything else is retried, up to `HARNESS_RUN_ATTEMPTS` sessions, and then escalated as `runner`;
+- gives a retry what went wrong instead of the same prompt: why the last session stopped (timed out, exited with an error, left the task `[x]` but uncommitted, or ended unfinished), the task's next step from `harness.py next` with the judge's findings and the debugger's brief, and the calls the hooks refused during it;
+- escalates at once when a retry that ended cleanly changed nothing: the same next step, the same files (specs and verdicts included) and the same commit as after the attempt before. Another identical session would only repeat it. A session that failed with an agent error or timed out keeps its attempts, since an API overload or a long test run can pass;
 - checks the kill switch between sessions.
 
 Logs go to `.git/harness/runs/<timestamp>/<task>-<attempt>.log`. Agents can't start the runner.
@@ -188,7 +190,7 @@ A coordinator asks the harness what a task needs instead of knowing the workflow
 | Command | Answer |
 |---|---|
 | `harness.py state [--json]` | Every task: state, spec problems, grill and judge verdicts (and whether they are current), approval, open escalations |
-| `harness.py next <id> [--json]` | The next step and who does it: `define` (analyst or architect), `grill` (griller), `answer` (the griller's questions, routed; `needs_user` says whether any must go to the user), `approve`, `start`, `test` (tester), `implement`, `judge`, `diagnose` (debugger), `fix` (implementer, with the debugger's brief), `finish` (scribe, then `finish`), `blocked`, `done` |
+| `harness.py next <id> [--json]` | `progress` is a fingerprint of the whole checkout, specs and verdicts included: the same step with the same `progress` means the last worker changed nothing. The next step and who does it: `define` (analyst or architect), `grill` (griller), `answer` (the griller's questions, routed; `needs_user` says whether any must go to the user), `approve`, `start`, `test` (tester), `implement`, `judge`, `diagnose` (debugger), `fix` (implementer, with the debugger's brief), `finish` (scribe, then `finish`), `blocked`, `done` |
 | `harness.py questions <id> [--json]` | The griller's open questions, each routed: design questions to the architect, the rest to the analyst. A question marked `apply` (a non-blocker with the griller's recommendation) is applied by that role without asking |
 | `harness.py start <id>` / `finish <id>` | Mark the task `[WIP]` / `[x]` through the same gates as an edit of `3-TASKS.md` (start: spec, grill, approval, one `[WIP]`; finish: a current judge pass) |
 
@@ -206,7 +208,7 @@ Under an Orca coordinator (`HARNESS_ORCA_RUN` set), `escalate` also sends an `es
 - **Agents per role** (`--agents` or `HARNESS_ORCA_AGENTS`, user-only): for example `default=claude,judge=codex` runs the judge on a different model from the implementer. Agents that need launch flags get their own terminal (`HARNESS_ORCA_LAUNCH`, default `codex=codex --dangerously-bypass-hook-trust -c check_for_update_on_startup=false`: an update prompt would block an unattended start). Codex otherwise skips the hooks of every new worktree until someone trusts them, and the harness's hooks are lock-checked.
 - **Permission prompts.** A worker must run Orca's own commands to report back. For Codex, the harness ships `.codex/rules/harness.rules`, which allows exactly `orca orchestration check`, `send` and `ask` without asking; every other command still follows Codex's own approvals. Codex loads it once the project's `.codex/` layer is trusted, which `--trust` does for task worktrees. A worker still waiting at a prompt (another agent, another command) is logged by the coordinator and never answered.
 - **`--trust`** marks the repository and each task worktree trusted for Claude Code (`~/.claude.json`) and Codex (`~/.codex/config.toml`). Claude Code decides trust for a worktree by its main repository. Without it, a worker in a new worktree waits at its trust dialog, which Orca reports as `Agent startup blocked: agent-trust-workspace`.
-- **Safety.** The coordinator follows Orca's lifecycle rules: it acknowledges every delivery after processing it, and releases a worker only after it settles. It never stops, abandons or retries a worker by itself. A step that comes back 3 times without progress is escalated. `.git/harness/STOP` halts it.
+- **Safety.** The coordinator follows Orca's lifecycle rules: it acknowledges every delivery after processing it, and releases a worker only after it settles. It never stops, abandons or retries a worker by itself. A role step that comes back with the same `progress` as when its worker started, after the worker reported success (it changed nothing), is escalated instead of started again, and so is a step that comes back more than 3 times. `.git/harness/STOP` halts it.
 - **The end.** It commits each finished task on its branch (and opens a PR with `--pr`), then reports every task's outcome and the open escalations. Answer those, then run it again: it picks up where the tasks stand.
 
 ## Knowledge source (`HARNESS_KNOWLEDGE_ROOT`)
