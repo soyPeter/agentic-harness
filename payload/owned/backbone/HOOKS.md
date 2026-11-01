@@ -250,6 +250,18 @@ Blocks, verify refusals, verdicts, approvals, escalations and run attempts are a
 - escalations and policy approvals;
 - blocked tool calls and refused commits, by reason.
 
+## Change receipt
+
+`harness.py receipt <id> [--base <rev>] [--json]` states what the harness can prove about a judged task, built only from the spec, the verdicts and the diff:
+- **Changed:** files since the base: `--base`, else the policy approval's base, else the parent of the commit that added the spec.
+- **Verified:** the harness's own test run, and each AC with its tests, evidence and the test files that mention it.
+- **Not verified:** ACs not met, NFRs no AC covers, and findings the judge left open.
+- **Decisions:** the ADRs the spec follows, the ADRs the task added or changed (with their status), and the assumptions with their sources.
+- **Risks** and the number of grill, judge and debugger rounds.
+- **Approval needed:** ADRs that aren't Accepted and open escalations.
+
+It refuses a task without a judge pass on the current code. `harness.py run` saves it next to the run logs and `--pr` puts it in the pull request; the Orca coordinator does the same and keeps it in `.git/harness/receipts/`.
+
 ## CI judge and branch protection
 
 `harness.py ci-judge --range <base>..<tip>` re-judges every task the range marks `[x]`:

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.19.0 (2026-11-01)
+
+- **Change receipt.** `harness.py receipt <id>` states what the harness can prove about a judged task, built from the
+  spec, the verdicts and the diff rather than from the agents' report: what changed since the task's base, each
+  acceptance criterion with the tests and evidence that prove it, the harness's own test run, what is **not**
+  verified (NFRs no criterion covers, criteria not met, findings left open), the ADRs followed and added, the
+  assumptions with their sources, the risks and rounds, and what still needs the user (Proposed ADRs, open
+  escalations). It refuses a task with no judge pass on the current code. `--json` gives the same for machines.
+- The report step of the workflow (step 13) is the receipt, instead of a summary the orchestrator writes.
+- `harness.py run` saves each finished task's receipt next to its logs, and `--pr` puts it in the pull request. The
+  Orca coordinator puts it in its pull requests too, keeps it in `.git/harness/receipts/`, and lists it in the digest.
+
 ## 0.18.2 (2026-10-25)
 
 - **The analyst goes with its own recommendation too.** An open question the analyst has a recommendation for,

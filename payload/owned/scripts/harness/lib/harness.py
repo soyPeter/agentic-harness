@@ -23,6 +23,7 @@ Usage:
   harness.py risk <task-id>
   harness.py run [--max-tasks N] [--only <task>] [--worktree [--pr]] [--dry-run]   (autonomous, unattended)
   harness.py report [--days N] [--json]                           (events: verdicts, escalations, blocks, runs)
+  harness.py receipt <task-id> [--base <rev>] [--json]            (what the harness can prove about a judged task)
   harness.py ci-judge --range <base>..<tip>                       (CI: independent re-judging of finished tasks)
   harness.py ci-protect [--branch main] [--with-judge] [--dry-run] (require the CI checks; needs gh)
   harness.py doctor
@@ -3299,10 +3300,14 @@ def run_worktrees(queue, open_prs):
                                     capture_output=True, text=True)
             if pushed.returncode == 0 and shutil.which("gh"):
                 state = "ready for review" if outcome == "done" else "BLOCKED, see backbone/escalations.md"
+                body = "Opened by harness.py run: task %s is %s.\n\nThe harness-verify check re-checks the gates." \
+                       % (task, state)
+                receipt = subprocess.run([sys.executable, str(tree / "scripts/harness/lib/harness.py"), "receipt", task],
+                                         cwd=str(tree), capture_output=True, text=True)
+                if receipt.returncode == 0:
+                    body += "\n\n```\n%s\n```" % receipt.stdout.strip()
                 pr = subprocess.run(["gh", "pr", "create", "--head", branch, "--base", base_branch, "--title",
-                                     "Task %s: %s" % (task, title), "--body",
-                                     "Opened by harness.py run: task %s is %s.\n\nThe harness-verify check "
-                                     "re-checks the gates." % (task, state)],
+                                     "Task %s: %s" % (task, title), "--body", body],
                                     cwd=str(tree), capture_output=True, text=True)
                 print("run: task %s: %s" % (task, pr.stdout.strip() or pr.stderr.strip()))
                 log_event("run-pr", task=task, branch=branch, url=pr.stdout.strip())
@@ -3483,6 +3488,11 @@ def run_command(argv):
             print("run: task %s attempt %d: %s (%ss, exit %s%s)" % (task, attempt, outcome, seconds, code,
                                                                    ", uncommitted changes" if dirty else ""))
             if outcome == "done" and not dirty:
+                data, _ = receipt_data(task)
+                if data:
+                    receipt = run_dir / ("%s.receipt.txt" % slug(task))
+                    receipt.write_text(receipt_text(data) + "\n", encoding="utf-8")
+                    print("run: task %s receipt: %s" % (task, receipt))
                 break
             if outcome == "blocked":
                 break
@@ -3692,6 +3702,151 @@ def report_command(argv):
     print("  agent cost: $%.2f over %d session(s)" % (sum(e.get("cost_usd") or 0 for e in attempts), len(attempts)))
     for reason, n in sorted(reasons.items(), key=lambda kv: -kv[1])[:8]:
         print("    %4d  %s" % (n, reason))
+    return 0
+
+
+# --------------------------------------------------------------------------- change receipt
+# What the harness can prove about a judged task, built only from recorded evidence (the spec, the verdicts, the
+# diff), never from what an agent says it did. Reviewers read it instead of the transcript; a pull request carries it.
+
+def receipt_base(task, spec_text, given=None):
+    """The commit the task's change is measured from: --base, the policy approval's base, else the parent of the
+    commit that added the spec, else HEAD (only the uncommitted work)."""
+    if given:
+        return given
+    policy = policy_approval(spec_text)
+    if policy and policy["base"] and policy["base"] != "none":
+        return policy["base"]
+    added = git("log", "--format=%H", "--diff-filter=A", "--", spec_rel(task)).split()
+    if added and git("rev-parse", "-q", "--verify", added[-1] + "^").strip():
+        return added[-1] + "^"
+    return git("rev-parse", "-q", "--verify", "HEAD").strip() or None
+
+
+def changed_since(base):
+    """[(path, status)] changed since base, committed or not, untracked included."""
+    found = {}
+    for line in git("diff", "--name-status", "--no-renames", base).splitlines() if base else []:
+        status, _, name = line.partition("\t")
+        found[name] = {"A": "added", "D": "deleted"}.get(status[:1], "modified")
+    for name in git("ls-files", "-z", "--others", "--exclude-standard").split("\0"):
+        if name:
+            found.setdefault(name, "added")
+    return sorted(found.items())
+
+
+def receipt_data(task, base=None):
+    """(receipt dict, None) for a task with a judge pass on the current code, else (None, why not)."""
+    spec_text = read(spec_path(task))
+    judge = verdict_history(task, "judge")
+    passed = judge[-1] if judge and judge[-1].get("verdict") == "pass" else None
+    if passed is None:
+        return None, "task %s has no judge pass on record; a receipt states only what the judge proved" % task
+    if not spec_text.strip():
+        return None, "no spec at %s" % spec_rel(task)
+    if passed.get("fingerprint") != code_fingerprint():
+        return None, "the code changed after the judge passed task %s; judge it again first" % task
+    body = strip_comments(spec_text)
+    title = re.match(r"^#\s+Spec\s+\S+:\s*(.+)$", body.strip().splitlines()[0]) if body.strip() else None
+    base = receipt_base(task, spec_text, base)
+    changes = changed_since(base)
+    reqs = dict(spec_items(body, "REQ", task))
+    criteria = {str(c.get("id")): c for c in passed.get("criteria") or [] if isinstance(c, dict)}
+    references = ac_test_references(task)
+    verified, not_verified = [], []
+    run = passed.get("test_run")
+    if run:
+        verified.append("HARNESS_TEST_CMD (%s) run by the harness: exit %s in %ss"
+                        % (run.get("command"), run.get("exit"), run.get("seconds")))
+    for ac, rest in spec_items(body, "AC", task):
+        proves = ", ".join(re.findall(r"REQ-%s-\d+" % re.escape(task), rest))
+        item = criteria.get(ac) or {}
+        line = "%s (%s): met; tests: %s; evidence: %s; test files: %s" % (
+            ac, proves, ", ".join(item.get("tests") or []), item.get("evidence") or "-",
+            ", ".join(references.get(ac) or []) or "-")
+        (verified if item.get("met") is True else not_verified).append(line if item.get("met") is True
+                                                                         else "%s (%s): not met" % (ac, proves))
+    tests = verdict_history(task, "tests")
+    if tests:
+        verified.append("acceptance tests written by the tester before the code, unchanged since: %s"
+                        % ", ".join(sorted({f for files in (tests[-1].get("files") or {}).values()
+                                            for f in (files if isinstance(files, list) else [files])})) or "-")
+    nfrs = [n for n in top_level_items(md_section(body, "Non-functional requirements"))
+            if n.lower().rstrip(".") not in ("none", "n/a")]
+    not_verified.extend("NFR not covered by any acceptance criterion: %s" % n for n in nfrs)
+    for f in passed.get("findings") or []:
+        if isinstance(f, dict):
+            where = ":".join(str(x) for x in (f.get("file"), f.get("line")) if x not in (None, ""))
+            not_verified.append("%s finding left open: %s%s" % (f.get("severity", "minor"), f.get("issue", "?"),
+                                                                " (%s)" % where if where else ""))
+    adrs, approval_needed = [], []
+    for name, status in changes:
+        m = re.match(r"^backbone/adr/(ADR-\d+)[^/]*\.md$", name)
+        if m and status != "deleted":
+            state = adr_status(read(ROOT / name)) or "no status"
+            adrs.append("%s (%s): %s" % (m.group(1), state, status))
+            if not state.lower().startswith("accepted"):
+                approval_needed.append("accept or reject %s (%s)" % (m.group(1), name))
+    governing = ["%s (%s)" % (adr, adr_status(read(adr_file(adr))) if adr_file(adr) else "missing")
+                 for adr in spec_adrs(spec_text)]
+    assumptions = [a for a in top_level_items(md_section(body, "Assumptions")) if a.lower().rstrip(".") not in
+                   ("none", "n/a")]
+    escalations = [e for e in open_escalations() if re.search(r"\bTask %s:" % re.escape(task), e)]
+    approval_needed.extend("resolve the open escalation: %s" % e for e in escalations)
+    grills = verdict_history(task, "grill")
+    data = {
+        "task": task,
+        "title": title.group(1).strip() if title else task_title(task),
+        "objective": " ".join((md_section(body, "Context") or "").split()),
+        "base": base,
+        "changed": [{"path": n, "status": s} for n, s in changes if not n.startswith("backbone/")],
+        "backbone_changed": [{"path": n, "status": s} for n, s in changes if n.startswith("backbone/")],
+        "requirements": sorted(reqs),
+        "verified": verified,
+        "not_verified": not_verified,
+        "decisions": {"governing_adrs": governing, "adrs_changed": adrs, "assumptions": assumptions},
+        "risks": risk_reasons(task, base),
+        "rounds": {"grill": len(grills), "judge": len(judge), "debug": len(verdict_history(task, "debug"))},
+        "judged_at": passed.get("at"),
+        "approval": approval_lines(md_section(body, "Approval") or ""),
+        "approval_needed": approval_needed,
+    }
+    return data, None
+
+
+def receipt_text(d):
+    lines = ["Receipt: Task %s: %s" % (d["task"], d["title"]), "",
+             "OBJECTIVE", "  %s" % (d["objective"] or "(the spec has no Context section)"), "",
+             "CHANGED (since %s)" % ((d["base"] or "the empty tree")[:12])]
+    lines += ["  %-8s %s" % (c["status"], c["path"]) for c in d["changed"]] or ["  (no code changes)"]
+    if d["backbone_changed"]:
+        lines.append("  backbone: %s" % ", ".join(c["path"] for c in d["backbone_changed"]))
+    sections = (("VERIFIED (judge pass %s, re-checked by the harness)" % d["judged_at"], d["verified"]),
+                ("NOT VERIFIED", d["not_verified"] or ["nothing outside the acceptance criteria"]),
+                ("DECISIONS", ["follows %s" % a for a in d["decisions"]["governing_adrs"]] +
+                 ["ADR changed: %s" % a for a in d["decisions"]["adrs_changed"]] +
+                 ["assumption %s" % a for a in d["decisions"]["assumptions"]]),
+                ("RISKS", d["risks"] + ["grill rounds: %d; judge rounds: %d; debugger briefs: %d"
+                                        % (d["rounds"]["grill"], d["rounds"]["judge"], d["rounds"]["debug"])]),
+                ("APPROVAL", d["approval"] or ["(not approved)"]),
+                ("APPROVAL NEEDED", d["approval_needed"] or ["none"]))
+    for heading, items in sections:
+        lines += ["", heading] + ["  - %s" % i for i in items or ["none"]]
+    return "\n".join(lines)
+
+
+def receipt_command(argv):
+    base = argv[argv.index("--base") + 1] if "--base" in argv and argv.index("--base") + 1 < len(argv) else None
+    task = next((a for i, a in enumerate(argv) if not a.startswith("--") and (i == 0 or argv[i - 1] != "--base")),
+                None)
+    if not task:
+        sys.stderr.write("usage: harness.py receipt <task> [--base <rev>] [--json]\n")
+        return 64
+    data, problem = receipt_data(task, base)
+    if problem:
+        print("receipt: %s" % problem)
+        return 1
+    print(json.dumps(data, indent=2) if "--json" in argv else receipt_text(data))
     return 0
 
 
@@ -4158,6 +4313,8 @@ def main(argv):
         return finish_command(argv[2])
     if argv[1:2] == ["report"]:
         return report_command(argv[2:])
+    if argv[1:2] == ["receipt"]:
+        return receipt_command(argv[2:])
     if argv[1:2] == ["ci-judge"]:
         return ci_judge_command(argv[2:])
     if argv[1:2] == ["ci-protect"]:
