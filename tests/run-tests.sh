@@ -2340,5 +2340,37 @@ contains "receipt: the stale refusal exits non-zero" "exit=1" "$out"
 contains "receipt: a task that was never judged is refused" "no judge pass" "$($CH receipt 7.2)"
 unset HARNESS_TEST_CMD
 
+section "trace: what happened during a task"
+X="$WORK/trace"
+new_repo "$X"
+"$HARNESS/bootstrap.sh" "$X" --name trace >/dev/null
+XH="python3 $X/scripts/harness/lib/harness.py"
+printf -- '- [WIP] **Task 8.1: Traced** (spec: backbone/specs/8.1.md)\n- [ ] **Task 8.2: Other** (spec: backbone/specs/8.2.md)\n' >> "$X/backbone/3-TASKS.md"
+mkdir -p "$X/src"
+hook "$X" post-tool-use "$(sread s1 "$X/backbone/4-KNOWLEDGE.md")" >/dev/null
+hook "$X" post-tool-use "$(sread s1 "$X/src/unrelated.py")" >/dev/null
+hook "$X" post-tool-use "$(sskill s1 code-quality)" >/dev/null
+hook "$X" post-tool-use "$(swrite s1 "$X/src/x.py" "x = 1")" >/dev/null
+hook "$X" pre-tool-use "$(bash_json 'git commit -n -m x')" >/dev/null 2>&1
+HARNESS_TEST_CMD=true $XH test-run >/dev/null
+out=$($XH trace 8.1)
+contains "trace: the context an agent loaded" "context  backbone/4-KNOWLEDGE.md" "$out"
+lacks "trace: reads of ordinary code are not context sources" "src/unrelated.py" "$out"
+contains "trace: skills loaded" "skill    code-quality" "$out"
+contains "trace: files edited, with the tool" "edit     src/x.py (Write)" "$out"
+contains "trace: calls the hooks refused" "block    " "$out"
+contains "trace: test runs with their result" "tests    true: exit 0" "$out"
+contains "trace: who acted" "[s1]" "$out"
+out=$($XH trace 8.1 --json)
+expect 0 "trace --json parses" python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["task"]=="8.1" and len(d["events"])>=5' "$out"
+contains "trace: an event belongs to the task in progress" '"task": "8.1"' "$(tail -1 "$X/.git/harness/events.jsonl")"
+lacks "trace: another task's trace is empty" "src/x.py" "$($XH trace 8.2)"
+expect 1 "trace: an unknown task has nothing to show" $XH trace 9.9
+HARNESS_HOOK_SLOW=0.0001 hook "$X" post-tool-use "$(bash_json 'ls')" >/dev/null
+contains "a hook slower than HARNESS_HOOK_SLOW is logged" '"kind": "hook-slow"' "$(tail -1 "$X/.git/harness/events.jsonl")"
+slow_before=$(grep -c '"hook-slow"' "$X/.git/harness/events.jsonl")
+hook "$X" post-tool-use "$(bash_json 'ls')" >/dev/null
+expect 0 "a fast hook is not" test "$slow_before" -eq "$(grep -c '"hook-slow"' "$X/.git/harness/events.jsonl")"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

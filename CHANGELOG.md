@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.21.0 (2026-11-01)
+
+- **Trace a task.** `harness.py trace <id> [--json]` prints what happened during a task, in order: the project
+  knowledge and skills its agents loaded, the files they edited, the calls the hooks refused, the harness's test
+  runs, verdicts, escalations and runner attempts. Every event now carries the task in progress and, inside a hook,
+  the session and agent. Paths only: no file contents are logged.
+- New events: `context`, `skill`, `edit`, `tests-run`, and `hook-slow` for a hook call that took
+  `HARNESS_HOOK_SLOW` seconds or more (new setting, default 5).
+
 ## 0.20.0 (2026-11-01)
 
 - **A retry changes something, or the task is escalated.** `harness.py run` used to send a failed task the same
