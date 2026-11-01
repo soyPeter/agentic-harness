@@ -2502,8 +2502,11 @@ git -C "$G" reset -q
 out=$(HARNESS_AUTONOMY=autonomous $GH approve 11.6; echo "exit=$?")
 contains "light lane: in autonomous mode policy approval needs no griller pass for a light task" "approved by policy" "$out"
 gline 11.8
-out=$(hook "$G" pre-tool-use "$(edit_json "$G/backbone/3-tasks.md" "- [ ] **Task 11.8: Small** (spec: backbone/specs/11.8.md)" "- [ ] **Task 11.8: Small** (spec: backbone/specs/11.8.md) (light)")" 2>&1)
-contains "a case-variant path to 3-TASKS.md gets the same checks" "Only the user marks a task (light)" "$out"
+# On a case-sensitive disk (Linux) backbone/3-tasks.md is another file, so there is no bypass to check.
+if [ -e "$G/backbone/3-tasks.md" ]; then
+  out=$(hook "$G" pre-tool-use "$(edit_json "$G/backbone/3-tasks.md" "- [ ] **Task 11.8: Small** (spec: backbone/specs/11.8.md)" "- [ ] **Task 11.8: Small** (spec: backbone/specs/11.8.md) (light)")" 2>&1)
+  contains "a case-variant path to 3-TASKS.md gets the same checks" "Only the user marks a task (light)" "$out"
+fi
 gspec 11.7 1; gline 11.7 " (light)"; echo "Approved-by: Ana (2026-11-01)" >> "$G/backbone/specs/11.7.md"
 sed -i.bak 's/^- \[WIP\] \*\*Task 11\.1:/- [ ] **Task 11.1:/' "$GT" && rm -f "$GT.bak"
 expect 0 "fixture: light task 11.7 starts" hook "$G" pre-tool-use "$(edit_json "$GT" "- [ ] **Task 11.7:" "- [WIP] **Task 11.7:")"
