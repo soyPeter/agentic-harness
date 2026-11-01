@@ -363,6 +363,17 @@ class Coordinator(object):
                 step = dict(step, role=step["roles"][0],
                             questions=[q for q in step.get("questions") or [] if q.get("route") == step["roles"][0]])
             if name in ROLE_STEPS and step.get("role"):
+                dispatched = (name, step.get("role"), step.get("progress"))
+                # Only a worker that reported success and changed nothing; one that crashed may succeed if restarted.
+                if step.get("progress") and dispatched == info.get("last_dispatch") \
+                        and info.get("last_outcome") == "succeeded":
+                    self.harness(info["path"], "escalate", task, "--kind", "coordinator", "--reason",
+                                 "the %s worker changed nothing (%s): the task is back at that step with the same files"
+                                 % (name, step["role"]),
+                                 "--needed", "a look at the worker's transcript: starting it again would repeat it")
+                    info["outcome"] = "escalated (no progress at %s)" % name
+                    return False
+                info["last_dispatch"] = dispatched
                 detail = json.dumps(step.get("questions") or step.get("problems") or step.get("brief")
                                     or step.get("findings") or step.get("reason") or "", ensure_ascii=False)[:4000]
                 spec = WORKER_SPEC.format(task=task, title=info["title"], step=name, role=step["role"],
@@ -412,8 +423,8 @@ class Coordinator(object):
         if result.returncode != 0:
             self.log("orca: task %s: no receipt: %s" % (task, result.stdout.strip()[:300]))
             return None
-        common = self.git(self.root, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
-        folder = (Path(common) if common else self.root / ".git") / "harness" / "receipts"
+        common = self.git(self.root, "rev-parse", "--git-common-dir").stdout.strip() or ".git"
+        folder = (self.root / common).resolve() / "harness" / "receipts"
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / ("%s.txt" % re.sub(r"[^A-Za-z0-9._-]+", "-", task))
         path.write_text(result.stdout, encoding="utf-8")
@@ -424,6 +435,7 @@ class Coordinator(object):
         entry = self.active.pop(dispatch)
         task = entry["task"]
         outcome = str(find(payload_of(message), "outcome") or "").lower()
+        self.tasks[task]["last_outcome"] = outcome
         summary = (message.get("body") or "").strip()
         self.release(dispatch)
         self.event("orca-worker", task=task, role=entry["role"], worker=entry["kind"], agent=entry.get("agent"),

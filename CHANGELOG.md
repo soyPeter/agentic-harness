@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.20.0 (2026-11-01)
+
+- **A retry changes something, or the task is escalated.** `harness.py run` used to send a failed task the same
+  prompt again. Now the next session is told why the last one stopped (timed out, exited with an error, finished
+  without committing, or ended unfinished), the task's next step with the judge's findings and the debugger's brief,
+  and the calls the hooks refused during it, and it continues from that step. A retry that ended cleanly but changed nothing (same next step, same
+  files, specs and verdicts included, same commit) escalates the task at once instead of using up the attempts. A
+  session that failed with an agent error or timed out keeps its attempts.
+- **The Orca coordinator stops restarting a worker that changed nothing.** `harness.py next --json` reports
+  `progress`, a fingerprint of the checkout. When a role step comes back with the same progress after its worker
+  reported success, the task is escalated rather than the worker started again.
+- Each `run-attempt` event records its cause and the step the task stopped at.
+
 ## 0.19.0 (2026-11-01)
 
 - **Change receipt.** `harness.py receipt <id>` states what the harness can prove about a judged task, built from the

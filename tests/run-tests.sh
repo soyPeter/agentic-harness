@@ -1383,7 +1383,8 @@ elif args[:2] == ["orchestration", "worker-start"]:
             harness(cwd, "hook", "debug-stop", stdin=report("debugger", {"task": task, "root_causes": [{"criterion": "AC-%s-1" % task, "cause": "c", "fix": "f", "owner": "implementer"}], "confidence": "high", "summary": "s"}))
             done(d, h)
         elif step == "fix":
-            open(os.path.join(cwd, "src/feature_%s.py" % task.replace(".", "_")), "a").write("# fixed\n")
+            if "fix" not in os.environ.get("FAKE_ORCA_IDLE", ""):
+                open(os.path.join(cwd, "src/feature_%s.py" % task.replace(".", "_")), "a").write("# fixed\n")
             done(d, h)
         else:
             done(d, h)
@@ -1645,6 +1646,18 @@ echo "later" > "$O/backbone/later-9-17.md" && git -C "$O" add -A && HARNESS_VERI
 out=$(HARNESS_TEST_CMD=true HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.17 --wait-ms 10 2>&1)
 contains "a merge left in progress in the worktree is not touched by the sync" "a merge is already in progress" "$out"
 lacks "and it doesn't sync over it" "task 9.17: synced with" "$out"
+for id in 9.18; do
+  printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/$id/g" -e 's/^- python: all code$/- code-quality: all code/' > "$O/backbone/specs/$id.md"
+  printf '%s' "$(python3 -c 'import json,sys; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":sys.argv[1],"questions":[],"summary":"s"})+"\n```"}))' "$id")" \
+    | python3 "$O/scripts/harness/lib/harness.py" hook grill-stop >/dev/null
+done
+printf -- '- [ ] **Task 9.18: Idle fixer** (spec: backbone/specs/9.18.md)\n' >> "$O/backbone/3-TASKS.md"
+$OH approve 9.18 >/dev/null 2>&1
+git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: task 9.18"
+out=$(FAKE_ORCA_STATE="$WORK/orca-state-idle.json" FAKE_ORCA_IDLE=fix HARNESS_TEST_CMD=true HARNESS_ORCA_LAUNCH_WAIT=0 \
+      HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.18 --wait-ms 10 2>&1)
+contains "orca: a worker that changed nothing is not started again for the same step" "escalated (no progress at fix)" "$out"
+contains "orca: the escalation says the worker changed nothing" "the fix worker changed nothing" "$(cat "$WORK/orca-worktrees/harness-task-9.18/backbone/escalations.md")"
 unset FAKE_ORCA_STATE
 
 section "autonomous mode: judging, risk drift, kill switch"
@@ -1713,8 +1726,10 @@ git -C "$R" add -A && HARNESS_VERIFY=off git -C "$R" commit -qm "chore: adopt ag
 cat > "$WORK/fake-agent.sh" <<'EOF'
 #!/bin/bash
 # Stands in for `claude -p`: reads the prompt on stdin and acts per task.
-task=$(sed -n 's/^Drive Task \([^ ]*\) .*/\1/p')
+prompt=$(cat)
+task=$(printf '%s\n' "$prompt" | sed -n 's/^Drive Task \([^ ]*\) .*/\1/p')
 echo "fake agent: task $task"
+printf '%s\n=====\n' "$prompt" >> ".git/prompts-$task.txt"
 case "$task" in
   4.1) sed -i.bak "s/^- \[ \] \*\*Task 4.1/- [x] **Task 4.1/" backbone/3-TASKS.md && rm -f backbone/3-TASKS.md.bak
        echo "done" > "out-4.1.txt"; git add -A; HARNESS_VERIFY=off git commit -qm "feat: task 4.1" ;;
@@ -1722,6 +1737,12 @@ case "$task" in
   4.3) : ;;
   4.4) sleep 5 ;;
   4.5) mkdir -p .git/harness && touch .git/harness/STOP ;;
+  4.9) date +%s%N >> "progress-4.9.txt" ;;
+  4.10) sleep 5 ;;
+  4.12) echo '{"type":"result","total_cost_usd":0.1,"num_turns":1,"result":"overloaded"}'; exit 3 ;;
+  4.11) date +%s%N >> "progress-4.11.txt"
+        python3 -c 'import json; print(json.dumps({"tool_name":"Bash","tool_input":{"command":"git commit -n -m x"}}))' \
+          | python3 scripts/harness/lib/harness.py hook pre-tool-use >/dev/null 2>&1 ;;
   6.1) sed -i.bak "s/^- \[ \] \*\*Task 6.1/- [x] **Task 6.1/" backbone/3-TASKS.md && rm -f backbone/3-TASKS.md.bak
        echo "done" > "out-6.1.txt"; git add -A; HARNESS_VERIFY=off git commit -qm "feat: task 6.1" ;;
 esac
@@ -1775,6 +1796,30 @@ contains "report shows agent cost" "agent cost: \$" "$out"
 out=$(python3 "$R/scripts/harness/lib/harness.py" report --json)
 contains "report --json is JSON" '"escalations": 4' "$out"
 expect 0 "report --json parses" python3 -c 'import json,sys; json.loads(sys.argv[1])' "$out"
+
+section "runner: a retry changes something, or the task is escalated"
+printf -- '- [ ] **Task 4.8: Idle** (spec: backbone/specs/4.8.md)\n' >> "$RT"
+out=$(HARNESS_RUN_ATTEMPTS=4 python3 "$R/scripts/harness/lib/harness.py" run --only 4.8 2>&1)
+contains "run: an idle session is retried once" "task 4.8 attempt 2" "$out"
+lacks "run: a retry that changed nothing is not repeated" "task 4.8 attempt 3" "$out"
+contains "run: it is escalated at once instead" "escalated    task 4.8" "$out"
+contains "run: the escalation says nothing changed" "attempt 2 changed nothing" "$(cat "$R/backbone/escalations.md")"
+contains "run: the retry prompt says where the last attempt stopped" "Previous attempt 1 of 4" "$(cat "$R/.git/prompts-4.8.txt")"
+contains "run: and what the harness needs next" "Next step (from the harness): define (analyst): no spec yet" "$(cat "$R/.git/prompts-4.8.txt")"
+printf -- '- [ ] **Task 4.9: Busy** (spec: backbone/specs/4.9.md)\n' >> "$RT"
+out=$(HARNESS_RUN_ATTEMPTS=3 python3 "$R/scripts/harness/lib/harness.py" run --only 4.9 2>&1)
+contains "run: sessions that make progress use every attempt" "task 4.9 attempt 3" "$out"
+lacks "run: the first attempt's prompt has no retry note" "Previous attempt" "$(sed -n '1,/^=====/p' "$R/.git/prompts-4.9.txt")"
+printf -- '- [ ] **Task 4.10: Slow again** (spec: backbone/specs/4.10.md)\n' >> "$RT"
+HARNESS_RUN_TASK_TIMEOUT=1 HARNESS_RUN_ATTEMPTS=2 python3 "$R/scripts/harness/lib/harness.py" run --only 4.10 >/dev/null 2>&1
+contains "run: a timed-out attempt is named as such in the retry" "was stopped after 1 s (HARNESS_RUN_TASK_TIMEOUT)" "$(cat "$R/.git/prompts-4.10.txt")"
+printf -- '- [ ] **Task 4.12: Flaky agent** (spec: backbone/specs/4.12.md)\n' >> "$RT"
+out=$(HARNESS_RUN_ATTEMPTS=3 python3 "$R/scripts/harness/lib/harness.py" run --only 4.12 2>&1)
+contains "run: a session that failed with an agent error keeps its attempts (it may pass)" "task 4.12 attempt 3" "$out"
+printf -- '- [ ] **Task 4.11: Blocked call** (spec: backbone/specs/4.11.md)\n' >> "$RT"
+HARNESS_RUN_ATTEMPTS=2 python3 "$R/scripts/harness/lib/harness.py" run --only 4.11 >/dev/null 2>&1
+contains "run: calls the hooks refused are passed on to the retry" "The harness refused during it:" "$(cat "$R/.git/prompts-4.11.txt")"
+contains "run: with the refusal's reason" "commit -n" "$(cat "$R/.git/prompts-4.11.txt")"
 
 section "runner: cost budget and worktrees"
 printf -- '- [ ] **Task 5.1: A** (spec: backbone/specs/5.1.md)\n- [ ] **Task 5.2: B** (spec: backbone/specs/5.2.md)\n' >> "$RT"

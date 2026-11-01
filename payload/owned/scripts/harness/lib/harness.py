@@ -1049,9 +1049,9 @@ def consecutive_fails(history):
     return fails
 
 
-def code_fingerprint():
+def code_fingerprint(include_backbone=False):
     """Git tree hash of the working tree (tracked and untracked, ignores respected),
-    excluding backbone/. Identical code gives an identical hash, committed or not."""
+    excluding backbone/ unless include_backbone. Identical code gives an identical hash, committed or not."""
     git_dir = git("rev-parse", "--absolute-git-dir").strip()
     if not git_dir:
         return None
@@ -1066,7 +1066,8 @@ def code_fingerprint():
             return subprocess.run(["git"] + list(args), cwd=str(ROOT), env=env, capture_output=True, text=True)
 
         run("add", "-A", "--", ".")
-        run("rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", "backbone")
+        if not include_backbone:
+            run("rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", "backbone")
         result = run("write-tree")
         return result.stdout.strip() if result.returncode == 0 else None
     finally:
@@ -2816,6 +2817,11 @@ def next_step(task):
     return dict(step, step="judge", role="judge", reason="no judge verdict on the current code")
 
 
+def workspace_fingerprint():
+    """Fingerprint of everything an agent session can change in the checkout: code, specs, verdicts, task lines."""
+    return code_fingerprint(include_backbone=True)
+
+
 def set_task_marker(task, marker, checks):
     """Move task's line to [marker] if the gates allow it (the same checks as an edit of 3-TASKS.md)."""
     before = read(TASKS)
@@ -2860,7 +2866,10 @@ def state_command(argv):
 
 def next_command(argv):
     tasks = [a for a in argv if not a.startswith("--")] or [t for t, _, _ in ready_tasks()][:1]
-    steps = [next_step(t) for t in tasks]
+    # progress: the whole workspace's fingerprint, specs and verdicts included. A coordinator that gets the same step
+    # back with the same progress knows the last worker changed nothing.
+    progress = workspace_fingerprint()
+    steps = [dict(next_step(t), progress=progress) for t in tasks]
     if "--json" in argv:
         print(json.dumps(steps[0] if len(steps) == 1 else steps, indent=2))
         return 0
@@ -3146,6 +3155,56 @@ Drive Task {task} ("{title}") through the whole pipeline in backbone/8-WORKFLOW.
   judge fail, the debugger's brief goes to the implementer; then the scribe. Mark the task [x] and commit.
 - When anything needs a human, escalate: python3 scripts/harness/lib/harness.py escalate {task} --reason "..."
 Stop when the task is [x] and committed, or BLOCKED. Do not start other tasks."""
+
+
+def attempt_cause(code, seconds, outcome, dirty):
+    """(class, sentence) for why a runner session ended without finishing its task."""
+    if code is None:
+        return "timeout", "was stopped after %d s (HARNESS_RUN_TASK_TIMEOUT) before it finished" % int(seconds)
+    if outcome == "done" and dirty:
+        return "uncommitted", "marked the task [x] but left changes uncommitted: commit them with the task"
+    if code != 0:
+        return "agent-error", "ended with exit code %s" % code
+    return "unfinished", "ended before the task was [x] or BLOCKED"
+
+
+def events_since(started_at, kinds):
+    """Events of these kinds logged at or after started_at (same timestamp format, so text order is time order)."""
+    found = []
+    for line in read(events_file()).splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("kind") in kinds and str(event.get("at", "")) >= started_at:
+            found.append(event)
+    return found
+
+
+def retry_brief(task, attempt, attempts, cause, step, started_at):
+    """What the next session needs to know: why the last one stopped, where the task stands and what was refused,
+    so the retry changes something instead of replaying the same session."""
+    lines = ["", "", "Previous attempt %d of %d %s." % (attempt, attempts, cause)]
+    detail = step.get("reason") or "; ".join(str(p) for p in (step.get("problems") or [])[:5])
+    lines.append("Next step (from the harness): %s%s%s" % (step.get("step"), " (%s)" % step["role"] if step.get("role")
+                                                         else "", ": " + detail if detail else ""))
+    for finding in (step.get("findings") or [])[:8]:
+        lines.append("  - judge: %s" % (finding.get("issue") if isinstance(finding, dict) else finding))
+    for cause_item in ((step.get("brief") or {}).get("root_causes") or [])[:8]:
+        if isinstance(cause_item, dict):
+            lines.append("  - debugger (%s): %s; fix: %s" % (cause_item.get("owner"), cause_item.get("cause"),
+                                                            cause_item.get("fix")))
+    refused = []
+    for event in events_since(started_at, ("block", "verify")):
+        reason = re.sub(r"\s+", " ", str(event.get("reason") or "")).strip()
+        if reason and reason not in refused:
+            refused.append(reason)
+    if refused:
+        lines.append("The harness refused during it: %s. Fix the cause; don't retry the same call."
+                     % "; ".join(refused[:5]))
+    lines.append("Continue from that step. What the gates already record (the spec, its grill pass and approval, the "
+                 "verdicts) stays valid: don't redo it. If this step can't move forward, escalate it.")
+    return "\n".join(lines)
 
 
 def ready_tasks(text=None):
@@ -3451,6 +3510,7 @@ def run_command(argv):
     max_cost = float(values["HARNESS_RUN_MAX_COST"]) if re.match(r"^\d+(\.\d+)?$", values["HARNESS_RUN_MAX_COST"]) else None
     spent = 0.0
     for task, title, state in queue:
+        retry_note, last_signature = "", None
         if max_cost is not None and spent >= max_cost:
             print("run: budget reached ($%.2f of $%.2f); stopping before task %s" % (spent, max_cost, task))
             log_event("run-budget", spent=spent, limit=max_cost)
@@ -3465,8 +3525,9 @@ def run_command(argv):
                 break
             resume = ("The task is already [WIP]: resume it." if task_state(task) == "wip"
                       else "The task is pending.")
-            prompt = RUN_PROMPT.format(task=task, title=title, state=resume)
+            prompt = RUN_PROMPT.format(task=task, title=title, state=resume) + retry_note
             log_path = run_dir / ("%s-%d.log" % (slug(task), attempt))
+            started_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             code, seconds = run_agent(prompt, log_path, timeout)
             failure = agent_start_failure(log_path, code)
             if failure:
@@ -3483,10 +3544,25 @@ def run_command(argv):
                 break
             outcome = task_state(task)
             dirty = bool(git("status", "--porcelain").strip())
+            step = next_step(task) if outcome not in ("done", "blocked") else {}
+            cause = attempt_cause(code, seconds, outcome, dirty)
             log_event("run-attempt", task=task, attempt=attempt, exit=code, seconds=seconds, state=outcome,
-                      uncommitted=dirty, cost_usd=cost, turns=turns)
+                      uncommitted=dirty, cost_usd=cost, turns=turns, cause=cause[0], step=step.get("step"))
             print("run: task %s attempt %d: %s (%ss, exit %s%s)" % (task, attempt, outcome, seconds, code,
                                                                    ", uncommitted changes" if dirty else ""))
+            if outcome not in ("done", "blocked"):
+                # Only a session that ended cleanly having done nothing proves a retry futile: an agent error (an API
+                # overload) or a timeout (a long test run) can pass, so those keep their attempts.
+                signature = (workspace_fingerprint(), git("rev-parse", "-q", "--verify", "HEAD").strip(),
+                             step.get("step"), step.get("role"))
+                if cause[0] == "unfinished" and signature == last_signature:
+                    escalate(task, "runner", "attempt %d changed nothing: the task is still at step %s, with the same "
+                             "files as after attempt %d (logs: %s)" % (attempt, step.get("step"), attempt - 1, run_dir),
+                             "a look at the run logs: a further identical session would repeat the same failure")
+                    outcome = "escalated"
+                    break
+                last_signature = signature
+                retry_note = retry_brief(task, attempt, attempts, cause[1], step, started_at)
             if outcome == "done" and not dirty:
                 data, _ = receipt_data(task)
                 if data:
@@ -3499,7 +3575,7 @@ def run_command(argv):
             if outcome == "done" and dirty:
                 outcome = "done-uncommitted"
         else:
-            if outcome not in ("done", "blocked", "agent-failed"):
+            if outcome not in ("done", "blocked", "agent-failed", "escalated"):
                 escalate(task, "runner", "no resolution after %d agent session(s) (last state: %s; logs: %s)"
                          % (attempts, outcome, run_dir), "a look at the run logs and the task's state")
                 outcome = "escalated"
