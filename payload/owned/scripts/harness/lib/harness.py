@@ -24,6 +24,7 @@ Usage:
   harness.py run [--max-tasks N] [--only <task>] [--worktree [--pr]] [--dry-run]   (autonomous, unattended)
   harness.py report [--days N] [--json]                           (events: verdicts, escalations, blocks, runs)
   harness.py receipt <task-id> [--base <rev>] [--json]            (what the harness can prove about a judged task)
+  harness.py trace <task-id> [--json]                             (the task's events: context, skills, edits, refusals, tests)
   harness.py ci-judge --range <base>..<tip>                       (CI: independent re-judging of finished tasks)
   harness.py ci-protect [--branch main] [--with-judge] [--dry-run] (require the CI checks; needs gh)
   harness.py doctor
@@ -171,6 +172,7 @@ DEFAULTS = {
     "HARNESS_RUN_MAX_COST": "",
     "HARNESS_CI_JUDGE_CMD": "claude -p --agent judge --dangerously-skip-permissions --output-format json",
     "HARNESS_SKILL_MAX_AGE": "180",
+    "HARNESS_HOOK_SLOW": "5",
     "HARNESS_SCOPE_CHECK": "on",
     "HARNESS_CROSS_SCOPES": "deps|build|ci|docs|backbone|harness|release|config|tests?",
     "HARNESS_COMMIT_NUDGE": "8",
@@ -664,6 +666,7 @@ def remember_skill(data, name):
     path = session_file(data)
     if path is None or not name:
         return
+    log_event("skill", name=name)
     skills = loaded_skills(data) | {name}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"skills": sorted(skills), "updated": time.time()}), encoding="utf-8")
@@ -1211,7 +1214,9 @@ def run_tests():
         exit_code = None
         output = "%s%s" % (exc.stdout or "", exc.stderr or "")
         output = output.decode("utf-8", "replace") if isinstance(output, bytes) else output
-    return {"command": command, "exit": exit_code, "seconds": round(time.time() - started, 1),
+    seconds = round(time.time() - started, 1)
+    log_event("tests-run", command=command, exit=exit_code, seconds=seconds)
+    return {"command": command, "exit": exit_code, "seconds": seconds,
             "output_sha256": hashlib.sha256(output.encode("utf-8")).hexdigest(),
             "tail": output.strip().splitlines()[-15:]}
 
@@ -2330,26 +2335,41 @@ def add_context(event, text):
     emit({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})
 
 
+EVENTS_FILE = []   # resolved once per process: events now fire on every edit, and each lookup runs git
+
+
 def events_file():
+    if EVENTS_FILE:
+        return EVENTS_FILE[0]
     try:
         common = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=str(ROOT), capture_output=True,
                                 text=True, timeout=10).stdout.strip()
     except subprocess.TimeoutExpired:
         common = ".git"
     base = Path(common) if common and os.path.isabs(common) else ROOT / (common or ".git")
-    return base / "harness" / "events.jsonl"
+    EVENTS_FILE.append(base / "harness" / "events.jsonl")
+    return EVENTS_FILE[0]
+
+
+HOOK_CONTEXT = {}   # who the current hook call is for: session and agent, set by main()
 
 
 def log_event(kind, **fields):
-    """Append one event to .git/harness/events.jsonl (never fails the caller)."""
+    """Append one event to .git/harness/events.jsonl (never fails the caller). Events carry the task in progress and,
+    inside a hook, the session and agent, so harness.py trace can rebuild a task's history."""
     try:
         path = events_file()
         path.parent.mkdir(parents=True, exist_ok=True)
         entry = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": kind}
+        entry.update({k: v for k, v in HOOK_CONTEXT.items() if v})
+        if "task" not in fields:
+            tasks = wip_task_ids()
+            if len(tasks) == 1:
+                entry["task"] = tasks[0]
         entry.update(fields)
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, sort_keys=True) + "\n")
-    except OSError:
+            handle.write(json.dumps(entry, sort_keys=True, default=str) + "\n")
+    except Exception:   # deny() logs before it exits 2; raising here would exit 1 and let the call through
         pass
 
 
@@ -2533,6 +2553,8 @@ def hook_post_tool_use(data):
         add_context("PostToolUse", "\n\n".join(notes))
 
 
+# Reads worth a trace line: the project knowledge and instructions an agent based its work on, not every code file.
+CONTEXT_SOURCES = r"^(backbone/|\.claude/skills/|AGENTS\.md$|CLAUDE\.md$)"
 SKILL_FILE = re.compile(r"(?:^|[\s'\"=/])(?:\./)?(?:\.claude|\.agents)/skills/([A-Za-z0-9._-]+)/SKILL\.md\b")
 SKILL_READERS = re.compile(r"^\s*(cat|sed|head|tail|less|more|bat|nl|awk)\b")
 
@@ -2542,9 +2564,12 @@ def post_tool_notes(data):
     tool_input = data.get("tool_input") or {}
     notes = []
     if tool == "Read":
-        m = re.match(r"^\.claude/skills/([^/]+)/SKILL\.md$", rel(tool_input.get("file_path") or ""))
+        path = rel(tool_input.get("file_path") or "")
+        m = re.match(r"^\.claude/skills/([^/]+)/SKILL\.md$", path)
         if m:
             remember_skill(data, m.group(1))
+        elif re.match(CONTEXT_SOURCES, path):
+            log_event("context", path=path)
         return notes
     if tool == "Skill":
         name = str(tool_input.get("skill") or tool_input.get("name") or "").split(":")[-1].strip()
@@ -2553,6 +2578,7 @@ def post_tool_notes(data):
     if tool in FILE_TOOLS and tool_input.get("file_path"):
         snapshot_refresh()
         path = rel(tool_input["file_path"])
+        log_event("edit", path=path, tool=tool)
         rules, _ = load_rules()
         hits = check_text(rules, path, added_text(tool, tool_input), ("warn",))
         if hits:
@@ -3781,6 +3807,60 @@ def report_command(argv):
     return 0
 
 
+# --------------------------------------------------------------------------- trace
+
+def trace_line(event):
+    kind = event.get("kind", "?")
+    detail = {
+        "context": lambda e: e.get("path"),
+        "skill": lambda e: e.get("name"),
+        "edit": lambda e: "%s (%s)" % (e.get("path"), e.get("tool")),
+        "block": lambda e: e.get("reason"),
+        "verify": lambda e: e.get("reason"),
+        "tests-run": lambda e: "%s: exit %s in %ss" % (e.get("command"), e.get("exit"), e.get("seconds")),
+        "tests": lambda e: "acceptance tests recorded, missing: %s" % (", ".join(e.get("missing") or []) or "none"),
+        "verdict": lambda e: "%s %s%s" % (e.get("agent"), e.get("verdict"),
+                                          " (claimed %s)" % e.get("claimed") if e.get("claimed") != e.get("verdict")
+                                          else ""),
+        "debug": lambda e: "brief for %s" % ", ".join(e.get("owners") or []),
+        "escalation": lambda e: "%s: %s" % (e.get("escalation"), e.get("reason")),
+        "approval": lambda e: "policy %s, base %s" % (e.get("rule"), e.get("base")),
+        "run-attempt": lambda e: "attempt %s: %s, %s at step %s, %ss" % (e.get("attempt"), e.get("state"),
+                                                                       e.get("cause"), e.get("step"), e.get("seconds")),
+        "hook-slow": lambda e: "%s hook took %ss" % (e.get("hook"), e.get("seconds")),
+    }.get(kind, lambda e: ", ".join("%s=%s" % (k, v) for k, v in sorted(e.items())
+                                    if k not in ("at", "kind", "task", "session", "agent")))(event)
+    label = {"tests-run": "tests", "run-attempt": "run"}.get(kind, kind)
+    who = event.get("agent") or event.get("session")
+    return "%s  %-8s %s%s" % (str(event.get("at", ""))[:19].replace("T", " "), label, detail,
+                              "  [%s]" % who if who else "")
+
+
+def trace_command(argv):
+    task = next((a for a in argv if not a.startswith("--")), None)
+    if not task:
+        sys.stderr.write("usage: harness.py trace <task> [--json]\n")
+        return 64
+    events = []
+    for line in read(events_file()).splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("task") == task:
+            events.append(event)
+    if "--json" in argv:
+        print(json.dumps({"task": task, "events": events}, indent=2))
+        return 0 if events else 1
+    if not events:
+        print("trace: nothing recorded for task %s" % task)
+        return 1
+    print("trace: task %s, %d event(s)" % (task, len(events)))
+    for event in events:
+        print(trace_line(event))
+    return 0
+
+
 # --------------------------------------------------------------------------- change receipt
 # What the harness can prove about a judged task, built only from recorded evidence (the spec, the verdicts, the
 # diff), never from what an agent says it did. Reviewers read it instead of the transcript; a pull request carries it.
@@ -4311,6 +4391,14 @@ def hook_budget(name):
     signal.alarm(budget)
 
 
+def hook_slow_threshold():
+    """Seconds after which a hook call is logged as slow (HARNESS_HOOK_SLOW; 0 = never)."""
+    try:
+        return max(0.0, float(conf()["HARNESS_HOOK_SLOW"]))
+    except ValueError:
+        return 0.0
+
+
 def main(argv):
     global HOOK_SOURCE
     if argv[1:2] == ["hook"] and "--from" in argv:
@@ -4321,9 +4409,16 @@ def main(argv):
                                                                     "tester-stop", "debug-stop"):
         hook_budget(argv[2])   # the verdict recorders run the tests and have their own, longer timeout
     if len(argv) == 3 and argv[1] == "hook" and argv[2] in HOOKS:
+        started, data = time.time(), {}
         try:
-            HOOKS[argv[2]](normalize_hook(read_hook_input(), HOOK_SOURCE))
+            data = normalize_hook(read_hook_input(), HOOK_SOURCE)
+            HOOK_CONTEXT.update(session=data.get("session_id"), agent=data.get("agent_type") or data.get("agent_id"))
+            HOOKS[argv[2]](data)
         finally:
+            slow = hook_slow_threshold()
+            elapsed = time.time() - started
+            if slow and elapsed >= slow:
+                log_event("hook-slow", hook=argv[2], seconds=round(elapsed, 3), tool=data.get("tool_name"))
             if HOOK_SOURCE == "codex" and not EMITTED:
                 sys.stdout.write("{}\n")   # Codex wants JSON on stdout when a hook exits 0
         return 0
@@ -4391,6 +4486,8 @@ def main(argv):
         return report_command(argv[2:])
     if argv[1:2] == ["receipt"]:
         return receipt_command(argv[2:])
+    if argv[1:2] == ["trace"]:
+        return trace_command(argv[2:])
     if argv[1:2] == ["ci-judge"]:
         return ci_judge_command(argv[2:])
     if argv[1:2] == ["ci-protect"]:

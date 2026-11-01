@@ -244,9 +244,18 @@ The shell checks can't see what a script file does. In autonomous mode the harne
 
 After each shell command, any protected file that changed outside those, and isn't simply back to its committed version, is reported. It is logged as `tamper`, and the `[WIP]` task is escalated for review. Restore the file with `git checkout -- <file>`.
 
-## Event log and report
+## Event log, trace and report
 
-Blocks, verify refusals, verdicts, approvals, escalations and run attempts are appended to `.git/harness/events.jsonl`. `harness.py report [--days N]` summarises them (`--json` for machines):
+Blocks, verify refusals, verdicts, approvals, escalations and run attempts are appended to `.git/harness/events.jsonl`, and so is what a task's agents did:
+- `context`: a read of project knowledge or instructions (`backbone/`, `.claude/skills/`, `AGENTS.md`, `CLAUDE.md`), not every code file;
+- `skill`: a skill loaded;
+- `edit`: a file written with the file tools (the path and tool, never the content);
+- `tests-run`: every run of `HARNESS_TEST_CMD` by the harness, with its exit code and time;
+- `hook-slow`: a hook call that took `HARNESS_HOOK_SLOW` seconds or more (default 5; 0 = off).
+
+Each event carries the task in progress and, inside a hook, the session and agent. `harness.py trace <id> [--json]` prints a task's events in order, so a failed run can be followed step by step.
+
+`harness.py report [--days N]` summarises the log (`--json` for machines):
 - tasks finished;
 - judge verdicts, and claimed passes the harness overturned;
 - escalations and policy approvals;
