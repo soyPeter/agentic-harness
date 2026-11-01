@@ -2437,5 +2437,94 @@ out=$($LH report --json)
 expect 0 "report --json has the new measures" python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["first_pass_judge"]=={"tasks":3,"passed":1} and d["candidates"] and d["gate_refusals"]["judge_gate"]==1' "$out"
 unset HARNESS_TEST_CMD
 
+section "light lane: small, low-risk tasks the user marks (light)"
+G="$WORK/light"
+new_repo "$G"
+"$HARNESS/bootstrap.sh" "$G" --name light >/dev/null
+GH="python3 $G/scripts/harness/lib/harness.py"
+GT="$G/backbone/3-TASKS.md"
+export HARNESS_TEST_CMD=true
+mkdir -p "$G/backbone/specs" "$G/src" "$G/tests"
+gspec() {  # gspec <id> <requirement count> [extra context]: a spec whose Architecture the architect hasn't filled in
+  python3 - "$G/backbone/specs/$1.md" "$1" "$2" "${3:-}" <<'EOF'
+import sys
+path, t, n, extra = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+reqs = "\n".join("- REQ-%s-%d: The system shall do thing %d." % (t, i, i) for i in range(1, n + 1))
+acs = "\n".join("- AC-%s-%d (REQ-%s-%d): Given a, when b, then c%d." % (t, i, t, i, i) for i in range(1, n + 1))
+open(path, "w").write("# Spec %s: Small\n\n## Context\nA small fix. %s\n\n## Requirements\n%s\n\n## Acceptance criteria\n%s\n\n"
+  "## Non-functional requirements\n- none\n\n## Architecture\nADRs: ADR-001\nTech requirements:\n- <constraints>\n\n"
+  "## Skills\n- code-quality: all code\n\n## Open questions\n- none\n\n## Approval\n" % (t, extra, reqs, acs))
+EOF
+}
+gline() { printf -- '- [ ] **Task %s: Small** (spec: backbone/specs/%s.md)%s\n' "$1" "$1" "${2:-}" >> "$GT"; }
+gspec 11.1 1; gline 11.1 " (light)"
+gspec 11.2 3; gline 11.2 " (light)"
+gspec 11.3 1 "Passwords are hashed."; gline 11.3 " (light)"
+gspec 11.4 1; gline 11.4 " (light)"
+gspec 11.6 1; gline 11.6
+git -C "$G" add -A && HARNESS_VERIFY=off git -C "$G" commit -qm "chore: adopt the harness, light tasks"
+START11="$(edit_json "$GT" "- [ ] **Task 11.1:" "- [WIP] **Task 11.1:")"
+echo "Approved-by: Ana (2026-11-01)" >> "$G/backbone/specs/11.1.md"
+out=$(hook "$G" pre-tool-use "$START11" 2>&1)
+contains "light lane off: a (light) task is grilled like any other" "has not been grilled" "$out"
+export HARNESS_LIGHT_LANE=on
+expect 0 "light lane: a small, low-risk (light) task starts without the architect and the griller" hook "$G" pre-tool-use "$START11"
+contains "light lane: next skips design and grilling" "next 11.4: approve" "$($GH next 11.4)"
+contains "light lane: a task without the mark is designed first" "next 11.6: define (architect)" "$($GH next 11.6)"
+echo "Approved-by: Ana (2026-11-01)" >> "$G/backbone/specs/11.2.md"
+out=$(hook "$G" pre-tool-use "$(edit_json "$GT" "- [ ] **Task 11.2:" "- [WIP] **Task 11.2:")" 2>&1)
+contains "light lane: a spec over the size limit is grilled" "marked (light), but the spec has 6 requirements and acceptance criteria (HARNESS_LIGHT_MAX_ITEMS 3)" "$out"
+echo "Approved-by: Ana (2026-11-01)" >> "$G/backbone/specs/11.3.md"
+out=$(hook "$G" pre-tool-use "$(edit_json "$GT" "- [ ] **Task 11.3:" "- [WIP] **Task 11.3:")" 2>&1)
+contains "light lane: a risky spec is grilled" "marked (light), but the spec involves passwords" "$out"
+out=$(hook "$G" pre-tool-use "$(edit_json "$GT" "- [ ] **Task 11.6: Small** (spec: backbone/specs/11.6.md)" "- [ ] **Task 11.6: Small** (spec: backbone/specs/11.6.md) (light)")" 2>&1)
+contains "light lane: agents cannot mark a task (light)" "Only the user marks a task (light)" "$out"
+expect 0 "light lane: removing the mark is allowed" hook "$G" pre-tool-use "$(edit_json "$GT" "- [ ] **Task 11.4: Small** (spec: backbone/specs/11.4.md) (light)" "- [ ] **Task 11.4: Small** (spec: backbone/specs/11.4.md)")"
+sed -i.bak 's/^- \[ \] \*\*Task 11\.1:/- [WIP] **Task 11.1:/' "$GT" && rm -f "$GT.bak"
+printf 'def f():  # AC-11.1-1\n    return 1\n' > "$G/src/f.py"; printf 'def test_f():  # AC-11.1-1\n    assert True\n' > "$G/tests/test_f.py"
+hook "$G" judge-stop "$(stop_json judge '```json
+{"verdict":"pass","task":"11.1","criteria":[{"id":"AC-11.1-1","met":true,"evidence":"src/f.py:1","tests":["test_f"]}],"findings":[],"tests":{"command":"true","result":"passed"},"summary":"s"}
+```')" >/dev/null
+expect 0 "light lane: a light task that stayed small finishes" hook "$G" pre-tool-use "$(edit_json "$GT" "- [WIP] **Task 11.1:" "- [x] **Task 11.1:")"
+for n in 1 2 3; do echo "x = $n" > "$G/src/extra_$n.py"; done
+hook "$G" judge-stop "$(stop_json judge '```json
+{"verdict":"pass","task":"11.1","criteria":[{"id":"AC-11.1-1","met":true,"evidence":"src/f.py:1","tests":["test_f"]}],"findings":[],"tests":{"command":"true","result":"passed"},"summary":"s"}
+```')" >/dev/null
+out=$(hook "$G" pre-tool-use "$(edit_json "$GT" "- [WIP] **Task 11.1:" "- [x] **Task 11.1:")" 2>&1)
+contains "light lane: a light task whose change outgrew the lane is refused" "outgrew the light lane: it changes 5 files (HARNESS_LIGHT_MAX_FILES 3)" "$out"
+rm -f "$G"/src/extra_*.py
+sed -i.bak 's/^- \[ \] \*\*Task 11\.6: Small\*\* (spec: backbone\/specs\/11\.6\.md)$/& (light)/' "$GT" && rm -f "$GT.bak"
+git -C "$G" add backbone/3-TASKS.md
+out=$($GH verify; echo "exit=$?")
+contains "light lane: verify refuses a commit that marks a task (light)" "marks task(s) 11.6 (light)" "$out"
+contains "light lane: the refusal exits non-zero" "exit=1" "$out"
+git -C "$G" reset -q
+out=$(HARNESS_AUTONOMY=autonomous $GH approve 11.6; echo "exit=$?")
+contains "light lane: in autonomous mode policy approval needs no griller pass for a light task" "approved by policy" "$out"
+gline 11.8
+out=$(hook "$G" pre-tool-use "$(edit_json "$G/backbone/3-tasks.md" "- [ ] **Task 11.8: Small** (spec: backbone/specs/11.8.md)" "- [ ] **Task 11.8: Small** (spec: backbone/specs/11.8.md) (light)")" 2>&1)
+contains "a case-variant path to 3-TASKS.md gets the same checks" "Only the user marks a task (light)" "$out"
+gspec 11.7 1; gline 11.7 " (light)"; echo "Approved-by: Ana (2026-11-01)" >> "$G/backbone/specs/11.7.md"
+sed -i.bak 's/^- \[WIP\] \*\*Task 11\.1:/- [ ] **Task 11.1:/' "$GT" && rm -f "$GT.bak"
+expect 0 "fixture: light task 11.7 starts" hook "$G" pre-tool-use "$(edit_json "$GT" "- [ ] **Task 11.7:" "- [WIP] **Task 11.7:")"
+sed -i.bak 's/^- \[ \] \*\*Task 11\.7:/- [WIP] **Task 11.7:/' "$GT" && rm -f "$GT.bak"
+contains "light lane: the start records its base" '"base"' "$(cat "$G/backbone/.verdicts/11.7.light.json")"
+printf 'def g():  # AC-11.7-1\n    return 1\n' > "$G/src/g.py"; printf 'def test_g():  # AC-11.7-1\n    assert True\n' > "$G/tests/test_g.py"
+git -C "$G" add src/g.py tests/test_g.py src/f.py tests/test_f.py && HARNESS_VERIFY=off git -C "$G" commit -qm "feat: part one"
+hook "$G" judge-stop "$(stop_json judge '```json
+{"verdict":"pass","task":"11.7","criteria":[{"id":"AC-11.7-1","met":true,"evidence":"src/g.py:1","tests":["test_g"]}],"findings":[],"tests":{"command":"true","result":"passed"},"summary":"s"}
+```')" >/dev/null
+out=$(hook "$G" pre-tool-use "$(edit_json "$GT" "- [WIP] **Task 11.7:" "- [x] **Task 11.7:")" 2>&1)
+contains "light lane: files committed during the task still count" "it changes 4 files" "$out"
+sed -i.bak 's/^- \[ \] \*\*Task 11\.4:/- [WIP] **Task 11.4:/; s/^- \[WIP\] \*\*Task 11\.7:/- [ ] **Task 11.7:/' "$GT" && rm -f "$GT.bak"
+printf 'def test_h():  # AC-11.4-1\n    assert True\n' > "$G/tests/test_h.py"
+hook "$G" judge-stop "$(stop_json judge '```json
+{"verdict":"pass","task":"11.4","criteria":[{"id":"AC-11.4-1","met":true,"evidence":"src/g.py:1","tests":["test_g"]}],"findings":[],"tests":{"command":"true","result":"passed"},"summary":"s"}
+```')" >/dev/null
+out=$(hook "$G" pre-tool-use "$(edit_json "$GT" "- [WIP] **Task 11.4:" "- [x] **Task 11.4:")" 2>&1)
+contains "light lane: a task marked (light) after it started has no recorded start" "has no recorded start" "$out"
+expect 2 "light lane: agents cannot switch the lane on" hook "$G" pre-tool-use "$(edit_json "$G/backbone/harness.conf" 'HARNESS_LIGHT_LANE="off"' 'HARNESS_LIGHT_LANE="on"')"
+unset HARNESS_LIGHT_LANE HARNESS_TEST_CMD
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
