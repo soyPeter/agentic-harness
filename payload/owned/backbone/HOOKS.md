@@ -259,7 +259,11 @@ Each event carries the task in progress and, inside a hook, the session and agen
 - tasks finished;
 - judge verdicts, and claimed passes the harness overturned;
 - escalations and policy approvals;
-- blocked tool calls and refused commits, by reason.
+- blocked tool calls and refused commits, by reason;
+- **accepted work**: the first-pass judge rate, how many griller fails led to a spec change (a fail that changed nothing cost a round for nothing), the median time from start to finish, cost and escalations per finished task;
+- **what the gates and rules catch**: refusals per gate, and how often each guardrail rule fired. A project rule that never fires may no longer apply; `report --rules` lists every rule with its count (core rules guard against rare accidents and are expected to stay quiet);
+- **slow hook calls** (`HARNESS_HOOK_SLOW`);
+- **harness candidates**: a failure seen across several tasks, where an instruction, rule or skill is missing: the same refusal in 3 or more tasks, the same judge failure (with the AC and REQ ids taken out) in 2 or more, the same escalation kind in 2 or more. Fix the cause in `4-KNOWLEDGE.md`, a skill or `guardrails.conf`; the report only points at it.
 
 ## Change receipt
 

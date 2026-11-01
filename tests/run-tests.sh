@@ -2372,5 +2372,70 @@ slow_before=$(grep -c '"hook-slow"' "$X/.git/harness/events.jsonl")
 hook "$X" post-tool-use "$(bash_json 'ls')" >/dev/null
 expect 0 "a fast hook is not" test "$slow_before" -eq "$(grep -c '"hook-slow"' "$X/.git/harness/events.jsonl")"
 
+section "report: accepted work, gates, rules and harness candidates"
+L="$WORK/lift"
+new_repo "$L"
+"$HARNESS/bootstrap.sh" "$L" --name lift >/dev/null
+LH="python3 $L/scripts/harness/lib/harness.py"
+LT="$L/backbone/3-TASKS.md"
+export HARNESS_TEST_CMD=true
+mkdir -p "$L/backbone/specs" "$L/src" "$L/tests"
+printf '%s\n' 'block | \.py$ | FORBIDDEN_X | Never write FORBIDDEN_X.' 'warn | \.md$ | NEVER_SEEN_Y | A rule nothing triggers.' >> "$L/backbone/guardrails.conf"
+lspec() {  # lspec <id>: a valid spec with one criterion
+  printf '# Spec %s: Item\n\n## Context\nNeeded.\n\n## Requirements\n- REQ-%s-1: The system shall do one thing.\n\n## Acceptance criteria\n- AC-%s-1 (REQ-%s-1): Given a, when b, then c.\n\n## Non-functional requirements\n- none\n\n## Architecture\nADRs: ADR-001\nTech requirements:\n- src/\n\n## Skills\n- code-quality: all code\n\n## Open questions\n- none\n' "$1" "$1" "$1" "$1" > "$L/backbone/specs/$1.md"
+}
+lmark() { sed -i.bak "s/^- \[[^]]*\] \*\*Task $1:/- [$2] **Task $1:/" "$LT" && rm -f "$LT.bak"; }
+ljudge() {  # ljudge <id> <pass|fail>
+  hook "$L" judge-stop "$(stop_json judge "$(python3 -c 'import json,sys; t,v=sys.argv[1:3]
+print("```json\n"+json.dumps({"verdict":v,"task":t,"criteria":[{"id":"AC-%s-1"%t,"met":v=="pass","evidence":"src/a.py:1","tests":["t"]}],"findings":[],"tests":{"command":"true","result":"passed"},"summary":"s"})+"\n```")' "$1" "$2")")" >/dev/null
+}
+for id in 10.1 10.2 10.3; do lspec $id; printf -- '- [ ] **Task %s: Item** (spec: backbone/specs/%s.md)\n' "$id" "$id" >> "$LT"; done
+hook "$L" grill-stop "$(stop_json griller '```json
+{"verdict":"fail","task":"10.1","questions":[{"severity":"major","question":"Which?"}],"summary":"s"}
+```')" >/dev/null
+sed -i.bak 's/^Needed\.$/Needed by support./' "$L/backbone/specs/10.1.md" && rm -f "$L/backbone/specs/10.1.md.bak"
+hook "$L" grill-stop "$(stop_json griller '```json
+{"verdict":"fail","task":"10.1","questions":[{"severity":"major","question":"Which?"}],"summary":"s"}
+```')" >/dev/null
+hook "$L" grill-stop "$(stop_json griller '```json
+{"verdict":"pass","task":"10.1","questions":[],"summary":"s"}
+```')" >/dev/null
+for id in 10.1 10.2 10.3; do
+  HARNESS_SPEC_GATE=off hook "$L" pre-tool-use "$(edit_json "$LT" "- [ ] **Task $id:" "- [WIP] **Task $id:")" >/dev/null
+  lmark $id WIP
+  hook "$L" pre-tool-use "$(bash_json 'git commit -n -m x')" >/dev/null 2>&1
+  printf 'def a():  # AC-%s-1\n    return 1\n' "$id" > "$L/src/a.py"; printf 'def test_a():  # AC-%s-1\n    assert True\n' "$id" > "$L/tests/test_a.py"
+  case $id in
+    10.1) hook "$L" pre-tool-use "$(write_json "$L/src/b.py" "FORBIDDEN_X = 1")" >/dev/null 2>&1
+          ljudge $id pass ;;
+    10.2) out=$(hook "$L" pre-tool-use "$(edit_json "$LT" "- [WIP] **Task $id:" "- [x] **Task $id:")" 2>&1)
+          contains "fixture: finishing without a judge pass is refused" "has no judge verdict" "$out"
+          ljudge $id fail; ljudge $id pass ;;
+    10.3) ljudge $id fail ;;
+  esac
+  if [ $id = 10.3 ]; then $LH escalate 10.3 --kind runner --reason "stalled" >/dev/null; continue; fi
+  expect 0 "fixture: task $id finishes" hook "$L" pre-tool-use "$(edit_json "$LT" "- [WIP] **Task $id:" "- [x] **Task $id:")"
+  lmark $id x
+done
+$LH escalate 10.2 --kind runner --reason "stalled earlier" >/dev/null
+HARNESS_HOOK_SLOW=0.0001 hook "$L" post-tool-use "$(bash_json 'ls')" >/dev/null
+out=$($LH report)
+contains "report: first-pass judge rate" "first-pass judge rate: 1 of 3 task(s) (33%)" "$out"
+contains "report: grill rounds that changed the spec" "griller fails followed by a spec change: 1 of 2" "$out"
+contains "report: start to finish" "start to finish: 2 task(s), median" "$out"
+contains "report: escalations per finished task" "escalations per finished task: 1.0" "$out"
+contains "report: refusals per gate" "judge_gate 1" "$out"
+contains "report: rules that fired" "fired: Never write FORBIDDEN_X. (1)" "$out"
+contains "report: rules that never fired are counted" "never fired in 7 day(s):" "$out"
+contains "report: slow hook calls" "slow hook calls: 1" "$out"
+contains "report: a refusal repeated across tasks is a harness candidate" "refused in 3 tasks (10.1, 10.2, 10.3)" "$out"
+contains "report: a judge failure repeated across tasks is a candidate" "judge failed 2 tasks (10.2, 10.3) for: <AC> not met" "$out"
+contains "report: an escalation kind repeated across tasks is a candidate" "escalated 2 tasks (10.2, 10.3) as runner" "$out"
+out=$($LH report --rules)
+contains "report --rules: lists rules that never fired" "A rule nothing triggers." "$out"
+out=$($LH report --json)
+expect 0 "report --json has the new measures" python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["first_pass_judge"]=={"tasks":3,"passed":1} and d["candidates"] and d["gate_refusals"]["judge_gate"]==1' "$out"
+unset HARNESS_TEST_CMD
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
