@@ -77,7 +77,7 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
                   "HARNESS_DECISION_CMD", "HARNESS_DECISION_MODEL", "HARNESS_DECISION_URL",
                   "HARNESS_KNOWLEDGE_ROOT", "HARNESS_KNOWLEDGE_TOOLS", "HARNESS_KNOWLEDGE_PATHS",
                   "HARNESS_TESTER", "HARNESS_ACCEPTANCE_PATHS", "HARNESS_ORCA_AGENTS", "HARNESS_ORCA_LAUNCH",
-                  "HARNESS_SPEC_MAX_ITEMS")
+                  "HARNESS_SPEC_MAX_ITEMS", "HARNESS_LIGHT_LANE", "HARNESS_LIGHT_MAX_ITEMS", "HARNESS_LIGHT_MAX_FILES")
 # The knowledge source: an MCP server registered as "knowledge" (claude mcp add) over a folder of notes, that the
 # analyst, architect and griller consult when grilling raises questions. Read-only; answers are cited as vault:<path>.
 KNOWLEDGE_TOOL_PREFIX = "mcp__knowledge__"
@@ -97,6 +97,7 @@ DECISIONS_FILE = ROOT / "scripts/harness/decisions.json"
 ESCALATIONS = BACKBONE / "escalations.md"
 AUTONOMY_MODES = ("supervised", "autonomous")
 BLOCKED_NOTE = re.compile(r"\s+[-\u2014]+\s+BLOCKED:\s*(.*)$")
+LIGHT_MARK = re.compile(r"\(light\)", re.I)
 POLICY_APPROVAL = re.compile(r"^\s*Approved-by:\s*policy:(\S+)\s*\((.*)\)", re.M)
 
 # Write scope per agent: ("allow", patterns) permits only matches; ("deny", patterns) refuses matches.
@@ -192,6 +193,9 @@ DEFAULTS = {
     "HARNESS_ACCEPTANCE_PATHS": r"(^|/)acceptance([/._-]|$)",
     "HARNESS_DEBUGGER": "on",
     "HARNESS_SPEC_MAX_ITEMS": "30",
+    "HARNESS_LIGHT_LANE": "off",
+    "HARNESS_LIGHT_MAX_ITEMS": "3",
+    "HARNESS_LIGHT_MAX_FILES": "3",
     "HARNESS_ORCA_AGENTS": "default=claude",
     "HARNESS_ORCA_LAUNCH": "codex=codex --dangerously-bypass-hook-trust -c check_for_update_on_startup=false",
 }
@@ -249,6 +253,20 @@ def git(*args):
         log_event("git-timeout", args=list(args)[:6])
         return ""
     return result.stdout if result.returncode == 0 else ""
+
+
+CANONICAL_PATHS = ("backbone/3-TASKS.md", "backbone/harness.conf", "backbone/.harness-lock.json",
+                   "backbone/escalations.md", "backbone/.verdicts/", "backbone/specs/", "backbone/adr/", "backbone/")
+
+
+def canonical(path):
+    """path with a gated backbone name spelled as the gates expect: on a case-insensitive disk (macOS, Windows)
+    backbone/3-tasks.md is the same file as backbone/3-TASKS.md, and must not skip its checks."""
+    lower = path.lower()
+    for name in CANONICAL_PATHS:
+        if lower == name.lower() or (name.endswith("/") and lower.startswith(name.lower())):
+            return name + path[len(name):] if name.endswith("/") else name
+    return path
 
 
 def rel(path_str):
@@ -1455,7 +1473,9 @@ def approve_command(task):
     invalid = validate_spec(task)
     history = verdict_history(task, "grill")
     last = history[-1] if history else None
-    if invalid or not last or last.get("verdict") != "pass" or last.get("fingerprint") != spec_fingerprint(task):
+    light = light_lane(task)
+    if invalid or (not light and (not last or last.get("verdict") != "pass"
+                                  or last.get("fingerprint") != spec_fingerprint(task))):
         print("approve: the spec must be valid and have a current griller pass first (spec-check %s)" % task)
         return 1
     asked = sum(len(entry.get("questions") or []) for entry in history)
@@ -1474,8 +1494,8 @@ def approve_command(task):
               "Continue with another task." % (task, "; ".join(reasons)))
         return 1
     base = git("rev-parse", "--verify", "-q", "HEAD").strip()[:12] or "none"
-    line = "Approved-by: policy:low-risk (%s; base %s; grill %s)" % (time.strftime("%Y-%m-%d"), base,
-                                                                    last.get("fingerprint", "")[:12])
+    line = "Approved-by: policy:low-risk (%s; base %s; %s)" % (
+        time.strftime("%Y-%m-%d"), base, "light lane" if light else "grill %s" % last.get("fingerprint", "")[:12])
     m = re.search(r"^##\s+Approval\s*$", text, re.M | re.I)
     text = (text.rstrip("\n") + "\n\n## Approval\n" if not m else text.rstrip("\n")) + "\n" + line + "\n"
     spec_path(task).write_text(text, encoding="utf-8")
@@ -1597,6 +1617,89 @@ def wip_collision(before, after):
     return None
 
 
+# The light lane (HARNESS_LIGHT_LANE, user-only): a task the user marks "(light)" on its line skips the architect and
+# the griller when its spec is small and low-risk. The approval, the judge and verify still apply, and finishing
+# refuses a light task whose change grew past HARNESS_LIGHT_MAX_FILES files.
+
+def light_tasks(text):
+    lines = mask_comments(text or "").splitlines()
+    return {task_id_at(lines, i) for i, line in enumerate(lines)
+            if re.match(r"^\s*[-*]\s+\[[^\]]*\]", line) and LIGHT_MARK.search(BLOCKED_NOTE.sub("", line))}
+
+
+def light_marked(task):
+    return conf()["HARNESS_LIGHT_LANE"] == "on" and task in light_tasks(read(TASKS))
+
+
+def conf_int(key, default):
+    value = conf()[key]
+    return int(value) if value.isdigit() else default
+
+
+def light_reasons(task):
+    """Why a task marked (light) still needs the full pipeline; empty when the light lane applies."""
+    body = strip_comments(read(spec_path(task)))
+    items = len(spec_items(body, "REQ", task)) + len(spec_items(body, "AC", task))
+    limit = conf_int("HARNESS_LIGHT_MAX_ITEMS", 3)
+    reasons = ["the spec has %d requirements and acceptance criteria (HARNESS_LIGHT_MAX_ITEMS %d)" % (items, limit)] \
+        if items > limit else []
+    return reasons + risk_reasons(task)
+
+
+def light_lane(task):
+    """True when task goes through the light lane: the lane is on, the user marked it, and its spec qualifies."""
+    return light_marked(task) and not light_reasons(task)
+
+
+def light_guard(before, after):
+    added = light_tasks(after) - light_tasks(before)
+    if added:
+        return ("  - Only the user marks a task (light) (task %s): it skips the architect and the griller."
+                % ", ".join(sorted(added)))
+    return None
+
+
+def record_light_start(task):
+    """Remember the commit a light task started from, so finishing measures everything it changed since, committed
+    or not (the spec may never have been committed, and code may be committed in pieces)."""
+    if not light_lane(task):
+        return
+    history = verdict_history(task, "light")
+    history.append({"base": git("rev-parse", "-q", "--verify", "HEAD").strip() or None,
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+    VERDICTS.mkdir(parents=True, exist_ok=True)
+    verdict_path(task, "light").write_text(json.dumps({"task": task, "kind": "light", "history": history}, indent=2)
+                                           + "\n", encoding="utf-8")
+
+
+def light_base(task):
+    history = verdict_history(task, "light")
+    return history[-1].get("base") if history else None
+
+
+def light_drift(task):
+    """A light task's change that grew past the lane: too many files, or sensitive paths. None when it stayed light."""
+    if not light_marked(task):
+        return None
+    if not verdict_history(task, "light"):
+        return ("Task %s is marked (light) but has no recorded start (backbone/.verdicts/%s.light.json): it was not "
+                "started through the light lane. Ask the user to remove (light), or start it again." % (task, slug(task)))
+    base = light_base(task)
+    changed = changed_files(base)
+    limit = conf_int("HARNESS_LIGHT_MAX_FILES", 3)
+    paths = re.compile(conf()["HARNESS_RISK_PATHS"])
+    sensitive = [n for n in changed if paths.search(n)]
+    why = []
+    if len(changed) > limit:
+        why.append("it changes %d files (HARNESS_LIGHT_MAX_FILES %d)" % (len(changed), limit))
+    if sensitive:
+        why.append("it touches sensitive paths: %s" % ", ".join(sensitive[:6]))
+    if not why:
+        return None
+    return ("Task %s outgrew the light lane: %s. It needs the full pipeline: ask the user to remove (light) from its "
+            "line, then have the architect and the griller review the spec." % (task, "; ".join(why)))
+
+
 def start_problems(task):
     """Why task cannot be [WIP] (or done): spec, grill and approval. None when it may start."""
     spec = spec_rel(task)
@@ -1610,8 +1713,17 @@ def start_problems(task):
         return ("Task %s cannot start: %s is not ready:\n      - %s\n    The analyst writes requirements "
                 "and acceptance criteria, the architect the ADRs and Architecture section."
                 % (task, spec, "\n      - ".join(invalid)))
+    note = ""
+    if light_marked(task):
+        reasons = light_reasons(task)
+        if not reasons:
+            return None if approved(read(spec_path(task))) else (
+                "Task %s cannot start: the user has not approved the spec (light lane: no grilling needed). Ask them "
+                "to review %s and add 'Approved-by: <name> (<date>)' under '## Approval' themselves." % (task, spec))
+        note = " It is marked (light), but %s, so it goes through the griller." % "; ".join(reasons)
     if last is None:
-        return "Task %s cannot start: the spec has not been grilled. Ask the griller agent to review %s." % (task, spec)
+        return ("Task %s cannot start: the spec has not been grilled. Ask the griller agent to review %s.%s"
+                % (task, spec, note))
     if last.get("verdict") != "pass":
         return ("Task %s cannot start: the griller failed the spec (%s). Take its open questions to the user (have "
                 "the analyst or architect apply the recommendations marked apply without asking), update the spec "
@@ -1659,6 +1771,9 @@ def judge_problems(task, current, max_rounds):
     rederived, why = effective_judge(task, report)
     if rederived != "pass":
         return "The recorded judge pass for task %s does not hold up: %s." % (task, "; ".join(why)[:400])
+    drift = light_drift(task)
+    if drift:
+        return drift
     policy = policy_approval(read(spec_path(task)))
     if policy:
         risks = risk_reasons(task, policy["base"] if policy["base"] != "none" else "")
@@ -1807,6 +1922,10 @@ def verify_changes(before, after, changed, done_fingerprint, allow_user_changes=
     new_wip, new_done = task_states(show(after, tasks_rel))
     if values["HARNESS_ALLOW_PARALLEL_WIP"] != "1" and len(new_wip) > 1 and len(new_wip) > len(old_wip):
         problems.append("more than one task is [WIP]: %s" % ", ".join(sorted(new_wip)))
+    marked = light_tasks(show(after, tasks_rel) or "") - light_tasks(show(before, tasks_rel) if before else "")
+    if marked and before and not allow_user_changes:
+        problems.append("the change marks task(s) %s (light), which skips the architect and the griller. Only the "
+                        "user does that, and commits it with HARNESS_VERIFY=off git commit ..." % ", ".join(sorted(marked)))
     if gate_on("HARNESS_SPEC_GATE"):
         for task in sorted((new_wip | new_done) - old_wip - old_done):
             problem = start_problems(task)
@@ -2486,7 +2605,7 @@ def hook_pre_tool_use(data):
     if tool not in FILE_TOOLS or not tool_input.get("file_path"):
         return
     path_str = tool_input["file_path"]
-    path = rel(path_str)
+    path = canonical(rel(path_str))
     if data.get("harness_role"):
         hook_agent_guard(data, data["harness_role"])
     if path.startswith("backbone/.verdicts/"):
@@ -2505,7 +2624,7 @@ def hook_pre_tool_use(data):
         deny("Harness blocked this change to %s: escalations are written by harness.py escalate and resolved by "
              "the user." % path)
     if path == "backbone/3-TASKS.md":
-        checks = (wip_collision, start_gate, judge_gate, blocked_guard)
+        checks = (wip_collision, start_gate, judge_gate, blocked_guard, light_guard)
     elif path == "backbone/harness.conf":
         checks = (user_only_change,)
     elif re.match(r"^backbone/specs/[^/]+\.md$", path):
@@ -2534,6 +2653,7 @@ def hook_pre_tool_use(data):
     if path == "backbone/3-TASKS.md":
         for task in started_tasks(before, after):
             log_event("task-start", task=task)
+            record_light_start(task)
         for task in finished_tasks(before, after):
             if task_state_in(after, task) == "done":
                 log_event("task-finish", task=task)
@@ -2706,7 +2826,7 @@ def hook_agent_guard(data, agent):
     tool_input = data.get("tool_input") or {}
     if scope is None or data.get("tool_name") not in FILE_TOOLS or not tool_input.get("file_path"):
         return
-    path = rel(tool_input["file_path"])
+    path = canonical(rel(tool_input["file_path"]))
     mode, patterns = scope
     try:
         hit = any(re.search(pattern, path) for pattern in patterns)
@@ -2817,6 +2937,16 @@ def next_step(task):
         if s["spec_problems"]:
             design = any(re.search(r"(?i)architecture|skills|ADR", p) for p in s["spec_problems"])
             return dict(step, step="define", role="architect" if design else "analyst", problems=s["spec_problems"])
+        light = light_lane(task)
+        if light and not s["approved"]:
+            if autonomous():
+                return dict(step, step="approve", role=None, light=True,
+                            command="python3 scripts/harness/lib/harness.py approve %s" % task)
+            return dict(step, step="approve", role=None, light=True,
+                        needed="the user's Approved-by: line in %s" % s["spec"])
+        if light:
+            return dict(step, step="start", role=None, light=True,
+                        command="python3 scripts/harness/lib/harness.py start %s" % task)
         if architecture_pending(read(spec_path(task))):
             return dict(step, step="define", role="architect",
                         reason="the Architecture section has no tech requirements yet (the architect designs next)")
@@ -2838,7 +2968,8 @@ def next_step(task):
                                                                        "approve %s" % task)
             return dict(step, step="approve", role=None, needed="the user's Approved-by: line in %s" % s["spec"])
         return dict(step, step="start", role=None, command="python3 scripts/harness/lib/harness.py start %s" % task)
-    if s["spec"] and not (s["grill"] and s["grill"]["current"] and s["grill"]["verdict"] == "pass"):
+    if s["spec"] and not light_lane(task) and not (s["grill"] and s["grill"]["current"]
+                                                   and s["grill"]["verdict"] == "pass"):
         return dict(step, step="grill", role="griller", reason="the spec changed during the build (an answered "
                                                                  "question); grill it again before going on")
     if tester_on():
@@ -2889,6 +3020,8 @@ def set_task_marker(task, marker, checks):
     if problems:
         return problems
     TASKS.write_text(after, encoding="utf-8")
+    if marker == "WIP":
+        record_light_start(task)
     snapshot_refresh()
     log_event("task-%s" % ("start" if marker == "WIP" else "finish"), task=task)
     return []
@@ -4040,6 +4173,8 @@ def receipt_base(task, spec_text, given=None):
     commit that added the spec, else HEAD (only the uncommitted work)."""
     if given:
         return given
+    if light_base(task):
+        return light_base(task)
     policy = policy_approval(spec_text)
     if policy and policy["base"] and policy["base"] != "none":
         return policy["base"]

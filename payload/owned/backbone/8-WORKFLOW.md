@@ -17,6 +17,8 @@ The main session orchestrates; the role agents do the work. Give each agent a se
 
 Check the state at any time with `python3 scripts/harness/lib/harness.py spec-check <id>`.
 
+**Light lane.** When the user has switched on `HARNESS_LIGHT_LANE` and marked the task line `(light)`, a small, low-risk spec skips steps 3 to 5: the analyst writes it, the user approves it, and the build starts. `harness.py next <id>` says when this applies. Never add the mark yourself.
+
 ### Phase 2: Build
 
 7. **Start:** change the task line to `- [WIP]`. The start gate checks the spec, the grill pass and the approval.

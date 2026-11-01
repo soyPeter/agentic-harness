@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.23.0 (2026-11-01)
+
+- **Light lane for small fixes** (`HARNESS_LIGHT_LANE`, user-only, off by default). A task the user marks `(light)`
+  on its line skips the architect and the griller when its spec has at most `HARNESS_LIGHT_MAX_ITEMS` requirements
+  plus criteria (default 3) and is low-risk. It still needs a valid spec, the user's approval (or policy approval in
+  autonomous mode), a judge pass and verify. Starting a light task records the commit it started from, and finishing counts every file
+  changed since, committed or not: a light task that changed more than `HARNESS_LIGHT_MAX_FILES` files (default 3) or
+  touched a sensitive path is refused; the user then removes the mark and it is grilled. A marked task that doesn't qualify is grilled, and the start gate says why. Only the user adds the mark:
+  agents' edits and commits that add it are refused.
+- **Case-variant paths get the gates.** On a case-insensitive disk, an edit of `backbone/3-tasks.md` (or another
+  spelling of a gated backbone file) skipped its checks. Paths are now matched to the gated names first.
+
 ## 0.22.0 (2026-11-01)
 
 - **`harness.py report` measures what the harness buys.** Accepted work: the first-pass judge rate, griller fails
@@ -22,6 +34,7 @@
   the session and agent. Paths only: no file contents are logged.
 - New events: `context`, `skill`, `edit`, `tests-run`, and `hook-slow` for a hook call that took
   `HARNESS_HOOK_SLOW` seconds or more (new setting, default 5).
+- `log_event` never raises: an error there could turn a refusal into a non-blocking hook error.
 
 ## 0.20.0 (2026-11-01)
 

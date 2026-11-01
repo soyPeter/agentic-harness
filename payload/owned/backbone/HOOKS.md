@@ -60,6 +60,8 @@ A task line may become `[WIP]` only when all of these hold. Check them with `pyt
 2. **Grill pass on the current spec.** The fingerprint covers the spec text (without the Approval section) and every referenced ADR, so changing either makes the pass stale. A pass is recorded as a fail if any blocker or major question is open, or if the spec is invalid.
 3. **User approval:** an `Approved-by:` line under `## Approval`. Only the user can write it. Once it is there, agents can't change the spec.
 
+**Light lane** (`HARNESS_LIGHT_LANE`, user-only, default `off`). A task the user marks `(light)` on its line in `3-TASKS.md` skips the architect and step 2 when its spec has at most `HARNESS_LIGHT_MAX_ITEMS` requirements plus criteria (default 3) and is low-risk (`harness.py risk`). The spec must still be valid (step 1) and approved (step 3; `approve` in autonomous mode), and the judge gate and verify apply as usual. Starting a light task records the commit it started from (`backbone/.verdicts/<id>.light.json`). Finishing counts every file changed since then, committed or not, and refuses a light task that changed more than `HARNESS_LIGHT_MAX_FILES` files (default 3) or touched a sensitive path: the user removes the mark and the task is grilled. A task marked `(light)` after it started has no recorded start and can't finish as light. A `(light)` task that doesn't qualify goes through the griller, and the start gate says why. Only the user adds the mark: agents' edits that add it are refused, and so are commits that add it (verify).
+
 ### Skill gate (`HARNESS_SKILL_GATE`)
 
 Before an agent edits a file, it must have loaded, in the same session, every skill routed to that path (`routing.core.conf` and `backbone/routing.conf`). For code while a task is `[WIP]`, it also needs the skills listed in the spec. "Loaded" means it read `.claude/skills/<name>/SKILL.md` or invoked the skill. The refusal message lists the missing skills. Paths under `backbone/`, `.claude/` and `scripts/harness/` only need their routes.
@@ -268,7 +270,7 @@ Each event carries the task in progress and, inside a hook, the session and agen
 ## Change receipt
 
 `harness.py receipt <id> [--base <rev>] [--json]` states what the harness can prove about a judged task, built only from the spec, the verdicts and the diff:
-- **Changed:** files since the base: `--base`, else the policy approval's base, else the parent of the commit that added the spec.
+- **Changed:** files since the base: `--base`, else the light lane's recorded start, else the policy approval's base, else the parent of the commit that added the spec, else HEAD (only the uncommitted work).
 - **Verified:** the harness's own test run, and each AC with its tests, evidence and the test files that mention it.
 - **Not verified:** ACs not met, NFRs no AC covers, and findings the judge left open.
 - **Decisions:** the ADRs the spec follows, the ADRs the task added or changed (with their status), and the assumptions with their sources.
