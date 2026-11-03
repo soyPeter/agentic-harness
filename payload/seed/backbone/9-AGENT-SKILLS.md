@@ -15,6 +15,7 @@ Skills in `.claude/skills/`. Format and routing: `backbone/SKILLS.md`. Routes: `
 | `module-testing` | Test method, AC traceability, determinism; routed to tests; judge checklist |
 | `security` | Input, injection, authN/authZ, secrets, data exposure; judge checklist |
 | `changelog` | Release notes from Conventional Commits (on demand) |
+| `change-review` | The reviewers' three lenses after the judge: correctness (with blast radius), structure, lean |
 
 Stack skills come from catalog packs adopted after the stack ADR (`harness.py catalog`, `harness.py adopt`). List them below with the ADR that chose them.
 

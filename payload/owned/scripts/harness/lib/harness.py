@@ -86,7 +86,10 @@ read glob grep list todowrite todoread question lsp codesearch skill   read
 webfetch websearch                      network
 task subagent                           agent
 """
-PIPELINE_AGENTS = ("analyst", "architect", "griller", "tester", "implementer", "judge", "debugger", "scribe")
+PIPELINE_AGENTS = ("analyst", "architect", "griller", "tester", "implementer", "judge", "debugger", "scribe",
+                   "reviewer", "deliverer")
+# The reviewer runs once per lens, in parallel; each lens records its own verdict on the code.
+REVIEW_LENSES = ("correctness", "structure", "lean")
 USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE", "HARNESS_JUDGE_MAX_ROUNDS",
                   "HARNESS_VERIFY", "HARNESS_ORCHESTRATOR_SCOPE",
                   "HARNESS_AUTONOMY", "HARNESS_AUTO_APPROVE", "HARNESS_RISK_TERMS", "HARNESS_RISK_PATHS",
@@ -97,7 +100,8 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
                   "HARNESS_DECISION_CMD", "HARNESS_DECISION_MODEL", "HARNESS_DECISION_URL",
                   "HARNESS_KNOWLEDGE_ROOT", "HARNESS_KNOWLEDGE_TOOLS", "HARNESS_KNOWLEDGE_PATHS",
                   "HARNESS_TESTER", "HARNESS_ACCEPTANCE_PATHS", "HARNESS_ORCA_AGENTS", "HARNESS_ORCA_LAUNCH",
-                  "HARNESS_SPEC_MAX_ITEMS", "HARNESS_LIGHT_LANE", "HARNESS_LIGHT_MAX_ITEMS", "HARNESS_LIGHT_MAX_FILES")
+                  "HARNESS_SPEC_MAX_ITEMS", "HARNESS_LIGHT_LANE", "HARNESS_LIGHT_MAX_ITEMS", "HARNESS_LIGHT_MAX_FILES",
+                  "HARNESS_REVIEW", "HARNESS_DELIVER")
 # The knowledge source: an MCP server registered as "knowledge" (claude mcp add) over a folder of notes, that the
 # analyst, architect and griller consult when grilling raises questions. Read-only; answers are cited as vault:<path>.
 KNOWLEDGE_TOOL_PREFIX = "mcp__knowledge__"
@@ -133,6 +137,8 @@ AGENT_SCOPES = {
     "judge": ("allow", ()),
     "debugger": ("allow", ()),
     "tester": ("allow", ()),   # plus HARNESS_ACCEPTANCE_PATHS (see role_scope)
+    "reviewer": ("allow", ()),
+    "deliverer": ("allow", ()),
 }
 SCOPE_HELP = {
     "analyst": "It writes specs (backbone/specs/) and the PRD only.",
@@ -143,6 +149,8 @@ SCOPE_HELP = {
     "judge": "It judges the code against the spec; it never edits files.",
     "debugger": "It diagnoses the judge's failures and writes a fix brief; it never edits files.",
     "tester": "It writes acceptance tests only, in files matching HARNESS_ACCEPTANCE_PATHS.",
+    "reviewer": "It reviews the task's change through one lens and reports findings; it never edits files.",
+    "deliverer": "It pushes the reviewed branch, opens the PR and watches CI; fixes go back to the implementer.",
 }
 
 # A task line, not any mention of the marker (legends and prose must not count).
@@ -212,6 +220,8 @@ DEFAULTS = {
     "HARNESS_TESTER": "off",
     "HARNESS_ACCEPTANCE_PATHS": r"(^|/)acceptance([/._-]|$)",
     "HARNESS_DEBUGGER": "on",
+    "HARNESS_REVIEW": "on",
+    "HARNESS_DELIVER": "on",
     "HARNESS_SPEC_MAX_ITEMS": "30",
     "HARNESS_LIGHT_LANE": "off",
     "HARNESS_LIGHT_MAX_ITEMS": "3",
@@ -1887,6 +1897,9 @@ def judge_problems(task, current, max_rounds):
     rederived, why = effective_judge(task, report)
     if rederived != "pass":
         return "The recorded judge pass for task %s does not hold up: %s." % (task, "; ".join(why)[:400])
+    review = review_problems(task, current, max_rounds)
+    if review:
+        return review
     drift = light_drift(task)
     if drift:
         return drift
@@ -1898,6 +1911,41 @@ def judge_problems(task, current, max_rounds):
                     "scripts/harness/lib/harness.py escalate %s --kind approval --reason \"...\""
                     % (task, "; ".join(risks), task))
     return None
+
+
+def review_on():
+    return conf()["HARNESS_REVIEW"] != "off"
+
+
+def lens_reviews(task):
+    """{lens: its latest review entry, or None}."""
+    history = verdict_history(task, "review")
+    return {lens: next((e for e in reversed(history) if e.get("lens") == lens), None) for lens in REVIEW_LENSES}
+
+
+def review_problems(task, current, max_rounds):
+    """Why task's reviews don't allow finishing it: a lens with no review, a failed one, or one on older code."""
+    if not review_on():
+        return None
+    history = since_last_escalation(task, verdict_history(task, "review"))
+    problems = []
+    for lens, last in lens_reviews(task).items():
+        if last is None:
+            problems.append("Task %s has no %s review. Run the reviewer on task %s with the %s lens (the lenses run "
+                            "in parallel)." % (task, lens, task, lens))
+        elif last.get("verdict") != "pass":
+            fails = consecutive_fails([e for e in history if e.get("lens") == lens])
+            issues = "; ".join(str(f.get("issue")) for f in last.get("findings") or []
+                               if isinstance(f, dict) and f.get("severity") == "must-fix")[:400]
+            if fails >= max_rounds:
+                problems.append("The %s review failed task %s %d times. Stop retrying: report the findings to the "
+                                "user and ask how to proceed. Must-fix: %s" % (lens, task, fails, issues))
+            else:
+                problems.append("The %s review failed task %s: %s. Have the implementer fix the must-fix findings, "
+                                "then judge and review again." % (lens, task, issues))
+        elif current and last.get("fingerprint") != current:
+            problems.append("The code changed after the %s review of task %s passed. Review it again." % (lens, task))
+    return " ".join(problems) or None
 
 
 def acceptance_problem(task):
@@ -2712,6 +2760,8 @@ def hook_pre_tool_use(data):
     rules, _ = load_rules()
     if tool == "Bash":
         command = tool_input.get("command") or ""
+        if data.get("harness_role"):
+            hook_agent_guard(data, data["harness_role"])
         problems = ["  - " + p for p in shell_findings(command, data.get("cwd"))]
         hits = check_text(rules, None, rule_text(command), ("block",))
         if hits:
@@ -3027,10 +3077,34 @@ def tester_on():
     return conf()["HARNESS_TESTER"] == "on"
 
 
+def default_branch():
+    ref = git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD").strip()
+    return ref.rsplit("/", 1)[-1] if ref else None
+
+
+def role_command_refusal(agent, command):
+    """Why agent may not run command, or None. The deliverer reaches GitHub, but the decisions there stay the user's."""
+    if agent != "deliverer":
+        return None
+    if re.search(r"\bgh\s+pr\s+(merge|close|review|ready)\b|\bgh\s+api\b[^;&|\n]*/merge\b", command):
+        return "it opens and updates the PR; merging is the user's call, like closing or approving it."
+    targets = {b for b in ("main", "master", default_branch()) if b}
+    push = re.search(r"\bgit\s+push\b([^;&|\n]*)", command)
+    on_default = git("rev-parse", "--abbrev-ref", "HEAD").strip() in targets
+    if push and (on_default or any(re.search(r"(^|[\s:+])%s(\s|$)" % re.escape(b), push.group(1)) for b in targets)):
+        return "it pushes only its own branch; the default branch changes through the PR, when the user merges it."
+    return None
+
+
 def hook_agent_guard(data, agent):
     """PreToolUse scoped to one agent: keep its edits inside its role."""
     scope = role_scope(agent)
     tool_input = data.get("tool_input") or {}
+    if data.get("tool_name") == "Bash":
+        why = role_command_refusal(agent, tool_input.get("command") or "")
+        if why:
+            deny("The %s agent may not run this: %s" % (agent, why))
+        return
     if scope is None or data.get("tool_name") not in FILE_TOOLS or not tool_input.get("file_path"):
         return
     path = canonical(rel(tool_input["file_path"]))
@@ -3137,7 +3211,7 @@ def next_step(task):
     if s["state"] == "blocked":
         return dict(step, step="blocked", role=None, needed="the user", escalations=s["escalations"])
     if s["state"] == "done":
-        return dict(step, step="done", role=None)
+        return delivery_step(step)
     if s["state"] == "pending":
         if not s["spec"]:
             return dict(step, step="define", role="analyst", reason="no spec yet")
@@ -3186,6 +3260,20 @@ def next_step(task):
                         reason="no acceptance tests yet" if not tests else "the acceptance tests changed since the "
                                                                           "tester recorded them")
     judge = s["judge"]
+    if judge and judge["current"] and judge["verdict"] == "pass" and review_on():
+        current = code_fingerprint()
+        reviews = lens_reviews(task)
+        on_current = {lens: e for lens, e in reviews.items() if e and e.get("fingerprint") == current}
+        failed = [lens for lens, e in on_current.items() if e.get("verdict") != "pass"]
+        if failed:
+            return dict(step, step="fix", role="implementer", reason="must-fix findings from the %s review"
+                        % ", ".join(failed), findings=[dict(f, lens=lens) for lens in failed
+                                                       for f in on_current[lens].get("findings") or []
+                                                       if f.get("severity") == "must-fix"])
+        due = [lens for lens in REVIEW_LENSES if lens not in on_current]
+        if due:
+            return dict(step, step="review", role="reviewer", lenses=due,
+                        then="run one reviewer per lens, all at once; each records its own verdict")
     if judge and judge["current"] and judge["verdict"] == "pass":
         return dict(step, step="finish", role="scribe", then="python3 scripts/harness/lib/harness.py finish %s, "
                                                                "then commit" % task)
@@ -3202,6 +3290,43 @@ def next_step(task):
     if not judge and not code_changed():
         return dict(step, step="implement", role="implementer")
     return dict(step, step="judge", role="judge", reason="no judge verdict on the current code")
+
+
+def latest_delivery(head):
+    """The last deliverer report logged for commit head, or None."""
+    try:
+        lines = events_file().read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if event.get("kind") == "deliver" and event.get("head") == head:
+            return event
+    return None
+
+
+def delivery_step(step):
+    """A finished task is done once the branch tip that holds it is delivered: pushed, in a PR, CI green."""
+    if conf()["HARNESS_DELIVER"] == "off":
+        return dict(step, step="done", role=None)
+    head = git("rev-parse", "-q", "--verify", "HEAD").strip()
+    if git("status", "--porcelain").strip():
+        return dict(step, step="deliver", role=None, needed="the finished task committed (the deliverer pushes "
+                                                             "only committed work)")
+    if not git("remote", "get-url", "origin").strip():
+        return dict(step, step="deliver", role=None, needed="an origin remote to push to (or the user turns "
+                                                             "delivery off: HARNESS_DELIVER=\"off\")")
+    last = latest_delivery(head)
+    if last and last.get("delivery") == "delivered":
+        return dict(step, step="done", role=None, pr=last.get("pr"))
+    if last:
+        return dict(step, step="delivery-failed", role=None, delivery=last.get("delivery"), pr=last.get("pr"),
+                    findings=last.get("findings_detail") or [], owners=last.get("owners") or [],
+                    needed="a fix task for each finding (or the user, for theirs), then deliver again")
+    return dict(step, step="deliver", role="deliverer", head=head[:12])
 
 
 def workspace_fingerprint():
@@ -3546,9 +3671,13 @@ Drive Task {task} ("{title}") through the whole pipeline in backbone/8-WORKFLOW.
   questions from backbone/ and the knowledge source (if on) as Assumptions; escalate what they cannot answer.
 - Approve: python3 scripts/harness/lib/harness.py approve {task}
 - Build, judge and record: the tester first when HARNESS_TESTER is on, then the implementer and the judge; after a
-  judge fail, the debugger's brief goes to the implementer; then the scribe. Mark the task [x] and commit.
+  judge fail, the debugger's brief goes to the implementer.
+- Review: after the judge passes, start one reviewer per lens that `harness.py next {task} --json` lists, all at
+  once. A must-fix finding goes to the implementer, then the judge and the reviews again.
+- Record and deliver: the scribe, then mark the task [x] and commit. When `next` says deliver, run the deliverer.
 - When anything needs a human, escalate: python3 scripts/harness/lib/harness.py escalate {task} --reason "..."
-Stop when the task is [x] and committed, or BLOCKED. Do not start other tasks."""
+Stop when `python3 scripts/harness/lib/harness.py next {task}` says done, or the task is BLOCKED. Do not start other
+tasks."""
 
 
 def attempt_cause(code, seconds, outcome, dirty):
@@ -3557,6 +3686,8 @@ def attempt_cause(code, seconds, outcome, dirty):
         return "timeout", "was stopped after %d s (HARNESS_RUN_TASK_TIMEOUT) before it finished" % int(seconds)
     if outcome == "done" and dirty:
         return "uncommitted", "marked the task [x] but left changes uncommitted: commit them with the task"
+    if outcome == "undelivered":
+        return "undelivered", "finished and committed the task but did not deliver it: run the deliverer"
     if code != 0:
         return "agent-error", "ended with exit code %s" % code
     return "unfinished", "ended before the task was [x] or BLOCKED"
@@ -3751,7 +3882,8 @@ def run_worktrees(queue, open_prs):
             git("branch", "-D", branch)
             summary.append((task, outcome))
             break
-        if open_prs and outcome in ("done", "blocked", "escalated"):
+        # A done task was delivered by its own run (the deliver step); a stuck one is pushed for a person to look at.
+        if open_prs and outcome in ("blocked", "escalated"):
             dirty = git_in(tree, "status", "--porcelain").strip()
             if dirty:
                 git_in(tree, "add", "-A")
@@ -3946,6 +4078,19 @@ def run_command(argv):
                 break
             outcome = task_state(task)
             dirty = bool(git("status", "--porcelain").strip())
+            if outcome == "done" and not dirty:
+                after = next_step(task)
+                if after["step"] == "delivery-failed":
+                    escalate(task, "runner", "delivery failed (%s): %s" % (after.get("delivery"), json.dumps(
+                        after.get("findings"), ensure_ascii=False)[:800]), after["needed"])
+                    outcome = "escalated"
+                    break
+                if after["step"] == "deliver" and not after.get("role"):
+                    escalate(task, "runner", "the finished task can't be delivered", after["needed"])
+                    outcome = "escalated"
+                    break
+                if after["step"] != "done":
+                    outcome = "undelivered"
             step = next_step(task) if outcome not in ("done", "blocked") else {}
             cause = attempt_cause(code, seconds, outcome, dirty)
             log_event("run-attempt", task=task, attempt=attempt, exit=code, seconds=seconds, state=outcome,
@@ -4567,6 +4712,37 @@ def git_pre_commit():
     return 0
 
 
+def git_pre_push(remote):
+    """The pushed commits must pass verify, reviews included: the same check CI runs on the pull request."""
+    if conf()["HARNESS_VERIFY"] == "off":
+        return 0
+    zero = re.compile(r"^0+$")
+    problems = []
+    for line in sys.stdin.read().splitlines():
+        parts = line.split()
+        if len(parts) != 4 or zero.match(parts[1]):
+            continue
+        local, known = parts[1], parts[3]
+        # A force-push or a remote commit we don't have: check what isn't on the remote instead.
+        if not zero.match(known) and subprocess.run(["git", "merge-base", "--is-ancestor", known, local],
+                                                    cwd=str(ROOT), capture_output=True).returncode == 0:
+            base = known
+        else:
+            new = git("rev-list", local, "--not", "--remotes=%s" % remote).split()
+            if not new:
+                continue
+            base = git("rev-parse", "-q", "--verify", new[-1] + "^").strip() or new[-1]
+        problems += verify_range("%s..%s" % (base, local))
+    for problem in problems:
+        log_event("verify", reason=problem.splitlines()[0][:200], hook="pre-push")
+    if problems:
+        sys.stderr.write("harness: push blocked; the pushed commits break the harness gates:\n%s\n"
+                         "The user can push a deliberate exception with HARNESS_VERIFY=off.\n"
+                         % "\n".join("  - " + p for p in problems))
+        return 1
+    return 0
+
+
 def git_commit_msg(message_file):
     values = conf()
     lines = [line for line in read(message_file).splitlines() if not line.startswith("#")]
@@ -4860,11 +5036,82 @@ def record_debug(data):
     log_event("debug", task=task, confidence=report.get("confidence"), owners=owners)
 
 
+def record_review(data):
+    """The reviewer's Stop: one lens's verdict on the current code. A must-fix finding fails it, whatever was claimed."""
+    report = extract_report(data.get("last_assistant_message")
+                            or last_message_from_transcript(data.get("transcript_path")), "lens")
+    retry = not data.get("stop_hook_active")
+    if report is None:
+        if retry:
+            deny("End your final message with the JSON block described in your instructions.")
+        return
+    lens = report.get("lens")
+    if lens not in REVIEW_LENSES:
+        if retry:
+            deny("Set \"lens\" to the lens you reviewed through: one of %s." % ", ".join(REVIEW_LENSES))
+        return
+    task = task_for_role(report)
+    if task is None:
+        if retry:
+            deny("Set \"task\" to the [WIP] task you reviewed: one of %s." % (", ".join(wip_task_ids()) or "(none)"))
+        return
+    findings = [f for f in report.get("findings") or [] if isinstance(f, dict)]
+    verdict = "fail" if any(f.get("severity") == "must-fix" for f in findings) else "pass"
+    history = verdict_history(task, "review")
+    history.append({"lens": lens, "verdict": verdict, "claimed": report.get("verdict"),
+                    "fingerprint": code_fingerprint(), "findings": findings,
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "summary": report.get("summary")})
+    VERDICTS.mkdir(parents=True, exist_ok=True)
+    verdict_path(task, "review").write_text(json.dumps({"task": task, "kind": "review", "history": history}, indent=2)
+                                            + "\n", encoding="utf-8")
+    snapshot_refresh()
+    log_event("review", task=task, lens=lens, verdict=verdict, claimed=report.get("verdict"), findings=len(findings))
+    emit({"systemMessage": "harness: %s review of task %s: %s." % (lens, task, verdict.upper())})
+
+
+DELIVERY_OUTCOMES = ("delivered", "hold", "ci-failed")
+
+
+def record_delivery(data):
+    """The deliverer's Stop: a "delivered" claim must match the checkout (pushed, clean, CI green), and a stop short
+    of it must name what stopped it, so the orchestrator can route each finding to its owner."""
+    report = extract_report(data.get("last_assistant_message")
+                            or last_message_from_transcript(data.get("transcript_path")), "delivery")
+    if report is None:
+        if not data.get("stop_hook_active"):
+            deny("End your final message with the JSON block described in your instructions.")
+        return
+    outcome, findings = report.get("delivery"), report.get("findings") or []
+    head = git("rev-parse", "HEAD").strip()
+    problems = []
+    if outcome not in DELIVERY_OUTCOMES:
+        problems.append("delivery must be one of %s, not %r." % (", ".join(DELIVERY_OUTCOMES), outcome))
+    elif outcome == "delivered":
+        if git("status", "--porcelain").strip():
+            problems.append("There are uncommitted changes, so the PR doesn't hold what was reviewed.")
+        if not head or git("rev-parse", "@{upstream}").strip() != head:
+            problems.append("HEAD %s is not pushed to its upstream branch." % (head[:12] or "?"))
+        if report.get("checks") not in ("passed", "none"):
+            problems.append("CI checks are %r; report ci-failed, or wait until they pass." % report.get("checks"))
+    elif not findings:
+        problems.append("A %s report lists the findings that stopped delivery, each with an owner." % outcome)
+    if problems and not data.get("stop_hook_active"):
+        deny("Your delivery report doesn't match the checkout:\n- " + "\n- ".join(problems))
+        return
+    owners = sorted({str(f.get("owner")) for f in findings if isinstance(f, dict) and f.get("owner")})
+    log_event("deliver", delivery=outcome, branch=report.get("branch"), base=report.get("base"), head=head,
+              pr=report.get("pr"), checks=report.get("checks"), findings=len(findings), owners=owners,
+              findings_detail=findings[:20],
+              problems=problems or None)
+
+
 ROLE_RECORDERS = {
     "griller": lambda data: record_verdict(data, "grill"),
     "judge": lambda data: record_verdict(data, "judge"),
     "tester": record_tests,
     "debugger": record_debug,
+    "reviewer": record_review,
+    "deliverer": record_delivery,
 }
 
 
@@ -4880,6 +5127,8 @@ HOOKS = {
     "subagent-stop": hook_subagent_stop,
     "tester-stop": record_tests,
     "debug-stop": record_debug,
+    "review-stop": record_review,
+    "deliver-stop": record_delivery,
 }
 
 
@@ -4947,6 +5196,8 @@ def main(argv):
         return 0
     if argv[1:] == ["git", "pre-commit"]:
         return git_pre_commit()
+    if argv[1:3] == ["git", "pre-push"]:
+        return git_pre_push(argv[3] if len(argv) > 3 else "origin")
     if len(argv) == 4 and argv[1:3] == ["git", "commit-msg"]:
         return git_commit_msg(argv[3])
     if len(argv) == 3 and argv[1] == "spec-check":

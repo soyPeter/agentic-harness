@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.26.0 (2026-11-03)
+
+- **Review lenses, in parallel, before a task can finish** (`HARNESS_REVIEW`, user-only, default `on`). After the
+  judge passes, `next` returns the `review` step with the lenses still due. The orchestrator (or the Orca
+  coordinator's worker) starts one new `reviewer` agent per lens, all at once:
+  - `correctness`: bugs, security, scale, missing tests, and blast radius, proven by running real code;
+  - `structure`: the "code judo" move, files pushed past 1000 lines, spaghetti growth, logic in the wrong layer;
+  - `lean`: delete, reuse, stdlib, yagni.
+
+  Each lens records its verdict on the code fingerprint in `backbone/.verdicts/<id>.review.json` (`review-stop`). A
+  `must-fix` finding records a fail whatever the reviewer claimed and sends the task to the implementer, then the
+  judge and the lenses again. The judge gate requires every lens's pass on the current code, so `finish`,
+  pre-commit and CI `verify` refuse a task without it.
+- **Delivery is a pipeline step** (`HARNESS_DELIVER`, user-only, default `on`). A committed task is `done` only once
+  the new `deliverer` has pushed its branch, opened or updated its PR (receipts, plus the reviews' should-fix
+  findings as follow-ups) and seen `gh pr checks` pass. Its report is checked against git: `delivered` needs a clean
+  tree, `HEAD` pushed and green checks; `hold` and `ci-failed` need findings with owners. `next` then returns
+  `deliver`, `delivery-failed` or `done`. It never edits files: its `gh pr merge`, `close`, `review` and `ready`, and
+  any push to or from the default branch, are refused.
+- **Pre-push hook.** `verify` runs on the commits being pushed, so no push carries a finished task without its judge
+  and review passes. The user pushes a deliberate exception with `HARNESS_VERIFY=off`.
+- **The runners deliver.** `harness.py orca` runs the review and deliver steps (a failed delivery is escalated), and
+  no longer pushes or opens PRs itself; `--pr` is accepted and does nothing. `harness.py run` sessions drive the task
+  until `next` says `done`, and a session that finished without delivering is retried. `run --worktree --pr` pushes
+  only blocked or escalated tasks now. In `orca --merge`, the base branch is delivered from its own checkout.
+- **Upgrading:** a task finished before 0.26.0 has no reviews. Once this version is on the base branch, CI `verify`
+  and the pre-push hook refuse a range that finishes such a task: review it (the lenses run on a `[WIP]` task, so
+  reopen it), or have the user push and merge it with `HARNESS_VERIFY=off` and the CI exception they already use.
+- **`change-review` core skill**, the reviewers' lenses. Adapted from the MIT-licensed thermo-nuclear reviews and
+  pstack's blast-radius and prove-it-works (cursor/plugins), and from ponytail-review (DietrichGebert/ponytail);
+  notices in the skill's `NOTICE.md`.
+
 ## 0.25.0 (2026-11-03)
 
 - **Supervised mode catches script writes to harness files.** Out-of-band detection ran only in autonomous mode,

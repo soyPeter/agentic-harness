@@ -4,7 +4,8 @@
 Drives ready tasks through the pipeline with Orca supervised workers, one worker per step:
 
   - asks the harness what each task needs (`harness.py next <id> --json`), so it never re-implements the workflow;
-  - starts a worker for each role step (analyst, architect, griller, tester, implementer, judge, debugger, scribe),
+  - starts a worker for each role step (analyst, architect, griller, tester, implementer, judge, debugger, reviewer,
+    scribe, deliverer),
     and runs the command steps itself (approve, start, finish and the commit), all through the harness gates;
   - answers a worker's question by starting an analyst or architect worker. The answer goes into the spec (with its
     source), and the reply tells the asking worker where to find it. A question nobody can answer is escalated;
@@ -27,7 +28,8 @@ import subprocess
 import time
 from pathlib import Path
 
-ROLE_STEPS = ("define", "grill", "answer", "test", "implement", "judge", "diagnose", "fix", "finish")
+ROLE_STEPS = ("define", "grill", "answer", "test", "implement", "judge", "diagnose", "fix", "review", "finish",
+              "deliver")
 COMMAND_STEPS = ("approve", "start")
 END_STEPS = ("blocked", "done", "unknown")
 WAIT_TYPES = "worker_done,escalation,question,heartbeat"   # heartbeats are only acknowledged
@@ -44,7 +46,11 @@ INSTRUCTIONS = {
     "implement": "Implement task {task} from its approved spec, loading the skills it needs.",
     "judge": "Judge task {task} against its spec. The harness records the judge's verdict.",
     "diagnose": "Diagnose why the judge failed task {task} and write the fix brief. The harness records it.",
-    "fix": "Fix what the judge found in task {task}. The judge's findings and the debugger's brief: {detail}",
+    "fix": "Fix what the judge or a reviewer found in task {task}. The findings and the debugger's brief: {detail}",
+    "review": "Review task {task}: start one reviewer per lens, all at once (in parallel), naming its lens in each "
+              "prompt. The lenses due: {detail}. The harness records each lens's verdict; wait for all of them.",
+    "deliver": "Deliver task {task}'s branch: the deliverer pushes it, opens or updates its PR and watches CI. The "
+               "harness records the outcome.",
     "finish": "Record what task {task} taught (lessons, traps, emergent decisions) in backbone/.",
 }
 
@@ -320,14 +326,29 @@ class Coordinator(object):
                              "--needed", "a look at the task's verdicts and the workers' transcripts")
                 info["outcome"] = "escalated (no progress at %s)" % name
                 return False
+            if name in ("deliver", "delivery-failed") and self.opts.get("merge") and not self.opts.get("here"):
+                # --merge integrates locally: the base branch is delivered from its own checkout, not each task branch.
+                name = "done"
             if name == "done" and self.opts.get("merge") and not self.opts.get("here") and task not in self.base_done():
                 # Finished on its branch in an earlier run but never reached the base (a merge that was refused, a
                 # run that stopped): merge it now, so the tasks after it can start.
                 info["outcome"] = "done"
                 self.log("orca: task %s: done on its branch, not yet on the base; merging" % task)
                 return self.merge(task)
+            if name == "delivery-failed":
+                self.harness(info["path"], "escalate", task, "--kind", "coordinator", "--reason",
+                             "delivery failed (%s): %s" % (step.get("delivery"), json.dumps(step.get("findings"),
+                                                                                         ensure_ascii=False)[:800]),
+                             "--needed", step.get("needed") or "a fix task for each finding")
+                info["outcome"] = "escalated (delivery failed)"
+                return False
+            if name == "deliver" and not step.get("role"):
+                info["outcome"] = "waiting for %s" % step.get("needed")
+                return False
             if name in END_STEPS:
                 info["outcome"] = name
+                if step.get("pr"):
+                    info["pr"] = step["pr"]
                 self.log("orca: task %s: %s%s" % (task, name, (": " + "; ".join(step.get("escalations") or []))[:300]
                                                   if step.get("escalations") else ""))
                 return False
@@ -374,7 +395,8 @@ class Coordinator(object):
                     info["outcome"] = "escalated (no progress at %s)" % name
                     return False
                 info["last_dispatch"] = dispatched
-                detail = json.dumps(step.get("questions") or step.get("problems") or step.get("brief")
+                detail = json.dumps(step.get("lenses") or step.get("questions") or step.get("problems")
+                                    or step.get("brief")
                                     or step.get("findings") or step.get("reason") or "", ensure_ascii=False)[:4000]
                 spec = WORKER_SPEC.format(task=task, title=info["title"], step=name, role=step["role"],
                                           instruction=INSTRUCTIONS[name].format(task=task, detail=detail),
@@ -401,19 +423,11 @@ class Coordinator(object):
             info["outcome"] = "done, but the commit was refused: %s" % (commit.stderr + commit.stdout).strip()[:400]
             return False
         info["outcome"] = "done"
-        receipt = self.save_receipt(task)
+        self.save_receipt(task)
         if self.opts.get("merge") and not self.opts.get("here"):
             self.merge(task)
-        if self.opts.get("pr") and not self.opts.get("here"):
-            pushed = self.git(info["path"], "push", "-q", "-u", "origin", info["branch"])
-            if pushed.returncode == 0 and shutil.which("gh"):
-                body = "Opened by the harness Orca coordinator: task %s passed the judge and the gates." % task
-                if receipt:
-                    body += "\n\n```\n%s\n```" % receipt
-                pr = subprocess.run(["gh", "pr", "create", "--head", info["branch"], "--title", subject, "--body",
-                                     body], cwd=str(info["path"]), capture_output=True, text=True)
-                info["pr"] = (pr.stdout or pr.stderr).strip()
-        return True
+            return True
+        return self.advance(task)   # the deliver step, unless delivery is off
 
     def save_receipt(self, task):
         """The task's change receipt, taken on its branch right after the commit (later merges make it stale), and
