@@ -29,6 +29,7 @@ Usage:
   harness.py ci-protect [--branch main] [--with-judge] [--dry-run] (require the CI checks; needs gh)
   harness.py doctor
 """
+import fnmatch
 import hashlib
 import json
 import os
@@ -40,6 +41,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
 
 sys.dont_write_bytecode = True   # no __pycache__ in the project
@@ -57,6 +59,7 @@ ADRS = BACKBONE / "adr"
 VERDICTS = BACKBONE / ".verdicts"
 CONF_FILE = BACKBONE / "harness.conf"
 LOCK_FILE = BACKBONE / ".harness-lock.json"
+TOOLS_FILE = BACKBONE / "tools.conf"
 SKILLS = ROOT / ".claude" / "skills"
 AGENTS_DIR = ROOT / ".claude" / "agents"
 SETTINGS_FILE = ROOT / ".claude" / "settings.json"
@@ -66,6 +69,23 @@ CATALOG_DIR = ROOT / "scripts/harness/catalog"
 HOOKS_PATH = "scripts/harness/git-hooks"
 HOOK_MARK = "scripts/harness/"
 FILE_TOOLS = ("Write", "Edit", "MultiEdit")
+TOOL_CLASSES = ("read", "write", "exec", "network", "agent")
+# Contracts for the agents' own tools (Claude Code, Codex, OpenCode names). They come before backbone/tools.conf, which
+# adds contracts for other tools but can't reclassify these: "NotebookEdit read" would open backbone/ to it.
+BUILTIN_TOOL_CONTRACTS = """
+Write Edit MultiEdit                    write    path=file_path
+NotebookEdit                            write    path=notebook_path
+apply_patch                             write
+Bash KillShell KillBash TaskStop Monitor EnterWorktree ExitWorktree   exec
+Task Agent SendMessage ListAgents       agent
+WebFetch WebSearch                      network
+Read Grep Glob LS NotebookRead TodoWrite TodoRead TaskCreate TaskGet TaskList TaskUpdate TaskOutput BashOutput   read
+ToolSearch AskUserQuestion EnterPlanMode ExitPlanMode Skill SlashCommand ListMcpResourcesTool ReadMcpResourceTool   read
+LSP                                     read
+read glob grep list todowrite todoread question lsp codesearch skill   read
+webfetch websearch                      network
+task subagent                           agent
+"""
 PIPELINE_AGENTS = ("analyst", "architect", "griller", "tester", "implementer", "judge", "debugger", "scribe")
 USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE", "HARNESS_JUDGE_MAX_ROUNDS",
                   "HARNESS_VERIFY", "HARNESS_ORCHESTRATOR_SCOPE",
@@ -255,7 +275,7 @@ def git(*args):
     return result.stdout if result.returncode == 0 else ""
 
 
-CANONICAL_PATHS = ("backbone/3-TASKS.md", "backbone/harness.conf", "backbone/.harness-lock.json",
+CANONICAL_PATHS = ("backbone/3-TASKS.md", "backbone/harness.conf", "backbone/tools.conf", "backbone/.harness-lock.json",
                    "backbone/escalations.md", "backbone/.verdicts/", "backbone/specs/", "backbone/adr/", "backbone/")
 
 
@@ -270,10 +290,11 @@ def canonical(path):
 
 
 def rel(path_str):
-    """Repository-relative POSIX path, or the path unchanged if it lies outside the repo."""
+    """Repository-relative POSIX path, or the absolute path if it lies outside the repo. Relative paths are resolved
+    against the repo too: src/../backbone/x must meet the backbone gates."""
     path = Path(path_str)
     if not path.is_absolute():
-        return path.as_posix()
+        path = ROOT / path
     try:
         return path.resolve().relative_to(ROOT).as_posix()
     except ValueError:
@@ -1958,6 +1979,10 @@ def verify_changes(before, after, changed, done_fingerprint, allow_user_changes=
         if keys:
             problems.append("user-only setting(s) changed in backbone/harness.conf: %s. Only the user may change "
                             "them and commit that change (HARNESS_VERIFY=off git commit ...)." % ", ".join(keys))
+    tools_rel = TOOLS_FILE.relative_to(ROOT).as_posix()
+    if tools_rel in changed and before and show(before, tools_rel) is not None and not allow_user_changes:
+        problems.append("the tool contracts change (%s). They decide what agents may run, so only the user changes "
+                        "them and commits that change (HARNESS_VERIFY=off git commit ...)." % tools_rel)
     locked = (json.loads(show(after, LOCK_FILE.relative_to(ROOT).as_posix()) or "{}") or {}).get("files", {})
     lock_rel = LOCK_FILE.relative_to(ROOT).as_posix()
     if before and after and not allow_user_changes:
@@ -2602,7 +2627,10 @@ def hook_pre_tool_use(data):
                  "themselves (in Claude Code: `! <command>`). Do not rephrase the command to get "
                  "around the rule." % "\n".join(problems))
         return
-    if tool not in FILE_TOOLS or not tool_input.get("file_path"):
+    if tool not in FILE_TOOLS:
+        tool_gate(data, tool, tool_input)
+        return
+    if not tool_input.get("file_path"):
         return
     path_str = tool_input["file_path"]
     path = canonical(rel(path_str))
@@ -2620,6 +2648,9 @@ def hook_pre_tool_use(data):
     if path == LOCK_FILE.relative_to(ROOT).as_posix():
         deny("Harness blocked this change to %s: the lock is written by the installer and harness.py adopt only."
              % path)
+    if path == "backbone/tools.conf":
+        deny("Harness blocked this change to %s: the tool contracts decide what agents may run, so only the user "
+             "changes them. Ask the user to edit it." % path)
     if path == "backbone/escalations.md":
         deny("Harness blocked this change to %s: escalations are written by harness.py escalate and resolved by "
              "the user." % path)
@@ -2657,6 +2688,72 @@ def hook_pre_tool_use(data):
         for task in finished_tasks(before, after):
             if task_state_in(after, task) == "done":
                 log_event("task-finish", task=task)
+
+
+def parse_tool_contracts(text):
+    """Lines of `<tool or pattern>... <class> [path=<field>[,<field>]] [confirm]`; patterns are shell-style."""
+    contracts = []
+    for line in (text or "").splitlines():
+        words = line.split("#", 1)[0].split()
+        # The class is the last class word: OpenCode names a tool "read", which is also a class.
+        at = max((i for i, w in enumerate(words) if w in TOOL_CLASSES), default=None)
+        if not at:
+            continue
+        cls = words[at]
+        options = words[at + 1:]
+        paths = [f for w in options if w.startswith("path=") for f in w[5:].split(",") if f]
+        for pattern in words[:at]:
+            contracts.append({"pattern": pattern, "class": cls, "paths": paths, "confirm": "confirm" in options})
+    return contracts
+
+
+def tool_contract(tool):
+    for contract in parse_tool_contracts(BUILTIN_TOOL_CONTRACTS) + parse_tool_contracts(read(TOOLS_FILE)):
+        if fnmatch.fnmatchcase(tool, contract["pattern"]):
+            return contract
+    return None
+
+
+def contract_paths(contract, tool_input):
+    paths = []
+    for field in contract["paths"]:
+        value = tool_input.get(field)
+        paths.extend(v for v in (value if isinstance(value, list) else [value]) if isinstance(v, str) and v)
+    return paths
+
+
+def tool_gate(data, tool, tool_input):
+    """Tools other than Bash and the file tools: what their contract (backbone/tools.conf) says they may do."""
+    contract = tool_contract(tool)
+    if contract is None:
+        log_event("tool-unknown", tool=tool)
+        if autonomous():
+            deny("Harness blocked %s: it has no tool contract, so the gates can't tell what it changes. In autonomous "
+                 "mode only tools with a contract run; the user adds one to backbone/tools.conf (for example "
+                 "`%s write path=<the input field that holds the path>`)." % (tool, tool))
+        add_context("PreToolUse", "Harness: %s has no tool contract in backbone/tools.conf, so the gates don't check "
+                    "what it changes. Make file changes with Write or Edit, and tell the user, who can add a contract."
+                    % tool)
+        return
+    if contract["confirm"] and autonomous():
+        deny("Harness blocked %s: its contract in backbone/tools.conf says confirm, and in autonomous mode no one is "
+             "there to confirm it. Leave it for the user and say so in your report." % tool)
+    if contract["class"] != "write":
+        return
+    paths = contract_paths(contract, tool_input)
+    if not paths:
+        if autonomous():
+            deny("Harness blocked %s: its contract in backbone/tools.conf names no path field, so the gates can't "
+                 "see which files it writes. The user adds path=<field> to its line." % tool)
+        add_context("PreToolUse", "Harness: the contract for %s names no path field, so the gates don't check which "
+                    "files it writes." % tool)
+        return
+    for path_str in paths:
+        path = canonical(rel(path_str))
+        if any(re.search(pattern, path) for pattern in SHELL_PROTECTED):
+            deny("Harness blocked %s on %s: harness files change only through the Write or Edit tools, where the "
+                 "gates see the whole change." % (tool, path))
+        hook_pre_tool_use(dict(data, tool_name="Write", tool_input={"file_path": path_str, "content": ""}))
 
 
 def fresh_commit(max_age=120):
@@ -2735,6 +2832,11 @@ def post_tool_notes(data):
             if problems:
                 notes.append("Spec %s is not ready yet (the start gate needs it valid):\n  - %s"
                              % (path, "\n  - ".join(problems)))
+    elif tool not in ("Bash", "apply_patch") and not tool.startswith(KNOWLEDGE_TOOL_PREFIX):
+        contract = tool_contract(tool)
+        if contract and contract["class"] != "read":
+            log_event("tool", tool=tool, paths=[rel(p) for p in contract_paths(contract, tool_input)],
+                      **{"class": contract["class"]})
     elif tool == "Bash":
         command = tool_input.get("command") or ""
         # Agents without a Read or Skill tool (Codex) load a skill by printing its SKILL.md.
@@ -4020,6 +4122,8 @@ def lift(events):
                   "project_never_fired": [r for r in never if r in project]},
         "slow_hooks": {"count": len(slow), "slowest": max(slow, key=lambda e: e.get("seconds") or 0) if slow else None},
         "candidates": candidates,
+        "tools_without_contract": dict(sorted(Counter(e.get("tool") for e in events if e.get("kind") == "tool-unknown"
+                                                       and e.get("tool") and tool_contract(e["tool"]) is None).items())),
     }
 
 
@@ -4104,6 +4208,9 @@ def report_command(argv):
     print("  slow hook calls: %d%s" % (slow["count"], " (slowest %ss, %s)" % (slow["slowest"].get("seconds"),
                                                                            slow["slowest"].get("hook"))
                                       if slow["slowest"] else ""))
+    unknown = m["tools_without_contract"]
+    print("  tools used with no contract: %s" % ("; ".join("%s (%d)" % kv for kv in unknown.items())
+                                              + " (add contracts in backbone/tools.conf)" if unknown else "none"))
     print("  harness candidates (a failure seen in several tasks):")
     for line in m["candidates"] or ["none"]:
         print("    - %s" % line)
@@ -4131,6 +4238,9 @@ def trace_line(event):
         "run-attempt": lambda e: "attempt %s: %s, %s at step %s, %ss" % (e.get("attempt"), e.get("state"),
                                                                        e.get("cause"), e.get("step"), e.get("seconds")),
         "hook-slow": lambda e: "%s hook took %ss" % (e.get("hook"), e.get("seconds")),
+        "tool": lambda e: "%s (%s)%s" % (e.get("tool"), e.get("class"),
+                                         ": " + ", ".join(e["paths"]) if e.get("paths") else ""),
+        "tool-unknown": lambda e: "%s ran with no tool contract" % e.get("tool"),
     }.get(kind, lambda e: ", ".join("%s=%s" % (k, v) for k, v in sorted(e.items())
                                     if k not in ("at", "kind", "task", "session", "agent")))(event)
     label = {"tests-run": "tests", "run-attempt": "run"}.get(kind, kind)
