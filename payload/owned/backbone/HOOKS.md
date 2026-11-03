@@ -96,16 +96,17 @@ The user can always act directly. Hooks only see agent edits, so the user can ed
 
 ## Verify (`HARNESS_VERIFY`)
 
-The hooks guard edits made through the tools. `harness.py verify` checks the **resulting state**, so it also catches changes made any other way. It runs in the pre-commit hook on the staged change, and in CI on a range of commits:
+The hooks guard edits made through the tools. `harness.py verify` checks the **resulting state**, so it also catches changes made any other way. It runs in the pre-commit hook on the staged change, in the pre-push hook on the commits being pushed, and in CI on a range of commits:
 
 - Every task that became `[WIP]` or `[x]` passes the start gate: valid spec, current grill pass, user approval.
 - Every task that became `[x]` has a judge pass whose fingerprint equals the committed code (in CI, the code of the commit that marked it done), and the pass holds up when re-derived.
+- With `HARNESS_REVIEW` on, every task that became `[x]` also has a pass from each review lens (correctness, structure, lean) on that same code.
 - At most one `[WIP]` task (unless `HARNESS_ALLOW_PARALLEL_WIP="1"`).
 - Verdict history is append-only.
 - User-only settings in `harness.conf` are unchanged.
 - Harness enforcement files (`scripts/harness/`, `.claude/agents/`) match `backbone/.harness-lock.json`, and `.claude/settings.json` still runs the harness hooks.
 
-`HARNESS_VERIFY` is `block` (default) or `off`, and user-only. The user commits a deliberate exception with `HARNESS_VERIFY=off git commit ...`; agents can't set it.
+`HARNESS_VERIFY` is `block` (default) or `off`, and user-only. The user commits or pushes a deliberate exception with `HARNESS_VERIFY=off git commit ...` (or `git push`); agents can't set it.
 
 **CI** is the authoritative copy of this check, because nothing in an agent's session can switch it off. The harness installs `.github/workflows/harness-verify.yml`, which on every pull request:
 - takes `scripts/harness/lib` from the **base branch** and runs it against the pull request's checkout (`HARNESS_ROOT`), so a pull request can't change the verifier that checks it;
@@ -150,7 +151,7 @@ Logs go to `.git/harness/runs/<timestamp>/<task>-<attempt>.log`. Agents can't st
   - `HARNESS_RUN_MAX_COST`: dollars per run. The run stops before the next task once spent. Cost and turns are read from `--output-format json` output (the default command uses it).
   - Per session, add `--max-budget-usd <n>` to `HARNESS_AGENT_CMD`.
 - **`--worktree [--pr]`:** each task runs in its own worktree, on branch `harness/task-<id>` from the current HEAD. The base branch is left untouched.
-  - With `--pr`, a done or escalated task's branch is pushed and a pull request opened (`gh`), so CI gates each task separately.
+  - A done task's branch is delivered by its own session (the deliver step, when `HARNESS_DELIVER` is on). With `--pr`, a blocked or escalated task's branch is pushed and a pull request opened too, for a person to look at.
   - A task that already has a branch is skipped; delete the branch to retry.
   - Tasks run independently of each other, so `3-TASKS.md` may need a rebase between their pull requests.
 - **`--only <id>`** runs one task.
@@ -196,6 +197,27 @@ Regenerate the Codex and OpenCode agents after changing a Claude Code agent: `to
 
 **Debugger** (`HARNESS_DEBUGGER`, default `on`). After a judge fail, `next` sends the task to the debugger before the implementer. It changes nothing and records a fix brief with the root causes, each with an owner, in `backbone/.verdicts/<id>.debug.json`. `next` hands that brief to the implementer, and lists any other owner (the tester, analyst or user) under `needs`.
 
+## Reviewer (`HARNESS_REVIEW`)
+
+`HARNESS_REVIEW` (user-only, default `on`). After the judge passes a task, `next` returns the `review` step with the `lenses` still due: `correctness` (bugs, security, blast radius, missing tests), `structure` and `lean`. Start one `reviewer` per lens, all at once; they work independently, so they run in parallel, and the lenses can run on different models (`--agents reviewer=codex`). Each follows the `change-review` skill and changes nothing.
+
+Its Stop hook (`review-stop`; Codex and OpenCode through `subagent-stop`) records the lens's verdict in `backbone/.verdicts/<id>.review.json`, with the code fingerprint. A `must-fix` finding records a fail whatever verdict the reviewer claimed. A fail sends the task to the implementer with the findings (`fix`); the changed code goes back to the judge, then to the lenses again. A lens that passed on the current code is not run again.
+
+The judge gate, and so `finish`, pre-commit, pre-push and CI `verify`, refuses a finished task without a pass from every lens on its committed code. After `HARNESS_JUDGE_MAX_ROUNDS` consecutive fails of a lens, it says to stop and take the findings to the user.
+
+## Deliverer (`HARNESS_DELIVER`)
+
+`HARNESS_DELIVER` (user-only, default `on`). A finished task is `done` only once the branch tip that holds it is delivered. After the task is `[x]` and committed, `next` returns `deliver` (the `deliverer`). With uncommitted changes or no `origin` remote, it returns `deliver` with no role and says what is `needed`. The deliverer pushes the branch, opens or updates its PR with each task's receipt and the reviews' should-fix findings as follow-ups, and watches `gh pr checks`. It writes nothing in the checkout and never merges.
+
+Its shell commands are held to the role: `gh pr merge`, `close`, `review` and `ready` are refused, and so is a push to the default branch or from it. The main session can still merge.
+
+Its Stop hook (`deliver-stop`; Codex and OpenCode through `subagent-stop`) checks the report against git:
+- `delivered` is refused unless the tree is clean, `HEAD` equals its upstream branch, and `checks` is `passed` or `none`;
+- `hold` and `ci-failed` are refused without findings, each with an owner;
+- every report is logged as a `deliver` event with the PR, the head, the findings and the owners. `next` reads it: `delivered` on the current `HEAD` makes the task `done`; `hold` or `ci-failed` makes it `delivery-failed`, with the findings. A fix goes through the pipeline as a new task, and the next delivery covers the new `HEAD`.
+
+The **pre-push hook** runs `verify` on the commits being pushed, so no push, by the deliverer or anyone else, carries a finished task without its judge and review passes. In `harness.py orca --merge`, tasks are merged into the base locally; the base branch is delivered from its own checkout.
+
 ## Coordinator API
 
 A coordinator asks the harness what a task needs instead of knowing the workflow. The answers come from the artifacts the gates check.
@@ -203,7 +225,7 @@ A coordinator asks the harness what a task needs instead of knowing the workflow
 | Command | Answer |
 |---|---|
 | `harness.py state [--json]` | Every task: state, spec problems, grill and judge verdicts (and whether they are current), approval, open escalations |
-| `harness.py next <id> [--json]` | `progress` is a fingerprint of the whole checkout, specs and verdicts included: the same step with the same `progress` means the last worker changed nothing. The next step and who does it: `define` (analyst or architect), `grill` (griller), `answer` (the griller's questions, routed; `needs_user` says whether any must go to the user), `approve`, `start`, `test` (tester), `implement`, `judge`, `diagnose` (debugger), `fix` (implementer, with the debugger's brief), `finish` (scribe, then `finish`), `blocked`, `done` |
+| `harness.py next <id> [--json]` | `progress` is a fingerprint of the whole checkout, specs and verdicts included: the same step with the same `progress` means the last worker changed nothing. The next step and who does it: `define` (analyst or architect), `grill` (griller), `answer` (the griller's questions, routed; `needs_user` says whether any must go to the user), `approve`, `start`, `test` (tester), `implement`, `judge`, `diagnose` (debugger), `fix` (implementer, with the debugger's brief or the reviews' must-fix findings), `review` (one reviewer per lens in `lenses`, in parallel), `finish` (scribe, then `finish`), `deliver` (deliverer, after the commit), `delivery-failed`, `blocked`, `done` |
 | `harness.py questions <id> [--json]` | The griller's open questions, each routed: design questions to the architect, the rest to the analyst. A question marked `apply` (a non-blocker with the griller's recommendation) is applied by that role without asking |
 | `harness.py start <id>` / `finish <id>` | Mark the task `[WIP]` / `[x]` through the same gates as an edit of `3-TASKS.md` (start: spec, grill, approval, one `[WIP]`; finish: a current judge pass) |
 
@@ -211,10 +233,10 @@ Under an Orca coordinator (`HARNESS_ORCA_RUN` set), `escalate` also sends an `es
 
 ## Orca coordinator (`harness.py orca`)
 
-`python3 scripts/harness/lib/harness.py orca [--tasks 1.3,1.4] [--parallel 2] [--agents default=claude,judge=codex] [--trust] [--merge | --pr] [--dry-run]` drives ready tasks with [Orca](https://github.com/stablyai/orca) supervised workers. It needs autonomous mode and a running Orca.
+`python3 scripts/harness/lib/harness.py orca [--tasks 1.3,1.4] [--parallel 2] [--agents default=claude,judge=codex] [--trust] [--merge] [--dry-run]` drives ready tasks with [Orca](https://github.com/stablyai/orca) supervised workers. It needs autonomous mode and a running Orca.
 
 - **A queue.** All ready tasks are queued; up to `--parallel` run at once, and the next one starts as soon as a slot frees. A task waits for the tasks named on its line, `- [ ] **Task 1.4: ...** (spec: ...) (after: 1.2, 1.3)`, until they are `[x]` on the base branch. `--dry-run` shows what each task waits for.
-- **`--merge`** merges each finished task's branch into the base branch, so the tasks after it build on it. Parallel tasks both edit `3-TASKS.md` and append to `6-MEMORY.md` and `5-DECISIONS.md`. When those are the only conflicts, the coordinator resolves them: the base's task list with this task marked `[x]`, and both sides of each log. Harness-owned files take the base's version, and `escalations.md` is merged by entry. A **code** conflict (parallel tasks built the same module) starts an **integrate** step: the coordinator merges the base into the task's branch in its worktree, an implementer worker resolves only the conflicted code files, and the coordinator commits that and runs `HARNESS_TEST_CMD` (`harness.py test-run`) before merging. If conflict markers remain or the tests fail, the task is escalated. A resumed run merges tasks that finished on their branch earlier. Use `--pr` instead to open one pull request per task.
+- **`--merge`** merges each finished task's branch into the base branch, so the tasks after it build on it. Parallel tasks both edit `3-TASKS.md` and append to `6-MEMORY.md` and `5-DECISIONS.md`. When those are the only conflicts, the coordinator resolves them: the base's task list with this task marked `[x]`, and both sides of each log. Harness-owned files take the base's version, and `escalations.md` is merged by entry. A **code** conflict (parallel tasks built the same module) starts an **integrate** step: the coordinator merges the base into the task's branch in its worktree, an implementer worker resolves only the conflicted code files, and the coordinator commits that and runs `HARNESS_TEST_CMD` (`harness.py test-run`) before merging. If conflict markers remain or the tests fail, the task is escalated. A resumed run merges tasks that finished on their branch earlier. Without `--merge`, each task's branch is delivered by the deliver step: one pull request per task.
 - **One Orca worktree per task** (`harness-task-<id>`, from the current branch), so tasks run in parallel without sharing `3-TASKS.md`. The repository is registered with Orca if it isn't yet.
 - **One worker per step.** The coordinator asks `harness.py next <id>` what the task needs. For a role step it starts a worker with a self-contained spec: target, change, ownership, constraints and the acceptance check. The worker delegates the step to the role agent, and the hooks hold that agent to its role. Approve, start, finish and the commit the coordinator runs itself, through the same gates.
 - **Questions between agents.** A worker that needs an answer asks the coordinator (`orca orchestration ask`). The coordinator starts an analyst worker, or an architect worker for design questions, to answer from `backbone/` and the knowledge source. The answer goes into the spec under Assumptions, with its source, and the reply tells the asker where it is. A question nobody can answer from the sources is escalated. A spec that changed during the build is grilled again before the task goes on.
@@ -222,7 +244,7 @@ Under an Orca coordinator (`HARNESS_ORCA_RUN` set), `escalate` also sends an `es
 - **Permission prompts.** A worker must run Orca's own commands to report back. For Codex, the harness ships `.codex/rules/harness.rules`, which allows exactly `orca orchestration check`, `send` and `ask` without asking; every other command still follows Codex's own approvals. Codex loads it once the project's `.codex/` layer is trusted, which `--trust` does for task worktrees. A worker still waiting at a prompt (another agent, another command) is logged by the coordinator and never answered.
 - **`--trust`** marks the repository and each task worktree trusted for Claude Code (`~/.claude.json`) and Codex (`~/.codex/config.toml`). Claude Code decides trust for a worktree by its main repository. Without it, a worker in a new worktree waits at its trust dialog, which Orca reports as `Agent startup blocked: agent-trust-workspace`.
 - **Safety.** The coordinator follows Orca's lifecycle rules: it acknowledges every delivery after processing it, and releases a worker only after it settles. It never stops, abandons or retries a worker by itself. A role step that comes back with the same `progress` as when its worker started, after the worker reported success (it changed nothing), is escalated instead of started again, and so is a step that comes back more than 3 times. `.git/harness/STOP` halts it.
-- **The end.** It commits each finished task on its branch (and opens a PR with `--pr`), then reports every task's outcome and the open escalations. Answer those, then run it again: it picks up where the tasks stand.
+- **The end.** It commits each finished task on its branch and runs its deliver step (a `delivery-failed` is escalated), then reports every task's outcome, PR and the open escalations. Answer those, then run it again: it picks up where the tasks stand.
 
 ## Knowledge source (`HARNESS_KNOWLEDGE_ROOT`)
 

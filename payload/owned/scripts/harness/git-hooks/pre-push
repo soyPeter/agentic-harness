@@ -1,0 +1,4 @@
+#!/bin/sh
+# Harness-owned. Active through: git config core.hooksPath scripts/harness/git-hooks
+# Runs verify on the commits being pushed (reviews included), the same check CI runs on the pull request.
+exec python3 "$(git rev-parse --show-toplevel)/scripts/harness/lib/harness.py" git pre-push "$1"

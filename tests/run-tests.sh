@@ -10,6 +10,8 @@ WORK="$(cd "$WORK" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 export GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.com \
        GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com
+# The review lenses and delivery are on by default; sections that test them switch them on again.
+export HARNESS_REVIEW=off HARNESS_DELIVER=off
 PASS=0
 FAIL=0
 
@@ -444,7 +446,7 @@ print("\n".join(problems) or "OK")
 EOF
 )
 contains "every skill follows the format contract" "OK" "$out"
-for s in requirements-writing adr-writing architecture api-design openapi code-quality module-testing security changelog \
+for s in requirements-writing adr-writing architecture api-design openapi code-quality module-testing security changelog change-review \
          java java-test java-review quarkus quarkus-cdi jdbi containers container-security; do
   contains "skill present: $s" " $s" " ${out%%$'\n'*} "
 done
@@ -1313,6 +1315,126 @@ hookf "$A" subagent-stop codex "$(treport 8.4 | python3 -c 'import json,sys; d=j
 sed -i.bak 's/^- \[WIP\] \*\*Task 8\.4/- [ ] **Task 8.4/' "$AT" && rm -f "$AT.bak"
 unset HARNESS_TESTER
 
+section "deliverer"
+DL="$WORK/deliver"; new_repo "$DL"; "$HARNESS/bootstrap.sh" "$DL" --name dl >/dev/null
+git -C "$DL" add -A && HARNESS_VERIFY=off git -C "$DL" commit -qm "chore: adopt agentic harness"
+git init -q --bare "$WORK/deliver-remote.git" && git -C "$DL" remote add origin "$WORK/deliver-remote.git"
+git -C "$DL" checkout -q -b feat/x
+mkdir -p "$DL/src" && echo "x = 1" > "$DL/src/x.py"
+git -C "$DL" add -A && HARNESS_VERIFY=off git -C "$DL" commit -qm "feat: x"
+expect 2 "the deliverer may not edit" guard "$DL" deliverer "$(wj "$DL/src/x.py")"
+expect 0 "the deliverer may push" guard "$DL" deliverer "$(bash_json 'git push -u origin HEAD')"
+dbash() { python3 -c 'import json,sys; print(json.dumps({"session_id":"dl","agent_id":"dl","agent_type":"deliverer","tool_name":"Bash","tool_input":{"command":sys.argv[1]}}))' "$1"; }
+expect 0 "the deliverer may push its branch" hook "$DL" pre-tool-use "$(dbash 'git push -u origin HEAD')"
+expect 0 "the deliverer may open a PR" hook "$DL" pre-tool-use "$(dbash 'gh pr create --base main --title t --body b')"
+out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr merge 7 --squash')" 2>&1; echo "exit=$?")
+contains "the deliverer may not merge" "exit=2" "$out"
+contains "the refusal says merging is the user's" "merging is the user's" "$out"
+expect 2 "the deliverer may not approve a PR" hook "$DL" pre-tool-use "$(dbash 'gh pr review 7 --approve')"
+expect 2 "the deliverer may not push to the default branch" hook "$DL" pre-tool-use "$(dbash 'git push origin HEAD:main')"
+expect 0 "merging stays open to the main session" hook "$DL" pre-tool-use "$(bash_json 'gh pr merge 7 --squash')"
+git -C "$DL" checkout -q main
+expect 2 "the deliverer may not push while on the default branch" hook "$DL" pre-tool-use "$(dbash 'git push -u origin HEAD')"
+git -C "$DL" checkout -q feat/x
+# dlreport <delivery> <checks> <findings json>: the deliverer's final message
+dlreport() { python3 -c 'import json,sys; print(json.dumps({"agent_type":"deliverer","last_assistant_message":"```json\n"+json.dumps({"delivery":sys.argv[1],"branch":"feat/x","base":"main","pr":"https://example.test/pr/1","checks":sys.argv[2],"findings":json.loads(sys.argv[3]),"summary":"s"})+"\n```"}))' "$1" "$2" "$3"; }
+out=$(hook "$DL" deliver-stop "$(dlreport delivered passed '[]')" 2>&1; echo "exit=$?")
+contains "delivered is refused while the branch isn't pushed" "is not pushed" "$out"
+contains "the refusal blocks the stop" "exit=2" "$out"
+git -C "$DL" push -q -u origin HEAD 2>/dev/null
+expect 2 "delivered is refused while a CI check failed" hook "$DL" deliver-stop "$(dlreport delivered failed '[]')"
+echo "y = 2" >> "$DL/src/x.py"
+out=$(hook "$DL" deliver-stop "$(dlreport delivered passed '[]')" 2>&1; echo "exit=$?")
+contains "delivered is refused with uncommitted changes" "uncommitted" "$out"
+git -C "$DL" checkout -q -- src/x.py
+expect 0 "delivered is recorded once pushed, clean and green" hook "$DL" deliver-stop "$(dlreport delivered passed '[]')"
+contains "the delivery is logged with its PR" '"pr": "https://example.test/pr/1"' "$(grep '"deliver"' "$DL/.git/harness/events.jsonl" | tail -1)"
+expect 2 "hold needs the findings that stop delivery" hook "$DL" deliver-stop "$(dlreport hold none '[]')"
+expect 0 "hold with findings is recorded" hook "$DL" deliver-stop "$(dlreport hold none '[{"severity":"must-fix","file":"src/x.py","line":1,"issue":"i","fix":"f","owner":"implementer"}]')"
+expect 2 "an unknown delivery outcome is refused" hook "$DL" deliver-stop "$(dlreport shipped passed '[]')"
+expect 2 "the deliverer must end with its report" hook "$DL" deliver-stop "$(stop_json deliverer 'done')"
+hookf "$DL" subagent-stop codex "$(dlreport hold none '[{"severity":"must-fix","issue":"i","fix":"f","owner":"implementer"}]')" >/dev/null 2>&1
+[ "$(grep -c '"kind": "deliver"' "$DL/.git/harness/events.jsonl")" -eq 3 ] && ok "codex: the deliverer's SubagentStop records too" || bad "codex: the deliverer's SubagentStop records too"
+contains "codex runs the deliverer's recorder" "deliverer" "$(cat "$DL/.codex/hooks.json")"
+contains "opencode runs the deliverer's recorder" '"deliverer"' "$(cat "$DL/.opencode/plugins/harness.js")"
+
+section "review lenses and delivery"
+# rreport <task> <lens> <claimed verdict> <findings json>: a reviewer's final message
+rreport() { python3 -c 'import json,sys; print(json.dumps({"agent_type":"reviewer","last_assistant_message":"```json\n"+json.dumps({"task":sys.argv[1],"lens":sys.argv[2],"verdict":sys.argv[3],"findings":json.loads(sys.argv[4]),"summary":"s"})+"\n```"}))' "$1" "$2" "$3" "$4"; }
+MUST='[{"severity":"must-fix","file":"src/r20.py","line":2,"issue":"returns the wrong total","fix":"sum all items","owner":"implementer"}]'
+SHOULD='[{"severity":"should-fix","file":"src/r20.py","line":1,"issue":"hand-written sum","fix":"use sum()","owner":"implementer"}]'
+git -C "$A" add -A && HARNESS_VERIFY=off git -C "$A" commit -qm "chore: fixture" >/dev/null 2>&1
+export HARNESS_REVIEW=on
+auto_spec 8.20 ""
+grill_pass 8.20 >/dev/null; $AH approve 8.20 >/dev/null
+HARNESS_ALLOW_PARALLEL_WIP=1 $AH start 8.20 >/dev/null
+printf 'def r():  # AC-8.20-1 AC-8.20-2\n    return 1\n' > "$A/src/r20.py"
+printf 'def test_r():  # AC-8.20-1 AC-8.20-2\n    assert True\n' > "$A/tests/test_r20.py"
+hook "$A" judge-stop "$(judge_report 8.20 pass)" >/dev/null 2>&1
+contains "fixture: the judge passed 8.20" '"verdict": "pass"' "$(cat "$A/backbone/.verdicts/8.20.judge.json")"
+step=$($AH next 8.20 --json)
+contains "next: after the judge, the reviewer" '"role": "reviewer"' "$step"
+lenses() { python3 -c 'import json,sys; print(" ".join(json.loads(sys.argv[1]).get("lenses") or []))' "$1"; }
+contains "next: all three lenses are due, to run in parallel" "correctness structure lean" "$(lenses "$step")"
+contains "next: with the review off, the scribe follows the judge" '"step": "finish"' "$(HARNESS_REVIEW=off $AH next 8.20 --json)"
+out=$($AH finish 8.20; echo "exit=$?")
+contains "finish refuses a task without its reviews" "has no correctness review" "$out"
+expect 2 "the reviewer may not edit" guard "$A" reviewer "$(wj "$A/src/r20.py")"
+expect 2 "a review names one of the lenses" hook "$A" review-stop "$(rreport 8.20 style pass '[]')"
+expect 2 "the reviewer must end with its report" hook "$A" review-stop "$(stop_json reviewer 'looks fine')"
+expect 0 "a review is recorded" hook "$A" review-stop "$(rreport 8.20 correctness pass "$MUST")"
+contains "a claimed pass with a must-fix finding is recorded as a fail" '"verdict": "fail"' "$(cat "$A/backbone/.verdicts/8.20.review.json")"
+step=$($AH next 8.20 --json)
+contains "next: a must-fix finding goes to the implementer" '"step": "fix"' "$step"
+contains "next: the fix carries the review's findings" "returns the wrong total" "$step"
+printf 'def r():  # AC-8.20-1 AC-8.20-2\n    return 2\n' > "$A/src/r20.py"
+contains "next: the fixed code goes back to the judge" '"step": "judge"' "$($AH next 8.20 --json)"
+hook "$A" judge-stop "$(judge_report 8.20 pass)" >/dev/null 2>&1
+hook "$A" review-stop "$(rreport 8.20 correctness pass '[]')" >/dev/null 2>&1
+step=$($AH next 8.20 --json)
+contains "next: only the lenses without a current pass are due" "structure lean" "$(lenses "$step")"
+lacks "next: a lens that passed on the current code is not due again" "correctness" "$(lenses "$step")"
+hook "$A" review-stop "$(rreport 8.20 structure pass "$SHOULD")" >/dev/null 2>&1
+expect 0 "codex: the reviewer's SubagentStop records too" hookf "$A" subagent-stop codex "$(rreport 8.20 lean pass '[]')"
+contains "next: with every lens passed, the scribe" '"step": "finish"' "$($AH next 8.20 --json)"
+out=$($AH finish 8.20; echo "exit=$?")
+contains "with every lens passed, the task finishes" "finish: task 8.20 is [x]" "$out"
+contains "codex runs the reviewer's recorder" "reviewer" "$(cat "$A/.codex/hooks.json")"
+contains "opencode runs the reviewer's recorder" '"reviewer"' "$(cat "$A/.opencode/plugins/harness.js")"
+git -C "$A" add -A && git -C "$A" commit -qm "feat: task 8.20" 2>/dev/null
+contains "the reviewed task commits" "feat: task 8.20" "$(git -C "$A" log -1 --format=%s)"
+contains "next: with delivery off, a finished task is done" '"step": "done"' "$($AH next 8.20 --json)"
+export HARNESS_DELIVER=on
+step=$($AH next 8.20 --json)
+contains "next: without an origin remote, delivery needs the user" '"needed": "an origin remote' "$step"
+git init -q --bare "$WORK/auto-remote.git" && git -C "$A" remote add origin "$WORK/auto-remote.git"
+HARNESS_VERIFY=off git -C "$A" push -q origin HEAD~1:refs/heads/main 2>/dev/null
+contains "next: a finished task goes to the deliverer" '"role": "deliverer"' "$($AH next 8.20 --json)"
+out=$(git -C "$A" push -q -u origin HEAD 2>&1; echo "exit=$?")
+contains "pre-push lets reviewed work through" "exit=0" "$out"
+dreport8() { python3 -c 'import json,sys; print(json.dumps({"agent_type":"deliverer","last_assistant_message":"```json\n"+json.dumps({"delivery":sys.argv[1],"branch":"main","base":"main","pr":"https://example.test/pr/2","checks":sys.argv[2],"findings":json.loads(sys.argv[3]),"summary":"s"})+"\n```"}))' "$1" "$2" "$3"; }
+hook "$A" deliver-stop "$(dreport8 ci-failed failed '[{"severity":"must-fix","issue":"lint job fails","fix":"f","owner":"implementer"}]')" >/dev/null 2>&1
+step=$($AH next 8.20 --json)
+contains "next: a red CI stops at delivery-failed" '"step": "delivery-failed"' "$step"
+contains "next: delivery-failed carries the CI findings" "lint job fails" "$step"
+hook "$A" deliver-stop "$(dreport8 delivered passed '[]')" >/dev/null 2>&1
+contains "next: once delivered, the task is done" '"step": "done"' "$($AH next 8.20 --json)"
+auto_spec 8.21 ""
+grill_pass 8.21 >/dev/null; $AH approve 8.21 >/dev/null
+HARNESS_ALLOW_PARALLEL_WIP=1 $AH start 8.21 >/dev/null
+printf 'def r7():  # AC-8.21-1 AC-8.21-2\n    return 1\n' > "$A/src/r21.py"
+printf 'def test_r21():  # AC-8.21-1 AC-8.21-2\n    assert True\n' > "$A/tests/test_r21.py"
+hook "$A" judge-stop "$(judge_report 8.21 pass)" >/dev/null 2>&1
+HARNESS_REVIEW=off $AH finish 8.21 >/dev/null
+git -C "$A" add -A && HARNESS_REVIEW=off git -C "$A" commit -qm "feat: task 8.21" 2>/dev/null
+contains "fixture: 8.21 committed without reviews" "feat: task 8.21" "$(git -C "$A" log -1 --format=%s)"
+out=$(git -C "$A" push -q origin HEAD 2>&1; echo "exit=$?")
+contains "pre-push refuses a finished task without its reviews" "has no correctness review" "$out"
+lacks "the refused push changed nothing on the remote" "feat: task 8.21" "$(git -C "$WORK/auto-remote.git" log -1 --format=%s)"
+expect 0 "the user can push a deliberate exception" env HARNESS_VERIFY=off git -C "$A" push -q origin HEAD
+unset HARNESS_DELIVER HARNESS_REVIEW
+export HARNESS_REVIEW=off HARNESS_DELIVER=off
+
 section "worktrees keep their own out-of-band snapshot"
 WT="$WORK/wt-main"; new_repo "$WT"; "$HARNESS/bootstrap.sh" "$WT" --name wt >/dev/null
 git -C "$WT" add -A && HARNESS_VERIFY=off git -C "$WT" commit -qm "chore: adopt"
@@ -1658,6 +1780,34 @@ out=$(FAKE_ORCA_STATE="$WORK/orca-state-idle.json" FAKE_ORCA_IDLE=fix HARNESS_TE
       HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.18 --wait-ms 10 2>&1)
 contains "orca: a worker that changed nothing is not started again for the same step" "escalated (no progress at fix)" "$out"
 contains "orca: the escalation says the worker changed nothing" "the fix worker changed nothing" "$(cat "$WORK/orca-worktrees/harness-task-9.18/backbone/escalations.md")"
+python3 - "$WORK/fake-orca.py" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+s = s.replace('''        elif step == "fix":''', '''        elif step == "review":
+            for lens in re.findall(r'"(correctness|structure|lean)"', spec):
+                harness(cwd, "hook", "review-stop", stdin=report("reviewer", {"task": task, "lens": lens, "verdict": "pass", "findings": [], "summary": "s"}))
+            done(d, h)
+        elif step == "deliver":
+            subprocess.run(["git", "push", "-q", "-u", "origin", "HEAD"], cwd=cwd, capture_output=True)
+            harness(cwd, "hook", "deliver-stop", stdin=report("deliverer", {"delivery": "delivered", "branch": "b", "base": "main", "pr": "https://example.test/pr/%s" % task, "checks": "passed", "findings": [], "summary": "s"}))
+            done(d, h)
+        elif step == "fix":''', 1)
+open(p, "w").write(s)
+PY
+git init -q --bare "$WORK/orca-remote.git" && git -C "$O" remote add origin "$WORK/orca-remote.git"
+HARNESS_VERIFY=off git -C "$O" push -q origin main 2>/dev/null
+printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/9.30/g" -e 's/^- python: all code$/- code-quality: all code/' > "$O/backbone/specs/9.30.md"
+printf '%s' "$(python3 -c 'import json; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":"9.30","questions":[],"summary":"s"})+"\n```"}))')" \
+  | python3 "$O/scripts/harness/lib/harness.py" hook grill-stop >/dev/null
+printf -- '- [ ] **Task 9.30: Reviewed and delivered** (spec: backbone/specs/9.30.md)\n' >> "$O/backbone/3-TASKS.md"
+$OH approve 9.30 >/dev/null 2>&1
+git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: task 9.30"
+out=$(FAKE_ORCA_STATE="$WORK/orca-state-deliver.json" HARNESS_REVIEW=on HARNESS_DELIVER=on HARNESS_TEST_CMD=true \
+      HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.30 --wait-ms 10 2>&1)
+contains "orca: every lens recorded a pass" "correctness lean structure" "$(python3 -c 'import json,sys; print(" ".join(sorted({e["lens"] for e in json.load(open(sys.argv[1]))["history"] if e["verdict"]=="pass"})))' "$WORK/orca-worktrees/harness-task-9.30/backbone/.verdicts/9.30.review.json")"
+contains "orca: a finished task is delivered, not just committed" "task 9.30: done" "$out"
+contains "orca: the summary carries the delivered PR" "https://example.test/pr/9.30" "$out"
+expect 0 "orca: the deliverer pushed the task branch" git -C "$WORK/orca-remote.git" rev-parse --verify -q harness-task-9.30
 unset FAKE_ORCA_STATE
 
 section "autonomous mode: judging, risk drift, kill switch"
@@ -1743,6 +1893,8 @@ case "$task" in
   4.11) date +%s%N >> "progress-4.11.txt"
         python3 -c 'import json; print(json.dumps({"tool_name":"Bash","tool_input":{"command":"git commit -n -m x"}}))' \
           | python3 scripts/harness/lib/harness.py hook pre-tool-use >/dev/null 2>&1 ;;
+  4.30|4.31) sed -i.bak "s/^- \[ \] \*\*Task $task/- [x] **Task $task/" backbone/3-TASKS.md && rm -f backbone/3-TASKS.md.bak
+       echo "done" > "out-$task.txt"; git add -A; HARNESS_VERIFY=off git commit -qm "feat: task $task" ;;
   6.1) sed -i.bak "s/^- \[ \] \*\*Task 6.1/- [x] **Task 6.1/" backbone/3-TASKS.md && rm -f backbone/3-TASKS.md.bak
        echo "done" > "out-6.1.txt"; git add -A; HARNESS_VERIFY=off git commit -qm "feat: task 6.1" ;;
 esac
@@ -1778,6 +1930,18 @@ contains "run: a task with no progress is escalated after the attempts" "escalat
 contains "run: attempts are retried" "task 4.3 attempt 2" "$out"
 contains "run: the stalled task is BLOCKED by the runner" "Task 4.3: Item 4.3** (spec: backbone/specs/4.3.md) — BLOCKED: runner" "$(cat "$RT")"
 [ -f "$(ls "$R"/.git/harness/runs/*/4.1-1.log | head -1)" ] && ok "run keeps a log per agent session" || bad "run keeps a log per agent session"
+RD="$WORK/runner-deliver"; new_repo "$RD"; "$HARNESS/bootstrap.sh" "$RD" --name rd >/dev/null; trust "$RD"
+printf -- '- [ ] **Task 4.30: Undeliverable** (spec: backbone/specs/4.30.md)\n- [ ] **Task 4.31: Undelivered** (spec: backbone/specs/4.31.md)\n' >> "$RD/backbone/3-TASKS.md"
+git -C "$RD" add -A && HARNESS_VERIFY=off git -C "$RD" commit -qm "chore: adopt" >/dev/null
+out=$(HARNESS_DELIVER=on python3 "$RD/scripts/harness/lib/harness.py" run --only 4.30 2>&1)
+contains "run: a finished task that can't be delivered is escalated at once" "escalated    task 4.30" "$out"
+lacks "run: and is not retried" "task 4.30 attempt 2" "$out"
+contains "run: the escalation says what delivery needs" "an origin remote" "$(cat "$RD/backbone/escalations.md")"
+git -C "$RD" add -A && HARNESS_VERIFY=off git -C "$RD" commit -qm "chore: escalation" >/dev/null
+git init -q --bare "$WORK/runner-remote.git" && git -C "$RD" remote add origin "$WORK/runner-remote.git"
+out=$(HARNESS_DELIVER=on python3 "$RD/scripts/harness/lib/harness.py" run --only 4.31 2>&1)
+contains "run: a committed but undelivered task is not done" "task 4.31 attempt 1: undelivered" "$out"
+contains "run: the retry is told to deliver" "did not deliver it: run the deliverer" "$(cat "$RD/.git/prompts-4.31.txt")"
 printf -- '- [ ] **Task 4.4: Slow** (spec: backbone/specs/4.4.md)\n- [ ] **Task 4.5: Halts** (spec: backbone/specs/4.5.md)\n- [ ] **Task 4.6: Never reached** (spec: backbone/specs/4.6.md)\n' >> "$RT"
 out=$(HARNESS_RUN_TASK_TIMEOUT=1 HARNESS_RUN_ATTEMPTS=1 python3 "$R/scripts/harness/lib/harness.py" run 2>&1)
 contains "run: a session over the time budget is cut off" "task 4.4 attempt 1: pending" "$out"

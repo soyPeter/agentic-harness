@@ -33,7 +33,7 @@ Read `backbone/4-KNOWLEDGE.md`, `backbone/7-CONVENTIONS.md`, `backbone/8-WORKFLO
 
 ## 3. The pipeline
 
-Every task goes through four phases. You, the main session, are the **orchestrator**: you run the agents, relay questions to the user, and keep `3-TASKS.md` current. You don't write specs, ADRs or code yourself. `8-WORKFLOW.md` has the step-by-step loop.
+Every task goes through five phases. You, the main session, are the **orchestrator**: you run the agents, relay questions to the user, and keep `3-TASKS.md` current. You don't write specs, ADRs or code yourself. `8-WORKFLOW.md` has the step-by-step loop.
 
 | Phase | Agent | Produces | Gate (enforced by hooks) |
 |---|---|---|---|
@@ -42,7 +42,9 @@ Every task goes through four phases. You, the main session, are the **orchestrat
 | | `griller` | Questions and a verdict on the spec and ADRs | **Start gate:** a task can only become `[WIP]` with a valid spec, a griller **pass** on its current text and ADRs, and the **user's** `Approved-by:` line |
 | 2. Build | `implementer` | Code and tests; tests mention the AC ids they prove | **Skill gate:** a file can't be edited until every skill routed to it (and every skill in the spec) has been loaded in that session |
 | 3. Judge | `judge` | A verdict on requirements, ACs and tests | **Judge gate:** a task can only become `[x]` with a judge **pass** on the current code, every AC traced to a test |
+| | `reviewer` × 3 | One verdict per lens (correctness, structure, lean), run in parallel | The judge gate also needs a pass from every lens on the current code |
 | 4. Record | `scribe` | `6-MEMORY.md` entries; ADRs for emergent decisions | — |
+| 5. Deliver | `deliverer` | The push, the PR and a CI watch; it never edits or merges | **Pre-push:** pushed commits pass verify, reviews included. A task is `done` once its `HEAD` is delivered with CI green |
 
 **Grilling** means you take the griller's **open** questions verbatim to the user — blockers, and anything it left without a recommendation. A non-blocker the griller gave a recommendation for is marked `apply` (`harness.py questions <id>`): have the analyst or architect apply it without asking the user. Get answers, have the analyst or architect revise, and grill again until it passes. Then ask the user to review the spec and add their approval line. Only the user can approve; agents' edits to `Approved-by:` lines are refused, and an approved spec is frozen.
 
@@ -66,7 +68,7 @@ Every task goes through four phases. You, the main session, are the **orchestrat
 
 Skills live in `.claude/skills/<name>/SKILL.md`:
 
-- **Core skills:** `requirements-writing`, `adr-writing`, `architecture`, `api-design`, `openapi`, `code-quality`, `module-testing`, `security` and `changelog` (at release time).
+- **Core skills:** `requirements-writing`, `adr-writing`, `architecture`, `api-design`, `openapi`, `code-quality`, `module-testing`, `security`, `changelog` (at release time) and `change-review` (the reviewers' lenses).
 - **Stack skills:** come from catalog packs adopted after the stack ADR. Session start lists the adopted packs.
 - **Project skills:** anything else the project needs. List them in `backbone/9-AGENT-SKILLS.md`.
 

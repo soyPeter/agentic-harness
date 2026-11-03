@@ -2,7 +2,7 @@
 
 Harness-owned guide. Skills live in `.claude/skills/<name>/SKILL.md`, which Claude Code discovers natively; other agents read the same files.
 
-- **Harness core skills** (replaced on update): `requirements-writing`, `adr-writing`, `architecture`, `api-design`, `openapi`, `code-quality`, `module-testing`, `security`, `changelog`.
+- **Harness core skills** (replaced on update): `requirements-writing`, `adr-writing`, `architecture`, `api-design`, `openapi`, `code-quality`, `module-testing`, `security`, `changelog`, `change-review`.
 - **Stack skills** (from the catalog, replaced on update once adopted): the harness assumes no language, framework or tool. The stack is decided in the design phase in an ADR. Packs in `scripts/harness/catalog/` stay inert until that ADR is accepted and they are adopted:
 
   ```

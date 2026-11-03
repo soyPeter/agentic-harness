@@ -38,7 +38,7 @@ needs `HARNESS_AUTONOMY="autonomous"` in `backbone/harness.conf`, which only the
 1. **Ask the harness, every time.** Before each step run `python3 scripts/harness/lib/harness.py next <id> --json`
    and do what it says: `step`, `role`, `command`, `questions`, `brief`. Never decide the next step yourself.
 2. **One worker per step, delegating to the role.** A worker's spec names the step and the role agent it must use
-   (analyst, architect, griller, tester, implementer, judge, debugger, scribe). The worker orchestrates; the role
+   (analyst, architect, griller, tester, implementer, judge, debugger, reviewer, scribe, deliverer). The worker orchestrates; the role
    agent edits, and the hooks hold it to its role.
 3. **Command steps go through the harness.** When `next` returns a `command` (`harness.py approve <id>`,
    `start <id>`), run it yourself, and run `harness.py finish <id>` when it says `finish`. When it returns `needed`
