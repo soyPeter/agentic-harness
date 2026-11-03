@@ -22,17 +22,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|Write|Edit|MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py\" hook pre-tool-use",
-            "timeout": 30
-          }
-        ]
-      },
-      {
-        "matcher": "mcp__knowledge__.*",
+        "matcher": "^(?!(Read|Grep|Glob|LS|TodoWrite)$)",
         "hooks": [
           {
             "type": "command",
@@ -44,7 +34,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Bash|Write|Edit|MultiEdit|Read|Skill",
+        "matcher": "^(?!(Grep|Glob|LS|TodoWrite)$)",
         "hooks": [
           {
             "type": "command",

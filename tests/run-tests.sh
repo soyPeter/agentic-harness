@@ -2529,5 +2529,83 @@ contains "light lane: a task marked (light) after it started has no recorded sta
 expect 2 "light lane: agents cannot switch the lane on" hook "$G" pre-tool-use "$(edit_json "$G/backbone/harness.conf" 'HARNESS_LIGHT_LANE="off"' 'HARNESS_LIGHT_LANE="on"')"
 unset HARNESS_LIGHT_LANE HARNESS_TEST_CMD
 
+section "tool contracts: every tool that can change something goes through the gate"
+T="$WORK/tools"
+new_repo "$T"
+"$HARNESS/bootstrap.sh" "$T" --name tools >/dev/null
+TH="python3 $T/scripts/harness/lib/harness.py"
+mkdir -p "$T/src"
+# tjson <tool> <input json> [main]: a tool call from a subagent, or from the main session with "main"
+tjson() { python3 -c 'import json,sys; d={"session_id":"s","tool_name":sys.argv[1],"tool_input":json.loads(sys.argv[2])}
+if sys.argv[3] != "main": d["agent_id"] = "a"
+print(json.dumps(d))' "$1" "$2" "${3:-}"; }
+nb() { tjson NotebookEdit "{\"notebook_path\": \"$1\", \"new_source\": \"x = 1\"}" "${2:-}"; }
+out=$(python3 - "$T/.claude/settings.json" <<'PYEOF2'
+import json, re, sys
+groups = json.load(open(sys.argv[1]))["hooks"]["PreToolUse"]
+matchers = [g.get("matcher", "") for g in groups if any("hook pre-tool-use" in h["command"] for h in g["hooks"])]
+def hit(tool):  # Claude Code: only letters, digits, _, -, |, spaces and commas is an exact list; else an unanchored regex
+    return any(tool in re.split(r"\s*[|,]\s*", m) if re.fullmatch(r"[\w\s|,-]*", m) else re.search(m, tool)
+               for m in matchers)
+for tool in ("NotebookEdit", "mcp__fs__write_file", "WebFetch", "Task", "Write", "Bash", "mcp__knowledge__search"):
+    print("%s %s" % (tool, "gated" if hit(tool) else "ungated"))
+for tool in ("Read", "Grep", "Glob"):
+    print("%s %s" % (tool, "gated" if hit(tool) else "skipped"))
+PYEOF2
+)
+lacks "tools: the PreToolUse hook sees every tool that can change something" "ungated" "$out"
+lacks "tools: reads don't start the hook (no cost on every Read, Grep or Glob)" " gated" "$(printf '%s\n' "$out" | grep -E '^(Read|Grep|Glob) ')"
+contains "tools: Codex sends MCP tools through the gate" 'mcp__.*' "$(grep pre-tool-use "$T/.codex/hooks.json")"
+out=$(hook "$T" pre-tool-use "$(nb "$T/backbone/3-TASKS.md")" 2>&1; echo "exit=$?")
+contains "tools: NotebookEdit can't write backbone/3-TASKS.md" "exit=2" "$out"
+contains "tools: the refusal names the file tools" "Write or Edit" "$out"
+expect 0 "tools: a subagent's NotebookEdit on src/ is allowed" hook "$T" pre-tool-use "$(nb "$T/src/a.ipynb")"
+out=$(hook "$T" pre-tool-use "$(nb "$T/src/a.ipynb" main)" 2>&1; echo "exit=$?")
+contains "tools: NotebookEdit gets the file gates (the main session doesn't write code)" "orchestrates" "$out"
+contains "tools: ... and is refused" "exit=2" "$out"
+out=$(hook "$T" pre-tool-use "$(tjson mcp__fs__write_file '{"path": "src/b.txt", "content": "x"}')" 2>&1; echo "exit=$?")
+contains "tools: supervised: a tool with no contract runs" "exit=0" "$out"
+contains "tools: supervised: ... with a warning" "no tool contract" "$out"
+contains "tools: the unknown tool is logged" '"kind": "tool-unknown"' "$(cat "$T/.git/harness/events.jsonl")"
+hook "$T" pre-tool-use "$(tjson mcp__web__post '{"url": "https://example.com"}')" >/dev/null 2>&1
+out=$(HARNESS_AUTONOMY=autonomous hook "$T" pre-tool-use "$(tjson mcp__fs__write_file '{"path": "src/b.txt", "content": "x"}')" 2>&1; echo "exit=$?")
+contains "tools: autonomous: a tool with no contract is refused" "exit=2" "$out"
+contains "tools: autonomous: ... and the refusal says where contracts go" "backbone/tools.conf" "$out"
+for t in WebFetch Task ToolSearch TodoWrite glob; do
+  lacks "tools: the built-in $t has a contract" "no tool contract" "$(hook "$T" pre-tool-use "$(tjson "$t" '{}')" 2>&1)"
+done
+cat >> "$T/backbone/tools.conf" <<'EOF'
+mcp__fs__write_file    write   path=path
+mcp__fs__move          write
+mcp__deploy__*         exec    confirm
+NotebookEdit           read
+EOF
+out=$(HARNESS_AUTONOMY=autonomous hook "$T" pre-tool-use "$(tjson mcp__fs__write_file '{"path": "src/b.txt", "content": "x"}')" 2>&1; echo "exit=$?")
+contains "tools: a registered write tool on src/ runs in autonomous mode" "exit=0" "$out"
+lacks "tools: ... without a warning" "no tool contract" "$out"
+expect 2 "tools: a registered write tool can't write backbone/" hook "$T" pre-tool-use "$(tjson mcp__fs__write_file '{"path": "backbone/2-PLANNING.md", "content": "x"}')"
+out=$(HARNESS_AUTONOMY=autonomous hook "$T" pre-tool-use "$(tjson mcp__fs__move '{"from": "a", "to": "b"}')" 2>&1; echo "exit=$?")
+contains "tools: autonomous: a write tool whose paths the harness can't see is refused" "exit=2" "$out"
+contains "tools: ... and says why" "names no path field" "$out"
+expect 0 "tools: supervised: ... runs" hook "$T" pre-tool-use "$(tjson mcp__fs__move '{"from": "a", "to": "b"}')"
+out=$(HARNESS_AUTONOMY=autonomous hook "$T" pre-tool-use "$(tjson mcp__deploy__prod '{}')" 2>&1; echo "exit=$?")
+contains "tools: autonomous: a confirm tool is refused" "exit=2" "$out"
+contains "tools: ... and the refusal says it needs the user" "confirm" "$out"
+expect 0 "tools: supervised: a confirm tool runs (Claude Code asks the user)" hook "$T" pre-tool-use "$(tjson mcp__deploy__prod '{}')"
+expect 2 "tools: tools.conf can't weaken a built-in contract" hook "$T" pre-tool-use "$(nb "$T/backbone/3-TASKS.md")"
+expect 2 "tools: agents can't edit backbone/tools.conf" hook "$T" pre-tool-use "$(edit_json "$T/backbone/tools.conf" "NotebookEdit           read" "")"
+git -C "$T" add -A && HARNESS_VERIFY=off git -C "$T" commit -qm "chore: contracts"
+echo "mcp__fs__delete        read" >> "$T/backbone/tools.conf"
+git -C "$T" add backbone/tools.conf
+out=$($TH verify 2>&1; echo "exit=$?")
+contains "tools: verify refuses a commit that changes the tool contracts" "backbone/tools.conf" "$out"
+contains "tools: ... with a non-zero exit" "exit=1" "$out"
+git -C "$T" checkout -q -- backbone/tools.conf 2>/dev/null; git -C "$T" reset -q; git -C "$T" checkout -q -- backbone/tools.conf
+hook "$T" post-tool-use "$(nb "$T/src/a.ipynb")" >/dev/null
+contains "tools: a gated tool call is logged with its class" '"class": "write"' "$(grep '"kind": "tool"' "$T/.git/harness/events.jsonl")"
+out=$($TH report 2>&1 | grep 'no contract')
+contains "tools: report lists the tools still without a contract" "mcp__web__post" "$out"
+lacks "tools: ... but not one the user has since registered" "mcp__fs__write_file" "$out"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.24.0 (2026-11-03)
+
+- **Tool contracts** (`backbone/tools.conf`, user-only). Only Bash, the file tools and the knowledge server went
+  through the gates: `NotebookEdit` or an MCP server's write tool could change `backbone/3-TASKS.md` unchecked.
+  The PreToolUse hook now runs for every tool except Read, Grep, Glob, LS and TodoWrite. Each tool has a contract:
+  class `read`, `write` (with the input field that holds the path), `exec`, `network` or `agent`, and optionally
+  `confirm`. A write tool's paths get the same gates as Write and Edit, and harness files are refused to it. A
+  `confirm` tool is refused in autonomous mode. The agents' own tools have built-in contracts the file can't change.
+- **Tools with no contract** run with a warning in supervised mode and are refused in autonomous mode. Each use is
+  logged as `tool-unknown`, and `harness.py report` lists the tools still without a contract.
+- Gated tool calls are logged as `tool` events (class and paths), so `trace` shows MCP and notebook writes too.
+- Codex sends MCP tools through the PreToolUse and PostToolUse hooks.
+
 ## 0.23.0 (2026-11-01)
 
 - **Light lane for small fixes** (`HARNESS_LIGHT_LANE`, user-only, off by default). A task the user marks `(light)`

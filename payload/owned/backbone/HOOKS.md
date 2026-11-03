@@ -9,8 +9,10 @@ Harness-owned. All hook logic lives in `scripts/harness/lib/harness.py`, which n
 | SessionStart | all | Shows the reading list, SETUP INCOMPLETE if FILL placeholders remain, the `[WIP]` task, and harness errors | Added to context |
 | PreToolUse | Bash | **Shell checks** (below) and `@bash` block rules: destructive git, recursive root/home delete, DROP/TRUNCATE, `--no-verify` | Command refused |
 | PreToolUse | Write, Edit, MultiEdit | Block rules for the path, the **orchestrator scope**, the **skill gate**, plus per file (see below) | Edit refused |
+| PreToolUse | every other tool except Read, Grep, Glob, LS and TodoWrite | Its **tool contract** (below): the file gates for the paths a write tool names, `confirm` and unknown tools refused in autonomous mode | Call refused, or a warning |
 | PostToolUse | Read, Skill | Records which skills the session has loaded (for the skill gate) | Silent |
 | PostToolUse | Write, Edit, MultiEdit | Warn rules; harness-owned file edited; spec readiness after a spec edit | Added to context |
+| PostToolUse | other tools with a non-read contract | Logs a `tool` event with the tool's class and paths | Silent |
 | PostToolUse | Bash | `@bash` warn rules (discarding changes, force branch delete, amend, ...); after a fresh `git commit`: task log touched, ADR format, TODO stubs, WIP left | Added to context |
 | Stop | n/a | If a task is still `[WIP]`: `remind` shows a one-line note; `block` makes the agent address the DoD once. With no `[WIP]`, a commit nudge once `HARNESS_COMMIT_NUDGE` tracked files are changed | Per `HARNESS_STOP_MODE` |
 
@@ -27,6 +29,7 @@ Per-file checks in PreToolUse:
 | `backbone/.verdicts/*` | Never writable by agents |
 | `backbone/.harness-lock.json` | Written only by the installer and `harness.py adopt` |
 | `backbone/escalations.md` | Written by `harness.py escalate`; resolved by the user |
+| `backbone/tools.conf` | The tool contracts are user-only; verify also refuses commits that change them |
 
 **Orchestrator scope** (`HARNESS_ORCHESTRATOR_SCOPE`, user-only, default `on`): the main session (a tool call without an `agent_id`) may edit only `backbone/` docs and configuration (not specs, ADRs or verdicts), `.claude/skills/` and `CLAUDE.md`. Specs, ADRs and code are written by the role agents.
 
@@ -34,6 +37,14 @@ Per-file checks in PreToolUse:
 - Shell writes, moves and deletes in `backbone/`, `scripts/harness/`, `.claude/`, `AGENTS.md`, `CLAUDE.md`, `.git/hooks`, `.git/harness` and `.git/config`: redirections, `rm`/`mv`/`cp`/`tee`/`touch`/`chmod`, `sed -i`/`perl -i`, `git rm|mv`, and `python -c`/`node -e` or interpreter heredocs that write there. Every gate is enforced on the file tools, so these changes go through Write or Edit. `cd` and `bash -c`/`eval` are followed.
 - Bypasses: `git commit -n`, `git -c core.hooksPath=...`, `git config core.hooksPath`, and setting `HARNESS_*` or `SKIP_BUILD` from the shell (those are the user's, in their own terminal).
 - `git push` with a `+<ref>`, `--mirror` or a branch delete; `find / ... -delete`; `DELETE` without `WHERE` sent to a SQL client; `curl ... | sh`.
+
+**Tool contracts** (`backbone/tools.conf`, user-only). Every tool that can change something goes through the gate, not only Bash and the file tools. A contract line is `<tool or pattern>... <class> [path=<input field>] [confirm]`, with class `read`, `write`, `exec`, `network` or `agent`; patterns are shell-style (`mcp__github__*`).
+- A `write` tool's paths (the `path=` fields of its input) get the same gates as Write and Edit: harness files (`backbone/`, `scripts/harness/`, `.claude/`, `AGENTS.md`, ...) are refused outright, and other paths go through the agent's write scope, the orchestrator scope, the skill gate and the block rules. A write tool whose contract names no path field is refused in autonomous mode, since the gates can't see what it writes.
+- A `confirm` tool is refused in autonomous mode; in supervised mode Claude Code's own permission prompt asks the user.
+- A tool with **no contract** runs with a warning in supervised mode and is refused in autonomous mode. Each use is logged as `tool-unknown`, and `harness.py report` lists the tools still without a contract.
+- The agents' own tools (Write, Edit, NotebookEdit, Bash, WebFetch, Task, ... and the Codex and OpenCode names) have built-in contracts that `tools.conf` can't change, so `NotebookEdit read` doesn't open `backbone/` to notebook edits.
+
+Claude Code skips the hook for Read, Grep, Glob, LS and TodoWrite, so the reads that make up most calls cost nothing. Codex sends Bash, `apply_patch` and MCP tools; OpenCode's plugin sends every call.
 
 ### Hooks scoped to agents (`.claude/agents/*.md` frontmatter)
 
