@@ -811,7 +811,7 @@ contains "custom hook kept" "custom-hook" "$settings"
 contains "custom permission kept" "Bash(make:*)" "$settings"
 contains "other settings kept" '"model": "opus"' "$settings"
 count=$(grep -c "hook pre-tool-use" "$P/.claude/settings.json")
-[ "$count" -eq 2 ] && ok "harness hooks not duplicated (tools and knowledge source)" || bad "harness hooks not duplicated ($count)"
+[ "$count" -eq 1 ] && ok "harness hooks not duplicated (one group gates every tool)" || bad "harness hooks not duplicated ($count)"
 contains "lock records the new version" "99.0.0-test" "$(cat "$P/backbone/.harness-lock.json")"
 conf=$(cat "$P/backbone/harness.conf")
 contains "update adds a new setting to harness.conf, commented out" '# HARNESS_NEW_KNOB="x"' "$conf"
