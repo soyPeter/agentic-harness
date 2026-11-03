@@ -2881,5 +2881,83 @@ lacks "thin: doctor finds the pipeline agents in the engine" "agent definitions 
 lacks "thin: doctor finds the core skills the core routes name" "missing skill 'adr-writing'" "$out"
 contains "thin: the catalog comes from the engine" "quarkus" "$(thin "$T" catalog)"
 
+section "thin mode: the launcher runs the engine the project pins (ADR-001)"
+L="$HARNESS/plugin/launcher.py"
+SRC="$WORK/engine-src"   # stands in for the harness repository: this checkout, committed and tagged
+mkdir -p "$SRC"
+(cd "$HARNESS" && git ls-files -z --cached --others --exclude-standard | tar --null -T - -cf -) | tar -xf - -C "$SRC"
+git -C "$SRC" init -q -b main && git -C "$SRC" add -A && git -C "$SRC" commit -qm release && git -C "$SRC" tag v9.9.9
+PINNED=$(git -C "$SRC" rev-parse HEAD)
+LENG="$WORK/engines"
+LSRC="$SRC"
+launch() {  # launch <dir> <args...>: the launcher as a CLI's hook runs it, from the project's working directory
+  local dir=$1; shift
+  (cd "$dir" && env -u HARNESS_ROOT -u CLAUDE_PROJECT_DIR HARNESS_ENGINES="$LENG" HARNESS_ENGINE_SOURCE="$LSRC" \
+     python3 "$L" "$@")
+}
+lhook() { printf '%s' "$3" | launch "$1" hook "$2"; }   # lhook <dir> <event> <json>
+read_json() { python3 -c 'import json,sys; print(json.dumps({"tool_name":"Read","tool_input":{"file_path":sys.argv[1]}}))' "$1"; }
+pin() {  # pin <project> <lock fields as JSON>: a thin lock
+  python3 -c 'import json,sys; d=json.loads(sys.argv[2]); d.setdefault("mode","thin"); json.dump(d, open(sys.argv[1],"w"))' \
+    "$1/backbone/.harness-lock.json" "$2"
+}
+N="$WORK/not-enrolled"
+new_repo "$N"
+out=$(lhook "$N" pre-tool-use "$(bash_json 'rm -rf /')"; echo "exit=$?")
+contains "launcher: a repository without the harness is left alone" "exit=0" "$out"
+lacks "launcher: ... silently" "harness" "$out"
+mkdir -p "$WORK/no-git"
+expect 0 "launcher: outside any repository it does nothing" lhook "$WORK/no-git" pre-tool-use "$(bash_json 'rm -rf /')"
+FULL="$WORK/full"
+new_repo "$FULL"
+"$HARNESS/bootstrap.sh" "$FULL" --name full >/dev/null
+expect 0 "launcher: a full install keeps its own hooks (no double gating)" lhook "$FULL" pre-tool-use "$(bash_json 'rm -rf /')"
+contains "launcher: commands in a full install run its own engine" "project: full" "$(launch "$FULL" doctor)"
+
+T2="$WORK/thin2"
+new_repo "$T2"
+"$HARNESS/bootstrap.sh" "$T2" --name thin2 >/dev/null
+rm -rf "$T2/scripts/harness" "$T2/.claude/agents" "$T2/AGENTS.md"
+for s in "$HARNESS"/payload/owned/.claude/skills/*/; do rm -rf "$T2/.claude/skills/$(basename "$s")"; done
+pin "$T2" "{\"version\": \"9.9.9\", \"commit\": \"$PINNED\"}"
+echo 'block | \.py$ | ^import pickle$ | Never use pickle.' >> "$T2/backbone/guardrails.conf"
+expect 2 "launcher: the pinned engine gates a thin project" lhook "$T2" pre-tool-use "$(bash_json 'rm -rf /')"
+expect 0 "launcher: ... and lets safe commands through" lhook "$T2" pre-tool-use "$(bash_json 'git status')"
+[ -f "$LENG/9.9.9/payload/owned/scripts/harness/lib/harness.py" ] && ok "launcher: the engine is fetched once into the cache" \
+  || bad "launcher: the engine is fetched once into the cache"
+expect 2 "launcher: the engine works on the project (its own rules apply)" \
+  lhook "$T2" pre-tool-use "$(write_json "$T2/a.py" "import pickle")"
+contains "launcher: commands run the pinned engine on the project" "project: thin2" "$(launch "$T2" doctor)"
+LSRC="$WORK/unreachable"
+expect 2 "launcher: a cached engine needs no network" lhook "$T2" pre-tool-use "$(bash_json 'rm -rf /')"
+expect 0 "launcher: ... for safe commands either" lhook "$T2" pre-tool-use "$(bash_json 'git status')"
+
+LENG="$WORK/engines-offline"
+out=$(lhook "$T2" pre-tool-use "$(write_json "$T2/b.py" "x = 1")" 2>&1; echo "exit=$?")
+contains "launcher: no engine and no network: changes are refused" "exit=2" "$out"
+contains "launcher: ... saying why" "9.9.9" "$out"
+expect 2 "launcher: ... shell commands too" lhook "$T2" pre-tool-use "$(bash_json 'git status')"
+expect 0 "launcher: ... reads still work" lhook "$T2" pre-tool-use "$(read_json "$T2/backbone/harness.conf")"
+out=$(lhook "$T2" session-start '{}'; echo "exit=$?")
+contains "launcher: ... the session starts and is told" "additionalContext" "$out"
+contains "launcher: ... without failing" "exit=0" "$out"
+expect 1 "launcher: ... and commands fail" launch "$T2" doctor
+LSRC="$SRC"
+
+echo moved > "$SRC/MOVED" && git -C "$SRC" add MOVED && git -C "$SRC" commit -qm moved && git -C "$SRC" tag -f v9.9.9 >/dev/null
+LENG="$WORK/engines-moved"
+out=$(lhook "$T2" pre-tool-use "$(write_json "$T2/b.py" "x = 1")" 2>&1; echo "exit=$?")
+contains "launcher: a release tag moved off the pinned commit is refused" "exit=2" "$out"
+contains "launcher: ... naming the pinned commit" "$PINNED" "$out"
+[ -e "$LENG/9.9.9" ] && bad "launcher: ... and nothing is cached" || ok "launcher: ... and nothing is cached"
+LENG="$WORK/engines"
+git -C "$LENG/9.9.9" fetch -q "$SRC" main && git -C "$LENG/9.9.9" checkout -q FETCH_HEAD
+expect 2 "launcher: a cached engine moved off the pinned commit is refused" \
+  lhook "$T2" pre-tool-use "$(bash_json 'git status')"
+pin "$T2" '{"version": "9.9.9"}'
+out=$(lhook "$T2" pre-tool-use "$(bash_json 'git status')" 2>&1; echo "exit=$?")
+contains "launcher: a pin without its commit is refused" "exit=2" "$out"
+contains "launcher: ... saying so" "without its commit" "$out"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

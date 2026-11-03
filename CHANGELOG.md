@@ -9,6 +9,13 @@
   ones and win on a shared name. The skill gate points at the file that is actually there, and reading it counts.
 - In CI, the base branch's verifier now also uses the base branch's core guardrails, routes and decisions, not the
   pull request's.
+- **The thin-mode launcher** (`plugin/launcher.py`). It runs the engine a project pins in
+  `backbone/.harness-lock.json` (`"mode": "thin"`, `"version"`, `"commit"`):
+  - It fetches tag `v<version>` once into `~/.agentic-harness/engines/<version>/` (`HARNESS_ENGINES`, source
+    `HARNESS_ENGINE_SOURCE`), and refuses a release or a cached copy whose commit isn't the pinned one.
+  - A repository without the harness is left alone, and a full install keeps its own hooks.
+  - When the pinned engine can't be run, it fails closed: reads go through, other tool calls are refused with the
+    reason, the session is told at start, and commands exit 1.
 
 ## 0.26.1 (2026-11-03)
 
