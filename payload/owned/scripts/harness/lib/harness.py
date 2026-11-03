@@ -1553,67 +1553,162 @@ def escalations_command():
     return 0
 
 
-# Out-of-band changes. Shell checks can't see what a script file does. In autonomous mode the harness keeps
-# a snapshot of the protected files, refreshed after every file-tool edit and every write of its own, and
-# compares it after each shell command. A protected file that changed in between, and is not simply back
-# to its committed version, was written some other way.
+# Out-of-band changes. Shell checks can't see what a script file does. The harness keeps a snapshot of the
+# protected files, refreshed after every file-tool edit and every write of its own, and compares it after each
+# shell command. A protected file that changed in between, and is not simply back to its committed version, was
+# written some other way. In supervised mode the user edits these files too, so the snapshot is also taken as a
+# command starts, and only what changed while that command ran is reported.
 SNAPSHOT_ROOTS = ("backbone", "scripts/harness", ".claude", ".codex", ".opencode")
 SNAPSHOT_FILES = ("AGENTS.md", "CLAUDE.md")
 SNAPSHOT_SKIP = (".claude/settings.local.json",)
 
 
+SNAPSHOT_PATH = []   # resolved once per process: the snapshot is read and written around every shell command
+# A command whose end never came (interrupted) stops counting as running after its timeout (Bash: 2 minutes unless
+# the call sets one) plus this margin; until then, edits made meanwhile are reported against it.
+RUNNING_MARGIN_SECONDS = 30
+
+
 def snapshot_file():
     """Per worktree (its own git dir), not in the shared .git/harness: each worktree has its own protected files,
     and worktrees sharing one snapshot see each other's files as out-of-band changes."""
-    git_dir = git("rev-parse", "--absolute-git-dir").strip()
-    return (Path(git_dir) / "harness" / "snapshot.json") if git_dir else events_file().parent / "snapshot.json"
+    if not SNAPSHOT_PATH:
+        git_dir = git("rev-parse", "--absolute-git-dir").strip()
+        SNAPSHOT_PATH.append((Path(git_dir) / "harness" / "snapshot.json") if git_dir
+                             else events_file().parent / "snapshot.json")
+    return SNAPSHOT_PATH[0]
 
 
-def protected_hashes():
-    hashes = {}
+def protected_files():
     for top in SNAPSHOT_ROOTS:
         for folder, dirs, files in os.walk(str(ROOT / top)):
-            dirs[:] = [d for d in dirs if d not in ("__pycache__", "node_modules")]
+            dirs[:] = [d for d in dirs if d not in ("__pycache__", "node_modules")
+                       and not (d == "worktrees" and Path(folder) == ROOT / ".claude")]   # Claude Code's worktrees
             for name in files:
                 full = Path(folder) / name
                 key = full.relative_to(ROOT).as_posix()
                 if key not in SNAPSHOT_SKIP and not name.endswith((".pyc", ".harness-new", ".harness-bak")):
-                    hashes[key] = sha256(full)
+                    yield key, full
     for name in SNAPSHOT_FILES:
         if (ROOT / name).is_file():
-            hashes[name] = sha256(ROOT / name)
-    return hashes
+            yield name, ROOT / name
 
 
-def snapshot_refresh():
-    if not autonomous():
-        return
+def protected_state(previous=None):
+    """{path: [size, mtime_ns, ctime_ns, sha256]}. A hash is reused while the stat is unchanged: the snapshot is taken
+    around every shell command, and rehashing the whole backbone each time would make every command slow. ctime is
+    in the key because a script can put mtime back (touch -r), but not ctime."""
+    previous = previous or {}
+    state = {}
+    for key, full in protected_files():
+        try:
+            st = full.stat()
+        except OSError:
+            continue
+        stat = [st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+        old = previous.get(key)
+        state[key] = old if isinstance(old, list) and len(old) == 4 and old[:3] == stat else stat + [sha256(full)]
+    return state
+
+
+def read_snapshot():
+    """{"files": protected_state, "running": {mark: {"command", "at"}}}: the shell commands started and not yet
+    finished (supervised mode), which all share the snapshot taken when the first of them started."""
+    try:
+        data = json.loads(read(snapshot_file()) or "null")
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("files"), dict):
+        return None
+    running = data.get("running") if isinstance(data.get("running"), dict) else {}
+    data["running"] = {m: v for m, v in running.items()
+                       if isinstance(v, dict) and time.time() < (v.get("until") or 0)}
+    return data
+
+
+def write_snapshot(files, running):
     try:
         path = snapshot_file()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(protected_hashes()), encoding="utf-8")
+        path.write_text(json.dumps({"files": files, "running": running}), encoding="utf-8")
     except OSError:
         pass
 
 
-def out_of_band_changes():
-    """Protected files changed since the snapshot, other than restores to the committed version."""
+def snapshot_refresh():
+    """After a write of the harness's own or a file-tool edit, so it isn't reported as out-of-band."""
+    snapshot = read_snapshot() or {}
+    if autonomous() or snapshot.get("running"):
+        write_snapshot(protected_state(snapshot.get("files")), snapshot.get("running") or {})
+
+
+def command_mark(data):
+    tool_input = data.get("tool_input") or {}
+    return data.get("tool_use_id") or hashlib.sha256(str(tool_input.get("command") or "").encode("utf-8")).hexdigest()
+
+
+def command_started(data):
+    """Supervised mode: the user edits protected files too, so only what changes while a command runs is reported.
+    While another command still runs, its snapshot stays: re-taking it would hide what that command changed."""
+    snapshot = read_snapshot() or {}
+    running = snapshot.get("running") or {}
+    files = snapshot["files"] if running else protected_state(snapshot.get("files"))
+    tool_input = data.get("tool_input") or {}
+    timeout = tool_input.get("timeout")
+    seconds = timeout / 1000.0 if isinstance(timeout, (int, float)) and timeout > 0 else 120
+    running[command_mark(data)] = {"command": str(tool_input.get("command") or "")[:300],
+                                   "until": time.time() + seconds + RUNNING_MARGIN_SECONDS}
+    write_snapshot(files, running)
+
+
+def command_finished(data):
+    """(changed files, commands that were running) for a command whose start was seen; ([], []) otherwise."""
+    snapshot = read_snapshot()
+    mark = command_mark(data)
+    if snapshot is None or mark not in snapshot["running"]:
+        return [], []
+    commands = [v.get("command", "") for v in snapshot["running"].values()]
+    changed, current = protected_changes(snapshot["files"])
+    del snapshot["running"][mark]
+    write_snapshot(current, snapshot["running"])
+    return changed, commands
+
+
+def protected_changes(files):
+    """(protected files changed since files, other than restores to the committed version; the current state)."""
+    previous = {k: v[3] for k, v in files.items() if isinstance(v, list) and len(v) == 4}
+    current = protected_state(files)
+    hashes = {k: v[3] for k, v in current.items()}
+    differ = sorted(name for name in set(previous) | set(hashes) if previous.get(name) != hashes.get(name))
+    committed = committed_blobs(differ)
+    return [name for name in differ if name not in committed or committed[name] != blob_id(ROOT / name)], current
+
+
+def committed_blobs(names):
+    """{path: blob id at HEAD} in one git call: a script can change hundreds of files, and a git show per file made
+    the check take seconds."""
+    blobs = {}
+    if names:
+        for line in git("ls-tree", "-r", "-z", "HEAD", "--", *names).split("\0"):
+            meta, _, name = line.partition("\t")
+            parts = meta.split()
+            if len(parts) == 3 and parts[1] == "blob":
+                blobs[name] = parts[2]
+    return blobs
+
+
+def blob_id(path):
     try:
-        previous = json.loads(read(snapshot_file()) or "null")
-    except ValueError:
-        previous = None
-    if previous is None:
-        return []
-    current = protected_hashes()
-    changed = []
-    for name in sorted(set(previous) | set(current)):
-        if previous.get(name) == current.get(name):
-            continue
-        committed = show("HEAD", name)
-        committed_hash = hashlib.sha256(committed.encode("utf-8")).hexdigest() if committed is not None else None
-        if current.get(name) != committed_hash:
-            changed.append(name)
-    return changed
+        data = path.read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def out_of_band_changes():
+    """Autonomous mode: protected files changed since the snapshot."""
+    snapshot = read_snapshot()
+    return protected_changes(snapshot["files"])[0] if snapshot else []
 
 
 def blocked_guard(before, after):
@@ -2626,6 +2721,8 @@ def hook_pre_tool_use(data):
             deny("Harness blocked this command:\n%s\nIf the user really wants it, ask them to run it "
                  "themselves (in Claude Code: `! <command>`). Do not rephrase the command to get "
                  "around the rule." % "\n".join(problems))
+        if not autonomous():
+            command_started(data)
         return
     if tool not in FILE_TOOLS:
         tool_gate(data, tool, tool_input)
@@ -2788,7 +2885,7 @@ def hook_post_tool_use(data):
     else:
         notes = post_tool_notes(data)
     if notes:
-        add_context("PostToolUse", "\n\n".join(notes))
+        add_context(data.get("hook_event_name") or "PostToolUse", "\n\n".join(notes))
 
 
 # Reads worth a trace line: the project knowledge and instructions an agent based its work on, not every code file.
@@ -2863,6 +2960,14 @@ def post_tool_notes(data):
                              % ", ".join(changed[:8]), "a check of what changed them, and a restore")
                     notes.append("Task %s is BLOCKED for review (backbone/escalations.md)." % task)
             snapshot_refresh()
+        else:
+            changed, commands = command_finished(data)
+            if changed:
+                log_event("tamper", files=changed[:20], command=command[:300], running=commands[:5])
+                notes.append("Harness-protected files changed during `%s`, outside the Write/Edit tools: %s. If a "
+                             "command changed them, restore them (git checkout -- <file>) and make the change with "
+                             "the file tools, where the gates apply. The user may also have edited them meanwhile."
+                             % ("` or `".join(c[:120] for c in commands), ", ".join(changed[:8])))
     return notes
 
 

@@ -2222,7 +2222,7 @@ hook "$A" post-tool-use "$(write_json "$A/backbone/4-KNOWLEDGE.md" "# knowledge"
 lacks "file-tool edits are not flagged" "outside the Write/Edit tools" "$(hook "$A" post-tool-use "$(bash_json 'ls')")"
 unset HARNESS_AUTONOMY
 echo "manual edit" >> "$A/backbone/4-KNOWLEDGE.md"
-lacks "supervised mode does not watch for out-of-band changes" "outside" "$(hook "$A" post-tool-use "$(bash_json 'ls')")"
+lacks "supervised mode: an edit before a command it never saw start is not flagged" "outside" "$(hook "$A" post-tool-use "$(bash_json 'ls')")"
 export HARNESS_AUTONOMY=autonomous
 M="$WORK/comments"
 new_repo "$M"
@@ -2611,6 +2611,70 @@ contains "tools: a gated tool call is logged with its class" '"class": "write"' 
 out=$($TH report 2>&1 | grep 'no contract')
 contains "tools: report lists the tools still without a contract" "mcp__web__post" "$out"
 lacks "tools: ... but not one the user has since registered" "mcp__fs__write_file" "$out"
+
+section "supervised mode: protected files a shell command changed"
+V="$WORK/tamper"
+new_repo "$V"
+"$HARNESS/bootstrap.sh" "$V" --name tamper >/dev/null
+VH="python3 $V/scripts/harness/lib/harness.py"
+printf -- '- [WIP] **Task 1.1: Work** (spec: backbone/specs/1.1.md)\n- [ ] **Task 1.2: Later** (spec: backbone/specs/1.2.md)\n' >> "$V/backbone/3-TASKS.md"
+git -C "$V" add -A && HARNESS_VERIFY=off git -C "$V" commit -qm "chore: tasks"
+expect 0 "supervised: a script command starts" hook "$V" pre-tool-use "$(bash_json 'python3 tools/gen.py')"
+echo "sneaky" >> "$V/backbone/4-KNOWLEDGE.md"
+out=$(hook "$V" post-tool-use "$(bash_json 'python3 tools/gen.py')")
+contains "supervised: a protected file the command changed is reported" "backbone/4-KNOWLEDGE.md" "$out"
+contains "supervised: ... as changed during that command" "changed during" "$out"
+contains "supervised: ... naming the command" "python3 tools/gen.py" "$out"
+contains "supervised: it is logged as tamper" '"kind": "tamper"' "$(cat "$V/.git/harness/events.jsonl")"
+lacks "supervised: the task is not parked (the user is there)" "BLOCKED" "$(cat "$V/backbone/3-TASKS.md")"
+lacks "supervised: no escalation" "out-of-band" "$(cat "$V/backbone/escalations.md" 2>/dev/null)"
+echo "the user's own edit" >> "$V/backbone/2-PLANNING.md"
+hook "$V" pre-tool-use "$(bash_json 'ls')" >/dev/null
+out=$(hook "$V" post-tool-use "$(bash_json 'ls')")
+lacks "supervised: an edit made between commands is not reported" "changed during" "$out"
+hook "$V" pre-tool-use "$(bash_json 'python3 scripts/harness/lib/harness.py escalate 1.2 --reason r')" >/dev/null
+$VH escalate 1.2 --reason r >/dev/null
+out=$(hook "$V" post-tool-use "$(bash_json 'python3 scripts/harness/lib/harness.py escalate 1.2 --reason r')")
+lacks "supervised: the harness's own writes during a command are not reported" "changed during" "$out"
+hook "$V" pre-tool-use "$(bash_json 'make docs')" >/dev/null
+echo "x" >> "$V/backbone/4-KNOWLEDGE.md"
+out=$(hook "$V" post-tool-use "$(bash_json 'make test')")
+lacks "supervised: a post for a different command than the one that started compares nothing" "changed during" "$out"
+hook "$V" post-tool-use "$(bash_json 'make docs')" >/dev/null
+fail_json() { python3 -c 'import json,sys; print(json.dumps({"hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":sys.argv[1]},"error":"Exit code 1"}))' "$1"; }
+contains "supervised: failed shell commands reach the hook too" "PostToolUseFailure" "$(cat "$V/.claude/settings.json")"
+hook "$V" pre-tool-use "$(bash_json 'python3 evil.py; exit 1')" >/dev/null
+echo "sneaky" >> "$V/backbone/4-KNOWLEDGE.md"
+out=$(hook "$V" post-tool-use "$(fail_json 'python3 evil.py; exit 1')")
+contains "supervised: a command that failed is checked as well" "changed during" "$out"
+contains "supervised: ... and the note is for the failure event" '"hookEventName": "PostToolUseFailure"' "$out"
+hook "$V" pre-tool-use "$(bash_json 'make a')" >/dev/null
+echo "by a" >> "$V/backbone/4-KNOWLEDGE.md"
+hook "$V" pre-tool-use "$(bash_json 'make b')" >/dev/null
+out=$(hook "$V" post-tool-use "$(bash_json 'make a')")
+contains "supervised: a change made before an overlapping command started is still reported" "backbone/4-KNOWLEDGE.md" "$out"
+contains "supervised: ... naming both commands that were running" "make b" "$out"
+lacks "supervised: ... once" "changed during" "$(hook "$V" post-tool-use "$(bash_json 'make b')")"
+hook "$V" pre-tool-use "$(bash_json 'python3 quiet.py')" >/dev/null
+cp -p "$V/AGENTS.md" "$V/.agents-ref"
+python3 - "$V/AGENTS.md" <<'PYEOF2'
+import sys
+p = sys.argv[1]; b = bytearray(open(p, "rb").read()); b[0] = ord("X") if b[0] != ord("X") else ord("Y"); open(p, "wb").write(bytes(b))
+PYEOF2
+touch -r "$V/.agents-ref" "$V/AGENTS.md"; rm -f "$V/.agents-ref"
+contains "supervised: a same-size change with its mtime put back is still reported" "AGENTS.md" "$(hook "$V" post-tool-use "$(bash_json 'python3 quiet.py')")"
+mkdir -p "$V/.claude/worktrees/w"
+hook "$V" pre-tool-use "$(bash_json 'make w')" >/dev/null
+echo "work in a Claude Code worktree" > "$V/.claude/worktrees/w/f.py"
+lacks "supervised: Claude Code worktrees under .claude/ are not harness files" "changed during" "$(hook "$V" post-tool-use "$(bash_json 'make w')")"
+mkdir -p "$V/backbone/notes"
+for i in $(seq 1 400); do echo "note $i" > "$V/backbone/notes/n$i.md"; done
+: > "$V/.git/harness/events.jsonl"
+for i in 1 2 3; do
+  HARNESS_HOOK_SLOW=2 hook "$V" pre-tool-use "$(bash_json 'ls')" >/dev/null
+  HARNESS_HOOK_SLOW=2 hook "$V" post-tool-use "$(bash_json 'ls')" >/dev/null
+done
+lacks "supervised: watching 400 backbone files keeps shell hooks fast" "hook-slow" "$(cat "$V/.git/harness/events.jsonl")"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
