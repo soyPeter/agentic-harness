@@ -12,6 +12,9 @@
   logged as `tool-unknown`, and `harness.py report` lists the tools still without a contract.
 - Gated tool calls are logged as `tool` events (class and paths), so `trace` shows MCP and notebook writes too.
 - Codex sends MCP tools through the PreToolUse and PostToolUse hooks.
+- **Relative paths meet the gates.** A relative path with `..` (`src/../backbone/tools.conf`) skipped every
+  backbone check, through the file tools, `apply_patch` and now MCP write tools. Paths are resolved against the
+  repository first.
 
 ## 0.23.0 (2026-11-01)
 
