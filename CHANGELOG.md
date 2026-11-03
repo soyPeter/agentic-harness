@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.25.0 (2026-11-03)
+
+- **Supervised mode catches script writes to harness files.** Out-of-band detection ran only in autonomous mode,
+  because the user's own edits would look like tampering. Now, in supervised mode, the snapshot of the protected
+  files is also taken as each shell command starts, and only what changed while it ran is reported: the agent gets
+  a note naming the command and files, and a `tamper` event is logged. Nothing is escalated. Edits made between
+  commands are not reported.
+- Failed shell commands are checked too (`PostToolUseFailure` hook), in both modes. Overlapping commands share the
+  snapshot from the first one's start, so no command's changes are hidden by another starting.
+- **Cheaper snapshots.** The snapshot caches each file's hash by size, modification and change time (a script can
+  put mtime back, not ctime), and checks restores to the committed version with one `git ls-tree`, so taking it
+  around every shell command costs a directory walk. `.claude/worktrees/` is no longer part of it.
+
 ## 0.24.0 (2026-11-03)
 
 - **Tool contracts** (`backbone/tools.conf`, user-only). Only Bash, the file tools and the knowledge server went

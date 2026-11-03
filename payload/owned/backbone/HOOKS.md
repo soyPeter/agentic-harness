@@ -251,11 +251,14 @@ In autonomous mode the griller's questions are answered from `backbone/`. A know
 
 **Limits.** Search results aren't filtered: a search can list notes outside `HARNESS_KNOWLEDGE_PATHS`, though reading or citing them is refused. Whatever the agents read is sent to the model, so keep notes that must never leave your machine out of the folder the server serves (or run a second server over a subset). In the sandbox, mount the vault read-only, set `HARNESS_KNOWLEDGE_ROOT` to the mount point in `containerEnv`, install the server's dependencies in your Dockerfile, and register the server in `postStartCommand` (see the comments in `devcontainer.json`).
 
-## Out-of-band changes (autonomous mode)
+## Out-of-band changes
 
-The shell checks can't see what a script file does. In autonomous mode the harness keeps a snapshot of the protected files (`backbone/`, `scripts/harness/`, `.claude/`, `AGENTS.md`, `CLAUDE.md`). The snapshot is refreshed after every file-tool edit and every write of the harness's own.
+The shell checks can't see what a script file does. The harness keeps a snapshot of the protected files (`backbone/`, `scripts/harness/`, `.claude/`, `AGENTS.md`, `CLAUDE.md`). The snapshot is refreshed after every file-tool edit and every write of the harness's own. It caches each file's hash by size, modification time and change time (which a script can't set back), so a refresh costs a directory walk, not a read of every file. Claude Code's worktrees under `.claude/worktrees/` are not part of it.
 
-After each shell command, any protected file that changed outside those, and isn't simply back to its committed version, is reported. It is logged as `tamper`, and the `[WIP]` task is escalated for review. Restore the file with `git checkout -- <file>`.
+- **Autonomous mode**: after each shell command, any protected file that changed outside those, and isn't simply back to its committed version, is reported. It is logged as `tamper`, and the `[WIP]` task is escalated for review.
+- **Supervised mode**: the user edits these files too, so the snapshot is also taken as each shell command starts, and only what changed while that command ran is reported, whether it succeeded or failed (`PostToolUseFailure`). Edits made between commands are not. While commands overlap, the snapshot from the first one's start stays until the last has finished, and the note names every command that was running. A command whose end never comes (interrupted) stops counting after its timeout plus 30 seconds. A background command (`run_in_background`) is checked when it is launched, not when it ends. The agent gets a note naming the command and the files, and the change is logged as `tamper` (it shows in `trace` and `report`); nothing is escalated, since the user is there. A file the user saves while an agent's command runs is reported too; the note names the command so they can tell.
+
+Restore a file with `git checkout -- <file>`.
 
 ## Event log, trace and report
 
