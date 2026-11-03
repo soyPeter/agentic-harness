@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **The engine can run from outside the project** (first step of thin mode, ADR-001). The project is the folder in
+  `HARNESS_ROOT`, otherwise the engine's own folder if it is a full install, otherwise the git repository of the
+  working directory (or `CLAUDE_PROJECT_DIR`). Engine-owned files come from the engine: the core guardrails and
+  routes, `decisions.json`, the pipeline agents, the catalog and the core skills. Project skills are added to the core
+  ones and win on a shared name. The skill gate points at the file that is actually there, and reading it counts.
+- In CI, the base branch's verifier now also uses the base branch's core guardrails, routes and decisions, not the
+  pull request's.
+
 ## 0.26.1 (2026-11-03)
 
 - **Applied recommendations don't grow the spec; out-of-domain cases don't fail a task.** Found in a trial run of

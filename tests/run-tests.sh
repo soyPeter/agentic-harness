@@ -2840,5 +2840,46 @@ for i in 1 2 3; do
 done
 lacks "supervised: watching 400 backbone files keeps shell hooks fast" "hook-slow" "$(cat "$V/.git/harness/events.jsonl")"
 
+section "thin mode: the engine runs from outside the project (ADR-001)"
+ENGINE="$HARNESS/payload/owned/scripts/harness/lib/harness.py"
+T="$WORK/thin"
+new_repo "$T"
+"$HARNESS/bootstrap.sh" "$T" --name thin >/dev/null
+rm -rf "$T/scripts/harness" "$T/.claude/agents" "$T/AGENTS.md"
+for s in "$HARNESS"/payload/owned/.claude/skills/*/; do rm -rf "$T/.claude/skills/$(basename "$s")"; done
+mkdir -p "$T/src" "$T/.claude/skills/python"
+printf -- '---\nname: python\ndescription: Python rules\napplies-to: python>=3.11\nlast-verified: 2026-10-04\n---\n# Python\n' \
+  > "$T/.claude/skills/python/SKILL.md"
+thin() {  # thin <dir> <args...>: the engine run from outside the project, found from the working directory
+  local dir=$1; shift
+  (cd "$dir" && env -u HARNESS_ROOT -u CLAUDE_PROJECT_DIR python3 "$ENGINE" "$@")
+}
+thook() { printf '%s' "$3" | thin "$1" hook "$2"; }  # thook <dir> <event> <json>
+expect 2 "thin: the engine's core guardrails apply" thook "$T" pre-tool-use "$(bash_json 'rm -rf /')"
+echo 'block | \.py$ | ^import pickle$ | Never use pickle.' >> "$T/backbone/guardrails.conf"
+expect 2 "thin: the project is found from a subdirectory (its own rules apply)" \
+  thook "$T/src" pre-tool-use "$(write_json "$T/src/a.py" "import pickle")"
+TSPEC="$T/backbone/specs/2.1.md"
+mkdir -p "$T/backbone/specs"
+out=$(thook "$T" pre-tool-use "$(swrite analyst "$TSPEC" "$SPEC_TEXT")" 2>&1)
+contains "thin: the skill gate requires a core skill from the engine" "requirements-writing" "$out"
+contains "thin: ... and points at the engine's copy of it" \
+  "payload/owned/.claude/skills/requirements-writing/SKILL.md" "$out"
+thook "$T" post-tool-use "$(sread analyst "$HARNESS/payload/owned/.claude/skills/requirements-writing/SKILL.md")" >/dev/null
+expect 0 "thin: reading the engine's skill file counts as loading it" \
+  thook "$T" pre-tool-use "$(swrite analyst "$TSPEC" "$SPEC_TEXT")"
+thook "$T" post-tool-use "$(sskill other "agentic-harness:requirements-writing")" >/dev/null
+expect 0 "thin: a plugin skill invoked by its namespaced name counts" \
+  thook "$T" pre-tool-use "$(swrite other "$TSPEC" "$SPEC_TEXT")"
+printf '%s\n' "$SPEC_TEXT" > "$TSPEC"
+contains "thin: spec skills resolve from the engine (api-design) and the project (python)" \
+  "valid" "$(thin "$T" spec-check 2.1 | grep -v invalid)"
+echo '\.sql$ | sql-migrations | Migrations.' >> "$T/backbone/routing.conf"
+out=$(thin "$T" doctor)
+contains "thin: doctor checks the project's routes" "missing skill 'sql-migrations'" "$out"
+lacks "thin: doctor finds the pipeline agents in the engine" "agent definitions missing" "$out"
+lacks "thin: doctor finds the core skills the core routes name" "missing skill 'adr-writing'" "$out"
+contains "thin: the catalog comes from the engine" "quarkus" "$(thin "$T" catalog)"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

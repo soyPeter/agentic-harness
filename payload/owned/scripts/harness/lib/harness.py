@@ -48,9 +48,28 @@ sys.dont_write_bytecode = True   # no __pycache__ in the project
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import decisions  # noqa: E402  (sibling module)
 
-# HARNESS_ROOT lets CI run the base branch's copy of this file against a pull request's checkout,
-# so a pull request cannot change the verifier that checks it.
-ROOT = Path(os.environ.get("HARNESS_ROOT") or Path(__file__).resolve().parents[3]).resolve()
+# The engine is the folder holding scripts/harness/: the project itself in a full install, or a pinned release outside
+# it in thin mode (ADR-001). Engine-owned files (core rules and routes, core skills, agents, catalog) come from here.
+ENGINE = Path(__file__).resolve().parents[3]
+
+
+def find_root():
+    # HARNESS_ROOT lets CI run the base branch's copy of this file against a pull request's checkout,
+    # so a pull request cannot change the verifier that checks it.
+    if os.environ.get("HARNESS_ROOT"):
+        return Path(os.environ["HARNESS_ROOT"])
+    if (ENGINE / "backbone" / ".harness-lock.json").is_file() or (ENGINE / ".git").exists():
+        return ENGINE
+    start = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    try:
+        top = subprocess.run(["git", "-C", start, "rev-parse", "--show-toplevel"], capture_output=True, text=True,
+                             timeout=10).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        top = ""
+    return Path(top or start)
+
+
+ROOT = find_root().resolve()
 BACKBONE = ROOT / "backbone"
 TASKS = BACKBONE / "3-TASKS.md"
 MEMORY = BACKBONE / "6-MEMORY.md"
@@ -61,11 +80,14 @@ CONF_FILE = BACKBONE / "harness.conf"
 LOCK_FILE = BACKBONE / ".harness-lock.json"
 TOOLS_FILE = BACKBONE / "tools.conf"
 SKILLS = ROOT / ".claude" / "skills"
-AGENTS_DIR = ROOT / ".claude" / "agents"
+ENGINE_SKILLS = ENGINE / ".claude" / "skills"
+AGENT_DIRS = [ROOT / ".claude" / "agents", ENGINE / ".claude" / "agents"]
 SETTINGS_FILE = ROOT / ".claude" / "settings.json"
-RULE_FILES = [ROOT / "scripts/harness/guardrails.core.conf", BACKBONE / "guardrails.conf"]
-ROUTE_FILES = [ROOT / "scripts/harness/routing.core.conf", BACKBONE / "routing.conf"]
-CATALOG_DIR = ROOT / "scripts/harness/catalog"
+RULE_FILES = [ENGINE / "scripts/harness/guardrails.core.conf", BACKBONE / "guardrails.conf"]
+ROUTE_FILES = [ENGINE / "scripts/harness/routing.core.conf", BACKBONE / "routing.conf"]
+# An installed engine has the catalog copied in; a checkout of the harness repository (thin mode) keeps it at the top.
+CATALOG_DIR = next((d for d in (ENGINE / "scripts/harness/catalog", ENGINE.parent.parent / "catalog")
+                    if d.is_dir()), ENGINE / "scripts/harness/catalog")
 HOOKS_PATH = "scripts/harness/git-hooks"
 HOOK_MARK = "scripts/harness/"
 FILE_TOOLS = ("Write", "Edit", "MultiEdit")
@@ -117,7 +139,7 @@ ENFORCEMENT_FILES = (r"^scripts/harness/", r"^\.claude/agents/", r"^\.github/wor
                      r"^\.opencode/(plugins/harness\.js$|agents/)")
 # What the main session (the orchestrator) may edit itself; specs, ADRs and code go through the role agents.
 ORCHESTRATOR_ALLOW = (r"^backbone/(?!specs/|adr/|\.verdicts/)", r"^\.claude/skills/", r"^CLAUDE\.md$")
-DECISIONS_FILE = ROOT / "scripts/harness/decisions.json"
+DECISIONS_FILE = ENGINE / "scripts/harness/decisions.json"
 ESCALATIONS = BACKBONE / "escalations.md"
 AUTONOMY_MODES = ("supervised", "autonomous")
 BLOCKED_NOTE = re.compile(r"\s+[-\u2014]+\s+BLOCKED:\s*(.*)$")
@@ -651,14 +673,30 @@ def spec_fingerprint(task, text=None):
 
 # --------------------------------------------------------------------------- skills
 
+def skill_files():
+    """{skill name: its SKILL.md}: the engine's core skills, then the project's, which win on a shared name."""
+    found = {}
+    for base in (ENGINE_SKILLS, SKILLS):
+        for path in sorted(base.glob("*/SKILL.md")):
+            found[path.parent.name] = path
+    return found
+
+
 def available_skills():
-    return {path.parent.name for path in SKILLS.glob("*/SKILL.md")}
+    return set(skill_files())
+
+
+def skill_read(file_path):
+    """The skill whose SKILL.md file_path is, or None."""
+    path = Path(file_path)
+    path = (path if path.is_absolute() else ROOT / path).resolve()
+    return next((name for name, f in skill_files().items() if f.resolve() == path), None)
 
 
 def load_routes():
     routes, errors = [], []
     for path in ROUTE_FILES:
-        origin = path.relative_to(ROOT).as_posix()
+        origin = rel(str(path))
         for n, raw in enumerate(read(path).splitlines(), 1):
             line = raw.strip()
             if not line or line.startswith("#"):
@@ -731,15 +769,15 @@ def remember_skill(data, name):
 def skill_gate(data, path):
     if not gate_on("HARNESS_SKILL_GATE") or path.startswith("/"):
         return None
-    available = available_skills()
+    files = skill_files()
     loaded = loaded_skills(data)
     missing = [(skill, why) for skill, why in sorted(required_skills(path).items())
-               if skill in available and skill not in loaded]
+               if skill in files and skill not in loaded]
     if not missing:
         return None
     return ("  - Load these skills before editing %s, then retry:\n%s"
-            % (path, "\n".join("      %s: read .claude/skills/%s/SKILL.md (or invoke the skill). Required by: %s"
-                               % (skill, skill, why) for skill, why in missing)))
+            % (path, "\n".join("      %s: read %s (or invoke the skill). Required by: %s"
+                               % (skill, rel(str(files[skill])), why) for skill, why in missing)))
 
 
 # --------------------------------------------------------------------------- guardrail rules
@@ -756,7 +794,7 @@ class Rule(object):
 def load_rules():
     rules, errors = [], []
     for path in RULE_FILES:
-        origin = path.relative_to(ROOT).as_posix()
+        origin = rel(str(path))
         for n, raw in enumerate(read(path).splitlines(), 1):
             line = raw.strip()
             if not line or line.startswith("#"):
@@ -2226,7 +2264,7 @@ def health():
                        % (where, s)) for s in skills if s not in available)
     values = conf()
     max_age = int(values["HARNESS_SKILL_MAX_AGE"]) if values["HARNESS_SKILL_MAX_AGE"].isdigit() else 0
-    for skill in sorted(SKILLS.glob("*/SKILL.md")) if max_age else []:
+    for skill in sorted(skill_files().values()) if max_age else []:
         m = re.search(r"^last-verified:\s*(\d{4}-\d{2}-\d{2})\s*$", read(skill), re.M)
         name = skill.parent.name
         if not m:
@@ -2288,7 +2326,7 @@ def health():
         issues.append(("error", "HARNESS_TEST_TIMEOUT must be a number of seconds"))
     if not values["HARNESS_JUDGE_MAX_ROUNDS"].isdigit() or int(values["HARNESS_JUDGE_MAX_ROUNDS"]) < 1:
         issues.append(("error", "HARNESS_JUDGE_MAX_ROUNDS must be a positive integer"))
-    missing = [a for a in PIPELINE_AGENTS if not (AGENTS_DIR / ("%s.md" % a)).is_file()]
+    missing = [a for a in PIPELINE_AGENTS if not any((d / ("%s.md" % a)).is_file() for d in AGENT_DIRS)]
     if missing:
         issues.append(("error", "agent definitions missing in .claude/agents/: %s; the gates cannot be passed "
                                 "(re-run the harness update)" % ", ".join(missing)))
@@ -2950,9 +2988,9 @@ def post_tool_notes(data):
     notes = []
     if tool == "Read":
         path = rel(tool_input.get("file_path") or "")
-        m = re.match(r"^\.claude/skills/([^/]+)/SKILL\.md$", path)
-        if m:
-            remember_skill(data, m.group(1))
+        skill = skill_read(tool_input.get("file_path") or "")
+        if skill:
+            remember_skill(data, skill)
         elif re.match(CONTEXT_SOURCES, path):
             log_event("context", path=path)
         return notes
