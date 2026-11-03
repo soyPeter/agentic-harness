@@ -2593,6 +2593,11 @@ contains "tools: autonomous: a confirm tool is refused" "exit=2" "$out"
 contains "tools: ... and the refusal says it needs the user" "confirm" "$out"
 expect 0 "tools: supervised: a confirm tool runs (Claude Code asks the user)" hook "$T" pre-tool-use "$(tjson mcp__deploy__prod '{}')"
 expect 2 "tools: tools.conf can't weaken a built-in contract" hook "$T" pre-tool-use "$(nb "$T/backbone/3-TASKS.md")"
+expect 2 "tools: a relative path with .. can't reach backbone/ through a write tool" hook "$T" pre-tool-use "$(tjson mcp__fs__write_file '{"path": "src/../backbone/2-PLANNING.md", "content": "x"}')"
+expect 2 "tools: ... nor tools.conf through Edit" hook "$T" pre-tool-use "$(edit_json "src/../backbone/tools.conf" "NotebookEdit           read" "")"
+for t in subagent SendMessage LSP; do
+  expect 0 "tools: autonomous: the agents' own $t runs" env HARNESS_AUTONOMY=autonomous bash -c 'printf "%s" "$1" | CLAUDE_PROJECT_DIR="$2" python3 "$2/scripts/harness/lib/harness.py" hook pre-tool-use' _ "$(tjson "$t" '{}')" "$T"
+done
 expect 2 "tools: agents can't edit backbone/tools.conf" hook "$T" pre-tool-use "$(edit_json "$T/backbone/tools.conf" "NotebookEdit           read" "")"
 git -C "$T" add -A && HARNESS_VERIFY=off git -C "$T" commit -qm "chore: contracts"
 echo "mcp__fs__delete        read" >> "$T/backbone/tools.conf"

@@ -77,13 +77,14 @@ Write Edit MultiEdit                    write    path=file_path
 NotebookEdit                            write    path=notebook_path
 apply_patch                             write
 Bash KillShell KillBash TaskStop Monitor EnterWorktree ExitWorktree   exec
-Task Agent                              agent
+Task Agent SendMessage ListAgents       agent
 WebFetch WebSearch                      network
 Read Grep Glob LS NotebookRead TodoWrite TodoRead TaskCreate TaskGet TaskList TaskUpdate TaskOutput BashOutput   read
 ToolSearch AskUserQuestion EnterPlanMode ExitPlanMode Skill SlashCommand ListMcpResourcesTool ReadMcpResourceTool   read
+LSP                                     read
 read glob grep list todowrite todoread question lsp codesearch skill   read
 webfetch websearch                      network
-task                                    agent
+task subagent                           agent
 """
 PIPELINE_AGENTS = ("analyst", "architect", "griller", "tester", "implementer", "judge", "debugger", "scribe")
 USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE", "HARNESS_JUDGE_MAX_ROUNDS",
@@ -289,10 +290,11 @@ def canonical(path):
 
 
 def rel(path_str):
-    """Repository-relative POSIX path, or the path unchanged if it lies outside the repo."""
+    """Repository-relative POSIX path, or the absolute path if it lies outside the repo. Relative paths are resolved
+    against the repo too: src/../backbone/x must meet the backbone gates."""
     path = Path(path_str)
     if not path.is_absolute():
-        return path.as_posix()
+        path = ROOT / path
     try:
         return path.resolve().relative_to(ROOT).as_posix()
     except ValueError:
