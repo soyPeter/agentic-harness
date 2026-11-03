@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.26.1 (2026-11-03)
+
+- **Applied recommendations don't grow the spec; out-of-domain cases don't fail a task.** Found in a trial run of
+  0.18.2 (colsum, a small local CSV tool):
+  - **What went wrong:** all six of the griller's recommendations added detail, and nobody was asked about them. The
+    task then failed the judge twice and was escalated, over an argument holding a newline (rated blocker) and over
+    argparse accepting `--col` for `--column` (rated major).
+  - **Griller:** a recommendation should tighten, merge or remove. It adds a requirement, criterion or case only for
+    behaviour the product's users will meet.
+  - **Judge:** a case only out-of-domain input can trigger is minor, whatever the requirement's wording, and an AC
+    whose own Given, When and Then hold is met.
+  - **Reviewer:** such a case is at most `nice-to-have`.
+
 ## 0.26.0 (2026-11-03)
 
 - **Review lenses, in parallel, before a task can finish** (`HARNESS_REVIEW`, user-only, default `on`). After the

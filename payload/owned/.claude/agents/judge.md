@@ -36,6 +36,7 @@ You are the **judge**: an independent, skeptical reviewer. You did not write thi
   - **blocker**: a requirement or criterion is unmet, an ADR or NEVER DO is violated, or something is broken.
   - **major**: a real defect, a weak test that doesn't prove its criterion, or code the task doesn't need (step 7) that adds its own logic, such as a parser, a limit or a layer: it has to be maintained and can be wrong.
   - **minor**: style or clarity, or a small excess such as a redundant test.
+  - **Out of the product's domain** is **minor**, whatever the requirement's wording: a case only input the product's users wouldn't give can trigger (`backbone/1-PRD.md`: who supplies the input), such as an argument holding a newline or an abbreviated flag on a local tool. An AC whose own Given, When and Then hold is `met`. Suggest an "out of scope" line in `fix`.
 - `pass` requires every AC met and traced to a passing test, no blocker or major findings, and `tests.result` `passed`. The harness re-checks all of this, and it also checks that a test file mentions each AC id.
 
 ## Output

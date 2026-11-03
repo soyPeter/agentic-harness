@@ -27,6 +27,7 @@ You are a **reviewer**. The judge has confirmed that the task meets its spec. Yo
 
 - Do not modify anything in the checkout. Use Bash only for read-only commands, the tests, and scratch scripts outside the checkout.
 - Report through your lens only. When you notice something serious outside it, add it as a `should-fix` finding with `"note": "outside the <lens> lens"`, so the reviewer of that lens isn't the only safety net.
+- A case only input outside the product's domain can trigger (`backbone/1-PRD.md`: who supplies the input, across which trust boundary) is at most `nice-to-have`.
 - `verdict` is `fail` when you have a must-fix finding, otherwise `pass`. The harness derives it from the severities anyway.
 
 ## Output
