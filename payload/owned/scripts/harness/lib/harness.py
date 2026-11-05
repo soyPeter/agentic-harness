@@ -4606,8 +4606,12 @@ def report_command(argv):
         for rule in measures["rules"]["never_fired"]:
             print("     0  %s%s" % (rule, "" if rule in measures["rules"]["project_never_fired"] else "  (core)"))
         return 0
+    by_class = {}
+    for e in events:
+        if e.get("kind") == "escalation":
+            by_class[e.get("failure_class") or "unclassified"] = by_class.get(e.get("failure_class") or "unclassified", 0) + 1
     if "--json" in argv:
-        data = {"days": days, "events": len(events), "tasks_finished": done,
+        data = {"days": days, "events": len(events), "tasks_finished": done, "escalations_by_class": by_class,
                 "judge_verdicts": len(judged), "judge_passes": passes, "overturned_passes": overturned,
                 "escalations": count("escalation"), "open_escalations": len(open_escalations()),
                 "policy_approvals": count("approval"), "blocked_tool_calls": count("block"),
@@ -4626,6 +4630,8 @@ def report_command(argv):
           % (len(judged), passes, len(judged) - passes, overturned))
     print("  escalations: %d (open now: %d); policy approvals: %d" % (count("escalation"), len(open_escalations()),
                                                                        count("approval")))
+    if by_class:
+        print("    by class: %s" % ", ".join("%s %d" % kv for kv in sorted(by_class.items(), key=lambda kv: -kv[1])))
     print("  blocked tool calls: %d; commits refused by verify: %d; out-of-band changes: %d"
           % (count("block"), count("verify"), count("tamper")))
     if workers or merged:

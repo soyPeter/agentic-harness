@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.28.1 (2026-11-05)
+
+- **Disputes pilot runbook** (`catalog/triple/RUNBOOK.md`). The runbook covers:
+  - the decisions and approvals the pilot needs;
+  - bootstrapping onto a fork or a throwaway repo with `enroll --profile triple`;
+  - adopting the `triple` pack and importing one light-lane `DIS-*` ticket;
+  - the supervised define → build → judge → receipt → PR loop, where a human merges;
+  - the metrics to record.
+- **`harness.py report` counts escalations by class** (`escalations_by_class` in `--json`).
+
 ## 0.28.0 (2026-11-05)
 
 - **Failure classes.** Every escalation in `backbone/escalations.md` now records a class and the playbook that recovers
