@@ -2969,7 +2969,8 @@ expect 0 "adopts the triple pack with disputes-pci and ears" $TH adopt triple --
 tg() { hook "$TR" pre-tool-use "$(write_json "$TR/$1" "$2")" 2>&1; echo "exit=$?"; }
 for path in apps/disputes/src/auth/guard.ts src/billing/invoice.ts libs/payments/refund.service.ts \
             prisma/migrations/20261105_init/migration.sql docs/pci-evidence/scope.md .env.production \
-            config/secrets/api.json certs/server.key infra/main.tf; do
+            config/secrets/api.json certs/server.key infra/main.tf \
+            src/lib/api/pan-ingress.ts prisma/schema/account.prisma src/app/auth/sso/saml/route.ts; do
   out=$(tg "$path" 'export const x = 1;')
   contains "parked: $path is refused" "Parked in the Disputes pilot" "$out"
   contains "parked: $path exits 2" "exit=2" "$out"
@@ -2978,6 +2979,11 @@ out=$(tg apps/disputes/src/ui/CaseList.tsx 'export const x = 1;')
 lacks "UI code stays open" "Parked in the Disputes pilot" "$out"
 contains "Disputes code is routed to the disputes-pci skill" "disputes-pci" "$out"
 lacks "an author field isn't taken for auth" "Parked" "$(tg docs/authoring.md 'Write short sentences.')"
+# Paths from triple-disputes that are UI or plumbing, not parked surfaces.
+for path in src/components/ui/card.tsx "src/app/(playground)/components/cards/page.tsx" src/lib/i18n/keys/auth.ts \
+            src/lib/intake/session.ts src/lib/deployment/build-info.ts src/lib/card-scheme.ts; do
+  lacks "open: $path is not parked" "Parked in the Disputes pilot" "$(tg "$path" 'export const x = 1;')"
+done
 contains "a CVV in a fixture is refused" "card verification value" "$(tg apps/disputes/test/fixtures/case.ts 'cvv: "123",')"
 contains "a card number gets a warning after the edit" "looks like a card number" "$(hook "$TR" post-tool-use "$(write_json "$TR/apps/disputes/test/fixtures/case.ts" 'const pan = "4111 1111 1111 1111";')" 2>&1)"
 out=$(hook "$TR" pre-tool-use "$(bash_json 'echo x > src/payments/key.ts')" 2>&1; echo "exit=$?")
