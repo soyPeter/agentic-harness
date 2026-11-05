@@ -1852,7 +1852,7 @@ unset HARNESS_AUTONOMY HARNESS_TEST_CMD
 section "CI trust: base-branch verifier and harness changes"
 expect 2 "agents cannot edit the harness lock" hook "$A" pre-tool-use "$(edit_json "$A/backbone/.harness-lock.json" '"files"' '"files"')"
 [ -f "$A/.github/workflows/harness-verify.yml" ] && ok "the CI workflow is installed" || bad "the CI workflow is installed"
-contains "CI runs the base branch's verifier" 'git archive "origin/$BASE" scripts/harness/lib' "$(cat "$A/.github/workflows/harness-verify.yml")"
+contains "CI runs the base branch's verifier" 'git archive "origin/$BASE"' "$(cat "$A/.github/workflows/harness-verify.yml")"
 lacks "the workflows use no deprecated (Node 20) action versions" "@v4" "$(cat "$A"/.github/workflows/harness-*.yml)"
 git -C "$A" add -A >/dev/null; HARNESS_VERIFY=off git -C "$A" commit -qm "chore: autonomy fixtures" >/dev/null
 CI_BASE=$(git -C "$A" rev-parse HEAD)
@@ -2881,7 +2881,7 @@ lacks "thin: doctor finds the pipeline agents in the engine" "agent definitions 
 lacks "thin: doctor finds the core skills the core routes name" "missing skill 'adr-writing'" "$out"
 contains "thin: the catalog comes from the engine" "quarkus" "$(thin "$T" catalog)"
 
-expect 0 "thin: skill overrides" python3 -B "$HARNESS/tests/test-thin-regressions.py"
+expect 0 "thin: skill overrides and CI assets" python3 -B "$HARNESS/tests/test-thin-regressions.py"
 
 section "thin mode: the launcher runs the engine the project pins (ADR-001)"
 L="$HARNESS/plugin/launcher.py"

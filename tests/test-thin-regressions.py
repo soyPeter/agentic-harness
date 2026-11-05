@@ -110,5 +110,70 @@ class ThinRegressions(unittest.TestCase):
                 self.assert_gate(session, session == "missing")
 
 
+    def extraction_script(self):
+        workflow = (HARNESS / "payload/owned/.github/workflows/harness-verify.yml").read_text()
+        step = workflow.split("      - name: Take the verifier from the base branch\n", 1)[1]
+        return textwrap.dedent(step.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0])
+
+    def extract(self, check=True):
+        runner = self.work / "runner temp"
+        runner.mkdir()
+        env = dict(self.env, BASE="review-base", RUNNER_TEMP=str(runner))
+        result = self.run_command("bash", "-e", "-o", "pipefail", "-c", self.extraction_script(),
+                                  env=env, check=check)
+        return runner / "trusted", result
+
+    def commit_base(self):
+        self.run_command("git", "add", "-A")
+        self.run_command("git", "commit", "--allow-empty", "-qm", "chore: review base")
+        self.run_command("git", "update-ref", "refs/remotes/origin/review-base", "HEAD")
+
+    def engine_assets(self):
+        return ["scripts/harness/lib/harness.py", "scripts/harness/guardrails.core.conf",
+                "scripts/harness/routing.core.conf", "scripts/harness/decisions.json"]
+
+    def test_ci_extracts_configuration_from_base_not_pr(self):
+        self.install()
+        self.commit_base()
+        expected = {name: (self.project / name).read_bytes() for name in self.engine_assets()}
+        for name in self.engine_assets():
+            (self.project / name).write_text("PR replacement\n")
+        trusted, result = self.extract()
+        self.assertIn("Using the harness from origin/review-base.", result.stdout)
+        for name, content in expected.items():
+            self.assertEqual((trusted / name).read_bytes(), content, name)
+            self.assertEqual((self.project / name).read_text(), "PR replacement\n")
+        probe = '''
+import json, runpy, sys
+h = runpy.run_path(sys.argv[1])
+rules, errors = h['load_rules']()
+routes, route_errors = h['load_routes']()
+assert rules and not errors and routes and not route_errors
+assert h['decisions'].load_definitions(str(h['DECISIONS_FILE']))['decisions']
+'''
+        self.run_command("python3", "-B", "-c", probe, str(trusted / "scripts/harness/lib/harness.py"),
+                         env=dict(self.env, HARNESS_ROOT=str(self.project)))
+
+    def test_ci_bootstrap_fallback_includes_configuration(self):
+        self.commit_base()
+        self.install()
+        trusted, result = self.extract()
+        self.assertIn("has no harness yet", result.stdout)
+        for name in self.engine_assets():
+            self.assertEqual((trusted / name).read_bytes(), (self.project / name).read_bytes(), name)
+
+    def test_ci_does_not_replace_an_incomplete_base_engine_with_pr_code(self):
+        self.install()
+        decisions = self.project / "scripts/harness/decisions.json"
+        contents = decisions.read_bytes()
+        decisions.unlink()
+        self.commit_base()
+        decisions.write_bytes(contents)
+        trusted, result = self.extract(check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("using the pull request's copy", result.stdout)
+        self.assertFalse((trusted / "scripts/harness/decisions.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

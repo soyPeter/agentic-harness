@@ -23,16 +23,29 @@ jobs:
           fetch-depth: 0
 
       - name: Take the verifier from the base branch
+        shell: bash
         env:
           BASE: ${{ github.base_ref }}
         run: |
+          set -o pipefail
+          assets=(scripts/harness/lib scripts/harness/guardrails.core.conf
+                  scripts/harness/routing.core.conf scripts/harness/decisions.json)
+          if ! git rev-parse --verify "origin/$BASE^{commit}" >/dev/null; then
+            echo "::error::Cannot resolve the base branch origin/$BASE."
+            exit 1
+          fi
           mkdir -p "$RUNNER_TEMP/trusted"
-          if git archive "origin/$BASE" scripts/harness/lib | tar -x -C "$RUNNER_TEMP/trusted"; then
+          if git cat-file -e "origin/$BASE:scripts/harness/lib" 2>/dev/null; then
+            if ! git archive "origin/$BASE" "${assets[@]}" | tar -x -C "$RUNNER_TEMP/trusted"; then
+              echo "::error::Cannot extract the base branch's verifier and required engine configuration."
+              exit 1
+            fi
             echo "Using the harness from origin/$BASE."
           else
             echo "::warning::origin/$BASE has no harness yet; using the pull request's copy."
+            rm -rf "$RUNNER_TEMP/trusted"
             mkdir -p "$RUNNER_TEMP/trusted/scripts/harness"
-            cp -R scripts/harness/lib "$RUNNER_TEMP/trusted/scripts/harness/"
+            cp -R "${assets[@]}" "$RUNNER_TEMP/trusted/scripts/harness/"
           fi
 
       - name: Verify the pull request's commits
