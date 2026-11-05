@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.29.0 (2026-11-05)
+
+- **`typescript` pack.** The options:
+  - a package manager (`npm` | `pnpm`), which sets a `tsc --noEmit` build check and the test command;
+  - a test runner (`vitest` | `jest`), which sets the test paths and installs `typescript-test`;
+  - `strict`, which refuses `@ts-ignore` and `@ts-nocheck` and warns on `any`.
+
+  The pack always refuses `eval` and `new Function` and warns on stray `console.log`.
+- **`react` pack** (requires `typescript`). It refuses `dangerouslySetInnerHTML` and warns on index keys. Options:
+  - `nextjs` routes `app/`, server actions and the request pipeline to the `nextjs` and `security` skills, and refuses
+    secrets in `NEXT_PUBLIC_` variables;
+  - `testing-library` warns on CSS-selector queries in component tests.
+
+  There is no NestJS pack: `triple-disputes` is Next.js.
+- **Chained git hooks.** Doctor accepts a `core.hooksPath` that another manager owns (Husky's `.husky/_`) when its
+  `pre-commit`, `commit-msg` and `pre-push` call the harness's, and names any that don't.
+- **`disputes-pci` locks fit the real `triple-disputes` tree.**
+  - No longer parked: UI cards, i18n `auth` keys, intake chat sessions and deployment helpers.
+  - Now parked: PAN-handling modules, the Prisma schema, and the SAML and NextAuth routes.
+- **Runbook**: how to fit into `triple-disputes`, covering `AGENTS.md` and `CLAUDE.md`, Husky, the double type check,
+  and the PR title convention.
+
 ## 0.28.1 (2026-11-05)
 
 - **Disputes pilot runbook** (`catalog/triple/RUNBOOK.md`). The runbook covers:

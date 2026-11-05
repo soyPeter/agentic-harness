@@ -3102,5 +3102,25 @@ contains "and the typescript skill" "typescript:" "$out"
 contains "server actions need nextjs and security" "security:" "$(tsg src/lib/actions/cases.ts 'export async function close() {}')"
 contains "tests need the typescript-test skill" "typescript-test:" "$(tsg src/lib/cases.test.ts 'it("AC-1.1-1: x", () => {})')"
 
+section "git hooks chained from another hook manager (Husky)"
+git -C "$TS" config core.hooksPath .husky/_
+mkdir -p "$TS/.husky/_"
+for h in pre-commit commit-msg pre-push; do
+  printf '#!/bin/sh\nsh "$(dirname "$0")/../%s" "$@"\n' "$h" > "$TS/.husky/_/$h"; chmod +x "$TS/.husky/_/$h"
+done
+printf 'npm run typecheck\n' > "$TS/.husky/pre-commit"
+out=$(cd "$TS" && $TSH doctor 2>&1)
+contains "doctor: another manager's hooks that don't call the harness are inactive" "git hooks inactive: core.hooksPath is .husky/_" "$out"
+contains "and it names the hooks to chain" "missing: pre-commit, commit-msg, pre-push" "$out"
+printf 'scripts/harness/git-hooks/pre-commit\n' > "$TS/.husky/pre-commit"
+printf 'scripts/harness/git-hooks/commit-msg "$1"\n' > "$TS/.husky/commit-msg"
+contains "doctor: a hook still not chained is named" "missing: pre-push" "$(cd "$TS" && $TSH doctor 2>&1)"
+printf 'scripts/harness/git-hooks/pre-push "$@"\n' > "$TS/.husky/pre-push"
+lacks "doctor: hooks chained through Husky count as active" "git hooks inactive" "$(cd "$TS" && $TSH doctor 2>&1)"
+git -C "$TS" add -A >/dev/null 2>&1
+out=$(cd "$TS" && HARNESS_BUILD_CMD= git commit -qm "not conventional" 2>&1; echo "exit=$?")
+contains "a chained commit-msg hook still enforces Conventional Commits" "must follow Conventional Commits" "$out"
+git -C "$TS" config core.hooksPath scripts/harness/git-hooks
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

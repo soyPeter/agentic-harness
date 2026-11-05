@@ -2382,14 +2382,28 @@ def verify_command(argv):
 
 # --------------------------------------------------------------------------- health
 
+CHAINED_HOOKS = ("pre-commit", "commit-msg", "pre-push")
+
+
+def chained_hooks_missing(hooks_path):
+    """Hooks another manager owns (core.hooksPath set to, say, Husky's .husky/_) that don't hand on to the harness's.
+    Husky's .husky/_/<hook> wrappers run .husky/<hook>, so that script counts too."""
+    base = Path(hooks_path) if os.path.isabs(hooks_path) else ROOT / hooks_path
+    places = [base] + ([base.parent] if base.name == "_" else [])
+    return [name for name in CHAINED_HOOKS
+            if not any(("%s/%s" % (HOOKS_PATH, name)) in read(place / name) for place in places)]
+
+
 def health():
     """List of (level, message) for misconfigurations; level is 'error' or 'warn'."""
     issues = []
     hooks_path = git("config", "--get", "core.hooksPath").strip()
-    if hooks_path != HOOKS_PATH:
-        issues.append(("error", "git hooks inactive: core.hooksPath is %s, expected %s "
-                                "(fix: git config core.hooksPath %s)"
-                       % (hooks_path or "unset", HOOKS_PATH, HOOKS_PATH)))
+    unchained = chained_hooks_missing(hooks_path) if hooks_path and hooks_path != HOOKS_PATH else None
+    if hooks_path != HOOKS_PATH and unchained != []:
+        issues.append(("error", "git hooks inactive: core.hooksPath is %s, expected %s (fix: git config "
+                                "core.hooksPath %s, or have each hook there call %s/<hook>; missing: %s)"
+                       % (hooks_path or "unset", HOOKS_PATH, HOOKS_PATH, HOOKS_PATH,
+                          ", ".join(unchained or CHAINED_HOOKS))))
     for name in ("pre-commit", "commit-msg"):
         if not os.access(str(ROOT / HOOKS_PATH / name), os.X_OK):
             issues.append(("error", "%s/%s is missing or not executable" % (HOOKS_PATH, name)))
