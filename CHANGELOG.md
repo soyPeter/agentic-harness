@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.27.0 (2026-11-05)
+
+Triple adapter layer for the supervised Disputes pilot, on top of the core harness.
+
+- **Profiles** (`HARNESS_PROFILE`, user-only). `triple` means only a human merges, and the code enforces it:
+  - `harness.py orca` refuses `--merge` and `--trust`, and `orca-nightly` refuses to start;
+  - `enroll` refuses `--automation` and `--protect` before changing anything (`enroll --profile triple` sets the
+    profile);
+  - the shell gate refuses `gh pr merge` and GitHub's merge API, and the tool gate refuses MCP merge tools.
+
+  `HARNESS_PROFILE=triple` or `TRIPLE_MODE=1` in the environment adds the profile, but clearing the variable never
+  lifts one that `harness.conf` sets.
+- **EARS requirements** (`HARNESS_REQ_STYLE`, user-only, `plain` | `ears`). With `ears`, `spec-check` refuses a
+  requirement that has no `shall`, more than one `shall`, no named system, a `When`/`While`/`If`/`Where` without its
+  clause, `If` without `then`, passive voice, or untestable words. Acceptance criteria stay Given/When/Then; they may
+  also prove `NFR-<task>-<n>` items, and every criterion must cite a requirement or an NFR. The analyst, architect and
+  griller prompts, the spec template and `requirements-writing/ears.md` cover the patterns.
+- **Linear as the system of record** (`harness.py linear`, user-only; agents may only run `--dry-run`).
+  - `linear import <ISSUE> --task <id> [--light] [--from <issue.json>]` writes a draft spec with a `Linear:` line and
+    the ticket quoted as source material, and adds the task line.
+  - `linear receipt <task> [--status <state>]` posts the receipt on the ticket and never moves it to a completed or
+    canceled state.
+  - Standard library only (`lib/linear.py`). It is tested against a local fake of the GraphQL API with a recorded
+    `DIS-*` fixture.
+- **`triple` catalog pack.** Option `disputes-pci` parks authentication, billing and payments, migrations, PCI
+  evidence, secrets and infrastructure:
+  - file and shell writes to them are refused, and so are running migrations and storing a CVV; card numbers get a
+    warning;
+  - those paths and terms make a task not low-risk;
+  - it installs the `disputes-pci` skill.
+
+  Option `ears` sets `HARNESS_REQ_STYLE`. `catalog/triple/tools.conf.linear` holds Linear MCP contracts for the user to
+  paste into `tools.conf`. The pack's README says the devcontainer is not a PCI attestation.
+
 ## 0.26.1 (2026-11-03)
 
 - **Applied recommendations don't grow the spec; out-of-domain cases don't fail a task.** Found in a trial run of

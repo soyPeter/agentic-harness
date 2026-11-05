@@ -7,7 +7,10 @@ PRD: <the section of backbone/1-PRD.md this serves, or "none">
 <Why this is needed. The current behaviour, and who is affected.>
 
 ## Requirements
-<!-- One behaviour per requirement, written as "The system shall ...". Ids are REQ-<task-id>-<n>. -->
+<!-- One behaviour per requirement, written as "The system shall ...". Ids are REQ-<task-id>-<n>.
+     With HARNESS_REQ_STYLE="ears", use an EARS pattern (requirements-writing skill, ears.md):
+     "When <trigger>, the <system> shall ...", "While <state>, ...", "If <condition>, then the <system> shall ...",
+     "Where <feature>, ...". -->
 - REQ-<task-id>-1: The system shall <behaviour>.
 
 ## Acceptance criteria
@@ -16,6 +19,7 @@ PRD: <the section of backbone/1-PRD.md this serves, or "none">
 - AC-<task-id>-1 (REQ-<task-id>-1): Given <state>, when <action>, then <observable result>.
 
 ## Non-functional requirements
+<!-- With HARNESS_REQ_STYLE="ears", an NFR a criterion proves gets an id: - NFR-<task-id>-1: ... -->
 - <performance, security, availability or compatibility constraints, or "none">
 
 ## Architecture

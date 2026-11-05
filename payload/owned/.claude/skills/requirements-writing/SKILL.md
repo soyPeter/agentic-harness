@@ -2,7 +2,7 @@
 name: requirements-writing
 description: Write or review a task spec (backbone/specs/<id>.md) with clear requirements and testable Given/When/Then acceptance criteria. Use when defining a task, grilling a spec, or judging against one.
 applies-to: any
-last-verified: 2026-10-04
+last-verified: 2026-11-05
 ---
 
 # Requirements and acceptance criteria
@@ -16,6 +16,8 @@ Specs use the format in `backbone/templates/spec.md`. Run `python3 scripts/harne
 - Make them unambiguous. Replace "fast", "user-friendly", "secure", "handle errors" and "etc." with something measurable or enumerable ("responds within 300 ms at p95", "rejects names longer than 100 characters with 400").
 - Each one is necessary and traceable to the PRD or a stated need. Delete requirements nobody asked for.
 - Cover the unhappy paths: invalid input, not found, conflicts, permissions, empty results, limits, concurrency and idempotency where relevant.
+
+When `HARNESS_REQ_STYLE` is `ears`, write every requirement in an EARS pattern and read `ears.md`: `spec-check` enforces it.
 
 ## Acceptance criteria (`AC-<task>-<n> (REQ-<task>-<n>)`)
 

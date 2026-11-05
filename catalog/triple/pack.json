@@ -1,0 +1,24 @@
+{
+  "name": "triple",
+  "description": "Triple's delivery policy for supervised pilots: Disputes/PCI path locks, EARS requirements and Linear as the system of record. Pair it with HARNESS_PROFILE=\"triple\", which refuses unattended merges.",
+  "decides": "A pilot ADR puts the project under Triple's delivery policy (the Disputes pilot).",
+  "requires": [],
+  "groups": {},
+  "options": [
+    {
+      "id": "disputes-pci",
+      "description": "Park authentication, billing and payments, migrations, PCI evidence, secrets and infrastructure: agents may not write them, card data is refused, and those paths and terms make a task not low-risk (no light lane, no policy approval).",
+      "conf": {
+        "HARNESS_RISK_TERMS": "(?i)\\b(auth(entication|orization)?|logins?|passwords?|secrets?|tokens?|credentials?|encrypt\\w*|access control|RBAC|role-based|(user|admin) roles?|permission (model|check|system)s?|payments?|billing|personal data|PII|GDPR|migrations?|schema changes?|breaking changes?|public API|deletes? (all|every)|PCI|PCI DSS|cardholder|card numbers?|PAN|CVV|CVC|tokeni[sz]ation|KYC|AML|sanctions)\\b",
+        "HARNESS_RISK_PATHS": "(?i)(^|/)(auth\\w*|security|migrations?|migrate|db/migration|prisma/migrations|infra\\w*|deploy\\w*|\\.github|billing|payments?|payouts?|refunds?|settlements?|ledger|cards?|tokeni[sz]ation|vault|pci[^/]*|compliance|secrets?|terraform|k8s|helm|iam|identity|sso|oauth2?)/|openapi|swagger|Dockerfile|(^|/)(pom\\.xml|build\\.gradle(\\.kts)?|settings\\.gradle(\\.kts)?|package\\.json|go\\.mod|Cargo\\.toml|requirements[^/]*\\.txt|pyproject\\.toml)$"
+      }
+    },
+    {
+      "id": "ears",
+      "description": "Requirements in EARS: spec-check refuses a requirement without an EARS pattern (HARNESS_REQ_STYLE=\"ears\"); Given/When/Then criteria stay the evidence the judge traces.",
+      "conf": {
+        "HARNESS_REQ_STYLE": "ears"
+      }
+    }
+  ]
+}
