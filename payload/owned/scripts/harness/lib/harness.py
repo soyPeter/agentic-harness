@@ -686,11 +686,21 @@ def available_skills():
     return set(skill_files())
 
 
-def skill_read(file_path):
+def skill_read(file_path, cwd=None):
     """The skill whose SKILL.md file_path is, or None."""
-    path = Path(file_path)
-    path = (path if path.is_absolute() else ROOT / path).resolve()
+    path = Path(file_path).expanduser()
+    path = (path if path.is_absolute() else ROOT / (cwd or "") / path).resolve()
     return next((name for name, f in skill_files().items() if f.resolve() == path), None)
+
+
+def skill_invoked(name):
+    namespace, separator, skill = name.partition(":")
+    if separator:
+        if namespace != "agentic-harness":
+            return None
+        return skill_read(ENGINE_SKILLS / skill / "SKILL.md")
+    path = skill_files().get(name)
+    return skill_read(path) if path else None
 
 
 def load_routes():
@@ -2978,8 +2988,30 @@ def hook_post_tool_use(data):
 
 # Reads worth a trace line: the project knowledge and instructions an agent based its work on, not every code file.
 CONTEXT_SOURCES = r"^(backbone/|\.claude/skills/|AGENTS\.md$|CLAUDE\.md$)"
-SKILL_FILE = re.compile(r"(?:^|[\s'\"=/])(?:\./)?(?:\.claude|\.agents)/skills/([A-Za-z0-9._-]+)/SKILL\.md\b")
-SKILL_READERS = re.compile(r"^\s*(cat|sed|head|tail|less|more|bat|nl|awk)\b")
+SKILL_READERS = ("cat", "sed", "head", "tail", "less", "more", "bat", "nl", "awk")
+
+
+def shell_skills(command, cwd=None):
+    command, _ = split_heredocs(command)
+    for segment, _ in split_segments(command):
+        try:
+            lexer = shlex.shlex(segment, posix=True, punctuation_chars=True)
+            lexer.whitespace_split = True
+            words = list(lexer)
+        except ValueError:
+            continue
+        prog = program(words)
+        if prog == "cd" and len(words) == 2:
+            cwd = ROOT / (cwd or "") / Path(words[1]).expanduser()
+        if prog not in SKILL_READERS:
+            continue
+        for index, word in enumerate(words[1:], 1):
+            if index > 1 and ">" in words[index - 1]:
+                continue
+            if Path(word).name == "SKILL.md":
+                skill = skill_read(word, cwd)
+                if skill:
+                    yield skill
 
 
 def post_tool_notes(data):
@@ -2995,8 +3027,9 @@ def post_tool_notes(data):
             log_event("context", path=path)
         return notes
     if tool == "Skill":
-        name = str(tool_input.get("skill") or tool_input.get("name") or "").split(":")[-1].strip()
-        remember_skill(data, name)
+        skill = skill_invoked(str(tool_input.get("skill") or tool_input.get("name") or "").strip())
+        if skill:
+            remember_skill(data, skill)
         return notes
     if tool in FILE_TOOLS and tool_input.get("file_path"):
         snapshot_refresh()
@@ -3025,10 +3058,8 @@ def post_tool_notes(data):
     elif tool == "Bash":
         command = tool_input.get("command") or ""
         # Agents without a Read or Skill tool (Codex) load a skill by printing its SKILL.md.
-        for part in re.split(r"&&|;|\|\|", command):
-            if SKILL_READERS.match(part):
-                for name in SKILL_FILE.findall(part):
-                    remember_skill(data, name)
+        for skill in shell_skills(command, data.get("cwd")):
+            remember_skill(data, skill)
         rules, _ = load_rules()
         hits = check_text(rules, None, rule_text(command), ("warn",))
         if hits:

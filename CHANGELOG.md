@@ -7,6 +7,8 @@
   working directory (or `CLAUDE_PROJECT_DIR`). Engine-owned files come from the engine: the core guardrails and
   routes, `decisions.json`, the pipeline agents, the catalog and the core skills. Project skills are added to the core
   ones and win on a shared name. The skill gate points at the file that is actually there, and reading it counts.
+- Skill overrides apply to file reads, shell reads and skill invocations: loading an overridden engine skill does
+  not satisfy the project skill requirement.
 - In CI, the base branch's verifier now also uses the base branch's core guardrails, routes and decisions, not the
   pull request's.
 - **The thin-mode launcher** (`plugin/launcher.py`). It runs the engine a project pins in
