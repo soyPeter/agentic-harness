@@ -129,6 +129,22 @@ In a range, any change to the harness itself (enforcement files, the lock) or to
 
 `doctor.sh` reports an error if autonomous mode runs without `HARNESS_TEST_CMD`, or with verify, the start gate or the judge gate off.
 
+### Failure classes and the flywheel
+
+Every escalation records a **class** and the **playbook** that recovers from it. The harness picks the class from the escalation's kind and reason; `escalate --class <c>` sets it. After repeated judge fails, the last debugger brief decides: a spec or test it blames (owner `analyst`, `tester` or `user`) is `contradictory_req`, anything else `failed_test`.
+
+| Class | Playbook | Typical source |
+|---|---|---|
+| `tool_timeout` | retry with backoff | A worker or tool died or timed out. The Orca coordinator retries a dead step worker once (after `HARNESS_ORCA_RETRY_WAIT` seconds, default 30), then escalates. |
+| `invalid_args` | repair the call | A tool or command called wrongly |
+| `missing_context` | retrieve the source | An unanswered question (the default) |
+| `failed_test` | repair from the debugger's brief | The judge failed the code; delivery or CI failed |
+| `permission_denied` | request approval | A gate, guardrail, contract or approval refused it |
+| `contradictory_req` | escalate to the user | The spec, ADRs or PRD disagree; the griller kept failing |
+| `unchanged_repeat` | stop | A step came back without progress |
+
+`harness.py escalations` counts escalations by class. Once a class has been escalated twice, the harness opens `backbone/proposals/<class>.md` with every occurrence and the kind of change that would stop it. The scribe may draft the concrete change there: a guardrail, a regression test or a skill rule. The harness applies nothing. A proposal stays `Status: draft` until the user acts on it through a task they approve.
+
 ## Runner (`harness.py run`)
 
 The user (or a scheduled job) runs `python3 scripts/harness/lib/harness.py run [--max-tasks N] [--dry-run]` in autonomous mode. The runner only sequences work; the hooks, gates and verify still do all the enforcing. For each ready task (a `[WIP]` one first, then pending lines in order; BLOCKED tasks are skipped), it:

@@ -551,9 +551,21 @@ class Coordinator(object):
                 self.event("orca-worker", task=task, role=entry["role"], worker=entry["kind"], agent=entry.get("agent"),
                            outcome="failed-before-reporting", seconds=int(time.time() - entry.get("started", time.time())))
                 self.log("orca: task %s: the %s worker failed before reporting: %s" % (task, entry["role"], why))
+                # Playbook for tool_timeout: a worker that died gets one more try after a pause, then is escalated.
+                retries = self.tasks[task].setdefault("retries", {})
+                if entry["kind"] == "step" and retries.get(entry["role"], 0) < self.opts.get("retries", 1):
+                    retries[entry["role"]] = retries.get(entry["role"], 0) + 1
+                    wait = self.opts.get("retry_wait", 30) * retries[entry["role"]]
+                    self.log("orca: task %s: retrying the %s worker in %ds (tool_timeout: retry with backoff)"
+                             % (task, entry["role"], wait))
+                    self.event("orca-retry", task=task, role=entry["role"], failure_class="tool_timeout", wait=wait)
+                    time.sleep(wait)
+                    if not self.advance(task):
+                        self.start_next()
+                    continue
                 self.harness(self.tasks[task]["path"], "escalate", task, "--kind", "coordinator", "--reason",
                              "the %s worker (%s) failed: %s" % (entry["role"], self.agent_for(entry["role"]), why),
-                             "--needed", "a look at that agent in this worktree (trust, login, configuration)")
+                             "--class", "tool_timeout", "--needed", "a look at that agent in this worktree (trust, login, configuration)")
                 self.tasks[task]["outcome"] = "escalated (%s worker failed: %s)" % (entry["role"], why)
             self.start_next()
         if self.delivery:

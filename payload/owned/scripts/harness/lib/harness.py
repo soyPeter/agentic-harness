@@ -18,7 +18,7 @@ Usage:
   harness.py adopt --remove <pack>[,<pack>] [--dry-run]
   harness.py verify [--range <base>..<tip>] [--allow-user-changes]   (gates on the staged change, or a CI range)
   harness.py approve <task-id>                                    (autonomous mode: policy approval of a low-risk spec)
-  harness.py escalate <task-id> --reason <text> [--kind <k>] [--needed <text>]
+  harness.py escalate <task-id> --reason <text> [--kind <k>] [--class <failure class>] [--needed <text>]
   harness.py escalations                                          (open escalations for the user)
   harness.py risk <task-id>
   harness.py run [--max-tasks N] [--only <task>] [--worktree [--pr]] [--dry-run]   (autonomous, unattended)
@@ -145,7 +145,8 @@ AGENT_SCOPES = {
     "analyst": ("allow", (r"^backbone/specs/[^/]+\.md$", r"^backbone/1-PRD\.md$")),
     "architect": ("allow", (r"^backbone/adr/[^/]+\.md$", r"^backbone/specs/[^/]+\.md$",
                             r"^backbone/5-DECISIONS\.md$", r"^backbone/2-PLANNING\.md$")),
-    "scribe": ("allow", (r"^backbone/6-MEMORY\.md$", r"^backbone/adr/[^/]+\.md$", r"^backbone/5-DECISIONS\.md$")),
+    "scribe": ("allow", (r"^backbone/6-MEMORY\.md$", r"^backbone/adr/[^/]+\.md$", r"^backbone/5-DECISIONS\.md$",
+                         r"^backbone/proposals/[^/]+\.md$")),
     "implementer": ("deny", (r"^backbone/", r"^\.claude/", r"^\.codex/", r"^\.opencode/", r"^scripts/harness/",
                              r"^(AGENTS|CLAUDE)\.md$")),
     # Reviewers never edit. Claude Code enforces this with their tool list; Codex has no per-agent tool list.
@@ -159,7 +160,7 @@ AGENT_SCOPES = {
 SCOPE_HELP = {
     "analyst": "It writes specs (backbone/specs/) and the PRD only.",
     "architect": "It writes ADRs (backbone/adr/), their index, 2-PLANNING.md and the Architecture section of specs.",
-    "scribe": "It writes 6-MEMORY.md and ADRs for decisions taken during implementation.",
+    "scribe": "It writes 6-MEMORY.md, ADRs for decisions taken during implementation, and draft proposals.",
     "implementer": "It writes code and tests only; backbone/, .claude/ and harness files belong to other roles.",
     "griller": "It reviews the spec and asks questions; it never edits files.",
     "judge": "It judges the code against the spec; it never edits files.",
@@ -1403,7 +1404,7 @@ def record_verdict(data, kind):
         recent = since_last_escalation(task, history)
         if autonomous() and consecutive_fails(recent) >= limit:
             escalate(task, "%s failed %d times" % (agent_name, consecutive_fails(recent)), "; ".join(reasons),
-                     "the user's decision on the findings")
+                     "the user's decision on the findings", debug_class(task) if kind == "judge" else None)
             note += ". Escalated after %d failed rounds: the task is BLOCKED (backbone/escalations.md); " \
                     "continue with another task." % consecutive_fails(recent)
     emit({"systemMessage": note})
@@ -1514,8 +1515,92 @@ def risk_reasons(task, base=None):
     return reasons
 
 
-def escalate(task, kind, reason, needed=None):
+# Failure classes: why a task stopped, each with the playbook that recovers from it. An escalation is classified from
+# its kind and reason (or --class); a class that repeats gets a draft proposal in backbone/proposals/ for the user.
+FAILURE_CLASSES = {
+    "tool_timeout": ("retry with backoff", "a tool or worker timed out or died: retry once after a pause, then "
+                     "escalate", "a timeout, a tool contract or a sandbox allowlist entry"),
+    "invalid_args": ("repair the call", "a tool or command was called wrongly: fix the arguments from its usage "
+                     "and call again", "a skill note on how to call the tool"),
+    "missing_context": ("retrieve the source", "the answer is in a source nobody read: find it in backbone/, the "
+                        "knowledge source or the code, cite it, and continue", "a 4-KNOWLEDGE.md entry or a skill"),
+    "failed_test": ("repair from the debugger's brief", "the judge failed the code: the debugger diagnoses, the "
+                    "implementer fixes, the judge re-runs", "a regression test or a guardrail for the defect pattern"),
+    "permission_denied": ("request approval", "a gate, a guardrail or a contract refused the action: ask the user, "
+                          "never route around it", "a guardrail or tools.conf review"),
+    "contradictory_req": ("escalate to the user", "the spec, an ADR or the PRD disagree or leave the behaviour open: "
+                          "the user decides", "a requirements-writing rule or a PRD clarification"),
+    "unchanged_repeat": ("stop", "the same step came back without progress: stop the task and hand it over",
+                         "a smaller task split or a playbook change"),
+}
+FAILURE_RULES = (   # (class, regex over "<kind> <reason>"), first match wins
+    ("unchanged_repeat", r"(?i)changed nothing|without progress|no progress|no resolution|came back \d+ times"),
+    ("tool_timeout", r"(?i)time[sd]? ?out|timed out|worker .*failed|unreachable"),
+    ("permission_denied", r"(?i)^(approval|out-of-band change)\b|refused|permission|not allowed|blocked by"),
+    ("invalid_args", r"(?i)invalid (arg|argument|input|option)|unknown (argument|option|flag)|usage:"),
+    ("failed_test", r"(?i)^judge failed|tests? fail|not met|delivery failed|checks? failed"),
+    ("contradictory_req", r"(?i)^griller failed|contradict|ambiguous|conflict"),
+    ("missing_context", r"(?i)^decision\b|question|unanswered|no source|missing context"),
+)
+
+
+def failure_class(kind, reason):
+    text = "%s %s" % (kind, reason)
+    return next((name for name, pattern in FAILURE_RULES if re.search(pattern, text)), "missing_context")
+
+
+def debug_class(task):
+    """The class the last debugger brief points at: a spec or test it blames is contradictory, else a failed test."""
+    briefs = verdict_history(task, "debug")
+    owners = {str(c.get("owner")) for c in (briefs[-1].get("root_causes") or []) if isinstance(c, dict)} \
+        if briefs else set()
+    return "contradictory_req" if owners & {"analyst", "tester", "user"} else "failed_test"
+
+
+def class_entries():
+    """[(class, task, reason)] for every classified escalation in escalations.md, oldest first."""
+    found = []
+    for entry in re.split(r"(?m)^## ", read(ESCALATIONS))[1:]:
+        cls = re.search(r"(?m)^- Class:\s*(\w+)", entry)
+        task = re.search(r"\bTask\s+(\S+):", entry.splitlines()[0])
+        reason = re.search(r"(?m)^- Reason:\s*(.*)$", entry)
+        if cls:
+            found.append((cls.group(1), task.group(1) if task else "?", reason.group(1) if reason else ""))
+    return found
+
+
+def class_counts():
+    counts = {}
+    for cls, _, _ in class_entries():
+        counts[cls] = counts.get(cls, 0) + 1
+    return counts
+
+
+def propose(cls):
+    """A failure class seen twice or more gets a draft proposal for the user, listing every occurrence. The harness
+    applies nothing: the scribe drafts the change and it lands only through a task the user approves."""
+    occurrences = [(task, reason) for c, task, reason in class_entries() if c == cls]
+    if len(occurrences) < 2:
+        return None
+    path = BACKBONE / "proposals" / ("%s.md" % cls)
+    action, _, change = FAILURE_CLASSES[cls]
+    text = read(path)
+    if not text:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = ("# Proposal: %s keeps recurring\n\n- Status: draft (the user accepts, edits or drops it; the harness "
+                "applies nothing)\n- Playbook: %s\n- Proposed change: %s\n\n## Draft\n\n(the scribe writes the "
+                "concrete change here)\n\n## Occurrences\n" % (cls, action, change))
+        lines = occurrences
+    else:
+        lines = occurrences[-1:]
+    text += "".join("- task %s: %s\n" % (task, reason.strip()[:300]) for task, reason in lines)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def escalate(task, kind, reason, needed=None, cls=None):
     """Park task for the user: a BLOCKED note on its line (out of [WIP]) and an entry in escalations.md."""
+    cls = cls if cls in FAILURE_CLASSES else failure_class(kind, reason)
     stamp = time.strftime("%Y-%m-%d %H:%M")
     text = read(TASKS)
     lines = text.splitlines()
@@ -1529,11 +1614,13 @@ def escalate(task, kind, reason, needed=None):
         ESCALATIONS.write_text("# Escalations\n\nWritten by the harness when an autonomous run needs a human "
                                "decision. Resolve an entry by acting on it, setting its status to resolved, and "
                                "removing the BLOCKED note from the task line in 3-TASKS.md.\n", encoding="utf-8")
-    entry = ("\n## %s Task %s: %s\n\n- Status: open\n- Reason: %s\n- Needed: %s\n"
-             % (stamp, task, kind, reason.strip(), needed or "a decision from the user"))
-    log_event("escalation", task=task, escalation=kind, reason=reason.strip()[:500])
+    entry = ("\n## %s Task %s: %s\n\n- Status: open\n- Class: %s\n- Playbook: %s\n- Reason: %s\n- Needed: %s\n"
+             % (stamp, task, kind, cls, FAILURE_CLASSES[cls][0], reason.strip(), needed or "a decision from the user"))
+    log_event("escalation", task=task, escalation=kind, failure_class=cls, reason=reason.strip()[:500])
     with ESCALATIONS.open("a", encoding="utf-8") as handle:
         handle.write(entry)
+    if propose(cls):
+        log_event("proposal", failure_class=cls)
     snapshot_refresh()
     issue = None
     if conf()["HARNESS_ESCALATE_GH"] == "on" and shutil.which("gh"):
@@ -1627,14 +1714,17 @@ def escalate_command(argv):
         return 64
     task, opts, key = argv[0], {}, None
     for arg in argv[1:]:
-        if arg in ("--reason", "--kind", "--needed"):
+        if arg in ("--reason", "--kind", "--needed", "--class"):
             key = arg[2:]
         elif key:
             opts[key] = (opts.get(key, "") + " " + arg).strip()
     if not opts.get("reason"):
         sys.stderr.write("escalate: --reason is required\n")
         return 64
-    issue = escalate(task, opts.get("kind", "decision"), opts["reason"], opts.get("needed"))
+    if opts.get("class") and opts["class"] not in FAILURE_CLASSES:
+        sys.stderr.write("escalate: --class must be one of %s\n" % ", ".join(FAILURE_CLASSES))
+        return 64
+    issue = escalate(task, opts.get("kind", "decision"), opts["reason"], opts.get("needed"), opts.get("class"))
     print("escalate: task %s parked as BLOCKED; recorded in backbone/escalations.md%s. Continue with another task."
           % (task, " and " + issue if issue else ""))
     return 0
@@ -1645,6 +1735,10 @@ def escalations_command():
     for item in items:
         print("open  %s" % item)
     print("%d open escalation(s)" % len(items))
+    counts = class_counts()
+    if counts:
+        print("by class (all escalations): %s" % ", ".join("%s %d" % (c, counts[c]) for c in FAILURE_CLASSES
+                                                           if c in counts))
     return 0
 
 
@@ -3734,7 +3828,8 @@ def orca_command(argv):
     launch = dict(part.strip().split("=", 1) for part in conf()["HARNESS_ORCA_LAUNCH"].split(";") if "=" in part)
     opts = {"run": value("--run"), "agents": agents, "launch": launch, "trust": "--trust" in argv,
             "parallel": limit, "deps": deps, "merge": "--merge" in argv,
-            "launch_wait": int(os.environ.get("HARNESS_ORCA_LAUNCH_WAIT", "8")), "here": "--here" in argv, "pr": "--pr" in argv,
+            "launch_wait": int(os.environ.get("HARNESS_ORCA_LAUNCH_WAIT", "8")),
+            "retry_wait": int(os.environ.get("HARNESS_ORCA_RETRY_WAIT", "30")), "here": "--here" in argv, "pr": "--pr" in argv,
             "orca": os.environ.get("HARNESS_ORCA_BIN"),
             "wait_ms": int(value("--wait-ms")) if (value("--wait-ms") or "").isdigit() else 900000,
             "timeout": int(value("--timeout")) if (value("--timeout") or "").isdigit() else 4 * 3600}
