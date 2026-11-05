@@ -447,7 +447,8 @@ EOF
 )
 contains "every skill follows the format contract" "OK" "$out"
 for s in requirements-writing adr-writing architecture api-design openapi code-quality module-testing security changelog change-review \
-         java java-test java-review quarkus quarkus-cdi jdbi containers container-security; do
+         java java-test java-review quarkus quarkus-cdi jdbi containers container-security \
+         typescript typescript-test react nextjs disputes-pci; do
   contains "skill present: $s" " $s" " ${out%%$'\n'*} "
 done
 leaks=$(grep -rlE -- '-----BEGIN ([A-Z]+ )?PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b' "$HARNESS/payload" "$HARNESS/catalog" 2>/dev/null)
@@ -3058,6 +3059,42 @@ contains "report counts escalations by class" "by class: tool_timeout 2" "$(cd "
 contains "report --json carries them" '"escalations_by_class"' "$(cd "$TR" && $TH report --json 2>&1)"
 expect 0 "the scribe may draft a proposal" guard "$TR" scribe "$(write_json "$TR/backbone/proposals/tool_timeout.md" "x")"
 expect 2 "the implementer may not" guard "$TR" implementer "$(write_json "$TR/backbone/proposals/tool_timeout.md" "x")"
+
+section "typescript and react packs (Disputes stack)"
+TS="$WORK/ts-app"; new_repo "$TS"
+"$HARNESS/bootstrap.sh" "$TS" --name ts-app >/dev/null
+TSH="python3 $TS/scripts/harness/lib/harness.py"
+printf '# ADR-002: Stack\n\n## Status\nAccepted\n\n## Context\nA web app.\n\n## Decision\nTypeScript on Node with npm and Vitest, strict typing; React with the Next.js App Router and Testing Library. Catalog packs: typescript, react.\n\n## Alternatives considered\nNone.\n\n## Consequences\nAgents load the stack skills.\n' > "$TS/backbone/adr/ADR-002-stack.md"
+contains "react requires the typescript pack" "requires the typescript pack" "$($TSH adopt react --adr ADR-002 --with nextjs,testing-library 2>&1)"
+contains "the package manager must be decided" "choose the package-manager" "$($TSH adopt typescript --adr ADR-002 --with vitest,strict 2>&1)"
+expect 0 "adopts typescript and react" $TSH adopt typescript,react --adr ADR-002 --with npm,vitest,strict,nextjs,testing-library
+for s in typescript typescript-test react nextjs; do
+  [ -f "$TS/.claude/skills/$s/SKILL.md" ] && ok "adopted skill: $s" || bad "adopted skill: $s"
+done
+contains "the Vitest skill is the one installed" "Vitest" "$(cat "$TS/.claude/skills/typescript-test/SKILL.md")"
+conf=$(cat "$TS/backbone/harness.conf")
+contains "npm sets a type check as the build command" 'HARNESS_BUILD_CMD="npx --no-install tsc --noEmit"' "$conf"
+contains "npm sets the test command" 'HARNESS_TEST_CMD="npm test"' "$conf"
+contains "the runner sets the test paths" 'HARNESS_TEST_PATHS="(^|/)(tests?|__tests__)/' "$conf"
+tsg() { hook "$TS" pre-tool-use "$(write_json "$TS/$1" "$2")" 2>&1; }
+tsw() { hook "$TS" post-tool-use "$(write_json "$TS/$1" "$2")" 2>&1; }
+contains "strict: @ts-ignore is refused" "use // @ts-expect-error" "$(tsg src/lib/cases.ts '// @ts-ignore')"
+lacks "strict: @ts-expect-error with a reason is fine" "ts-expect-error <why>" "$(tsg src/lib/cases.ts '// @ts-expect-error upstream types lag, see #12')"
+contains "strict: any in code gets a warning" "switches type checking off" "$(tsw src/lib/cases.ts 'export function f(x: any) {}')"
+lacks "strict: any in a test doesn't" "switches type checking off" "$(tsw src/lib/cases.test.ts 'const x: any = 1')"
+contains "eval is refused" "run strings as code" "$(tsg src/lib/run.ts 'const v = eval(input)')"
+lacks "a method called eval is not" "run strings as code" "$(tsg src/lib/run.ts 'const v = engine.eval(input)')"
+contains "dangerouslySetInnerHTML is refused" "unescaped HTML" "$(tsg src/components/Note.tsx '<div dangerouslySetInnerHTML={{ __html: note }} />')"
+contains "a secret in NEXT_PUBLIC_ is refused" "inlined into the browser bundle" "$(tsg .env.example 'NEXT_PUBLIC_STRIPE_SECRET_KEY=x')"
+lacks "a public URL in NEXT_PUBLIC_ is fine" "inlined into the browser bundle" "$(tsg .env.example 'NEXT_PUBLIC_APP_URL=https://example.test')"
+contains "vi.mock gets a warning" "mock only at a port boundary" "$(tsw src/tests/cases.test.ts 'vi.mock("../lib/db")')"
+contains "querySelector in a component test gets a warning" "Query as a user would" "$(tsw src/components/Note.test.tsx 'container.querySelector(".title")')"
+out=$(tsg src/app/cases/page.tsx 'export default function Page() { return null }')
+contains "App Router pages need the nextjs skill" "nextjs:" "$out"
+contains "and the react skill" "react:" "$out"
+contains "and the typescript skill" "typescript:" "$out"
+contains "server actions need nextjs and security" "security:" "$(tsg src/lib/actions/cases.ts 'export async function close() {}')"
+contains "tests need the typescript-test skill" "typescript-test:" "$(tsg src/lib/cases.test.ts 'it("AC-1.1-1: x", () => {})')"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

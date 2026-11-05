@@ -1,0 +1,56 @@
+{
+  "name": "typescript",
+  "description": "TypeScript on Node.js: strict types, narrowing over casts, schemas at trust boundaries, async error handling, module layout; tests with the runner the ADR chose (no mocks of the code under test).",
+  "decides": "The stack ADR chooses TypeScript (Node.js) as an implementation language.",
+  "requires": [],
+  "groups": {
+    "package-manager": {
+      "required": true,
+      "description": "The package manager the ADR chose; sets HARNESS_BUILD_CMD (a type check, fast enough for pre-commit) and HARNESS_TEST_CMD."
+    },
+    "test-runner": {
+      "required": true,
+      "description": "The test runner the ADR chose; sets HARNESS_TEST_PATHS and installs its testing skill."
+    }
+  },
+  "options": [
+    {
+      "id": "npm",
+      "group": "package-manager",
+      "description": "npm with a committed package-lock.json.",
+      "conf": {
+        "HARNESS_BUILD_CMD": "npx --no-install tsc --noEmit",
+        "HARNESS_TEST_CMD": "npm test"
+      }
+    },
+    {
+      "id": "pnpm",
+      "group": "package-manager",
+      "description": "pnpm with a committed pnpm-lock.yaml.",
+      "conf": {
+        "HARNESS_BUILD_CMD": "pnpm exec tsc --noEmit",
+        "HARNESS_TEST_CMD": "pnpm test"
+      }
+    },
+    {
+      "id": "vitest",
+      "group": "test-runner",
+      "description": "Vitest (vi.* APIs, happy-dom or jsdom for components).",
+      "conf": {
+        "HARNESS_TEST_PATHS": "(^|/)(tests?|__tests__)/|\\.(test|spec)\\.[cm]?[jt]sx?$"
+      }
+    },
+    {
+      "id": "jest",
+      "group": "test-runner",
+      "description": "Jest (jest.* APIs, ts-jest or SWC).",
+      "conf": {
+        "HARNESS_TEST_PATHS": "(^|/)(tests?|__tests__)/|\\.(test|spec)\\.[cm]?[jt]sx?$"
+      }
+    },
+    {
+      "id": "strict",
+      "description": "Strict typing in code: @ts-ignore and @ts-nocheck are refused (use @ts-expect-error with a reason), and `any` outside tests gets a warning."
+    }
+  ]
+}
