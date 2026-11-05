@@ -2502,7 +2502,9 @@ section "Linear as the system of record: ticket -> spec -> receipt"
 FX="$HARNESS/tests/fixtures/linear"
 rm -f "$WORK/linear-port" "$WORK/linear-calls"
 python3 "$HARNESS/tests/fake-linear.py" "$FX" "$WORK/linear-port" "$WORK/linear-calls" & LINEAR_PID=$!
-for _ in $(seq 1 50); do [ -s "$WORK/linear-port" ] && break; sleep 0.1; done
+# A cold Python on a CI runner can take several seconds to start; without the port every call is refused.
+for _ in $(seq 1 300); do [ -s "$WORK/linear-port" ] && break; sleep 0.1; done
+[ -s "$WORK/linear-port" ] && ok "the fake Linear API is listening" || bad "the fake Linear API is listening (no port after 30 s)"
 export HARNESS_LINEAR_URL="http://127.0.0.1:$(cat "$WORK/linear-port")/graphql"
 out=$($CH linear import DIS-142 --task 7.3 2>&1; echo "exit=$?")
 contains "import without a key says what's missing" "LINEAR_API_KEY is not set" "$out"
