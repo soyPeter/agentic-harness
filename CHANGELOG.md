@@ -9,6 +9,7 @@
   ones and win on a shared name. The skill gate points at the file that is actually there, and reading it counts.
 - Skill overrides apply to file reads, shell reads and skill invocations: loading an overridden engine skill does
   not satisfy the project skill requirement.
+- Rule reports identify core and project guardrails by source when the engine runs outside the project.
 - CI extracts the base branch's core guardrails, routes and decisions alongside its verifier. `verify --range`
   continues to check task gates and protected changes; it does not scan the changed code for guardrail violations.
 - **The thin-mode launcher** (`plugin/launcher.py`). It runs the engine a project pins in

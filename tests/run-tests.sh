@@ -2881,7 +2881,7 @@ lacks "thin: doctor finds the pipeline agents in the engine" "agent definitions 
 lacks "thin: doctor finds the core skills the core routes name" "missing skill 'adr-writing'" "$out"
 contains "thin: the catalog comes from the engine" "quarkus" "$(thin "$T" catalog)"
 
-expect 0 "thin: skill overrides and CI assets" python3 -B "$HARNESS/tests/test-thin-regressions.py"
+expect 0 "thin: skill overrides, rule provenance and CI engine assets" python3 -B "$HARNESS/tests/test-thin-regressions.py"
 
 section "thin mode: the launcher runs the engine the project pins (ADR-001)"
 L="$HARNESS/plugin/launcher.py"

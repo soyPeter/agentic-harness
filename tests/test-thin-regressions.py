@@ -110,6 +110,20 @@ class ThinRegressions(unittest.TestCase):
                 self.assert_gate(session, session == "missing")
 
 
+    def test_rule_reports_distinguish_core_and_project_in_both_layouts(self):
+        self.install()
+        with (self.project / "backbone/guardrails.conf").open("a") as handle:
+            handle.write("\nwarn | \\.review$ | NEVER_MATCH | Project review sentinel.\n")
+        for engine in (self.project / "scripts/harness/lib/harness.py", ENGINE):
+            with self.subTest(engine=engine):
+                result = self.run_command("python3", "-B", str(engine), "report", "--json")
+                rules = json.loads(result.stdout)["rules"]
+                self.assertEqual(rules["project_never_fired"], ["Project review sentinel."])
+                self.assertGreater(len(rules["never_fired"]), 1)
+                report = self.run_command("python3", "-B", str(engine), "report", "--rules").stdout
+                self.assertIn("Private keys must never be written into the repository.  (core)", report)
+                self.assertNotIn("Project review sentinel.  (core)", report)
+
     def extraction_script(self):
         workflow = (HARNESS / "payload/owned/.github/workflows/harness-verify.yml").read_text()
         step = workflow.split("      - name: Take the verifier from the base branch\n", 1)[1]

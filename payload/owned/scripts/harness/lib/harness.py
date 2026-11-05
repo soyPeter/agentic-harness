@@ -793,17 +793,18 @@ def skill_gate(data, path):
 # --------------------------------------------------------------------------- guardrail rules
 
 class Rule(object):
-    def __init__(self, severity, target, content, message, origin):
+    def __init__(self, severity, target, content, message, origin, source):
         self.severity = severity
         self.target = target      # compiled path regex, or None for Bash commands (@bash)
         self.content = content
         self.message = message
         self.origin = origin
+        self.source = source
 
 
 def load_rules():
     rules, errors = [], []
-    for path in RULE_FILES:
+    for source, path in zip(("core", "project"), RULE_FILES):
         origin = rel(str(path))
         for n, raw in enumerate(read(path).splitlines(), 1):
             line = raw.strip()
@@ -820,7 +821,7 @@ def load_rules():
             except re.error as exc:
                 errors.append("%s: invalid regex (%s)" % (where, exc))
                 continue
-            rules.append(Rule(parts[0], target, content, parts[3], where))
+            rules.append(Rule(parts[0], target, content, parts[3], where, source))
     return rules, errors
 
 
@@ -4405,7 +4406,7 @@ def lift(events):
     # Core rules guard against rare disasters and are meant to stay quiet; a project rule that never fires may no
     # longer apply.
     never = sorted({r.message[:120] for r in rules} - set(fired))
-    project = {r.message[:120] for r in rules if not r.origin.startswith("scripts/harness/")}
+    project = {r.message[:120] for r in rules if r.source == "project"}
     slow = [e for e in events if e.get("kind") == "hook-slow"]
     candidates = []
     for reason, tasks in sorted(by_tasks((re.sub(r"\s+", " ", e.get("reason", "")).strip(), e.get("task"))
