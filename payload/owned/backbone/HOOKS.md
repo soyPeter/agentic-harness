@@ -332,12 +332,12 @@ Each event carries the task in progress and, inside a hook, the session and agen
 - **Decisions:** the ADRs the spec follows, the ADRs the task added or changed (with their status), and the assumptions with their sources.
 - **Risks**, headed by the spec's Change-Class (`change_class` in the JSON), and the number of grill, judge and debugger rounds.
 - **Approval needed:** ADRs that aren't Accepted and open escalations.
-- **Suggested labels** for whoever triages the pull request (`suggested_labels` with `--json`): one risk label from the spec's `Change-Class` (ADR-002) and the risks above, and `class:<class>` when the spec declares one of the four classes. A missing or unknown class is rated as `feature`. The labels are advisory: none approves or merges anything.
+- **Suggested labels** for whoever triages the pull request (`suggested_labels` with `--json`): one risk label from the spec's `Change-Class` (ADR-002) and the risks above, and `class:<class>` when the spec has a `Change-Class:` line. The class is the one `approve` and `risk` use: a spec with two different values, or a value that isn't one of the four, is labelled `class:feature`, and the receipt says why (`change_class_problem`). A spec without the line is rated as `feature` and gets no class label. The risk the class itself brings (the user approves `feature` and `schema` work) is already its step; only other risks raise the label. The labels are advisory: none approves or merges anything.
 
-| Change-Class | No risks | Risks |
+| Change-Class | No other risks | Other risks |
 |---|---|---|
 | `docs`, `refactor` | `risk:low` | `risk:elevated` |
-| `feature`, or none declared | `risk:elevated` | `risk:high` |
+| `feature`, an invalid one, or none | `risk:elevated` | `risk:high` |
 | `schema` | `risk:high` | `risk:high` |
 
 It refuses a task without a judge pass on the current code. `harness.py run` saves it next to the run logs and `--pr` puts it in the pull request; the Orca coordinator does the same and keeps it in `.git/harness/receipts/`.

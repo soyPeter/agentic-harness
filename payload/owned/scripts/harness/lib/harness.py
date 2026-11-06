@@ -132,12 +132,6 @@ PROFILES = ("", "triple")
 NO_MERGE_PROFILES = ("triple",)
 MERGE_ENDPOINT = re.compile(r"/pulls/\d+/merge\b|/merges\b")
 MERGE_TOOL = re.compile(r"^mcp__.*merge", re.I)
-# Pull request labels a receipt suggests for human triage (ADR-002). The risk label starts at the Change-Class's
-# step and goes one step up when the receipt lists risks: docs and refactor may be policy-approved, feature never is,
-# and schema is migrations, auth, secrets, payments and infrastructure.
-RISK_LABELS = ("risk:low", "risk:elevated", "risk:high")
-CLASS_RISK_STEP = {"docs": 0, "refactor": 0, "feature": 1, "schema": 2}
-TRIAGE_LABELS = RISK_LABELS + tuple("class:" + name for name in CLASS_RISK_STEP)
 # The knowledge source: an MCP server registered as "knowledge" (claude mcp add) over a folder of notes, that the
 # analyst, architect and griller consult when grilling raises questions. Read-only; answers are cited as vault:<path>.
 KNOWLEDGE_TOOL_PREFIX = "mcp__knowledge__"
@@ -185,6 +179,12 @@ CLASS_GATES = {
     "feature": "the user approves it, never policy",
     "schema": "the user approves it, never policy; it never takes the light lane",
 }
+# Pull request labels a receipt suggests for human triage. The risk label starts at the class's step and goes one
+# step up when the receipt lists other risks: docs and refactor may be policy-approved, feature never is, and schema
+# is migrations, auth, secrets, payments and infrastructure.
+RISK_LABELS = ("risk:low", "risk:elevated", "risk:high")
+CLASS_RISK_STEP = {"docs": 0, "refactor": 0, "feature": 1, "schema": 2}
+TRIAGE_LABELS = RISK_LABELS + tuple("class:" + name for name in CHANGE_CLASSES)
 
 # Write scope per agent: ("allow", patterns) permits only matches; ("deny", patterns) refuses matches.
 AGENT_SCOPES = {
@@ -5210,18 +5210,15 @@ def changed_since(base):
     return sorted(found.items())
 
 
-def declared_change_class(spec_text):
-    """The class on the spec's Change-Class: line when it is one of ADR-002's four, else None (rated as feature)."""
-    m = re.search(r"(?mi)^\s*Change-Class:[ \t]*(\S*)", strip_comments(spec_text or ""))
-    value = m.group(1).lower() if m else ""
-    return value if value in CLASS_RISK_STEP else None
-
-
 def suggested_labels(spec_text, risks):
-    """One risk:* label, and class:<class> when the spec declares its class. Advisory: a label approves nothing."""
-    declared = declared_change_class(spec_text)
-    step = min(CLASS_RISK_STEP[declared or "feature"] + (1 if risks else 0), len(RISK_LABELS) - 1)
-    return [RISK_LABELS[step]] + (["class:" + declared] if declared else [])
+    """One risk:* label, and class:<class> when the spec has a Change-Class line: the class approve and risk use, so
+    feature when the declared one is invalid. Advisory: a label approves nothing."""
+    cls, declared, _ = change_class(spec_text)
+    # risks holds the class's own reason (the user approves feature and schema work); the step already counts it.
+    own = class_risks(spec_text)
+    raised = any(reason not in own for reason in risks)
+    step = min(CLASS_RISK_STEP[cls] + (1 if raised else 0), len(RISK_LABELS) - 1)
+    return [RISK_LABELS[step]] + (["class:" + cls] if declared else [])
 
 
 def receipt_data(task, base=None):
@@ -5295,6 +5292,7 @@ def receipt_data(task, base=None):
         "not_verified": not_verified,
         "decisions": {"governing_adrs": governing, "adrs_changed": adrs, "assumptions": assumptions},
         "change_class": change_class(spec_text)[0],
+        "change_class_problem": change_class(spec_text)[2],
         "risks": risk_reasons(task, base),
         "rounds": {"grill": len(grills), "judge": len(judge), "debug": len(verdict_history(task, "debug"))},
         "judged_at": passed.get("at"),
@@ -5326,8 +5324,10 @@ def receipt_text(d):
         lines += ["", heading] + ["  - %s" % i for i in items or ["none"]]
     lines += ["", "SUGGESTED LABELS (for whoever triages the pull request; a label never approves or merges it)"]
     lines += ["  - %s" % label for label in d["suggested_labels"]]
-    if not any(label.startswith("class:") for label in d["suggested_labels"]):
-        lines.append("  (the spec declares no valid Change-Class, so it is rated as feature)")
+    if d["change_class_problem"]:
+        lines.append("  (labelled as feature, as approve and risk count it, because %s)" % d["change_class_problem"])
+    elif not any(label.startswith("class:") for label in d["suggested_labels"]):
+        lines.append("  (rated as feature, as approve and risk count it, because the spec declares no Change-Class)")
     return "\n".join(lines)
 
 
