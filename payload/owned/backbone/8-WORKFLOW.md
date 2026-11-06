@@ -44,7 +44,7 @@ Check the state at any time with `python3 scripts/harness/lib/harness.py spec-ch
 
 ### Phase 5: Deliver
 
-15. **Deliverer** (`HARNESS_DELIVER`, default `on`): once the task is committed, `next` returns `deliver`. "Deliver this branch." It pushes the branch, opens or updates the PR with the receipts and the reviews' follow-ups, and watches CI. It never edits files and never merges; merging stays with the user.
+15. **Deliverer** (`HARNESS_DELIVER`, default `on`): once the task is committed, `next` returns `deliver`. "Deliver this branch." It pushes the branch, opens or updates the PR with the receipts and the reviews' follow-ups, labels it with the receipts' suggested `risk:*` and `class:*` labels for triage, and watches CI. It never edits files and never merges; merging stays with the user, and a label never approves or merges.
     - `delivered`: the task is `done`; give the user the PR link.
     - `delivery-failed` (a red check, or a `hold`): each finding names its owner. Add a task for the fixes (the light lane suits small ones, when the user has it on) and run it through the pipeline; its delivery updates the same PR. Take `user` findings to the user.
 
