@@ -1,4 +1,5 @@
-"""The PR labels `harness.py receipt` suggests for human triage (ADR-002), checked through the receipt command.
+"""The PR labels `harness.py receipt` suggests for human triage (ADR-002), checked through the receipt command, and
+the deliverer's gate letting it apply each of them.
 
 One risk:* label comes from the spec's Change-Class and the receipt's other risks; class:<class> is added when the
 spec has a Change-Class line. The class is the one approve and risk use, so an invalid declaration is labelled
@@ -213,6 +214,19 @@ class SuggestedLabels(JudgedTask):
         self.assertEqual(data["suggested_labels"], ["risk:elevated", "class:docs"])
         self.assertTrue(any("doesn't cover a change to files that aren't documentation: src/search.py" in reason
                             for reason in data["risks"]), data["risks"])
+
+    def test_the_deliverer_may_apply_every_label_a_receipt_suggests(self):
+        for change_class, risky in (("Change-Class: docs", False), ("Change-Class: refactor", True),
+                                    ("Change-Class: feature", True), ("Change-Class: schema", False),
+                                    ("Change-Class: chore", False)):
+            with self.subTest(change_class=change_class, risky=risky):
+                labels = self.receipt_json(change_class, risky)["suggested_labels"]
+
+                gate = self.harness("hook", "pre-tool-use", check=False, input=json.dumps({
+                    "session_id": "s", "agent_id": "a1", "agent_type": "deliverer", "tool_name": "Bash",
+                    "tool_input": {"command": "gh pr edit 7 --add-label " + ",".join(labels)}}))
+
+                self.assertEqual(gate.returncode, 0, gate.stderr)
 
     def test_the_text_receipt_lists_the_labels_as_advisory(self):
         section = self.labels_section(self.receipt("Change-Class: feature", True).stdout)
