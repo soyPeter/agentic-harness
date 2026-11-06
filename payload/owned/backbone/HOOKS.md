@@ -361,6 +361,8 @@ Agents can't run `ci-judge` or `ci-protect`.
 
 A fresh clone needs `git config core.hooksPath scripts/harness/git-hooks` once. `doctor.sh` and the session-start note report when it is missing.
 
+**Another hook manager** (Husky, lefthook) may keep `core.hooksPath`. Then each of its `pre-commit`, `commit-msg` and `pre-push` hooks must call the harness's: `scripts/harness/git-hooks/pre-commit`, `scripts/harness/git-hooks/commit-msg "$1"` and `scripts/harness/git-hooks/pre-push "$@"`. With Husky (`core.hooksPath = .husky/_`), put the calls in `.husky/<hook>`. Doctor treats the hooks as active only when all three hand on, and names the ones that don't.
+
 ## Hook time budget
 
 Claude Code treats a hook it kills for running too long as a non-blocking error, and lets the tool call through. So the harness keeps its own budget of 25 seconds, under the 30-second timeout in `.claude/settings.json`, and its `git` calls time out before that:

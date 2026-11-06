@@ -58,6 +58,8 @@ It then installs the pack's skills, writes its routes and guardrails into the pr
 | `quarkus` (requires java) | Quarkus | `no-spring`; `hexagonal-layers`; `named-use-cases` |
 | `jdbi` (requires java) | JDBI for data access | `no-orm`; `hexagonal-layers`; `flyway` |
 | `container` | Container images | engine `podman` / `docker` |
+| `typescript` | TypeScript on Node.js | package manager `npm` / `pnpm`; test runner `vitest` / `jest`; `strict` |
+| `react` (requires typescript) | React for the UI | `nextjs` (App Router); `testing-library` |
 | `triple` | Triple's delivery policy (with `HARNESS_PROFILE=triple`) | `disputes-pci`; `ears` |
 
 Stacks without a pack get project skills written during design, routed in `backbone/routing.conf`.

@@ -8,7 +8,7 @@ judge to a receipt and a pull request that a human merges. Pedro is present for 
 | Decision | Options | Needed for |
 |---|---|---|
 | Pilot repo | A fork of `triple-disputes` under a personal account, or a throwaway demo repo | Step 1 |
-| Stack packs | TypeScript/Nest/React packs, or project skills written in design | Step 3 |
+| Stack packs | `typescript` and `react` (npm, Vitest, strict, Next.js, Testing Library) match `triple-disputes`; add Kotlin only if the pilot repo needs it | Step 3 |
 | Linear workspace | Disputes only, or also Enrichment | Step 4 |
 | CI judge | `ANTHROPIC_API_KEY` for `harness-judge.yml`, or judge locally only | Step 6 |
 
@@ -41,20 +41,48 @@ python3 scripts/harness/lib/harness.py orca --merge      # must print: refused u
 python3 scripts/harness/lib/harness.py doctor
 ```
 
+### Fitting into triple-disputes
+
+`triple-disputes` already has its own agent files and git hooks. Before the first session:
+
+- **`AGENTS.md`**: the installer keeps the repository's own and writes the harness's next to it as
+  `AGENTS.md.harness-new` (reported as a CONFLICT). Move the Disputes agent rules into `backbone/7-CONVENTIONS.md`
+  (conventions) and `backbone/4-KNOWLEDGE.md` (stack, NEVER DO). Then replace `AGENTS.md` with the `.harness-new` file
+  and run `update.sh status` again.
+- **`CLAUDE.md`** stays the project's. Add `@AGENTS.md` as its first line, or no session loads the harness rules. It
+  is one line against the `check:claude-md-size` budget.
+- **Git hooks**: Husky owns `core.hooksPath` (`.husky/_`). Keep it, and chain the harness hooks instead of switching
+  `core.hooksPath`:
+
+  ```sh
+  printf '\nscripts/harness/git-hooks/pre-commit\n' >> .husky/pre-commit
+  printf 'scripts/harness/git-hooks/commit-msg "$1"\n' > .husky/commit-msg
+  printf 'scripts/harness/git-hooks/pre-push "$@"\n' > .husky/pre-push
+  ```
+
+  Doctor accepts chained hooks and names any hook that doesn't hand on.
+- **Build check**: Husky's pre-commit already runs `npm run typecheck`. Leave `HARNESS_BUILD_CMD` empty after adopting
+  the `typescript` pack, so the type check doesn't run twice.
+- **Conventions the harness doesn't know**: commits on the task branch follow Conventional Commits (the harness's
+  commit-msg hook); the PR title follows CONTRIBUTING (`DIS-<n>: <the outcome>`), because the PR is squash-merged.
+  Write both into `7-CONVENTIONS.md` so the deliverer reads them. The repository's own specs live outside it: cite
+  the one a task follows in its harness spec's Context.
+
 ## 2. First-run setup (supervised)
 
 Start an agent session. It reports SETUP INCOMPLETE and walks through `AGENTS.md` section 1 with you:
 
 - `4-KNOWLEDGE.md`: the stack as it is, and a NEVER DO list that names the parked surfaces;
 - `HARNESS_BUILD_CMD` and `HARNESS_TEST_CMD`: the repo's own commands (for example `pnpm build`, `pnpm test`);
-- `ADR-002`: the pilot decision. It names the `triple` pack with `disputes-pci` and `ears`, and the stack packs or
-  project skills. You accept it.
+- `ADR-002`: the pilot decision. It names the `triple` pack with `disputes-pci` and `ears`, and the `typescript` and
+  `react` packs with their options. You accept it.
 
 ## 3. Adopt the packs
 
 ```sh
 python3 scripts/harness/lib/harness.py adopt triple --adr ADR-002 --with disputes-pci,ears
-python3 scripts/harness/lib/harness.py catalog          # stack packs the ADR chose, if any exist yet
+python3 scripts/harness/lib/harness.py adopt typescript,react --adr ADR-002 \
+        --with npm,vitest,strict,nextjs,testing-library          # the triple-disputes stack
 ```
 
 Paste `scripts/harness/catalog/triple/tools.conf.linear` into `backbone/tools.conf`. Switch on the light lane for the

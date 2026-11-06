@@ -1,0 +1,19 @@
+{
+  "name": "react",
+  "description": "React components with TypeScript: component and hook rules, state and effects, accessibility, safe rendering; options for the Next.js App Router and for Testing Library.",
+  "decides": "The stack ADR chooses React for the user interface.",
+  "requires": [
+    "typescript"
+  ],
+  "groups": {},
+  "options": [
+    {
+      "id": "nextjs",
+      "description": "Next.js App Router: server and client components, server actions as public POST endpoints, route handlers, caching; secrets never in NEXT_PUBLIC_ variables."
+    },
+    {
+      "id": "testing-library",
+      "description": "Component tests with Testing Library: query by role and label as a user would, not by CSS selectors."
+    }
+  ]
+}
