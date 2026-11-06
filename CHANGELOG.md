@@ -7,6 +7,19 @@
   Policy: PR merge stays human; policy `approve` must not be treated as merge. Runtime enforcement in
   `harness.py` is a follow-up.
 
+- **Change-Class is enforced (ADR-002, follow-up a).** `harness.py` reads the spec's `Change-Class:` line. A spec
+  without one counts as `feature`; any other value, or two different ones, makes the spec invalid (`spec-check`, the
+  start gate, the griller's pass). `feature` and `schema` are never low-risk: `approve` escalates them to the user's
+  `Approved-by:`, and a policy approval stops covering them when the task finishes. The light lane takes a `feature`
+  task the user marks `(light)`, never a `schema` one. A `docs` task whose change touches anything but documentation
+  (`HARNESS_DOC_PATHS`, new, user-only) is a risk, so a policy-approved one can't finish until it is escalated; a
+  `refactor` that touches sensitive paths already was. The class is read outside comments and the Approval section,
+  so it is part of what the griller and the user passed. `risk`, `next` and `state` (`change_class` in `--json`)
+  and the receipt show it. The spec template says which ADR-002 it means. `tests/test-change-class.py` walks the
+  class table through the public commands, with property checks. **Upgrading:** in autonomous mode, specs without
+  `Change-Class:` now wait for the user's approval, and so does a task policy-approved before this release when it
+  finishes; declare `docs` or `refactor` where policy approval should still apply.
+
 - **Plugin and pin must match (thin mode).** When the installed plugin isn't the release the project pins, its agents
   and skills don't match the pinned gates. Session start says so, with both versions and the fix. In autonomous mode
   `run` and `orca` refuse to start and every call except reads is refused until they match; `doctor` lists it as an
