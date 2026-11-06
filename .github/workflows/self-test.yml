@@ -25,5 +25,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
+      - name: Install the test-only tools
+        run: python -m pip install -r tests/requirements.txt
       - name: Run the self-test
         run: tests/run-tests.sh

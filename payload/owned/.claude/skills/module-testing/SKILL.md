@@ -2,7 +2,7 @@
 name: module-testing
 description: Write or review automated tests - acceptance-criterion traceability (AC ids in tests), Arrange-Act-Assert, one behaviour per test, determinism, test categories, test data, mocking at port boundaries and coverage. Use for any test code and when judging whether acceptance criteria are proven.
 applies-to: any
-last-verified: 2026-10-05
+last-verified: 2026-11-06
 sources: adapted from cuioss/plan-marshall dev-general-module-testing (tree ce2cc13); library mandates removed, AC traceability and harness rules added
 ---
 
@@ -51,6 +51,8 @@ test "AC-4.2-1: applies 10% discount to orders over 100 EUR" {
 - Assert explicitly. "No exception thrown" alone proves nothing. A test without a meaningful assertion is a defect.
 - No logic in tests: no `if`, `switch`, loops that may run zero times, or try/catch (except when asserting an error with the framework's assertion).
 - Test the contract (inputs, outputs, observable effects), not private methods or call order inside the unit.
+- Couple tests to public APIs (the module's interface, the HTTP API, the UI), never to the code's structure: a refactor that keeps the behaviour must not break a test.
+- Assert what the user or caller observes (the response, the screen, the stored record, the event), not how the code got there.
 
 ## Determinism
 
@@ -64,9 +66,9 @@ test "AC-4.2-1: applies 10% discount to orders over 100 EUR" {
 | Category | Scope | Doubles | Typical use |
 |---|---|---|---|
 | Unit | One domain or application unit, in memory | Test doubles for outbound ports only | Business rules, calculations, state transitions, validation |
-| Integration | One adapter against the real technology (database, broker, HTTP client) | None for the technology under test; containers or embedded servers | Repository queries, mappings, transactions, serialisation |
+| Integration | One adapter against the real technology (database, broker, HTTP client) | None for the technology under test; a throwaway container (Testcontainers where the stack has it) or an embedded server | Repository queries, mappings, transactions, serialisation |
 | Contract | The boundary as clients see it (API, events) | The application behind it may be real or stubbed | Status codes, payload shapes, error formats, OpenAPI conformance |
-| End-to-end | A deployed slice through all layers | None | A few critical user journeys |
+| End-to-end | A deployed slice through all layers | None | A few critical user journeys, driven through the real UI (Playwright, through its MCP server when the agent has one) |
 
 - Prefer many unit tests and fewer, focused integration tests. Prove each AC at the cheapest level that observes its Then.
 - Keep categories separable so the build can run them independently (naming, directories or tags per the project convention).
@@ -80,6 +82,7 @@ test "AC-4.2-1: applies 10% discount to orders over 100 EUR" {
 
 ## Mocking
 
+- Avoid mocks whenever possible: use the real code first, then an in-memory fake, and a mock only for what can't run in a test.
 - Mock only boundaries you own: the **outbound ports** (repository, gateway, clock, id generator). A hand-written in-memory fake of a port is often clearer than a mocking library.
 - Never mock the unit under test, value types, domain entities or types you don't own (framework or library classes); wrap foreign APIs in an adapter behind a port and test the adapter with an integration test.
 - If a test needs more than a few mocks or stubs, the unit has too many collaborators; report it as a design finding.
@@ -97,6 +100,11 @@ test "AC-4.2-1: applies 10% discount to orders over 100 EUR" {
 - Guide, not goal: about 80% line and branch coverage on domain and application code. Near-complete coverage on security, validation and money or state logic.
 - Never write a test only to raise the number. A gap is fixed by a test that asserts a behaviour, or accepted with a reason.
 - Coverage never replaces traceability: 100% coverage with an untraced AC still fails the judge.
+- Find missing tests with mutation testing (a surviving mutant is an assertion nobody wrote) and property-based tests (an invariant checked over generated inputs), on the logic that matters, where the stack has the tools.
+
+## Bugs
+
+- Reproduce a bug in a failing test before fixing it. The test fails for the reported reason, then the fix turns it green; a fix without one can come back unnoticed.
 
 Read `methodology.md` for boundary-value analysis, test organisation and splitting, assertion messages, async and time handling, and the anti-pattern table.
 
@@ -108,6 +116,7 @@ Read `methodology.md` for boundary-value analysis, test organisation and splitti
 - [ ] Negative ACs have tests asserting the specified error (status, error type, message or field).
 - [ ] No sleeps, order dependence, shared mutable state or uncontrolled time and randomness.
 - [ ] Doubles only at outbound ports; no mocking of the unit or of foreign types.
+- [ ] Tests reach the code through public APIs and assert observable behaviour, not internals.
 
 ## Linked skills
 
