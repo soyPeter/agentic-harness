@@ -12,3 +12,5 @@ python3 "$CLAUDE_PLUGIN_ROOT/plugin/launcher.py" init --thin
 For other CLIs, locate the plugin root from this skill's path and run the same launcher. Report the pinned version, commit, and generated project files.
 
 The default version must already be published as a tag with thin-mode assets. Use `--version <released-version>` only when the user names a different released version. Existing project-owned documents are kept; report any that the installer lists for review.
+
+A repository that already has a full install (a `scripts/harness/` folder) is refused. Tell the user that they switch it themselves with `update.sh --to-thin <repo>` from a checkout of the harness (its README, "Thin mode").
