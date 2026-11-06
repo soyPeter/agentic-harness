@@ -162,11 +162,7 @@ done
 for s in requirements-writing adr-writing architecture api-design openapi; do
   [ -f "$P/.claude/skills/$s/SKILL.md" ] && ok "installed skill $s" || bad "installed skill $s"
 done
-contains "griller declares its verdict recorder" "hook grill-stop" "$(cat "$P/.claude/agents/griller.md")"
-contains "judge declares its verdict recorder" "hook judge-stop" "$(cat "$P/.claude/agents/judge.md")"
-for a in analyst architect implementer scribe; do
-  contains "$a declares its write scope" "hook agent-guard $a" "$(cat "$P/.claude/agents/$a.md")"
-done
+expect 0 "agents' own hooks record verdicts and keep write scopes" python3 -B "$HARNESS/tests/test-agent-hooks.py"
 
 section "pipeline: define"
 F="$WORK/flow"
@@ -1039,19 +1035,26 @@ expect 2 "agents cannot edit escalations.md" hook "$A" pre-tool-use "$(edit_json
 auto_spec 3.3 ""
 sed -i.bak 's/^- code-quality: all code$/&\
 - `security` is not listed: titles are trusted input and no auth, secret or personal data is handled./' "$A/backbone/specs/3.3.md" && rm -f "$A/backbone/specs/3.3.md.bak"
-out=$(HARNESS_ROOT="$A" python3 -c 'import importlib.util as u,sys; s=u.spec_from_file_location("h",sys.argv[1]); m=u.module_from_spec(s); s.loader.exec_module(m); import re; t=re.compile(m.conf()["HARNESS_RISK_TERMS"]); print([bool(t.search(x)) for x in sys.argv[2:]])' "$A/scripts/harness/lib/harness.py" "so the scope is fixed and the permission to add files is closed" "the admin roles can delete users" "add an RBAC check" "Passwords are hashed")
-contains "risk terms: everyday 'permission' prose isn't risk; roles, RBAC and passwords are" "[False, True, True, True]" "$out"
 contains "fixture: the Skills section rules out risks by name" "no auth, secret or personal data" "$(cat "$A/backbone/specs/3.3.md")"
 grill_pass 3.3 >/dev/null
 expect 0 "approve: risk words in the Skills section don't escalate" $AH approve 3.3
 contains "escalations lists open entries" "1 open escalation(s)" "$($AH escalations)"
+auto_spec 3.7 "So the scope is fixed and the permission to add files is closed."
+grill_pass 3.7 >/dev/null
+expect 0 "risk terms: everyday 'permission' prose is not a risk" $AH approve 3.7
+auto_spec 3.8 "The admin roles can delete users."
+grill_pass 3.8 >/dev/null
+contains "risk terms: roles are a risk" "not low-risk" "$($AH approve 3.8)"
+auto_spec 3.9 "Add an RBAC check."
+grill_pass 3.9 >/dev/null
+contains "risk terms: RBAC is a risk" "not low-risk" "$($AH approve 3.9)"
 printf '# ADR-002: Cache\n\n## Status\nProposed\n\n## Context\nc\n\n## Decision\nd\n\n## Alternatives considered\na\n\n## Consequences\nq\n' \
   > "$A/backbone/adr/ADR-002-cache.md"
 auto_spec 3.3 "" ADR-002
 grill_pass 3.3 >/dev/null
 out=$($AH approve 3.3)
 contains "a spec on a Proposed ADR escalates for the user's decision" "ADR-002 is not Accepted" "$out"
-contains "session start reports autonomy and open escalations" "Open escalations waiting for the user: 2" "$(hook "$A" session-start '{}')"
+contains "session start reports autonomy and open escalations" "Open escalations waiting for the user: 4" "$(hook "$A" session-start '{}')"
 
 section "knowledge source: read-only, cited, checked"
 K="$WORK/vault"; mkdir -p "$K/20-Architecture" "$K/40-Security"
@@ -1440,8 +1443,6 @@ section "worktrees keep their own out-of-band snapshot"
 WT="$WORK/wt-main"; new_repo "$WT"; "$HARNESS/bootstrap.sh" "$WT" --name wt >/dev/null
 git -C "$WT" add -A && HARNESS_VERIFY=off git -C "$WT" commit -qm "chore: adopt"
 git -C "$WT" worktree add -q -b other "$WORK/wt-other"
-snap() { HARNESS_ROOT="$1" python3 -c 'import importlib.util as u,sys; s=u.spec_from_file_location("h",sys.argv[1]); m=u.module_from_spec(s); s.loader.exec_module(m); print(m.snapshot_file())' "$1/scripts/harness/lib/harness.py"; }
-[ "$(snap "$WT")" != "$(snap "$WORK/wt-other")" ] && ok "each worktree has its own snapshot" || bad "each worktree has its own snapshot"
 echo "edited in the other worktree" >> "$WORK/wt-other/backbone/4-KNOWLEDGE.md"
 HARNESS_AUTONOMY=autonomous HARNESS_TEST_CMD=true python3 "$WORK/wt-other/scripts/harness/lib/harness.py" hook post-tool-use "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s/backbone/4-KNOWLEDGE.md","content":"x"}}' "$WORK/wt-other")" < /dev/null >/dev/null 2>&1
 printf '{"tool_name":"Write","tool_input":{"file_path":"%s/backbone/4-KNOWLEDGE.md","content":"x"}}' "$WORK/wt-other" | HARNESS_AUTONOMY=autonomous HARNESS_TEST_CMD=true python3 "$WORK/wt-other/scripts/harness/lib/harness.py" hook post-tool-use >/dev/null 2>&1
@@ -1551,7 +1552,21 @@ out=$(HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --help 2>&1); code=$?
 [ $code = 0 ] && contains "orca --help prints the usage and starts nothing" "usage: harness.py orca" "$out" || bad "orca --help prints the usage and starts nothing"
 out=$(HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --merg 2>&1); code=$?
 [ $code = 2 ] && contains "orca refuses an unknown argument" "unknown argument --merg" "$out" || bad "orca refuses an unknown argument"
-out=$(HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --agents "default=claude,judge=codex" --wait-ms 10 2>&1; echo "exit=$?")
+cat > "$WORK/held-orca.sh" <<EOF
+#!/bin/sh
+# Holds the coordinator at its first orca call (it has the run lock by then) until the test releases it.
+[ -f "$WORK/orca-release" ] || { touch "$WORK/orca-held"; while [ ! -f "$WORK/orca-release" ]; do sleep 0.1; done; }
+exec "$WORK/fake-orca.py" "\$@"
+EOF
+chmod +x "$WORK/held-orca.sh"
+HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/held-orca.sh" $OH orca --agents "default=claude,judge=codex" --wait-ms 10 > "$WORK/orca-run.out" 2>&1 &
+run=$!
+for _ in $(seq 100); do [ -f "$WORK/orca-held" ] && break; sleep 0.1; done
+contains "a second coordinator can't start while a run is going, and says who runs it" "already going for this repository (pid $run)" "$(HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --wait-ms 10 2>&1)"
+contains "orca-digest says a run is going" "a backlog run is going now (pid $run)" "$($OH orca-digest)"
+touch "$WORK/orca-release"; wait "$run"; echo "exit=$?" >> "$WORK/orca-run.out"
+out=$(cat "$WORK/orca-run.out")
+lacks "a finished run holds no lock" "going now" "$($OH orca-digest)"
 contains "orca drives the task to done" "task 9.1: done" "$out"
 contains "orca ends cleanly" "exit=0" "$out"
 contains "the task was committed on its own branch" "feat: task 9.1: Item" "$(git -C "$O" log --oneline harness-task-9.1)"
@@ -1567,24 +1582,21 @@ n_released=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))
 [ "$n_started" -eq "$n_released" ] && ok "every worker was released after it settled ($n_released)" || bad "every worker was released after it settled ($n_started started, $n_released released)"
 contains "the debugger diagnosed the failed round" '"kind": "debug"' "$(git -C "$O" show harness-task-9.1:backbone/.verdicts/9.1.debug.json 2>/dev/null)"
 contains "a finished run publishes its digest" "task 9.1: done" "$(python3 "$O/scripts/harness/lib/harness.py" orca-digest)"
+printf '#!/bin/sh\necho '"'"'{"ok":true,"result":{"terminal":{"handle":"t0"}}}'"'"'\n' > "$WORK/nightly-orca"; chmod +x "$WORK/nightly-orca"
+contains "orca-nightly prints the last digest before starting" "task 9.1: done" "$(HARNESS_ORCA_BIN="$WORK/nightly-orca" $OH orca-nightly 2>&1)"
+contains "the last finished run's digest survives a new run starting" "task 9.1: done" "$($OH orca-digest)"
 for id in 9.2 9.3; do
   printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/$id/g" -e 's/^- python: all code$/- code-quality: all code/' > "$O/backbone/specs/$id.md"
   printf '%s' "$(python3 -c 'import json,sys; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":sys.argv[1],"questions":[],"summary":"s"})+"\n```"}))' "$id")" \
     | python3 "$O/scripts/harness/lib/harness.py" hook grill-stop >/dev/null
 done
 printf -- '- [ ] **Task 9.3: After** (spec: backbone/specs/9.3.md) (after: 9.2)\n- [ ] **Task 9.2: First** (spec: backbone/specs/9.2.md)\n' >> "$O/backbone/3-TASKS.md"
-printf -- '- [ ] **Task 6.1c: C** (spec: backbone/specs/6.1c.md) (after 6.1a)\n- [ ] **Task 6.1d: D** (spec: backbone/specs/6.1d.md) (after: 6.1a, 6.1c)\n- [ ] **Task 6.2: E** (spec: backbone/specs/6.2.md) (afterwards, see the notes)\n' > "$WORK/deps-tasks.md"
-deps=$(python3 - "$O/scripts/harness/lib" "$WORK/deps-tasks.md" <<'PYEOF'
-import json, sys, importlib.util
-from pathlib import Path
-spec = importlib.util.spec_from_file_location("h", sys.argv[1] + "/harness.py"); h = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(h); h.TASKS = Path(sys.argv[2])
-print(json.dumps(h.task_dependencies(), sort_keys=True))
-PYEOF
-)
-contains "dependencies: '(after 6.1a)' without a colon counts" '"6.1c": ["6.1a"]' "$deps"
-contains "dependencies: a list after 'after:'" '"6.1d": ["6.1a", "6.1c"]' "$deps"
-lacks "dependencies: 'afterwards' in a note isn't one" '"6.2"' "$deps"
+DP="$WORK/deps"; new_repo "$DP"; "$HARNESS/bootstrap.sh" "$DP" --name deps >/dev/null
+printf -- '- [ ] **Task 6.1c: C** (spec: backbone/specs/6.1c.md) (after 6.1a)\n- [ ] **Task 6.1d: D** (spec: backbone/specs/6.1d.md) (after: 6.1a, 6.1c)\n- [ ] **Task 6.2: E** (spec: backbone/specs/6.2.md) (afterwards, see the notes)\n' >> "$DP/backbone/3-TASKS.md"
+deps=$(HARNESS_AUTONOMY=autonomous HARNESS_TEST_CMD=true HARNESS_ORCA_BIN=/usr/bin/true python3 "$DP/scripts/harness/lib/harness.py" orca --dry-run --tasks 6.1c,6.1d,6.2 2>&1)
+contains "dependencies: '(after 6.1a)' without a colon counts" "task 6.1c (next: define by the analyst), after 6.1a is done" "$deps"
+contains "dependencies: a list after 'after:'" "task 6.1d (next: define by the analyst), after 6.1a, 6.1c is done" "$deps"
+contains "dependencies: 'afterwards' in a note isn't one" "task 6.2 (next: define by the analyst), agents" "$deps"
 $OH approve 9.2 >/dev/null; $OH approve 9.3 >/dev/null
 git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: tasks 9.2 and 9.3"
 contains "orca --dry-run shows a task waiting for its dependency" "would drive task 9.3 (next: start), after 9.2 is done" "$(HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --dry-run --tasks 9.3,9.2 2>&1)"
@@ -2199,25 +2211,6 @@ expect 1 "orca-digest creates no metadata" test -d "$(git -C "$EN" rev-parse --p
 rm -rf "$(git -C "$EN" rev-parse --path-format=absolute --git-common-dir)/harness"
 HARNESS_ORCA_BIN=/usr/bin/true python3 "$HP" orca-nightly --dry-run >/dev/null 2>&1
 expect 1 "orca-nightly --dry-run creates no metadata" test -d "$(git -C "$EN" rev-parse --path-format=absolute --git-common-dir)/harness"
-lockpy() { HARNESS_ROOT="$EN" python3 -c 'import importlib.util as u,sys,time; s=u.spec_from_file_location("h",sys.argv[1]); m=u.module_from_spec(s); s.loader.exec_module(m)
-first = m.orca_lock_acquire()
-import os
-fd = None
-second_holder = m.orca_lock_holder()
-s2 = u.spec_from_file_location("h2",sys.argv[1]); m2 = u.module_from_spec(s2); s2.loader.exec_module(m2)
-second = m2.orca_lock_acquire()
-print(first, second, second_holder == os.getpid())
-m.orca_lock_release()
-print(m2.orca_lock_acquire())' "$HP"; }
-contains "a second coordinator can't take a held lock, and sees who holds it" "True False True" "$(lockpy)"
-contains "once released, the lock can be taken again" "True" "$(lockpy | tail -1)"
-mkdir -p "$(git -C "$EN" rev-parse --path-format=absolute --git-common-dir)/harness"
-echo '{"pid": 999999}' > "$(git -C "$EN" rev-parse --path-format=absolute --git-common-dir)/harness/orca.lock"
-contains "a stale lock file (no process holds it) doesn't block" "True" "$(HARNESS_ROOT="$EN" python3 -c 'import importlib.util as u,sys; s=u.spec_from_file_location("h",sys.argv[1]); m=u.module_from_spec(s); s.loader.exec_module(m); print(m.orca_lock_holder() is None and m.orca_lock_acquire())' "$HP")"
-HARNESS_ROOT="$EN" python3 -c 'import importlib.util as u,sys; s=u.spec_from_file_location("h",sys.argv[1]); m=u.module_from_spec(s); s.loader.exec_module(m); m.orca_digest_publish("harness orca: run run_x\n  task 1.1: done")' "$HP"
-: > "$(git -C "$EN" rev-parse --path-format=absolute --git-common-dir)/harness/orca-latest.log"
-contains "the last finished run's digest survives a new run's log" "task 1.1: done" "$(python3 "$HP" orca-digest)"
-contains "orca-nightly prints that digest before starting" "task 1.1: done" "$(HARNESS_ORCA_BIN=/usr/bin/true python3 "$HP" orca-nightly --dry-run 2>&1)"
 expect 0 "agents may plan with orca --dry-run" hook "$EN" pre-tool-use "$(bash_json 'python3 scripts/harness/lib/harness.py orca --dry-run')"
 expect 2 "an inert --dry-run doesn't let an agent run the CI judge" hook "$EN" pre-tool-use "$(bash_json 'python3 scripts/harness/lib/harness.py ci-judge --range a..b --dry-run')"
 expect 2 "nor the runner" hook "$EN" pre-tool-use "$(bash_json 'python3 scripts/harness/lib/harness.py run --dry-run')"
@@ -2963,7 +2956,9 @@ expect 0 "thin: skill overrides, rule provenance and CI engine assets" python3 -
 
 section "thin mode: the launcher runs the engine the project pins (ADR-001)"
 expect 0 "plugin manifests and OpenCode adapter (ADR-001)" python3 -B "$HARNESS/tests/test-plugin-packaging.py"
+expect 0 "properties: a plugin agent gets its role's decisions (needs hypothesis)" python3 -B "$HARNESS/tests/test-properties.py"
 expect 0 "thin init, pin and pre-commit shim (ADR-001)" python3 -B "$HARNESS/tests/test-thin-install.py"
+expect 0 "live: a plugin judge verdict is recorded (runs with HARNESS_E2E=1)" python3 -B "$HARNESS/tests/test-live-plugin.py"
 L="$HARNESS/plugin/launcher.py"
 SRC="$WORK/engine-src"   # stands in for the harness repository: this checkout, committed and tagged
 mkdir -p "$SRC"

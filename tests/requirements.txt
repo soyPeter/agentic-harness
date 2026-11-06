@@ -1,0 +1,2 @@
+# Test-only tools; the harness itself stays standard-library only.
+hypothesis==6.170.15

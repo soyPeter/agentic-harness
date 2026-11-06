@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **Thin mode records verdicts in Claude Code.** Claude Code ignores the hooks a plugin agent declares itself, so the
+  plugin's griller, judge, tester, debugger, reviewer and deliverer stopped without their report being recorded: no
+  task could pass a gate. The plugin now runs the recorder on `SubagentStop` for those agents, as the Codex plugin
+  already did. A live check (`HARNESS_E2E=1 tests/test-live-plugin.py`, one short Claude Code session) runs the
+  plugin's judge in a thin project and fails if its verdict isn't recorded.
+- Tests go through the harness's public commands and hooks only: the checks that grepped agent files for hook names
+  now run those hooks, and the ones that imported `harness.py` to call its functions now use `approve`,
+  `orca --dry-run`, `orca-digest`, `orca-nightly` and a real, held `orca` run.
+- Property-based tests (`tests/test-properties.py`, hypothesis, test-only): an agent loaded from a plugin gets the
+  decision of its role for any write, and no agent writes a verdict.
+- `module-testing` skill: avoid mocks whenever possible; couple tests to public APIs and assert what the user
+  observes; Testcontainers for integration tests and Playwright (through its MCP server) for end-to-end flows where
+  the stack has them; reproduce a bug in a failing test before fixing it; find missing tests with mutation and
+  property-based testing. The judge checklist checks that tests go through public APIs.
+
 ## 0.30.0 (2026-11-06)
 
 - **The engine can run from outside the project** (first step of thin mode, ADR-001). The project is the folder in

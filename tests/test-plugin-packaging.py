@@ -1,12 +1,27 @@
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RECORDING_ROLES = ("griller", "judge", "tester", "debugger", "reviewer", "deliverer")
+
+
+def commands_claude_runs(event, name):
+    """The plugin hook commands Claude Code runs for event on name (a tool, or an agent for SubagentStop). Its rule:
+    no matcher or "*" matches everything, letters, digits, "_" and "|" list exact names, anything else is a regex."""
+    hooks = json.loads((ROOT / "plugin/claude-hooks.json").read_text())["hooks"]
+    commands = []
+    for group in hooks.get(event, []):
+        matcher = group.get("matcher") or "*"
+        if matcher == "*" or (name in matcher.split("|") if re.fullmatch(r"[\w|]+", matcher)
+                              else re.search(matcher, name)):
+            commands.extend(hook["command"] for hook in group["hooks"])
+    return commands
 
 
 class PluginPackaging(unittest.TestCase):
@@ -40,6 +55,18 @@ class PluginPackaging(unittest.TestCase):
                 self.assertIn("PreToolUse", hooks)
                 self.assertIn("PostToolUse", hooks)
                 self.assertIn("Stop", hooks)
+
+    def test_claude_records_each_plugin_role_when_it_stops(self):
+        # Claude Code ignores the hooks a plugin agent declares itself, so the plugin must run the recorder.
+        for role in RECORDING_ROLES:
+            with self.subTest(role=role):
+                commands = commands_claude_runs("SubagentStop", "agentic-harness:" + role)
+
+                self.assertEqual(commands, ['python3 "${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py" hook subagent-stop'])
+
+    def test_claude_records_no_other_agent(self):
+        self.assertEqual(commands_claude_runs("SubagentStop", "agentic-harness:implementer"), [])
+        self.assertEqual(commands_claude_runs("SubagentStop", "other-plugin:judge"), [])
 
     def test_opencode_package_reaches_launcher_in_a_thin_project(self):
         with tempfile.TemporaryDirectory() as temp:
