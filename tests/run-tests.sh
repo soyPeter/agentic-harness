@@ -2878,6 +2878,7 @@ section "thin mode: the launcher runs the engine the project pins (ADR-001)"
 expect 0 "plugin manifests and OpenCode adapter (ADR-001)" python3 -B "$HARNESS/tests/test-plugin-packaging.py"
 expect 0 "properties: a plugin agent gets its role's decisions (needs hypothesis)" python3 -B "$HARNESS/tests/test-properties.py"
 expect 0 "thin init, pin and pre-commit shim (ADR-001)" python3 -B "$HARNESS/tests/test-thin-install.py"
+expect 0 "update.sh --to-thin and --to-full, there and back (ADR-001)" python3 -B "$HARNESS/tests/test-thin-convert.py"
 expect 0 "live: a plugin judge verdict is recorded (runs with HARNESS_E2E=1)" python3 -B "$HARNESS/tests/test-live-plugin.py"
 L="$HARNESS/plugin/launcher.py"
 SRC="$WORK/engine-src"   # stands in for the harness repository: this checkout, committed and tagged

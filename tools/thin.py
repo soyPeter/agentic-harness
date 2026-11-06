@@ -18,7 +18,10 @@ from launcher import EngineUnavailable, checked, engines_dir, fetch
 
 DEFAULT_SOURCE = "https://github.com/soyPeter/agentic-harness.git"
 MARKETPLACE = "agentic-harness"
+PLUGIN = "agentic-harness@" + MARKETPLACE
+VERSION_PATTERN = r"[0-9A-Za-z][0-9A-Za-z._-]*"
 LOCK = Path("backbone/.harness-lock.json")
+SWITCH = "; a full install switches to thin mode with update.sh --to-thin, run from a checkout of the harness"
 SHIM = ".githooks/pre-commit"
 # Project files copied from the pinned release; pin brings them to the new one.
 RELEASE_FILES = ((SHIM, "plugin/pre-commit"),
@@ -41,7 +44,7 @@ def git(*args, cwd=None):
 
 
 def release_commit(version):
-    if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._-]*", version):
+    if not re.fullmatch(VERSION_PATTERN, version):
         raise ThinError("invalid version %r" % version)
     source = os.environ.get("HARNESS_ENGINE_SOURCE") or DEFAULT_SOURCE
     ref = "refs/tags/v" + version
@@ -53,8 +56,8 @@ def release_commit(version):
     return commit
 
 
-def release_checkout(version):
-    commit = release_commit(version)
+def cached_release(version, commit):
+    """The engine cache's checkout of release v<version>, fetched if missing, refused unless it is commit."""
     engine = engines_dir() / version
     try:
         if not engine.is_dir():
@@ -62,6 +65,12 @@ def release_checkout(version):
         checked(engine, commit)
     except (EngineUnavailable, OSError) as exc:
         raise ThinError("release v%s cannot be used: %s" % (version, exc))
+    return engine
+
+
+def release_checkout(version):
+    commit = release_commit(version)
+    engine = cached_release(version, commit)
     required = ("VERSION", ".claude-plugin/plugin.json", ".claude-plugin/marketplace.json",
                 ".codex-plugin/plugin.json", "package.json", "plugin/launcher.py", "plugin/pre-commit",
                 "tools/thin.py", "payload/seed/CLAUDE.md", "payload/owned/backbone/8-WORKFLOW.md",
@@ -97,14 +106,30 @@ def settings_for(root, version):
         raise ThinError(".claude/settings.json is invalid JSON: %s" % exc)
     if not isinstance(data, dict):
         raise ThinError(".claude/settings.json must be an object")
+    return json.dumps(plugin_settings(data, version), indent=2, ensure_ascii=False) + "\n"
+
+
+def plugin_settings(data, version):
+    """Settings data offering the plugin of release v<version> to everyone who opens the project in Claude Code."""
     markets = data.setdefault("extraKnownMarketplaces", {})
     plugins = data.setdefault("enabledPlugins", {})
     if not isinstance(markets, dict) or not isinstance(plugins, dict):
         raise ThinError("plugin settings in .claude/settings.json must be objects")
     markets[MARKETPLACE] = {"source": {"source": "github", "repo": "soyPeter/agentic-harness",
                                        "ref": "v" + version}}
-    plugins["agentic-harness@" + MARKETPLACE] = True
-    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    plugins[PLUGIN] = True
+    return data
+
+
+def without_plugin(data):
+    """Settings data without the entries plugin_settings adds, or the objects holding them once they are empty."""
+    for key, name in (("extraKnownMarketplaces", MARKETPLACE), ("enabledPlugins", PLUGIN)):
+        entries = data.get(key)
+        if isinstance(entries, dict) and name in entries:
+            del entries[name]
+            if not entries:
+                del data[key]
+    return data
 
 
 def write_new(root, rel, data, executable=False):
@@ -119,10 +144,19 @@ def write_new(root, rel, data, executable=False):
         path.chmod(0o755)
 
 
+def lock_mode(root):
+    """The install mode the project's lock names ("full" when it names none), or None when it can't be read."""
+    try:
+        lock = json.loads((root / LOCK).read_text())
+    except (OSError, ValueError):
+        return None
+    return lock.get("mode", "full") if isinstance(lock, dict) else None
+
+
 def init(version, name):
     root = root_dir()
     if (root / LOCK).exists():
-        raise ThinError("%s already exists" % LOCK)
+        raise ThinError("%s already exists%s" % (LOCK, SWITCH if lock_mode(root) == "full" else ""))
     hooks_path = subprocess.run(["git", "config", "--get", "core.hooksPath"], cwd=root,
                                 capture_output=True, text=True).stdout.strip()
     if hooks_path and hooks_path != ".githooks":
@@ -184,7 +218,7 @@ def pin(version):
     except (OSError, ValueError):
         raise ThinError("%s is missing or invalid" % LOCK)
     if lock.get("mode") != "thin":
-        raise ThinError("%s is not a thin-mode lock" % LOCK)
+        raise ThinError("%s is not a thin-mode lock%s" % (LOCK, SWITCH))
     commit, release = release_checkout(version)
     settings = settings_for(root, version)
     lock.update(version=version, commit=commit)
