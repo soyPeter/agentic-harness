@@ -41,6 +41,9 @@ run, and every write needs the user.
 
 ## Ground rules for the pilot
 
+The step-by-step first run is in `RUNBOOK.md`.
+
+
 - Supervised mode only. Autonomous mode, branch protection changes and any write to a Triple-Tech repository need
   Pedro's approval.
 - The harness never merges. The deliverer opens the PR and watches CI, and a human merges.

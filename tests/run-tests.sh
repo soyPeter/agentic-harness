@@ -3054,6 +3054,8 @@ done
 contains "escalate refuses an unknown class" "--class must be one of" "$(esc 9.5 --reason x --class gremlins)"
 out=$(cd "$TR" && $TH escalations 2>&1)
 contains "escalations counts by class" "by class (all escalations): tool_timeout 2, invalid_args 1, missing_context 1, failed_test 1, permission_denied 1, contradictory_req 1, unchanged_repeat 1" "$out"
+contains "report counts escalations by class" "by class: tool_timeout 2" "$(cd "$TR" && $TH report 2>&1)"
+contains "report --json carries them" '"escalations_by_class"' "$(cd "$TR" && $TH report --json 2>&1)"
 expect 0 "the scribe may draft a proposal" guard "$TR" scribe "$(write_json "$TR/backbone/proposals/tool_timeout.md" "x")"
 expect 2 "the implementer may not" guard "$TR" implementer "$(write_json "$TR/backbone/proposals/tool_timeout.md" "x")"
 
