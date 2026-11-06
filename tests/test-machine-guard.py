@@ -23,7 +23,8 @@ except ImportError:
 ROOT = Path(__file__).resolve().parents[1]
 THIN_LOCK = {"mode": "thin", "version": "9.9.9", "commit": "0" * 40}
 # Where each CLI reads its user hooks: the folder its variable names, or its folder in the home.
-USER_HOOKS = {"claude": ("CLAUDE_CONFIG_DIR", ".claude", "settings.json"), "codex": ("CODEX_HOME", ".codex", "hooks.json")}
+USER_HOOKS = {"claude": ("CLAUDE_CONFIG_DIR", ".claude", "settings.json"),
+              "codex": ("CODEX_HOME", ".codex", "hooks.json")}
 # What backbone/.harness-lock.json holds, and whether that alone (no engine in scripts/harness/) is enrolled.
 LOCKS = (
     ("no lock", None, False),
@@ -49,8 +50,8 @@ def matches(matcher, tool):
 def environment(home, work):
     for folder in (".claude", ".codex"):
         (home / folder).mkdir(parents=True, exist_ok=True)
-    env = {key: value for key, value in os.environ.items()
-           if key not in ("HARNESS_MACHINE_CONFIG", "CLAUDE_PROJECT_DIR", "HARNESS_ROOT", "CLAUDE_CONFIG_DIR", "CODEX_HOME")}
+    env = {key: value for key, value in os.environ.items() if key not in (
+        "HARNESS_MACHINE_CONFIG", "CLAUDE_PROJECT_DIR", "HARNESS_ROOT", "CLAUDE_CONFIG_DIR", "CODEX_HOME")}
     env.update(HOME=str(home), GIT_CONFIG_GLOBAL=os.devnull, PYTHONDONTWRITEBYTECODE="1",
                HARNESS_ENGINES=str(work / "engines"), HARNESS_ENGINE_SOURCE=str(work / "offline"),
                CLAUDE_PLUGIN_ROOT=str(ROOT), PLUGIN_ROOT=str(ROOT))
@@ -316,7 +317,8 @@ class MachineGuard(unittest.TestCase):
                 self.assertEqual(cli(self.env, source, shell("make", self.plain), hooks=hooks), (False, []))
 
     def test_machine_sh_puts_the_guard_hook_where_each_cli_reads_its_settings(self):
-        env = dict(self.env, CLAUDE_CONFIG_DIR=str(self.work / "claude config"), CODEX_HOME=str(self.work / "codex home"))
+        env = dict(self.env, CLAUDE_CONFIG_DIR=str(self.work / "claude config"),
+                   CODEX_HOME=str(self.work / "codex home"))
         for source in ("claude", "codex"):
             Path(env[USER_HOOKS[source][0]]).mkdir()
         machine(env, "install", "--roots", str(self.roots), "--mode", "block")
@@ -362,7 +364,8 @@ else:
             roots = str(work / "repos")
             cls.changes = {"nothing (status)": ("status",), "remove": ("remove",)}
             for mode, plugin in itertools.product(("warn", "block"), ((), ("--plugin",))):
-                cls.changes[" ".join(("install", mode) + plugin)] = ("install", "--roots", roots, "--mode", mode) + plugin
+                cls.changes[" ".join(("install", mode) + plugin)] = (
+                    ("install", "--roots", roots, "--mode", mode) + plugin)
             cls.envs = {}
             for install in ("guard", "plugin", "none"):
                 for mode in ("warn", "block"):
