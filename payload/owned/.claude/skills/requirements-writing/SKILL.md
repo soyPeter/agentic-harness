@@ -2,22 +2,45 @@
 name: requirements-writing
 description: Write or review a task spec (backbone/specs/<id>.md) with clear requirements and testable Given/When/Then acceptance criteria. Use when defining a task, grilling a spec, or judging against one.
 applies-to: any
-last-verified: 2026-11-05
+last-verified: 2026-11-06
 ---
 
 # Requirements and acceptance criteria
 
 Specs use the format in `backbone/templates/spec.md`. Run `python3 scripts/harness/lib/harness.py spec-check <id>` to see what the start gate will reject.
 
+## Change-Class and parent links
+
+- Set `Change-Class:` to one of `docs` | `refactor` | `feature` | `schema`. If unsure, use `feature`.
+  - `docs`: markdown/comments/non-runtime docs.
+  - `refactor`: structural change with no intended behaviour change.
+  - `feature`: new or changed behaviour (new REQ/AC).
+  - `schema`: migrations, auth, secrets, payments, deploy/infra (aligns with `HARNESS_RISK_*`).
+- `feature` and `schema` always need a human `Approved-by:` line. Never rely on policy approve for them.
+- `docs` / low-risk `refactor` may use autonomous `harness.py approve` only when `HARNESS_AUTO_APPROVE=low` and `risk_reasons` is empty (see product ADR-002).
+- Optional `Parent-CHNG:`, `Parent-RFC:`, `Parent-ADR:`: if a vault change record, RFC or ADR already exists, **copy its stable id/link** into these fields. The vault (or `backbone/adr/`) remains the system of record — do not create a CHNG folder inside the harness install.
+
 ## Requirements (`REQ-<task>-<n>`)
 
 - One behaviour per requirement: "The system shall <verb> <object> <condition>".
 - Describe **what** the system does, never how: no class names, libraries or SQL. Those belong in the Architecture section or the ADRs.
 - Make them unambiguous. Replace "fast", "user-friendly", "secure", "handle errors" and "etc." with something measurable or enumerable ("responds within 300 ms at p95", "rejects names longer than 100 characters with 400").
-- Each one is necessary and traceable to the PRD or a stated need. Delete requirements nobody asked for.
+- Each one is necessary and traceable to the PRD, a Parent-* link, or a stated need. Delete requirements nobody asked for.
 - Cover the unhappy paths: invalid input, not found, conflicts, permissions, empty results, limits, concurrency and idempotency where relevant.
 
-When `HARNESS_REQ_STYLE` is `ears`, write every requirement in an EARS pattern and read `ears.md`: `spec-check` enforces it.
+When `HARNESS_REQ_STYLE` is `ears`, write every requirement in an EARS pattern and read `ears.md`: `spec-check` enforces it. When it is `plain` (default), EARS phrasing is still allowed and useful; it is not required.
+
+### EARS ↔ REQ/AC (short map)
+
+| EARS pattern | REQ shape | Main AC When |
+|---|---|---|
+| Ubiquitous | The `<system>` shall `<response>`. | the action under test |
+| Event-driven | When `<trigger>`, the `<system>` shall `<response>`. | same trigger |
+| State-driven | While `<state>`, the `<system>` shall `<response>`. | action while in that state |
+| Unwanted | If `<condition>`, then the `<system>` shall `<response>`. | the unwanted condition |
+| Optional feature | Where `<feature>`, the `<system>` shall `<response>`. | using that feature |
+
+Keep ids as `REQ-<task>-<n>` either way. Acceptance criteria stay Given/When/Then and cite those ids.
 
 ## Acceptance criteria (`AC-<task>-<n> (REQ-<task>-<n>)`)
 
@@ -38,6 +61,7 @@ Name the quality constraints with a number or a standard: latency, throughput, d
 - Hidden decisions, such as pagination size, sorting or time zones. Make each one a requirement or an open question.
 - Scope creep, where the task does more than its PRD section. Move the extra to "Out of scope".
 - Open questions left unresolved. The griller fails the spec until they are answered by the user.
+- Missing or wrong `Change-Class:` (especially marking `schema` work as `docs`/`refactor` to chase policy approve).
 
 ## Linked skills
 

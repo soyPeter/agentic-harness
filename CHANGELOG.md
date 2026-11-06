@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Change-Class ladder (ADR-002).** Spec template and `requirements-writing` skill declare `Change-Class`
+  (`docs` | `refactor` | `feature` | `schema`) plus optional `Parent-CHNG` / `Parent-RFC` / `Parent-ADR` links.
+  Policy: PR merge stays human; policy `approve` must not be treated as merge. Runtime enforcement in
+  `harness.py` is a follow-up.
+
 ## 0.30.0 (2026-11-06)
 
 - **The engine can run from outside the project** (first step of thin mode, ADR-001). The project is the folder in
