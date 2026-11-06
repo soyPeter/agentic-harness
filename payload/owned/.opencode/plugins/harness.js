@@ -5,14 +5,19 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const SCRIPT = "scripts/harness/lib/harness.py";
+const LAUNCHER = join(dirname(fileURLToPath(import.meta.url)), "../../../../plugin/launcher.py");
 const NAMES = { shell: "Bash", bash: "Bash", edit: "Edit", write: "Write", read: "Read", skill: "Skill",
   patch: "apply_patch", apply_patch: "apply_patch" };
 const VERDICT_AGENTS = new Set(["griller", "judge", "tester", "debugger", "reviewer", "deliverer"]);
 
 function projectRoot(start) {
-  let dir = start || process.cwd();
+  const startDir = start || process.cwd();
+  const top = spawnSync("git", ["-C", startDir, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
+  if (top.status === 0) return top.stdout.trim();
+  let dir = startDir;
   for (;;) {
     if (existsSync(join(dir, SCRIPT))) return dir;
     const parent = dirname(dir);
@@ -39,7 +44,8 @@ function translate(tool, input) {
 }
 
 function hook(root, event, payload) {
-  return spawnSync("python3", [join(root, SCRIPT), "hook", event, "--from", "opencode"],
+  const script = existsSync(join(root, SCRIPT)) ? join(root, SCRIPT) : LAUNCHER;
+  return spawnSync("python3", [script, "hook", event, "--from", "opencode"],
     { input: JSON.stringify(payload), encoding: "utf8", cwd: root, timeout: event === "subagent-stop" ? 1200000 : 30000 });
 }
 

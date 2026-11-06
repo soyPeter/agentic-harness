@@ -1,0 +1,21 @@
+{
+  "name": "agentic-harness",
+  "version": "0.30.0",
+  "description": "Project-pinned agentic harness gates, skills, and role agents",
+  "author": {"name": "Peter"},
+  "repository": "https://github.com/soyPeter/agentic-harness",
+  "skills": ["./payload/owned/.claude/skills/", "./plugin/skills/"],
+  "agents": [
+    "./payload/owned/.claude/agents/analyst.md",
+    "./payload/owned/.claude/agents/architect.md",
+    "./payload/owned/.claude/agents/debugger.md",
+    "./payload/owned/.claude/agents/deliverer.md",
+    "./payload/owned/.claude/agents/griller.md",
+    "./payload/owned/.claude/agents/implementer.md",
+    "./payload/owned/.claude/agents/judge.md",
+    "./payload/owned/.claude/agents/reviewer.md",
+    "./payload/owned/.claude/agents/scribe.md",
+    "./payload/owned/.claude/agents/tester.md"
+  ],
+  "hooks": "./plugin/claude-hooks.json"
+}
