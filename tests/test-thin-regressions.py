@@ -91,6 +91,20 @@ class ThinRegressions(unittest.TestCase):
                 self.assertEqual(self.hook(session, tool, tool_input).returncode, 0)
                 self.assert_gate(session, False)
 
+    def test_launcher_defers_to_a_vendored_engine_even_with_a_thin_lock(self):
+        self.install()
+        lock = self.project / "backbone/.harness-lock.json"
+        lock.write_text(json.dumps({"mode": "thin", "version": "9.9.9", "commit": "0" * 40}))
+        launcher = HARNESS / "plugin/launcher.py"
+        result = self.run_command("python3", "-B", str(launcher), "hook", "pre-tool-use",
+                                  input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}))
+        self.assertEqual(result.returncode, 0)
+        guard = self.run_command("python3", "-B", str(launcher), "hook", "agent-guard", "implementer",
+                                 input=json.dumps({"tool_name": "Write", "tool_input": {
+                                     "file_path": str(self.project / "backbone/1-PRD.md"), "content": "x"}}), check=False)
+        self.assertEqual(guard.returncode, 2)
+        self.assertIn("project:", self.run_command("python3", "-B", str(launcher), "doctor").stdout)
+
     def test_shell_reads_resolve_aliases_and_working_directory(self):
         self.install(thin=True)
         override = self.project / ".claude/skills/code-quality/SKILL.md"
@@ -109,7 +123,6 @@ class ThinRegressions(unittest.TestCase):
                 self.assertEqual(self.hook(session, "Bash", {"command": command}, cwd=cwd).returncode, 0)
                 self.assert_gate(session, session == "missing")
 
-
     def test_rule_reports_distinguish_core_and_project_in_both_layouts(self):
         self.install()
         with (self.project / "backbone/guardrails.conf").open("a") as handle:
@@ -124,16 +137,17 @@ class ThinRegressions(unittest.TestCase):
                 self.assertIn("Private keys must never be written into the repository.  (core)", report)
                 self.assertNotIn("Project review sentinel.  (core)", report)
 
-    def extraction_script(self):
+    def extraction_script(self, source=None):
         workflow = (HARNESS / "payload/owned/.github/workflows/harness-verify.yml").read_text()
         step = workflow.split("      - name: Take the verifier from the base branch\n", 1)[1]
-        return textwrap.dedent(step.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0])
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0])
+        return script.replace("https://github.com/soyPeter/agentic-harness.git", str(source)) if source else script
 
-    def extract(self, check=True):
+    def extract(self, check=True, source=None):
         runner = self.work / "runner temp"
         runner.mkdir()
-        env = dict(self.env, BASE="review-base", RUNNER_TEMP=str(runner))
-        result = self.run_command("bash", "-e", "-o", "pipefail", "-c", self.extraction_script(),
+        env = dict(self.env, BASE="review-base", RUNNER_TEMP=str(runner), GITHUB_ENV=str(runner / "github-env"))
+        result = self.run_command("bash", "-e", "-o", "pipefail", "-c", self.extraction_script(source),
                                   env=env, check=check)
         return runner / "trusted", result
 
@@ -187,6 +201,50 @@ assert h['decisions'].load_definitions(str(h['DECISIONS_FILE']))['decisions']
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("using the pull request's copy", result.stdout)
         self.assertFalse((trusted / "scripts/harness/decisions.json").exists())
+
+    def test_ci_fetches_the_base_branch_pin_for_a_thin_project(self):
+        source = self.work / "engine-source"
+        source.mkdir()
+        shutil.copytree(HARNESS / "payload", source / "payload")
+        self.run_command("git", "-C", str(source), "init", "-q", "-b", "main")
+        self.run_command("git", "-C", str(source), "add", "-A")
+        self.run_command("git", "-C", str(source), "commit", "-qm", "engine")
+        commit = self.run_command("git", "-C", str(source), "rev-parse", "HEAD").stdout.strip()
+        lock = self.project / "backbone/.harness-lock.json"
+        lock.parent.mkdir()
+        lock.write_text(json.dumps({"mode": "thin", "version": "9.9.9", "commit": commit}))
+        self.commit_base()
+        lock.write_text(json.dumps({"mode": "thin", "version": "9.9.9", "commit": "0" * 40}))
+        trusted, result = self.extract(source=source)
+        self.assertIn("Using pinned engine %s from origin/review-base" % commit, result.stdout)
+        self.assertEqual(self.run_command("git", "-C", str(trusted), "rev-parse", "HEAD").stdout.strip(), commit)
+        self.assertEqual((self.work / "runner temp/github-env").read_text().strip(),
+                         "ENGINE_SCRIPT=%s" % (trusted / "payload/owned/scripts/harness/lib/harness.py"))
+
+    def test_ci_rejects_an_invalid_base_branch_pin(self):
+        lock = self.project / "backbone/.harness-lock.json"
+        lock.parent.mkdir()
+        lock.write_text(json.dumps({"mode": "thin", "version": "9.9.9", "commit": "not-a-commit"}))
+        self.commit_base()
+        _, result = self.extract(check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Invalid base branch harness lock", result.stderr)
+
+    def test_ci_can_bootstrap_an_initial_thin_install(self):
+        source = self.work / "engine-source"
+        source.mkdir()
+        shutil.copytree(HARNESS / "payload", source / "payload")
+        self.run_command("git", "-C", str(source), "init", "-q", "-b", "main")
+        self.run_command("git", "-C", str(source), "add", "-A")
+        self.run_command("git", "-C", str(source), "commit", "-qm", "engine")
+        commit = self.run_command("git", "-C", str(source), "rev-parse", "HEAD").stdout.strip()
+        self.commit_base()
+        lock = self.project / "backbone/.harness-lock.json"
+        lock.parent.mkdir()
+        lock.write_text(json.dumps({"mode": "thin", "version": "9.9.9", "commit": commit}))
+        trusted, result = self.extract(source=source)
+        self.assertIn("Using pinned engine %s from HEAD" % commit, result.stdout)
+        self.assertTrue((trusted / "payload/owned/scripts/harness/lib/harness.py").is_file())
 
 
 if __name__ == "__main__":

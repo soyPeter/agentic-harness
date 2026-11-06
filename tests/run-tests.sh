@@ -2884,6 +2884,8 @@ contains "thin: the catalog comes from the engine" "quarkus" "$(thin "$T" catalo
 expect 0 "thin: skill overrides, rule provenance and CI engine assets" python3 -B "$HARNESS/tests/test-thin-regressions.py"
 
 section "thin mode: the launcher runs the engine the project pins (ADR-001)"
+expect 0 "plugin manifests and OpenCode adapter (ADR-001)" python3 -B "$HARNESS/tests/test-plugin-packaging.py"
+expect 0 "thin init, pin and pre-commit shim (ADR-001)" python3 -B "$HARNESS/tests/test-thin-install.py"
 L="$HARNESS/plugin/launcher.py"
 SRC="$WORK/engine-src"   # stands in for the harness repository: this checkout, committed and tagged
 mkdir -p "$SRC"

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "agentic-harness",
+  "description": "Project-pinned agentic harness for Claude Code",
+  "owner": {"name": "Peter"},
+  "plugins": [
+    {"name": "agentic-harness", "source": "./"}
+  ]
+}

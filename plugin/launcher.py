@@ -50,11 +50,21 @@ def project_root():
 
 
 def read_lock(root):
+    """The lock, or None when the repository has none. A lock that exists but can't be read raises: treating it as
+    absent would turn every gate off, which a merge conflict in the pin would otherwise do."""
     try:
-        data = json.loads((root / "backbone" / ".harness-lock.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        text = (root / "backbone" / ".harness-lock.json").read_text(encoding="utf-8")
+    except FileNotFoundError:
         return None
-    return data if isinstance(data, dict) else None
+    except OSError as exc:
+        raise EngineUnavailable("backbone/.harness-lock.json can't be read (%s)" % exc.strerror)
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise EngineUnavailable("backbone/.harness-lock.json is not valid JSON (an unresolved merge conflict?)")
+    if not isinstance(data, dict):
+        raise EngineUnavailable("backbone/.harness-lock.json is not a JSON object")
+    return data
 
 
 def engines_dir():
@@ -68,6 +78,10 @@ def checked(engine, commit):
                                 % (engine, head or "(unreadable)", commit))
     if not (engine / ENGINE_SCRIPT).is_file():
         raise EngineUnavailable("the cached engine %s has no %s" % (engine, ENGINE_SCRIPT))
+    changes = git("-C", str(engine), "status", "--porcelain", "--untracked-files=all")
+    if changes is None or changes:
+        raise EngineUnavailable("the cached engine %s has local changes, so it is not the pinned release; delete it "
+                                "to fetch it again" % engine)
     return engine / ENGINE_SCRIPT
 
 
@@ -114,6 +128,9 @@ def refuse(event, reason):
     if event == "session-start":
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": message}}))
         return 0
+    if event == "agent-guard":
+        sys.stderr.write(message + "\n")
+        return 2
     if event == "pre-tool-use":
         try:
             data = json.load(sys.stdin)
@@ -128,24 +145,37 @@ def refuse(event, reason):
 
 def main(argv):
     args = argv[1:]
+    if args[:1] == ["pin"] or (args[:1] == ["init"] and "--thin" in args[1:]):
+        installer = Path(__file__).resolve().parents[1] / "tools/thin.py"
+        if not installer.is_file():
+            sys.stderr.write("Agentic harness: thin-mode installer is missing from the plugin.\n")
+            return 2
+        return subprocess.run([sys.executable, str(installer)] + args).returncode
     event = args[1] if len(args) >= 2 and args[0] == "hook" else None
     root = project_root()
     if root is None:
         return 0 if event else refuse(None, "not inside a git repository")
-    lock = read_lock(root)
+    vendored = root / VENDORED_SCRIPT
+    if vendored.is_file():
+        if event and event not in ("agent-guard", "grill-stop", "judge-stop", "tester-stop", "debug-stop",
+                                   "review-stop", "deliver-stop"):
+            return 0
+        os.execv(sys.executable, [sys.executable, str(vendored)] + args)
+    try:
+        lock = read_lock(root)
+    except EngineUnavailable as exc:
+        return refuse(event, str(exc))
     if not lock or lock.get("mode") != "thin":
-        vendored = root / VENDORED_SCRIPT
         if event:
             return 0
-        if vendored.is_file():
-            os.execv(sys.executable, [sys.executable, str(vendored)] + args)
         sys.stderr.write("Agentic harness: %s has no harness installed.\n" % root)
         return 1
     try:
         script = engine_script(lock, event)
     except EngineUnavailable as exc:
         return refuse(event, str(exc))
-    env = dict(os.environ, HARNESS_ROOT=str(root))
+    env = dict(os.environ, HARNESS_ROOT=str(root), HARNESS_ENGINES=str(engines_dir()),
+               HARNESS_PLUGIN_ROOT=str(Path(__file__).resolve().parents[1]))
     os.execve(sys.executable, [sys.executable, str(script)] + args, env)
 
 

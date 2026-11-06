@@ -1,0 +1,19 @@
+{
+  "name": "agentic-harness-opencode",
+  "version": "0.27.0",
+  "description": "OpenCode adapter for the project-pinned agentic harness",
+  "type": "module",
+  "exports": "./plugin/opencode.js",
+  "files": [
+    "VERSION",
+    "plugin/launcher.py",
+    "plugin/opencode.js",
+    "plugin/pre-commit",
+    "tools/thin.py",
+    "payload/seed",
+    "payload/owned/backbone",
+    "payload/owned/.github/workflows/harness-verify.yml",
+    "payload/owned/.opencode/plugins/harness.js"
+  ],
+  "repository": "https://github.com/soyPeter/agentic-harness"
+}

@@ -7,11 +7,10 @@
   working directory (or `CLAUDE_PROJECT_DIR`). Engine-owned files come from the engine: the core guardrails and
   routes, `decisions.json`, the pipeline agents, the catalog and the core skills. Project skills are added to the core
   ones and win on a shared name. The skill gate points at the file that is actually there, and reading it counts.
-- Skill overrides apply to file reads, shell reads and skill invocations: loading an overridden engine skill does
-  not satisfy the project skill requirement.
-- Rule reports identify core and project guardrails by source when the engine runs outside the project.
 - CI extracts the base branch's core guardrails, routes and decisions alongside its verifier. `verify --range`
   continues to check task gates and protected changes; it does not scan the changed code for guardrail violations.
+- Skill overrides apply to file reads, shell reads and skill invocations: loading an overridden engine skill does
+  not satisfy the project skill requirement. Reports identify core rules correctly with an external engine.
 - **The thin-mode launcher** (`plugin/launcher.py`). It runs the engine a project pins in
   `backbone/.harness-lock.json` (`"mode": "thin"`, `"version"`, `"commit"`):
   - It fetches tag `v<version>` once into `~/.agentic-harness/engines/<version>/` (`HARNESS_ENGINES`, source
@@ -19,6 +18,16 @@
   - A repository without the harness is left alone, and a full install keeps its own hooks.
   - When the pinned engine can't be run, it fails closed: reads go through, other tool calls are refused with the
     reason, the session is told at start, and commands exit 1.
+- `init --thin` now fetches and checks the release before writing project files. It refuses older tags without thin
+  plugin assets, seeds files from the pinned release, preserves existing project-owned docs, and pins Claude's
+  marketplace to that release tag. The next release version is `0.27.0`; the default install waits for its tag.
+- Thin session startup supplies the pinned engine's agent rules as context in Claude and Codex. Health checks now
+  recognize the thin pre-commit shim and plugin setting.
+- **Thin mode can't be switched off from inside a session.** Agents may not change the engine cache or the plugin
+  (file tools or shell, by any path that reaches them), run `pin`, or change the `.githooks/` pre-commit shim. The
+  launcher and the shim refuse a cached engine with local changes, and a lock that exists but can't be parsed (an
+  unresolved merge conflict) fails closed instead of reading as "not enrolled". Shell redirections to quoted paths
+  with spaces are now checked.
 
 ## 0.26.1 (2026-11-03)
 

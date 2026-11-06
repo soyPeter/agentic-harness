@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook session-start", "timeout": 15}]}
+    ],
+    "PreToolUse": [
+      {"matcher": "^(?!(Read|Grep|Glob|LS|TodoWrite)$)", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook pre-tool-use", "timeout": 30}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "^(?!(Grep|Glob|LS|TodoWrite)$)", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook post-tool-use", "timeout": 30}]}
+    ],
+    "PostToolUseFailure": [
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook post-tool-use", "timeout": 30}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook stop", "timeout": 1200}]}
+    ]
+  }
+}

@@ -10,7 +10,7 @@ hooks:
     - matcher: "Write|Edit|MultiEdit"
       hooks:
         - type: command
-          command: 'python3 "$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py" hook agent-guard analyst'
+          command: 'if [ -n "$CLAUDE_PLUGIN_ROOT" ]; then H="$CLAUDE_PLUGIN_ROOT/plugin/launcher.py"; else H="$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py"; fi; python3 "$H" hook agent-guard analyst'
           timeout: 30
 ---
 

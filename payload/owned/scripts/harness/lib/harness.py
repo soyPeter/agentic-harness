@@ -131,8 +131,12 @@ KNOWLEDGE_PATH_KEYS = ("path", "paths", "note", "notes", "hub", "name", "file", 
 # Paths an agent may change only through the file tools, where the hooks see the change. Shell writes to
 # them are refused: they would skip the gates (task states, approvals, verdicts, settings, skill state).
 SHELL_PROTECTED = (r"^backbone(/|$)", r"^scripts/harness(/|$)", r"^\.claude(/|$)", r"^\.codex(/|$)", r"^\.opencode(/|$)",
-                   r"^(AGENTS|CLAUDE)\.md$",
+                   r"^(AGENTS|CLAUDE)\.md$", r"^\.githooks(/|$)",
                    r"^\.git/(hooks|harness)(/|$)", r"^\.git/config$")
+# Thin mode (ADR-001): the launcher names the engine cache and the plugin it runs from. They decide the project's gates
+# but lie outside it, beyond the reach of the repository-relative protections.
+INSTALL_DIRS = (("HARNESS_ENGINES", "the harness engine cache"), ("HARNESS_PLUGIN_ROOT", "the harness plugin"))
+INSTALL_SCRIPTS = ("harness.py", "launcher.py", "thin.py")
 # Harness files whose edits change enforcement; verify refuses commits that change them away from the lock.
 ENFORCEMENT_FILES = (r"^scripts/harness/", r"^\.claude/agents/", r"^\.github/workflows/harness-[^/]+\.ya?ml$",
                      r"^\.devcontainer/harness-agent/", r"^\.codex/(hooks\.json$|agents/|rules/harness\.rules$)",
@@ -999,9 +1003,29 @@ def protected_path(path_str, cwd):
     return name if any(re.search(p, name) for p in SHELL_PROTECTED) else None
 
 
+def install_path(path_str, cwd):
+    """Which harness install (engine cache or plugin) path_str is in, or contains, else None."""
+    if not path_str or path_str.startswith("-"):
+        return None
+    path = os.path.expandvars(os.path.expanduser(path_str))
+    if not os.path.isabs(path):
+        path = os.path.join(cwd or str(ROOT), path)
+    full, root = os.path.realpath(path), os.path.realpath(str(ROOT))
+    for variable, label in INSTALL_DIRS:
+        base = os.environ.get(variable)
+        if not base:
+            continue
+        base = os.path.realpath(base)
+        if root == base or root.startswith(base + os.sep):
+            continue   # a project inside the install (the harness developed in thin mode) keeps its own gates
+        if full == base or full.startswith(base + os.sep) or base.startswith(full.rstrip(os.sep) + os.sep):
+            return label
+    return None
+
+
 def written_paths(segment, words):
     """Paths a segment writes, moves or deletes: redirection targets and mutating programs' operands."""
-    paths = re.findall(r"(?:^|[^<>&0-9])(?:[0-9]?>>?|&>>?)\s*([^\s;|&<>]+)", segment)
+    paths = re.findall(r"(?:^|[^<>&0-9])(?:[0-9]?>>?|&>>?)\s*('[^']*'|\"[^\"]*\"|[^\s;|&<>]+)", segment)
     prog, args = program(words), [w for w in words[1:] if not w.startswith("-")]
     if prog in MUTATORS:
         paths += args
@@ -1067,7 +1091,16 @@ def shell_findings(command, cwd=None, depth=0):
         if prog == "cd" and len(words) > 1:
             cwd = os.path.join(cwd or str(ROOT), os.path.expanduser(words[1]))
             continue
+        script = next((i for i, w in enumerate(words[:4]) if w.rsplit("/", 1)[-1] in INSTALL_SCRIPTS), None)
+        if script is not None and words[script + 1:script + 2] == ["pin"]:
+            found.append("pin moves the engine release this project pins, and with it every gate; only the user does "
+                         "that, in their own terminal.")
         for path in written_paths(segment, words):
+            label = install_path(path, cwd)
+            if label:
+                found.append("%s is in %s, which decides this project's gates; agents may not change it."
+                             % (path, label))
+                continue
             name = protected_path(path, cwd)
             if name:
                 found.append("Shell writes to %s skip the harness gates; change it with the Write or Edit tool "
@@ -2255,16 +2288,21 @@ def verify_command(argv):
 def health():
     """List of (level, message) for misconfigurations; level is 'error' or 'warn'."""
     issues = []
+    thin = lock().get("mode") == "thin" and ENGINE != ROOT
+    hooks_path_expected = ".githooks" if thin else HOOKS_PATH
     hooks_path = git("config", "--get", "core.hooksPath").strip()
-    if hooks_path != HOOKS_PATH:
+    if hooks_path != hooks_path_expected:
         issues.append(("error", "git hooks inactive: core.hooksPath is %s, expected %s "
                                 "(fix: git config core.hooksPath %s)"
-                       % (hooks_path or "unset", HOOKS_PATH, HOOKS_PATH)))
-    for name in ("pre-commit", "commit-msg"):
-        if not os.access(str(ROOT / HOOKS_PATH / name), os.X_OK):
-            issues.append(("error", "%s/%s is missing or not executable" % (HOOKS_PATH, name)))
-    if HOOK_MARK not in read(SETTINGS_FILE):
-        issues.append(("error", ".claude/settings.json has no harness hooks (re-run the harness update)"))
+                       % (hooks_path or "unset", hooks_path_expected, hooks_path_expected)))
+    for name in (("pre-commit",) if thin else ("pre-commit", "commit-msg")):
+        if not os.access(str(ROOT / hooks_path_expected / name), os.X_OK):
+            issues.append(("error", "%s/%s is missing or not executable" % (hooks_path_expected, name)))
+    if thin and not (ENGINE / "AGENTS.md").is_file():
+        issues.append(("error", "the pinned engine has no AGENTS.md to supply agent rules"))
+    if ("agentic-harness@agentic-harness" if thin else HOOK_MARK) not in read(SETTINGS_FILE):
+        issues.append(("error", ".claude/settings.json has no harness %s"
+                       % ("plugin entry" if thin else "hooks (re-run the harness update)")))
     _, rule_errors = load_rules()
     issues.extend(("error", "guardrail " + e) for e in rule_errors)
     routes, route_errors = load_routes()
@@ -2749,21 +2787,39 @@ def resulting_text(tool, tool_input, path_str):
 def hook_session_start(_data):
     values = conf()
     info = lock()
+    thin = info.get("mode") == "thin" and ENGINE != ROOT
     lines = ["[agentic harness %s] project: %s, stack packs: %s"
-             % (info.get("harness_version", "?"), values["HARNESS_PROJECT_NAME"] or ROOT.name, adopted_summary(info))]
+             % (info.get("harness_version") or info.get("version") or "?",
+                values["HARNESS_PROJECT_NAME"] or ROOT.name, adopted_summary(info))]
+    if thin:
+        rules = read(ENGINE / "AGENTS.md")
+        if rules:
+            command = "python3 %s" % shlex.quote(str(ENGINE / "scripts/harness/lib/harness.py"))
+            rules = rules.replace(
+                "Project knowledge lives in `backbone/`, role agents in `.claude/agents/`, skills in "
+                "`.claude/skills/`, and hooks in `scripts/harness/` enforce the process.",
+                "Project knowledge lives in `backbone/`. The plugin supplies role agents and core skills; "
+                "the pinned engine enforces the process through hooks.")
+            rules = rules.replace("Skills live in `.claude/skills/<name>/SKILL.md`:",
+                                  "Project skills live in `.claude/skills/<name>/SKILL.md`; core skills come from "
+                                  "the plugin:")
+            rules = rules.replace("python3 scripts/harness/lib/harness.py", command)
+            rules = rules.replace("scripts/harness/routing.core.conf",
+                                  str(ENGINE / "scripts/harness/routing.core.conf"))
+            lines.extend(("Agent rules from the pinned engine (there is no project AGENTS.md):", rules))
     pending = placeholders()
     if pending:
         lines.append("SETUP INCOMPLETE: %d FILL placeholder(s) in %s. Run first-run setup "
-                     "(AGENTS.md section 1) with the user before any other work."
+                     "(agent rules section 1) with the user before any other work."
                      % (sum(pending.values()), ", ".join(sorted(pending))))
     else:
-        lines.append("Before changing anything read: AGENTS.md, backbone/4-KNOWLEDGE.md, backbone/7-CONVENTIONS.md, "
-                     "backbone/8-WORKFLOW.md, backbone/3-TASKS.md.")
+        lines.append("Before changing anything read: %sbackbone/4-KNOWLEDGE.md, backbone/7-CONVENTIONS.md, "
+                     "backbone/8-WORKFLOW.md, backbone/3-TASKS.md." % ("" if thin else "AGENTS.md, "))
     snapshot_refresh()
     if autonomous():
         lines.append("AUTONOMOUS MODE: no user is in the loop. Never ask the user; approve low-risk specs with "
                      "harness.py approve <id>, escalate everything else with harness.py escalate <id> --reason ..., "
-                     "and continue with the next ready task (AGENTS.md section 7).")
+                     "and continue with the next ready task (agent rules section 7).")
         if knowledge_root() is not None:
             lines.append("Knowledge source on: the analyst and architect answer the griller's questions from "
                          "backbone/ and the knowledge MCP server (cite vault:<path>); escalate what neither answers.")
@@ -2779,7 +2835,9 @@ def hook_session_start(_data):
                      "(spec: %s)" % (", ".join(tasks), ", ".join(spec_rel(t) for t in tasks)))
     errors = [message for level, message in health() if level == "error"]
     if errors:
-        lines.append("Harness problems (details: scripts/harness/doctor.sh):")
+        lines.append("Harness problems (details: %s):" %
+                     ("python3 %s doctor" % (ENGINE / "scripts/harness/lib/harness.py")
+                      if thin else "scripts/harness/doctor.sh"))
         lines.extend("  - " + message for message in errors)
     found, _ = scan()
     blocks = sorted({name for name, rule, _ in found if rule.severity == "block"})
@@ -2829,6 +2887,10 @@ def hook_pre_tool_use(data):
     if not tool_input.get("file_path"):
         return
     path_str = tool_input["file_path"]
+    label = install_path(path_str, data.get("cwd"))
+    if label:
+        deny("Harness blocked this change to %s: it is in %s, which decides this project's gates. The user changes "
+             "it (with pin, or a plugin update)." % (path_str, label))
     path = canonical(rel(path_str))
     if data.get("harness_role"):
         hook_agent_guard(data, data["harness_role"])
@@ -2844,6 +2906,9 @@ def hook_pre_tool_use(data):
     if path == LOCK_FILE.relative_to(ROOT).as_posix():
         deny("Harness blocked this change to %s: the lock is written by the installer and harness.py adopt only."
              % path)
+    if path == ".githooks/pre-commit" and lock().get("mode") == "thin":
+        deny("Harness blocked this change to %s: in thin mode it is the shim that runs the pinned engine's checks, "
+             "written by init --thin only." % path)
     if path == "backbone/tools.conf":
         deny("Harness blocked this change to %s: the tool contracts decide what agents may run, so only the user "
              "changes them. Ask the user to edit it." % path)
@@ -5240,6 +5305,12 @@ def hook_slow_threshold():
 
 def main(argv):
     global HOOK_SOURCE
+    if (argv[1:2] == ["init"] and "--thin" in argv[2:]) or argv[1:2] == ["pin"]:
+        command = ENGINE.parent.parent / "tools/thin.py"
+        if not command.is_file():
+            sys.stderr.write("thin: this engine has no thin-mode installer\n")
+            return 2
+        return subprocess.run([sys.executable, str(command)] + argv[1:]).returncode
     if argv[1:2] == ["hook"] and "--from" in argv:
         i = argv.index("--from")
         HOOK_SOURCE = argv[i + 1] if i + 1 < len(argv) and argv[i + 1] in HOOK_SOURCES else "claude"

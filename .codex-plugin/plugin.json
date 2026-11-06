@@ -1,0 +1,7 @@
+{
+  "name": "agentic-harness",
+  "version": "0.27.0",
+  "description": "Project-pinned agentic harness gates and skills",
+  "skills": ["./payload/owned/.claude/skills/", "./plugin/skills/"],
+  "hooks": "./plugin/codex-hooks.json"
+}
