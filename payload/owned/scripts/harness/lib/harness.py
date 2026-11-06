@@ -117,7 +117,7 @@ REVIEW_LENSES = ("correctness", "structure", "lean")
 USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE", "HARNESS_JUDGE_MAX_ROUNDS",
                   "HARNESS_VERIFY", "HARNESS_ORCHESTRATOR_SCOPE",
                   "HARNESS_AUTONOMY", "HARNESS_AUTO_APPROVE", "HARNESS_RISK_TERMS", "HARNESS_RISK_PATHS",
-                  "HARNESS_RISK_MAX_FILES", "HARNESS_GRILL_MAX_ROUNDS", "HARNESS_ESCALATE_GH",
+                  "HARNESS_RISK_MAX_FILES", "HARNESS_DOC_PATHS", "HARNESS_GRILL_MAX_ROUNDS", "HARNESS_ESCALATE_GH",
                   "HARNESS_AGENT_CMD", "HARNESS_RUN_TASK_TIMEOUT", "HARNESS_RUN_ATTEMPTS",
                   "HARNESS_RUN_MAX_COST", "HARNESS_CI_JUDGE_CMD",
                   "HARNESS_DECISION_PROVIDER", "HARNESS_DECISION_MODE", "HARNESS_DECISION_ADR",
@@ -175,6 +175,16 @@ EARS_PASSIVE = re.compile(r"(?i)\bshall\s+(not\s+)?be\s+(\w+ed|\w+en|sent|shown|
 BLOCKED_NOTE = re.compile(r"\s+[-\u2014]+\s+BLOCKED:\s*(.*)$")
 LIGHT_MARK = re.compile(r"\(light\)", re.I)
 POLICY_APPROVAL = re.compile(r"^\s*Approved-by:\s*policy:(\S+)\s*\((.*)\)", re.M)
+# The kind of work a spec declares (the harness's ADR-002). A spec without the line counts as feature.
+CHANGE_CLASSES = ("docs", "refactor", "feature", "schema")
+CHANGE_CLASS_LINE = re.compile(r"^[ \t]*Change-Class:(.*)$", re.M | re.I)
+USER_APPROVED_CLASSES = ("feature", "schema")
+CLASS_GATES = {
+    "docs": "policy may approve it when nothing is risky; a change to anything but documentation is a risk",
+    "refactor": "policy may approve it when nothing is risky",
+    "feature": "the user approves it, never policy",
+    "schema": "the user approves it, never policy; it never takes the light lane",
+}
 
 # Write scope per agent: ("allow", patterns) permits only matches; ("deny", patterns) refuses matches.
 AGENT_SCOPES = {
@@ -246,6 +256,8 @@ DEFAULTS = {
                           r"|Dockerfile|(^|/)(pom\.xml|build\.gradle(\.kts)?|settings\.gradle(\.kts)?|package\.json|"
                           r"go\.mod|Cargo\.toml|requirements[^/]*\.txt|pyproject\.toml)$",
     "HARNESS_RISK_MAX_FILES": "20",
+    "HARNESS_DOC_PATHS": r"(?i)\.(md|mdx|markdown|rst|adoc|asciidoc)$|(^|/)(docs?|documentation)/"
+                         r"|(^|/)(README|CHANGELOG|CHANGES|HISTORY|LICEN[CS]E|NOTICE|CONTRIBUTING|AUTHORS)(\.[^/]*)?$",
     "HARNESS_GRILL_MAX_ROUNDS": "3",
     "HARNESS_ESCALATE_GH": "off",
     "HARNESS_AGENT_CMD": "claude -p --permission-mode acceptEdits --output-format json",
@@ -670,6 +682,28 @@ def ears_problems(req, text):
     return problems
 
 
+def change_class(text):
+    """(class, declared, problem) from the spec's Change-Class: line. Without one the spec counts as feature;
+    a value that isn't exactly one class, or two different values, is a problem and counts as feature too."""
+    # Read outside the Approval section: the grill fingerprint leaves it out, and agents may still write there once
+    # the spec is approved, so a class there could change after the griller and the user passed the spec.
+    values = [v.strip() for v in CHANGE_CLASS_LINE.findall(without_approval(strip_comments(text or "")))]
+    distinct = sorted({v.lower() for v in values})
+    if not values:
+        return "feature", False, None
+    if len(distinct) > 1:
+        return "feature", True, "Change-Class is declared more than once (%s): keep one" % ", ".join(distinct)
+    if distinct[0] not in CHANGE_CLASSES:
+        return "feature", True, "Change-Class '%s' is not one of %s" % (values[0], ", ".join(CHANGE_CLASSES))
+    return distinct[0], True, None
+
+
+def class_label(text):
+    cls, declared, problem = change_class(text)
+    return "Change-Class %s%s" % (cls, " (the declared one is invalid)" if problem else
+                                  "" if declared else " (not declared)")
+
+
 def validate_spec(task, text=None):
     text = read(spec_path(task)) if text is None else text
     if not text.strip():
@@ -704,6 +738,9 @@ def validate_spec(task, text=None):
         if not all(re.search(r"\b%s\b" % word, rest, re.I) for word in ("given", "when", "then")):
             problems.append("%s is not written as Given ..., when ..., then ..." % ac)
     problems.extend("%s has no acceptance criterion" % req for req in sorted(req_ids - covered))
+    class_problem = change_class(text)[2]
+    if class_problem:
+        problems.append(class_problem)
     problems.extend(knowledge_citation_problems(text))
     adrs = spec_adrs(text)
     if not adrs:
@@ -1653,8 +1690,38 @@ def changed_files(base):
 
 def risk_reasons(task, base=None):
     """Why a task is not low-risk (empty list = low risk). With base, the diff since then is assessed too."""
-    values = conf()
     text = read(spec_path(task))
+    changed = changed_files(base) if base is not None else None
+    return class_risks(text) + content_risks(text, changed) + class_mismatch(text, changed or [])
+
+
+def class_risks(text):
+    """Why the spec's Change-Class alone rules out policy approval: feature and schema work is the user's to approve."""
+    cls, declared, problem = change_class(text)
+    if cls not in USER_APPROVED_CLASSES:
+        return []
+    why = ("the spec's Change-Class is invalid (see spec-check), so it counts as feature" if problem else
+           "Change-Class %s" % cls if declared else "no Change-Class declared, so it counts as feature")
+    return ["%s: the user approves it, not policy" % why]
+
+
+def class_mismatch(text, changed):
+    """The changed files a docs Change-Class can't describe: anything that isn't documentation (HARNESS_DOC_PATHS)."""
+    if change_class(text)[0] != "docs":
+        return []
+    try:
+        docs = re.compile(conf()["HARNESS_DOC_PATHS"])
+    except re.error:   # doctor reports it; a crash here would let a finishing edit through, so nothing is a doc
+        docs = None
+    other = [n for n in changed if not (docs and docs.search(n))]
+    return ["Change-Class docs doesn't cover a change to files that aren't documentation: %s"
+            % ", ".join(other[:6])] if other else []
+
+
+def content_risks(text, changed=None):
+    """What makes the spec, or the files its change touches (changed, when given), not low-risk, whatever its
+    Change-Class: a class never lowers what these find."""
+    values = conf()
     # Skills only says which skills the agents load, and explaining why `security` isn't needed ("no auth or
     # personal data") would read as risk. What the work does is in the other sections and in the diff.
     body = without_section(without_approval(strip_comments(text)), "Skills")
@@ -1673,8 +1740,7 @@ def risk_reasons(task, base=None):
         found = adr_file(adr)
         if found is not None and not adr_status(read(found)).lower().startswith("accepted"):
             reasons.append("%s is not Accepted: the user decides on it" % adr)
-    if base is not None:
-        changed = changed_files(base)
+    if changed is not None:
         sensitive = [n for n in changed if paths.search(n)]
         if sensitive:
             reasons.append("the change touches sensitive paths: %s" % ", ".join(sensitive[:6]))
@@ -1873,7 +1939,7 @@ def approve_command(task):
     spec_path(task).write_text(text, encoding="utf-8")
     log_event("approval", task=task, rule="low-risk", base=base)
     snapshot_refresh()
-    print("approve: %s approved by policy (low risk)." % spec_rel(task))
+    print("approve: %s approved by policy (low risk, %s)." % (spec_rel(task), class_label(text)))
     return 0
 
 
@@ -2111,13 +2177,23 @@ def conf_int(key, default):
 
 
 def light_reasons(task):
-    """Why a task marked (light) still needs the full pipeline; empty when the light lane applies."""
-    body = strip_comments(read(spec_path(task)))
+    """Why a task marked (light) still needs the full pipeline; empty when the light lane applies. The user's mark
+    is enough for feature work, which the user approves anyway; schema work never takes the lane."""
+    text = read(spec_path(task))
+    body = strip_comments(text)
+    cls, _, problem = change_class(text)
+    if problem:
+        reasons = [problem]
+    elif cls == "schema":
+        reasons = ["Change-Class schema never takes the light lane"]
+    else:
+        reasons = []
     items = len(spec_items(body, "REQ", task)) + len(spec_items(body, "AC", task))
     limit = conf_int("HARNESS_LIGHT_MAX_ITEMS", 3)
-    reasons = ["the spec has %d requirements and acceptance criteria (HARNESS_LIGHT_MAX_ITEMS %d)" % (items, limit)] \
-        if items > limit else []
-    return reasons + risk_reasons(task)
+    if items > limit:
+        reasons.append("the spec has %d requirements and acceptance criteria (HARNESS_LIGHT_MAX_ITEMS %d)"
+                       % (items, limit))
+    return reasons + content_risks(text)
 
 
 def light_lane(task):
@@ -2674,7 +2750,7 @@ def health():
             re.compile(values["HARNESS_KNOWLEDGE_TOOLS"])
         except re.error as exc:
             issues.append(("error", "HARNESS_KNOWLEDGE_TOOLS is not a valid regex (%s)" % exc))
-    for key in ("HARNESS_RISK_TERMS", "HARNESS_RISK_PATHS"):
+    for key in ("HARNESS_RISK_TERMS", "HARNESS_RISK_PATHS", "HARNESS_DOC_PATHS"):
         try:
             re.compile(values[key])
         except re.error as exc:
@@ -3708,6 +3784,7 @@ def task_status(task):
     last_grill, last_judge = (grill[-1] if grill else None), (judge[-1] if judge else None)
     return {
         "task": task, "title": task_title(task), "state": state, "spec": spec_rel(task) if exists else None,
+        "change_class": change_class(text)[0] if exists else None,
         "spec_problems": validate_spec(task) if exists else ["no spec yet"],
         "grill": last_grill and {"verdict": last_grill.get("verdict"),
                                  "current": last_grill.get("fingerprint") == spec_fingerprint(task)},
@@ -3744,7 +3821,7 @@ def code_changed():
 def next_step(task):
     """What task needs next: {step, role (who does it, or null), command (what to run), ...}."""
     s = task_status(task)
-    step = {"task": task, "title": s["title"], "state": s["state"]}
+    step = {"task": task, "title": s["title"], "state": s["state"], "change_class": s["change_class"]}
     if s["state"] == "missing":
         return dict(step, step="unknown", role=None, reason="no such task in backbone/3-TASKS.md")
     if s["state"] == "blocked":
@@ -3934,6 +4011,8 @@ def next_command(argv):
     for s in steps:
         print("next %s: %s%s%s" % (s["task"], s["step"], " (%s)" % s["role"] if s.get("role") else "",
                                    ": " + s["command"] if s.get("command") else ""))
+        if s.get("change_class"):
+            print("  %s" % class_label(read(spec_path(s["task"]))))
     return 0
 
 
@@ -5215,6 +5294,7 @@ def receipt_data(task, base=None):
         "verified": verified,
         "not_verified": not_verified,
         "decisions": {"governing_adrs": governing, "adrs_changed": adrs, "assumptions": assumptions},
+        "change_class": change_class(spec_text)[0],
         "risks": risk_reasons(task, base),
         "rounds": {"grill": len(grills), "judge": len(judge), "debug": len(verdict_history(task, "debug"))},
         "judged_at": passed.get("at"),
@@ -5237,8 +5317,9 @@ def receipt_text(d):
                 ("DECISIONS", ["follows %s" % a for a in d["decisions"]["governing_adrs"]] +
                  ["ADR changed: %s" % a for a in d["decisions"]["adrs_changed"]] +
                  ["assumption %s" % a for a in d["decisions"]["assumptions"]]),
-                ("RISKS", d["risks"] + ["grill rounds: %d; judge rounds: %d; debugger briefs: %d"
-                                        % (d["rounds"]["grill"], d["rounds"]["judge"], d["rounds"]["debug"])]),
+                ("RISKS (Change-Class %s)" % d["change_class"],
+                 d["risks"] + ["grill rounds: %d; judge rounds: %d; debugger briefs: %d"
+                               % (d["rounds"]["grill"], d["rounds"]["judge"], d["rounds"]["debug"])]),
                 ("APPROVAL", d["approval"] or ["(not approved)"]),
                 ("APPROVAL NEEDED", d["approval_needed"] or ["none"]))
     for heading, items in sections:
@@ -5969,7 +6050,9 @@ def main(argv):
         return ci_protect_command(argv[2:])
     if len(argv) == 3 and argv[1] == "risk":
         reasons = risk_reasons(argv[2])
+        text = read(spec_path(argv[2]))
         print("risk %s: %s" % (argv[2], "; ".join(reasons) if reasons else "low"))
+        print("  %s: %s" % (class_label(text), CLASS_GATES[change_class(text)[0]]))
         return 1 if reasons else 0
     sys.stderr.write(__doc__)
     return 64

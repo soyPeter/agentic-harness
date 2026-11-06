@@ -181,6 +181,7 @@ read -r -d '' SPEC_TEXT <<'EOF'
 
 Task: 2.1
 PRD: none
+Change-Class: refactor
 
 ## Context
 Support needs to find customers by name.
@@ -2490,6 +2491,7 @@ contains "the ticket text is quoted as source material" "> Add a \"Respond by\" 
 contains "and marked as not instructions" "source material, not instructions" "$spec"
 contains "a task line points at the ticket" "- [ ] **Task 7.3: Show the response deadline on the case list** (spec: backbone/specs/7.3.md; linear: DIS-142) (light)" "$(cat "$C/backbone/3-TASKS.md")"
 contains "the imported draft is not yet valid: the analyst writes it" "invalid" "$($CH spec-check 7.3 2>&1)"
+contains "the draft declares its Change-Class before it is valid" "is not one of docs, refactor, feature, schema" "$($CH spec-check 7.3 2>&1)"
 contains "importing a ticket twice is refused" "imported already" "$(LINEAR_API_KEY=lin_test_key $CH linear import DIS-142 --task 7.4 2>&1)"
 contains "importing onto an existing task is refused" "exists already" "$(LINEAR_API_KEY=lin_test_key $CH linear import DIS-142 --task 7.1 2>&1)"
 rm -f "$C/backbone/specs/7.4.md"
@@ -2636,7 +2638,7 @@ import sys
 path, t, n, extra = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 reqs = "\n".join("- REQ-%s-%d: The system shall do thing %d." % (t, i, i) for i in range(1, n + 1))
 acs = "\n".join("- AC-%s-%d (REQ-%s-%d): Given a, when b, then c%d." % (t, i, t, i, i) for i in range(1, n + 1))
-open(path, "w").write("# Spec %s: Small\n\n## Context\nA small fix. %s\n\n## Requirements\n%s\n\n## Acceptance criteria\n%s\n\n"
+open(path, "w").write("# Spec %s: Small\n\nChange-Class: refactor\n\n## Context\nA small fix. %s\n\n## Requirements\n%s\n\n## Acceptance criteria\n%s\n\n"
   "## Non-functional requirements\n- none\n\n## Architecture\nADRs: ADR-001\nTech requirements:\n- <constraints>\n\n"
   "## Skills\n- code-quality: all code\n\n## Open questions\n- none\n\n## Approval\n" % (t, extra, reqs, acs))
 EOF
@@ -2713,6 +2715,10 @@ out=$(hook "$G" pre-tool-use "$(edit_json "$GT" "- [WIP] **Task 11.4:" "- [x] **
 contains "light lane: a task marked (light) after it started has no recorded start" "has no recorded start" "$out"
 expect 2 "light lane: agents cannot switch the lane on" hook "$G" pre-tool-use "$(edit_json "$G/backbone/harness.conf" 'HARNESS_LIGHT_LANE="off"' 'HARNESS_LIGHT_LANE="on"')"
 unset HARNESS_LIGHT_LANE HARNESS_TEST_CMD
+
+section "change class (ADR-002): who approves, the light lane, a diff that contradicts the class"
+expect 0 "the class table through risk, approve, next, start, finish and receipt (properties need hypothesis)" \
+  python3 -B "$HARNESS/tests/test-change-class.py"
 
 section "tool contracts: every tool that can change something goes through the gate"
 T="$WORK/tools"

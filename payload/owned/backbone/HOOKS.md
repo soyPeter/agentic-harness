@@ -67,11 +67,12 @@ A task line may become `[WIP]` only when all of these hold. Check them with `pyt
    - Every acceptance criterion `AC-<id>-<n>` is Given/When/Then and references existing requirements, and every requirement has an acceptance criterion.
    - The Architecture section references at least one existing ADR, with status Accepted or Proposed and all its sections filled.
    - The Skills section lists existing skills.
+   - `Change-Class:`, when present, is exactly one of `docs`, `refactor`, `feature`, `schema` (any case), and only one value is declared. Without it the spec counts as `feature`. The line is read outside comments and the Approval section, so it is part of what the griller and the user passed.
    - Open questions is `- none`, and there are no FILL, TODO or TBD markers.
 2. **Grill pass on the current spec.** The fingerprint covers the spec text (without the Approval section) and every referenced ADR, so changing either makes the pass stale. A pass is recorded as a fail if any blocker or major question is open, or if the spec is invalid.
 3. **User approval:** an `Approved-by:` line under `## Approval`. Only the user can write it. Once it is there, agents can't change the spec.
 
-**Light lane** (`HARNESS_LIGHT_LANE`, user-only, default `off`). A task the user marks `(light)` on its line in `3-TASKS.md` skips the architect and step 2 when its spec has at most `HARNESS_LIGHT_MAX_ITEMS` requirements plus criteria (default 3) and is low-risk (`harness.py risk`). The spec must still be valid (step 1) and approved (step 3; `approve` in autonomous mode), and the judge gate and verify apply as usual. Starting a light task records the commit it started from (`backbone/.verdicts/<id>.light.json`). Finishing counts every file changed since then, committed or not, and refuses a light task that changed more than `HARNESS_LIGHT_MAX_FILES` files (default 3) or touched a sensitive path: the user removes the mark and the task is grilled. A task marked `(light)` after it started has no recorded start and can't finish as light. A `(light)` task that doesn't qualify goes through the griller, and the start gate says why. Only the user adds the mark: agents' edits that add it are refused, and so are commits that add it (verify).
+**Light lane** (`HARNESS_LIGHT_LANE`, user-only, default `off`). A task the user marks `(light)` on its line in `3-TASKS.md` skips the architect and step 2 when its spec has at most `HARNESS_LIGHT_MAX_ITEMS` requirements plus criteria (default 3) and is low-risk (`harness.py risk`), not counting the `feature` class: the user's mark is enough for feature work, which the user approves anyway. A `Change-Class: schema` task never takes the lane. The spec must still be valid (step 1) and approved (step 3; `approve` in autonomous mode), and the judge gate and verify apply as usual. Starting a light task records the commit it started from (`backbone/.verdicts/<id>.light.json`). Finishing counts every file changed since then, committed or not, and refuses a light task that changed more than `HARNESS_LIGHT_MAX_FILES` files (default 3) or touched a sensitive path: the user removes the mark and the task is grilled. A task marked `(light)` after it started has no recorded start and can't finish as light. A `(light)` task that doesn't qualify goes through the griller, and the start gate says why. Only the user adds the mark: agents' edits that add it are refused, and so are commits that add it (verify).
 
 ### Skill gate (`HARNESS_SKILL_GATE`)
 
@@ -120,8 +121,8 @@ In a range, any change to the harness itself (enforcement files, the lock) or to
 
 | Mechanism | What it does |
 |---|---|
-| `harness.py approve <id>` | Policy approval. For a valid spec with a current griller pass, it writes `Approved-by: policy:low-risk (<date>; base <commit>; grill <fingerprint>)`, but only if `risk_reasons` finds nothing. Otherwise it escalates. Only `HARNESS_AUTO_APPROVE="low"` enables it; `off` escalates every spec. |
-| Risk | Spec text (outside the Skills section) matching `HARNESS_RISK_TERMS`, spec paths matching `HARNESS_RISK_PATHS`, or a referenced ADR that isn't Accepted. When finishing a policy-approved task, the judge gate also assesses the diff since the base commit: sensitive paths, or more than `HARNESS_RISK_MAX_FILES` files. `harness.py risk <id>` shows the assessment. |
+| `harness.py approve <id>` | Policy approval. For a valid spec with a current griller pass, it writes `Approved-by: policy:low-risk (<date>; base <commit>; grill <fingerprint>)`, but only if `risk_reasons` finds nothing, so only for `Change-Class: docs` or `refactor`. Otherwise it escalates. Only `HARNESS_AUTO_APPROVE="low"` enables it; `off` escalates every spec. |
+| Risk | A `Change-Class` of `feature` or `schema` (or none, which counts as `feature`): the user approves those (the harness's ADR-002). Spec text (outside the Skills section) matching `HARNESS_RISK_TERMS`, spec paths matching `HARNESS_RISK_PATHS`, or a referenced ADR that isn't Accepted, whatever the class. When finishing a policy-approved task, the judge gate also assesses the diff since the base commit: sensitive paths, more than `HARNESS_RISK_MAX_FILES` files, or, for `docs`, a file that isn't documentation (`HARNESS_DOC_PATHS`). `harness.py risk <id>` shows the assessment, the class and what it allows. |
 | `harness.py escalate <id> --reason ...` | Parks the task. Its line leaves `[WIP]` with a `BLOCKED: <kind>` note, and an entry goes into `backbone/escalations.md` (a GitHub issue too with `HARNESS_ESCALATE_GH="on"` and `gh`). A BLOCKED task cannot start. Agents can't clear the note or edit `escalations.md`. `harness.py escalations` lists open entries. |
 | Automatic escalation | The griller's recorder after `HARNESS_GRILL_MAX_ROUNDS` consecutive fails, the judge's after `HARNESS_JUDGE_MAX_ROUNDS`. |
 | Stop hook | Behaves as `block` (once per stop) whenever a task is `[WIP]`. |
@@ -243,8 +244,8 @@ A coordinator asks the harness what a task needs instead of knowing the workflow
 
 | Command | Answer |
 |---|---|
-| `harness.py state [--json]` | Every task: state, spec problems, grill and judge verdicts (and whether they are current), approval, open escalations |
-| `harness.py next <id> [--json]` | `progress` is a fingerprint of the whole checkout, specs and verdicts included: the same step with the same `progress` means the last worker changed nothing. The next step and who does it: `define` (analyst or architect), `grill` (griller), `answer` (the griller's questions, routed; `needs_user` says whether any must go to the user), `approve`, `start`, `test` (tester), `implement`, `judge`, `diagnose` (debugger), `fix` (implementer, with the debugger's brief or the reviews' must-fix findings), `review` (one reviewer per lens in `lenses`, in parallel), `finish` (scribe, then `finish`), `deliver` (deliverer, after the commit), `delivery-failed`, `blocked`, `done` |
+| `harness.py state [--json]` | Every task: state, `change_class`, spec problems, grill and judge verdicts (and whether they are current), approval, open escalations |
+| `harness.py next <id> [--json]` | `progress` is a fingerprint of the whole checkout, specs and verdicts included: the same step with the same `progress` means the last worker changed nothing. `change_class` is the spec's class (`feature` when it declares none). The next step and who does it: `define` (analyst or architect), `grill` (griller), `answer` (the griller's questions, routed; `needs_user` says whether any must go to the user), `approve`, `start`, `test` (tester), `implement`, `judge`, `diagnose` (debugger), `fix` (implementer, with the debugger's brief or the reviews' must-fix findings), `review` (one reviewer per lens in `lenses`, in parallel), `finish` (scribe, then `finish`), `deliver` (deliverer, after the commit), `delivery-failed`, `blocked`, `done` |
 | `harness.py questions <id> [--json]` | The griller's open questions, each routed: design questions to the architect, the rest to the analyst. A question marked `apply` (a non-blocker with the griller's recommendation) is applied by that role without asking |
 | `harness.py start <id>` / `finish <id>` | Mark the task `[WIP]` / `[x]` through the same gates as an edit of `3-TASKS.md` (start: spec, grill, approval, one `[WIP]`; finish: a current judge pass) |
 
@@ -329,7 +330,7 @@ Each event carries the task in progress and, inside a hook, the session and agen
 - **Verified:** the harness's own test run, and each AC with its tests, evidence and the test files that mention it.
 - **Not verified:** ACs not met, NFRs no AC covers, and findings the judge left open.
 - **Decisions:** the ADRs the spec follows, the ADRs the task added or changed (with their status), and the assumptions with their sources.
-- **Risks** and the number of grill, judge and debugger rounds.
+- **Risks**, headed by the spec's Change-Class (`change_class` in the JSON), and the number of grill, judge and debugger rounds.
 - **Approval needed:** ADRs that aren't Accepted and open escalations.
 - **Suggested labels** for whoever triages the pull request (`suggested_labels` with `--json`): one risk label from the spec's `Change-Class` (ADR-002) and the risks above, and `class:<class>` when the spec declares one of the four classes. A missing or unknown class is rated as `feature`. The labels are advisory: none approves or merges anything.
 
@@ -416,6 +417,7 @@ Two files of each kind apply: the core file in `scripts/harness/`, then the proj
 | `HARNESS_AUTO_APPROVE` | `low` | `low`: `approve` approves low-risk specs in autonomous mode; `off`: every spec is escalated. User-only |
 | `HARNESS_RISK_TERMS`, `HARNESS_RISK_PATHS` | security, data, API and build terms and paths | Regexes for what is not low-risk. User-only |
 | `HARNESS_RISK_MAX_FILES` | `20` | A policy-approved change touching more files is escalated. User-only |
+| `HARNESS_DOC_PATHS` | Markdown, reST and AsciiDoc files, `docs/` folders, README, CHANGELOG, LICENSE and the like | Regex for documentation. A `Change-Class: docs` change that touches anything else is a risk. While the regex is invalid (doctor reports it), nothing counts as documentation. User-only |
 | `HARNESS_GRILL_MAX_ROUNDS` | `3` | Griller fails before an autonomous escalation. User-only |
 | `HARNESS_ESCALATE_GH` | `off` | `on`: escalations also open a GitHub issue (`gh`). User-only |
 | `HARNESS_AGENT_CMD` | `claude -p --permission-mode acceptEdits --output-format json` | The runner's agent command (prompt on stdin). User-only |
