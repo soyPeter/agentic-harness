@@ -126,6 +126,7 @@ In a range, any change to the harness itself (enforcement files, the lock) or to
 | Automatic escalation | The griller's recorder after `HARNESS_GRILL_MAX_ROUNDS` consecutive fails, the judge's after `HARNESS_JUDGE_MAX_ROUNDS`. |
 | Stop hook | Behaves as `block` (once per stop) whenever a task is `[WIP]`. |
 | Kill switch | While `.git/harness/STOP` exists, every Bash and file tool call is refused, and the Stop hook lets the session end. Agents can't remove it through the shell. |
+| Plugin mismatch (thin mode) | While the plugin's version differs from the pinned engine's, every call except reads is refused, and `run` and `orca` don't start. Supervised sessions are only told at start. |
 
 `doctor.sh` reports an error if autonomous mode runs without `HARNESS_TEST_CMD`, or with verify, the start gate or the judge gate off.
 
@@ -200,6 +201,8 @@ The gates don't depend on the agent CLI. Each CLI's hooks call the same `harness
 | Gaps | | Project hooks run only once trusted: `harness.py run` refuses Codex without `--dangerously-bypass-hook-trust` (sandbox it), unless you trusted them with `/hooks` and set `HARNESS_SKIP_TRUST_CHECK=1` | No Stop hook: the "still [WIP]" reminder doesn't fire. Knowledge-server tools are mapped by name (`knowledge_*`), unverified |
 
 A session can also play a single role from start to finish (a coordinator starting one worker per role): set `HARNESS_ROLE=<role>` in its environment. The hooks then hold it to that role's write scope, record the griller's or judge's verdict when it stops, and leave the Definition of Done to the coordinator. The agent can't change the variable: the hooks read it from the session's own environment.
+
+**Thin mode** (the plugin runs the pinned engine; the project has no `AGENTS.md` or `scripts/harness/`). Session start and a `SubagentStart` hook tell each session and subagent which engine paths stand in for those files. Codex and OpenCode plugins can't ship agents, so on session start the harness installs the pinned engine's role agents in `$CODEX_HOME/agents` or OpenCode's user `agents` folder; restart the CLI to load them. A file there that the harness didn't write is kept and reported, and agents can't edit the installed ones. OpenCode has no session-start hook, so its plugin adds that context to each model request. `run --worktree` and `orca` run the pinned engine on each task's worktree.
 
 Regenerate the Codex and OpenCode agents after changing a Claude Code agent: `tools/gen_agents.py` (the self-test fails while they are out of date).
 

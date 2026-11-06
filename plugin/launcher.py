@@ -27,7 +27,7 @@ ENGINE_SCRIPT = Path("payload/owned/scripts/harness/lib/harness.py")
 VENDORED_SCRIPT = Path("scripts/harness/lib/harness.py")
 READ_TOOLS = ("Read", "Grep", "Glob", "LS", "TodoWrite")
 # Below the CLIs' hook timeouts (15s for session start, 30s for tool hooks): a hook the CLI kills lets the call through.
-FETCH_SECONDS = {"session-start": 10}
+FETCH_SECONDS = {"session-start": 10, "subagent-start": 10}
 FETCH_DEFAULT_SECONDS = 20
 
 

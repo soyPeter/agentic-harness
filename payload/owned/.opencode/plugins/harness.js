@@ -1,7 +1,8 @@
 // Agentic harness: OpenCode adapter (harness-owned).
 // Sends every OpenCode tool call through the harness hooks (scripts/harness/lib/harness.py --from opencode), so the
 // same gates apply as in Claude Code and Codex. A refused call throws, which OpenCode turns into a tool error.
-// It also records the griller's and judge's verdicts from the result of the subagent tool. OpenCode 2 and 1.
+// It also records the griller's and judge's verdicts from the result of the subagent tool, and gives each session the
+// session-start context, which OpenCode has no hook for. OpenCode 2 and 1.
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -81,16 +82,46 @@ async function after(event) {
     agent_type: event.agent, cwd: root });
 }
 
+// The session-start hook scans the project, so it runs once per session. Context changes don't persist between model
+// requests, so the text is added to every request.
+const SESSION_CONTEXT = new Map();
+
+function sessionContext(start, sessionID) {
+  const root = projectRoot(start);
+  if (!root) return "";
+  const key = sessionID || root;
+  if (!SESSION_CONTEXT.has(key)) {
+    const run = hook(root, "session-start", { session_id: sessionID, cwd: root });
+    if (run.error || run.signal || run.status !== 0) return "";
+    let text = (run.stdout || "").trim();
+    try {
+      text = JSON.parse(text).hookSpecificOutput.additionalContext ?? text;
+    } catch {}
+    SESSION_CONTEXT.set(key, text);
+  }
+  return SESSION_CONTEXT.get(key);
+}
+
 async function setup(ctx) {
   if (!ctx || typeof ctx.tool?.hook !== "function") return async () => {};
   const a = await ctx.tool.hook("execute.before", before);
   const b = await ctx.tool.hook("execute.after", after);
-  return async () => { await a?.dispose?.(); await b?.dispose?.(); };
+  const c = typeof ctx.session?.hook === "function"
+    ? await ctx.session.hook("context", (event) => {
+      const text = sessionContext(ctx.directory || ctx.worktree, event.sessionID);
+      if (text) event.system.push({ type: "text", text });
+    })
+    : null;
+  return async () => { await a?.dispose?.(); await b?.dispose?.(); await c?.dispose?.(); };
 }
 
 // OpenCode 1: a callable returning event hooks.
-async function server(_ctx) {
+async function server(ctx) {
   return {
+    "experimental.chat.system.transform": async (input, output) => {
+      const text = sessionContext(ctx?.directory || ctx?.worktree, input?.sessionID);
+      if (text) output.system.push(text);
+    },
     "tool.execute.before": async (input, output) =>
       before({ tool: input.tool, input: output?.args, sessionID: input.sessionID, agent: input.agent }),
     "tool.execute.after": async (input, output) =>

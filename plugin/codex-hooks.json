@@ -3,6 +3,9 @@
     "SessionStart": [
       {"hooks": [{"type": "command", "command": "python3 \"${PLUGIN_ROOT}/plugin/launcher.py\" hook session-start --from codex", "timeout": 15}]}
     ],
+    "SubagentStart": [
+      {"hooks": [{"type": "command", "command": "python3 \"${PLUGIN_ROOT}/plugin/launcher.py\" hook subagent-start --from codex", "timeout": 15}]}
+    ],
     "PreToolUse": [
       {"matcher": "Bash|apply_patch|mcp__.*", "hooks": [{"type": "command", "command": "python3 \"${PLUGIN_ROOT}/plugin/launcher.py\" hook pre-tool-use --from codex", "timeout": 30}]}
     ],

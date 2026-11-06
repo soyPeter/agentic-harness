@@ -19,6 +19,10 @@ from launcher import EngineUnavailable, checked, engines_dir, fetch
 DEFAULT_SOURCE = "https://github.com/soyPeter/agentic-harness.git"
 MARKETPLACE = "agentic-harness"
 LOCK = Path("backbone/.harness-lock.json")
+SHIM = ".githooks/pre-commit"
+# Project files copied from the pinned release; pin brings them to the new one.
+RELEASE_FILES = ((SHIM, "plugin/pre-commit"),
+                 (".github/workflows/harness-verify.yml", "payload/owned/.github/workflows/harness-verify.yml"))
 VERSION = (SOURCE_ROOT / "VERSION").read_text().strip()
 
 
@@ -181,12 +185,24 @@ def pin(version):
         raise ThinError("%s is missing or invalid" % LOCK)
     if lock.get("mode") != "thin":
         raise ThinError("%s is not a thin-mode lock" % LOCK)
-    commit, _ = release_checkout(version)
+    commit, release = release_checkout(version)
     settings = settings_for(root, version)
     lock.update(version=version, commit=commit)
+    updated = []
+    for rel, source in RELEASE_FILES:
+        content = (release / source).read_bytes()
+        path = root / rel
+        if not path.is_file() or path.read_bytes() != content:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+            updated.append(rel)
+        if rel == SHIM:
+            path.chmod(0o755)
     (root / ".claude/settings.json").write_text(settings)
     (root / LOCK).write_text(json.dumps(lock, indent=2) + "\n")
     print("Pinned thin agentic harness to v%s (%s)" % (version, commit))
+    if updated:
+        print("Updated from the release: %s" % ", ".join(updated))
     return 0
 
 
