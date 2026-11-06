@@ -20,6 +20,21 @@
   `Change-Class:` now wait for the user's approval, and so does a task policy-approved before this release when it
   finishes; declare `docs` or `refactor` where policy approval should still apply.
 
+- **Change-Class gaps closed (ADR-002).** A commented-out `## Approval` heading above `Change-Class:` ended the grill
+  fingerprint, and the freeze on an approved spec, at the comment while the class below it was still read: a spec
+  grilled as `feature` could become `refactor` and be approved by policy. The Approval section now starts at the first
+  `## Approval` heading outside comments for the fingerprint, the freeze and what is read from the spec alike, and a
+  spec with such a heading inside or next to a comment is invalid. A `Change-Class:` line in a fenced code block is an
+  example, not the declaration. `HARNESS_DOC_PATHS` no longer counts code as documentation: a file needs a
+  documentation extension (`md`, `mdx`, `markdown`, `rst`, `adoc`, `asciidoc`, `txt`) or a README-style name without
+  one, so `src/docs/handler.py`, `docs/conf.py`, `README.py`, `CMakeLists.txt` and `docs/requirements.txt` are code.
+  A moved file counts at both its old and its new path in the risk checks, the light lane and `verify`, which saw only
+  where it went: moving code into `docs/`, a file out of a sensitive path, or `.claude/settings.json`, `harness.conf`
+  or an enforcement file away is now seen. `tests/test-change-class.py` reproduces each gap through the public
+  commands, with property checks. **Upgrading:** a `docs` task that touches images, stylesheets or other files without
+  a documentation extension now waits for the user (add them to `HARNESS_DOC_PATHS` if your docs need them), and a
+  move counts as two files against `HARNESS_RISK_MAX_FILES` and `HARNESS_LIGHT_MAX_FILES`.
+
 - **Plugin and pin must match (thin mode).** When the installed plugin isn't the release the project pins, its agents
   and skills don't match the pinned gates. Session start says so, with both versions and the fix. In autonomous mode
   `run` and `orca` refuse to start and every call except reads is refused until they match; `doctor` lists it as an
