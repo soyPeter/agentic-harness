@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.28.0 (2026-11-05)
+
+- **Failure classes.** Every escalation in `backbone/escalations.md` now records a class and the playbook that recovers
+  from it. The classes are `tool_timeout`, `invalid_args`, `missing_context`, `failed_test`, `permission_denied`,
+  `contradictory_req` and `unchanged_repeat`.
+  - The class comes from the escalation's kind and reason, or `escalate --class` sets it.
+  - When repeated judge fails escalate a task, the last debugger brief decides the class.
+  - `harness.py escalations` counts escalations by class.
+- **Coordinator recovery.** A step worker that dies before reporting gets one retry after `HARNESS_ORCA_RETRY_WAIT`
+  seconds (`tool_timeout`), and is escalated only after that.
+- **Flywheel v1.** A class escalated twice opens a draft proposal, `backbone/proposals/<class>.md`, listing every
+  occurrence. The scribe may draft the guardrail, test or skill change there. Nothing is applied until the user acts
+  on it through an approved task.
+
 ## 0.27.0 (2026-11-05)
 
 Triple adapter layer for the supervised Disputes pilot, on top of the core harness.

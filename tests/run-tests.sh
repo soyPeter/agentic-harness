@@ -1780,6 +1780,27 @@ out=$(FAKE_ORCA_STATE="$WORK/orca-state-idle.json" FAKE_ORCA_IDLE=fix HARNESS_TE
       HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.18 --wait-ms 10 2>&1)
 contains "orca: a worker that changed nothing is not started again for the same step" "escalated (no progress at fix)" "$out"
 contains "orca: the escalation says the worker changed nothing" "the fix worker changed nothing" "$(cat "$WORK/orca-worktrees/harness-task-9.18/backbone/escalations.md")"
+contains "orca: a worker that changed nothing is classed unchanged_repeat" "Class: unchanged_repeat" "$(cat "$WORK/orca-worktrees/harness-task-9.18/backbone/escalations.md")"
+python3 - "$WORK/fake-orca.py" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+s = s.replace('    if spec.startswith("Harness question"):', '    if m and m.group(2) == os.environ.get("FAKE_ORCA_DIE_ONCE") and not state.get("died"):\n        state["died"] = True\n        state.setdefault("dying", []).append(d)\n    elif spec.startswith("Harness question"):', 1)
+s = s.replace('    result = {"dispatch": {"id": opt("--dispatch"), "status": "running"}}', '    failed = opt("--dispatch") in state.get("dying", [])\n    result = {"dispatch": {"id": opt("--dispatch"), "status": "failed" if failed else "running", "lastFailure": "startup timed out" if failed else None}}', 1)
+open(p, "w").write(s)
+PY
+for id in 9.19; do
+  printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/$id/g" -e 's/^- python: all code$/- code-quality: all code/' > "$O/backbone/specs/$id.md"
+  printf '%s' "$(python3 -c 'import json,sys; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":sys.argv[1],"questions":[],"summary":"s"})+"\n```"}))' "$id")" \
+    | python3 "$O/scripts/harness/lib/harness.py" hook grill-stop >/dev/null
+done
+printf -- '- [ ] **Task 9.19: Flaky worker** (spec: backbone/specs/9.19.md)\n' >> "$O/backbone/3-TASKS.md"
+$OH approve 9.19 >/dev/null 2>&1
+git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: task 9.19"
+out=$(FAKE_ORCA_STATE="$WORK/orca-state-die.json" FAKE_ORCA_DIE_ONCE=implement HARNESS_ORCA_RETRY_WAIT=0 HARNESS_TEST_CMD=true \
+      HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.19 --wait-ms 10 2>&1)
+contains "orca: a worker that died is retried once (tool_timeout playbook)" "worker in 0s (tool_timeout: retry with backoff)" "$out"
+contains "orca: and the task still finishes" "task 9.19: done" "$out"
+lacks "orca: a retried worker is not escalated" "worker failed:" "$(cat "$WORK/orca-worktrees/harness-task-9.19/backbone/escalations.md" 2>/dev/null)"
 python3 - "$WORK/fake-orca.py" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
@@ -3007,6 +3028,34 @@ contains "EARS: every requirement is cited by a criterion" "REQ-9.5-1 has no acc
 ears_spec 9.6 "- REQ-9.6-1: Cases shall be listed." "- AC-9.6-1 (REQ-9.6-1): Given case C-1, when the list loads, then it shows Open."
 lacks "plain style leaves the wording alone" "EARS" "$(cd "$TR" && HARNESS_REQ_STYLE=plain $TH spec-check 9.6 2>&1)"
 contains "doctor flags an unknown requirement style" "HARNESS_REQ_STYLE must be one of plain|ears" "$(cd "$TR" && HARNESS_REQ_STYLE=gherkin $TH doctor 2>&1)"
+
+section "failure taxonomy and the flywheel"
+esc() { (cd "$TR" && $TH escalate "$@" 2>&1); }
+esc 9.3 --kind coordinator --reason "the implementer worker (claude) failed: startup timed out" >/dev/null
+e=$(cat "$TR/backbone/escalations.md")
+contains "an escalation is classified" "- Class: tool_timeout" "$e"
+contains "and carries its playbook" "- Playbook: retry with backoff" "$e"
+expect 1 "one occurrence opens no proposal" test -f "$TR/backbone/proposals/tool_timeout.md"
+esc 9.4 --kind coordinator --reason "the judge worker (codex) failed: timed out" >/dev/null
+prop=$(cat "$TR/backbone/proposals/tool_timeout.md" 2>/dev/null)
+contains "a repeated class opens a draft proposal" "Status: draft" "$prop"
+contains "the proposal lists the first occurrence" "task 9.3: the implementer worker (claude) failed: startup timed out" "$prop"
+contains "and the repeat" "task 9.4: the judge worker (codex) failed: timed out" "$prop"
+esc 9.5 --kind "judge failed 2 times" --reason "AC-9.5-1 not met" >/dev/null
+esc 9.5 --kind approval --reason "the spec involves payments" >/dev/null
+esc 9.5 --kind runner --reason "attempt 2 changed nothing: the task is still at step fix" >/dev/null
+esc 9.5 --kind "griller failed 3 times" --reason "REQ-9.5-1 contradicts ADR-002" >/dev/null
+esc 9.5 --reason "Which currency does the export use?" >/dev/null
+esc 9.5 --kind runner --reason "the agent said: what now" --class invalid_args >/dev/null
+e=$(cat "$TR/backbone/escalations.md")
+for cls in failed_test permission_denied unchanged_repeat contradictory_req missing_context invalid_args; do
+  contains "escalations are classed $cls" "- Class: $cls" "$e"
+done
+contains "escalate refuses an unknown class" "--class must be one of" "$(esc 9.5 --reason x --class gremlins)"
+out=$(cd "$TR" && $TH escalations 2>&1)
+contains "escalations counts by class" "by class (all escalations): tool_timeout 2, invalid_args 1, missing_context 1, failed_test 1, permission_denied 1, contradictory_req 1, unchanged_repeat 1" "$out"
+expect 0 "the scribe may draft a proposal" guard "$TR" scribe "$(write_json "$TR/backbone/proposals/tool_timeout.md" "x")"
+expect 2 "the implementer may not" guard "$TR" implementer "$(write_json "$TR/backbone/proposals/tool_timeout.md" "x")"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
