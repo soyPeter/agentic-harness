@@ -3,9 +3,9 @@
 Task: <task-id>
 PRD: <the section of backbone/1-PRD.md this serves, or "none">
 Change-Class: <docs | refactor | feature | schema>
-<!-- Default if omitted: feature (conservative). See docs/adr/ADR-002-change-class-ladder.md in the
-     harness repo (or the project note that links it). schema = migrations / auth / secrets / payments /
-     deploy-infra. -->
+<!-- Exactly one of the four; any other value makes the spec invalid. Without the line the spec counts as
+     feature. See docs/adr/ADR-002-change-class-ladder.md in the agentic-harness repository (or the project
+     note that links it). schema = migrations / auth / secrets / payments / deploy-infra. -->
 Parent-CHNG: <vault or ticket id, or "none">
 Parent-RFC: <link or id, or "none">
 Parent-ADR: <project ADR ids that triggered this task, or "none">
@@ -57,4 +57,5 @@ Tech requirements:
 ## Approval
 <!-- The user approves by adding a line "Approved-by: <name> (<date>)" below. Agents cannot.
      feature and schema always need a human Approved-by (no policy approve). docs/refactor may use
-     policy:low-risk only when Change-Class and risk_reasons allow it (ADR-002). -->
+     policy:low-risk only when Change-Class and risk_reasons allow it (ADR-002 of the agentic-harness
+     repository, not this project's own ADR-002, which records its stack). -->
