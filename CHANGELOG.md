@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Change-Class ladder (ADR-002).** Spec template and `requirements-writing` skill declare `Change-Class`
+  (`docs` | `refactor` | `feature` | `schema`) plus optional `Parent-CHNG` / `Parent-RFC` / `Parent-ADR` links.
+  Policy: PR merge stays human; policy `approve` must not be treated as merge. Runtime enforcement in
+  `harness.py` is a follow-up.
+
 - **Plugin and pin must match (thin mode).** When the installed plugin isn't the release the project pins, its agents
   and skills don't match the pinned gates. Session start says so, with both versions and the fix. In autonomous mode
   `run` and `orca` refuse to start and every call except reads is refused until they match; `doctor` lists it as an
