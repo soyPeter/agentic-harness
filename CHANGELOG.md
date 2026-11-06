@@ -28,8 +28,21 @@
   `--json`). `docs` and `refactor` start at low, `feature` (and a spec without the line or with an invalid one) at
   elevated and `schema` at high; other risks, such as a `docs` change that touches code, raise the label one step.
   The deliverer puts the highest risk label and every class label on the PR, creating missing labels, and only ever
-  raises the risk label. The harness refuses any other label change by the deliverer, so it can't add a label such as
-  `harness-change-approved` or remove one a person set. Labels are advisory: none approves or merges.
+  raises the risk label. The harness refuses the deliverer any other label change it can read (next entry), such as
+  adding `harness-change-approved` or removing a label a person set. Labels are advisory: none approves or merges.
+
+- **The deliverer's gate reads gh calls as the shell runs them (ADR-002).** The gate saw only gh written as a plain
+  command: `$(...)`, `xargs`, a gh alias or a GraphQL query on stdin could add any label. It now reads gh calls in
+  `$(...)` and backticks, `sh -c` (also `bash -lc`), `eval`, behind runners such as `timeout`, `env` or `nice`, and in
+  heredocs and here-strings a shell reads, with `--repo` before the subcommand too. It refuses what it can't read:
+  gh behind `xargs`, `parallel` or `find -exec`, a shell reading its commands from a pipe or a file, a command or flag
+  that comes from an expansion, `--recover`, and gh aliases and extensions. The deliverer's `gh api` calls only read
+  (`GET` or `HEAD`, never GraphQL). Before, `gh api graphql` could merge a PR or enable auto-merge, and REST could merge
+  a branch (`/merges`), although ADR-002 says the deliverer never merges. A PR keeps one `risk:*` label: the harness
+  reads the PR's labels before the deliverer adds one, and refuses a second. Every shell check now reads the lines
+  after a here-string such as `<<<EOF` as commands, not as a heredoc body, and a quote inside `"$(...)"` as part of
+  the substitution, so it no longer ends the string around it. The gate stays best-effort: it doesn't see gh run from
+  a script or another program, nor other HTTP clients. GitHub permissions remain the boundary.
 
 - **Plugin and pin must match (thin mode).** When the installed plugin isn't the release the project pins, its agents
   and skills don't match the pinned gates. Session start says so, with both versions and the fix. In autonomous mode

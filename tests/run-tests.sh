@@ -866,6 +866,7 @@ for cmd in "cat backbone/3-TASKS.md" "grep -n WIP backbone/3-TASKS.md" "cp backb
   expect 0 "allows: $cmd" hook "$P" pre-tool-use "$(bash_json "$cmd")"
 done
 expect 2 "blocks: SQL sent through a heredoc" hook "$P" pre-tool-use "$(bash_json "$(printf "psql <<'SQL'\nDROP TABLE users;\nSQL")")"
+expect 2 "blocks: the lines after a here-string, which are commands, not a heredoc body" hook "$P" pre-tool-use "$(bash_json "$(printf "cat <<<EOF\ngit commit -n -m 'feat: x'\nEOF")")"
 out=$(hook "$P" pre-tool-use "$(bash_json "sed -i '' 's/a/b/' backbone/3-TASKS.md")" 2>&1)
 contains "the refusal says to use the file tools" "change it with the Write or Edit tool" "$out"
 
@@ -1338,6 +1339,25 @@ contains "the refusal says merging is the user's" "merging is the user's" "$out"
 expect 2 "the deliverer may not approve a PR" hook "$DL" pre-tool-use "$(dbash 'gh pr review 7 --approve')"
 expect 2 "the deliverer may not push to the default branch" hook "$DL" pre-tool-use "$(dbash 'git push origin HEAD:main')"
 expect 0 "merging stays open to the main session" hook "$DL" pre-tool-use "$(bash_json 'gh pr merge 7 --squash')"
+# A stand-in for GitHub, which the suite can't reach: it answers the harness's own read of a PR's labels, from
+# $DL_LABELS, and fails any other call.
+DGB="$WORK/deliver-gh-bin"; mkdir -p "$DGB"
+cat > "$DGB/gh" <<'EOF'
+#!/bin/sh
+case "$*" in
+  "pr view 7 --repo o/r --json labels"|"issue view 8 --json labels") echo '{"labels": [{"name": "risk:high"}]}' ;;
+  "pr view"*"--json labels"*|"issue view"*"--json labels"*) cat "$DL_LABELS" ;;
+  *) echo "fake gh: no answer for: gh $*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$DGB/gh"
+export DL_LABELS="$WORK/deliver-labels.json"
+pr_labels() { python3 -c 'import json,sys; print(json.dumps({"labels": [{"name": n} for n in sys.argv[1:]]}))' "$@" > "$DL_LABELS"; }
+pr_labels
+DL_PATH=$PATH; export PATH="$DGB:$PATH"
+dl_refuses() { expect 2 "$1" hook "$DL" pre-tool-use "$(dbash "$2")"; }
+dl_allows()  { expect 0 "$1" hook "$DL" pre-tool-use "$(dbash "$2")"; }
+dbash_in() { python3 -c 'import json,sys; print(json.dumps({"session_id":"dl","agent_id":"dl","agent_type":"deliverer","cwd":sys.argv[1],"tool_name":"Bash","tool_input":{"command":sys.argv[2]}}))' "$1" "$2"; }
 expect 0 "the deliverer may open a PR with the receipts' labels" hook "$DL" pre-tool-use "$(dbash 'gh pr create --base main --title t --body b --label risk:high,class:schema')"
 expect 0 "the deliverer may create a missing triage label" hook "$DL" pre-tool-use "$(dbash 'gh label create risk:elevated --color FBCA04 --description "Harness triage hint"')"
 expect 0 "the deliverer may list labels" hook "$DL" pre-tool-use "$(dbash 'gh label list --search risk: --json name')"
@@ -1364,6 +1384,94 @@ expect 2 "the deliverer may not remove a label someone else set" hook "$DL" pre-
 expect 2 "the deliverer may not delete or edit labels" hook "$DL" pre-tool-use "$(dbash 'gh label delete risk:low --yes')"
 expect 2 "the deliverer may not label through the API" hook "$DL" pre-tool-use "$(dbash 'gh api repos/o/r/issues/7/labels -f "labels[]=risk:low"')"
 expect 0 "other labels stay open to the main session" hook "$DL" pre-tool-use "$(bash_json 'gh pr edit 7 --add-label documentation')"
+dl_refuses "the deliverer may not hide a label command in \$(...)" 'x=$(gh pr edit 7 --add-label automerge)'
+dl_refuses "nor in backticks" 'echo `gh pr edit 7 --add-label automerge`'
+dl_refuses "nor run gh through xargs, which adds arguments the harness can't see" 'echo 7 | xargs gh pr edit --add-label automerge'
+dl_refuses "nor through find -exec" "find . -name x -exec gh pr edit 7 --add-label risk:low ';'"
+dl_refuses "nor define a gh alias" "gh alias set lbl 'pr edit --add-label automerge'"
+dl_refuses "nor run one, which could hold any gh command" 'gh lbl 7'
+dl_refuses "nor install an extension" 'gh extension install someone/gh-label'
+dl_refuses "nor run gh named by a variable" 'GH=gh; $GH pr edit 7 --add-label automerge'
+dl_refuses "nor in a login shell's -lc" 'bash -lc "gh pr edit 7 --add-label automerge"'
+dl_refuses "nor behind timeout" 'timeout 60 gh pr edit 7 --add-label automerge'
+dl_refuses "nor behind nice's options" 'nice -n 5 gh pr edit 7 --add-label automerge'
+dl_refuses "nor pipe commands into a shell" 'echo "gh pr edit 7 --add-label automerge" | bash'
+dl_refuses "nor give a shell a script file" 'bash ./label.sh'
+dl_refuses "nor in a heredoc a shell runs" "bash <<'EOF'
+gh pr edit 7 --add-label automerge
+EOF"
+dl_refuses "nor in a here-string a shell runs" 'bash <<< "gh pr edit 7 --add-label automerge"'
+dl_refuses "nor on the lines after a here-string, which aren't a heredoc body" 'cat <<<EOF
+gh pr edit 7 --add-label automerge
+EOF'
+dl_refuses "nor in \$(...) in an unquoted heredoc, which runs it" 'gh pr create --title t --body-file - <<EOF
+$(gh pr edit 7 --add-label automerge)
+EOF'
+dl_refuses "nor put a flag in a variable" 'F=--add-label=automerge; gh pr edit 7 "$F"'
+dl_refuses "nor after a quote inside \"\$(...)\", which belongs to the substitution" "echo \"\$(printf '\"')\" ; gh pr edit 7 --add-label automerge ; echo \"\$(printf '\"')\""
+dl_refuses "nor between two such substitutions in its own arguments" "gh pr edit 7 --title \"\$(printf '\"')\" --add-label automerge --body \"\$(printf '\"')\""
+dl_refuses "nor in an unquoted expansion, which word splitting may make several" 'gh pr edit 7 $FLAGS'
+dl_refuses "nor name the repository before the subcommand" 'gh pr -R o/r edit 7 --add-label automerge'
+dl_refuses "nor take labels from a --recover file" 'gh pr create --recover /tmp/pr.json'
+dl_refuses "nor label through GraphQL, with the query on stdin" "gh api graphql -F query=@- <<'EOF'
+mutation { addLabelsToLabelable(input: {labelableId: \"PR_1\", labelIds: [\"LA_1\"]}) { clientMutationId } }
+EOF"
+dl_refuses "nor through the REST API, with the body on stdin" "gh api -X PATCH repos/o/r/issues/7 --input - <<'EOF'
+{\"labels\": [\"automerge\"]}
+EOF"
+out=$(hook "$DL" pre-tool-use "$(dbash "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_1\"}) { clientMutationId } }'")" 2>&1; echo "exit=$?")
+contains "the deliverer may not merge through GraphQL" "exit=2" "$out"
+contains "the refusal says gh api is for reading" "gh api only reads" "$out"
+dl_refuses "nor enable auto-merge, with the query in a heredoc" "gh api graphql -F query=@- <<'EOF'
+mutation { enablePullRequestAutoMerge(input: {pullRequestId: \"PR_1\"}) { clientMutationId } }
+EOF"
+dl_refuses "nor merge a branch through the REST API" 'gh api repos/o/r/merges -f base=main -f head=feat/x'
+dl_refuses "nor merge with the repository named before the subcommand" 'gh pr -R o/r merge 7'
+dl_allows "the deliverer may read a PR's labels" "gh pr view --json labels -q '.labels[].name'"
+dl_allows "and read the REST API" 'gh api repos/o/r/pulls/7 --jq .labels'
+dl_allows "even with parameters, when the method is GET" "gh api -X GET search/issues -f q='repo:o/r is:pr'"
+dl_allows "it may keep a PR number from \$(...)" 'n=$(gh pr view --json number -q .number) && echo "$n"'
+dl_allows "and watch the checks behind timeout" 'timeout 1800 gh pr checks --watch --fail-fast'
+dl_allows "and read a run's failed logs" 'gh run view 123 --log-failed'
+dl_allows "a flag after # is a comment, not an argument" 'gh pr edit 7 --add-label class:docs # not --add-label automerge'
+dl_refuses "an escaped character in a flag's name leaves the flag as it is" 'gh pr edit 7 --add\-label automerge'
+dl_refuses "a backslash in double quotes stays in the label, as the shell keeps it" 'gh pr edit 7 --add-label "risk\:low"'
+dl_allows "an escaped \$(...) in a PR body is text" 'gh pr create --title t --body "run \$(gh pr edit 7 --add-label automerge) later" --label risk:low'
+dl_refuses "the deliverer may not take a subcommand from an expansion" 'gh pr "$SUB" 7 --add-label automerge'
+dl_refuses "nor build a flag's name from one" 'gh pr edit 7 "--add-$KIND=automerge"'
+dl_refuses "nor put one unquoted in a flag's value, where word splitting can add flags" 'gh pr edit 7 --title t$EXTRA'
+dl_refuses "nor give gh api an unquoted expansion" 'gh api repos/o/r/pulls/7 $ARGS'
+dl_refuses "nor read GraphQL, even with GET" "gh api graphql -X GET -f query='{ viewer { login } }'"
+dl_refuses "nor send a REST body from a file, which makes it a POST" 'gh api repos/o/r/issues/7 --input body.json'
+dl_refuses "nor run a command an expansion names, behind a runner" 'timeout 60 $CMD'
+dl_refuses "nor give a shell a file on stdin" 'bash < ./label.sh'
+dl_refuses "nor nest commands deeper than the harness reads" 'echo $(echo $(echo $(echo $(echo $(gh pr view)))))'
+dl_refuses "a PR keeps one risk label: the deliverer may not add two" 'gh pr create --title t --body b --label risk:low,risk:high'
+pr_labels risk:high class:feature
+out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:low,class:docs')" 2>&1; echo "exit=$?")
+contains "nor add a lower one next to a higher one on the PR" "exit=2" "$out"
+contains "the refusal names the PR's risk label" "already has risk:high" "$out"
+pr_labels risk:low
+out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:high')" 2>&1; echo "exit=$?")
+contains "nor add a higher one and leave the lower one" "exit=2" "$out"
+contains "the refusal says to remove the lower one in the same call" "--remove-label risk:low" "$out"
+dl_allows "replacing the lower one keeps one risk label" 'gh pr edit 7 --add-label risk:high --remove-label risk:low'
+pr_labels risk:elevated class:docs bug
+dl_allows "the risk label it already has may be added again" 'gh pr edit --add-label risk:elevated,class:feature'
+rm -f "$DL_LABELS"
+out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:low')" 2>&1; echo "exit=$?")
+contains "without the PR's labels, the deliverer may not add a risk label" "exit=2" "$out"
+contains "the refusal says gh couldn't read them" "gh pr view failed" "$out"
+printf 'not json' > "$DL_LABELS"
+dl_refuses "nor when gh's answer isn't the PR's labels" 'gh pr edit 7 --add-label risk:low'
+pr_labels
+expect 2 "nor when gh can't start" hook "$DL" pre-tool-use "$(dbash_in "$WORK/no-such-folder" 'gh pr edit 7 --add-label risk:low')"
+out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 -R o/r --add-label risk:low')" 2>&1; echo "exit=$?")
+contains "the harness reads the labels of the PR in the repository the call names" "already has risk:high" "$out"
+out=$(hook "$DL" pre-tool-use "$(dbash 'gh issue edit 7 8 --add-label risk:low')" 2>&1; echo "exit=$?")
+contains "and of each issue or PR the call edits" "already has risk:high" "$out"
+expect 0 "the deliverer's gate: every way of running a command, and its properties (with hypothesis)" python3 -B "$HARNESS/tests/test-deliverer-gate.py"
+export PATH=$DL_PATH
 git -C "$DL" checkout -q main
 expect 2 "the deliverer may not push while on the default branch" hook "$DL" pre-tool-use "$(dbash 'git push -u origin HEAD')"
 git -C "$DL" checkout -q feat/x
@@ -2912,7 +3020,7 @@ expect 0 "thin: skill overrides, rule provenance and CI engine assets" python3 -
 
 section "thin mode: the launcher runs the engine the project pins (ADR-001)"
 expect 0 "plugin manifests and OpenCode adapter (ADR-001)" python3 -B "$HARNESS/tests/test-plugin-packaging.py"
-expect 0 "properties: a plugin agent gets its role's decisions; the deliverer sets only triage labels (needs hypothesis)" python3 -B "$HARNESS/tests/test-properties.py"
+expect 0 "properties: a plugin agent gets its role's decisions (needs hypothesis)" python3 -B "$HARNESS/tests/test-properties.py"
 expect 0 "thin init, pin and pre-commit shim (ADR-001)" python3 -B "$HARNESS/tests/test-thin-install.py"
 expect 0 "live: a plugin judge verdict is recorded (runs with HARNESS_E2E=1)" python3 -B "$HARNESS/tests/test-live-plugin.py"
 L="$HARNESS/plugin/launcher.py"

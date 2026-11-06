@@ -224,7 +224,7 @@ class SuggestedLabels(JudgedTask):
 
                 gate = self.harness("hook", "pre-tool-use", check=False, input=json.dumps({
                     "session_id": "s", "agent_id": "a1", "agent_type": "deliverer", "tool_name": "Bash",
-                    "tool_input": {"command": "gh pr edit 7 --add-label " + ",".join(labels)}}))
+                    "tool_input": {"command": "gh pr create --title t --body b --label " + ",".join(labels)}}))
 
                 self.assertEqual(gate.returncode, 0, gate.stderr)
 
