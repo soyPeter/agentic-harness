@@ -126,6 +126,7 @@ In a range, any change to the harness itself (enforcement files, the lock) or to
 | Automatic escalation | The griller's recorder after `HARNESS_GRILL_MAX_ROUNDS` consecutive fails, the judge's after `HARNESS_JUDGE_MAX_ROUNDS`. |
 | Stop hook | Behaves as `block` (once per stop) whenever a task is `[WIP]`. |
 | Kill switch | While `.git/harness/STOP` exists, every Bash and file tool call is refused, and the Stop hook lets the session end. Agents can't remove it through the shell. |
+| Plugin mismatch (thin mode) | While the plugin's version differs from the pinned engine's, every call except reads is refused, and `run` and `orca` don't start. Supervised sessions are only told at start. |
 
 `doctor.sh` reports an error if autonomous mode runs without `HARNESS_TEST_CMD`, or with verify, the start gate or the judge gate off.
 

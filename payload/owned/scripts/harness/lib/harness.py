@@ -2476,6 +2476,25 @@ def chained_hooks_missing(hooks_path):
             if not any(("%s/%s" % (HOOKS_PATH, name)) in read(place / name) for place in places)]
 
 
+def plugin_mismatch():
+    """Why the plugin running the hooks isn't the release this project pins, or None. The plugin supplies the agents,
+    skills and agent rules; the pinned engine supplies the gates, so a mismatch pairs agents with gates they don't
+    match (ADR-001)."""
+    plugin_root, info = os.environ.get("HARNESS_PLUGIN_ROOT"), lock()
+    if not plugin_root or info.get("mode") != "thin":
+        return None
+    try:
+        plugin = (Path(plugin_root) / "VERSION").read_text(encoding="utf-8").strip() or "unknown"
+    except OSError:
+        plugin = "unknown"
+    pinned = str(info.get("version") or "")
+    if plugin == pinned:
+        return None
+    return ("the agentic-harness plugin is v%s, but this project pins v%s: its agents and skills don't match the "
+            "pinned gates. Update the plugin to v%s; or the user moves the pin (harness.py pin %s)"
+            % (plugin, pinned, pinned, plugin))
+
+
 def health():
     """List of (level, message) for misconfigurations; level is 'error' or 'warn'."""
     issues = []
@@ -2491,6 +2510,9 @@ def health():
             issues.append(("error", "the pinned engine has no AGENTS.md to supply agent rules"))
         if "agentic-harness@agentic-harness" not in read(SETTINGS_FILE):
             issues.append(("error", ".claude/settings.json has no harness plugin entry"))
+        mismatch = plugin_mismatch()
+        if mismatch:
+            issues.append(("error" if autonomous() else "warn", mismatch))
     else:
         unchained = chained_hooks_missing(hooks_path) if hooks_path and hooks_path != HOOKS_PATH else None
         if hooks_path != HOOKS_PATH and unchained != []:
@@ -3020,6 +3042,9 @@ def hook_session_start(_data):
         lines.append("Before changing anything read: %sbackbone/4-KNOWLEDGE.md, backbone/7-CONVENTIONS.md, "
                      "backbone/8-WORKFLOW.md, backbone/3-TASKS.md." % ("" if thin else "AGENTS.md, "))
     snapshot_refresh()
+    mismatch = plugin_mismatch()
+    if mismatch and not autonomous():   # autonomous mode lists it below, with the other errors
+        lines.append("PLUGIN MISMATCH: " + mismatch + ".")
     if values["HARNESS_REQ_STYLE"] == "ears":
         lines.append("REQUIREMENTS IN EARS (HARNESS_REQ_STYLE=ears): every REQ follows an EARS pattern; read "
                      "requirements-writing/ears.md. spec-check enforces it.")
@@ -3067,6 +3092,11 @@ def hook_pre_tool_use(data):
     if halt_file().exists():
         deny("Harness halted: %s exists (the user's kill switch). Stop working and report your state; the user "
              "removes the file to resume." % halt_file())
+    if autonomous() and tool not in ("Read", "Grep", "Glob", "LS"):
+        mismatch = plugin_mismatch()
+        if mismatch:
+            deny("Harness blocked this call: %s. In autonomous mode no work runs until they match; stop and report "
+                 "it." % mismatch)
     if tool.startswith(KNOWLEDGE_TOOL_PREFIX):
         knowledge_guard(tool, tool_input)
         return
