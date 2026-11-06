@@ -236,6 +236,29 @@ class ThinInstall(unittest.TestCase):
         self.assertEqual(start.returncode, 0)
         self.assertIn(".harness-lock.json", start.stdout)
 
+    def test_session_start_reports_a_plugin_that_is_not_the_pinned_release(self):
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.assertNotIn("plugin is v", self.hook("session-start", None, None).stdout)
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "pin", "0.30.1")
+        start = self.hook("session-start", None, None)
+        self.assertIn("plugin is v0.30.0, but this project pins v0.30.1", start.stdout)
+        self.assert_hook(0, "Bash", {"command": "echo hello"})
+
+    def test_autonomous_work_stops_while_the_plugin_is_not_the_pinned_release(self):
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.env["HARNESS_AUTONOMY"] = "autonomous"
+        self.assert_hook(0, "Bash", {"command": "echo hello"})
+        self.assertNotIn("plugin is v", self.run_at(self.project, "python3", "-B", str(LAUNCHER), "run", "--dry-run",
+                                                    check=False).stdout)
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "pin", "0.30.1")
+        self.assert_hook(2, "Bash", {"command": "echo hello"}, "plugin is v0.30.0, but this project pins v0.30.1")
+        self.assert_hook(0, "Read", {"file_path": str(self.project / "CLAUDE.md")})
+        for command in ("run", "orca"):
+            with self.subTest(command=command):
+                result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), command, "--dry-run", check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("plugin is v0.30.0, but this project pins v0.30.1", result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

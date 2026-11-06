@@ -7,6 +7,11 @@
   Policy: PR merge stays human; policy `approve` must not be treated as merge. Runtime enforcement in
   `harness.py` is a follow-up.
 
+- **Plugin and pin must match (thin mode).** When the installed plugin isn't the release the project pins, its agents
+  and skills don't match the pinned gates. Session start says so, with both versions and the fix. In autonomous mode
+  `run` and `orca` refuse to start and every call except reads is refused until they match; `doctor` lists it as an
+  error there and as a warning in supervised mode.
+
 ## 0.30.0 (2026-11-06)
 
 - **The engine can run from outside the project** (first step of thin mode, ADR-001). The project is the folder in
