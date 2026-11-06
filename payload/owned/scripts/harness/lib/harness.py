@@ -169,9 +169,11 @@ EARS_PASSIVE = re.compile(r"(?i)\bshall\s+(not\s+)?be\s+(\w+ed|\w+en|sent|shown|
 BLOCKED_NOTE = re.compile(r"\s+[-\u2014]+\s+BLOCKED:\s*(.*)$")
 LIGHT_MARK = re.compile(r"\(light\)", re.I)
 POLICY_APPROVAL = re.compile(r"^\s*Approved-by:\s*policy:(\S+)\s*\((.*)\)", re.M)
+APPROVAL_HEADING = re.compile(r"^##\s+Approval\s*$", re.M | re.I)
 # The kind of work a spec declares (the harness's ADR-002). A spec without the line counts as feature.
 CHANGE_CLASSES = ("docs", "refactor", "feature", "schema")
 CHANGE_CLASS_LINE = re.compile(r"^[ \t]*Change-Class:(.*)$", re.M | re.I)
+FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
 USER_APPROVED_CLASSES = ("feature", "schema")
 CLASS_GATES = {
     "docs": "policy may approve it when nothing is risky; a change to anything but documentation is a risk",
@@ -250,8 +252,11 @@ DEFAULTS = {
                           r"|Dockerfile|(^|/)(pom\.xml|build\.gradle(\.kts)?|settings\.gradle(\.kts)?|package\.json|"
                           r"go\.mod|Cargo\.toml|requirements[^/]*\.txt|pyproject\.toml)$",
     "HARNESS_RISK_MAX_FILES": "20",
-    "HARNESS_DOC_PATHS": r"(?i)\.(md|mdx|markdown|rst|adoc|asciidoc)$|(^|/)(docs?|documentation)/"
-                         r"|(^|/)(README|CHANGELOG|CHANGES|HISTORY|LICEN[CS]E|NOTICE|CONTRIBUTING|AUTHORS)(\.[^/]*)?$",
+    # A folder doesn't make a file documentation (docs/conf.py is Sphinx's code), and some .txt files are build or
+    # dependency input: CMake's, and pip's requirements and constraints, which Read the Docs installs.
+    "HARNESS_DOC_PATHS": r"(?i)^(?!(.*/)?CMakeLists\.txt$|.*(requirements|constraints)[^.]*\.txt$)(.*/)?"
+                         r"([^/]+\.(md|mdx|markdown|rst|adoc|asciidoc|txt)"
+                         r"|README|CHANGELOG|CHANGES|HISTORY|LICEN[CS]E|NOTICE|CONTRIBUTING|AUTHORS|COPYING)$",
     "HARNESS_GRILL_MAX_ROUNDS": "3",
     "HARNESS_ESCALATE_GH": "off",
     "HARNESS_AGENT_CMD": "claude -p --permission-mode acceptEdits --output-format json",
@@ -398,6 +403,11 @@ def strip_comments(text):
     return re.sub(r"<!--.*?-->", "", text, flags=re.S)
 
 
+def blank_comments(text):
+    """text with every HTML comment replaced by as many spaces, so an offset in it is an offset in text."""
+    return re.sub(r"<!--.*?-->", lambda m: " " * len(m.group(0)), text, flags=re.S)
+
+
 def md_section(text, title):
     """Body of the '## <title>' section (case-insensitive), or None if absent."""
     m = re.search(r"^##\s+%s\s*$" % re.escape(title), text, re.M | re.I)
@@ -534,8 +544,29 @@ def validate_adr(text, name):
 
 
 def without_approval(text):
-    m = re.search(r"^##\s+Approval\s*$", text, re.M | re.I)
+    """text above its Approval section. A heading inside an HTML comment doesn't start the section: approved() doesn't
+    see it either, and cutting there would leave the rest of the spec out of the grill fingerprint and the freeze."""
+    m = APPROVAL_HEADING.search(blank_comments(text))
     return text[:m.start()] if m else text
+
+
+def spec_body(text):
+    """The spec as the griller and the user passed it, without comments: everything the grill fingerprint and the
+    freeze on approval cover."""
+    return strip_comments(without_approval(text or ""))
+
+
+def approval_heading_problem(text):
+    """Why the spec's '## Approval' heading is ambiguous, or None: one inside a comment, or one that only reads as a
+    heading once a comment on its line is removed, where approved() would start the section while the grill
+    fingerprint and the freeze end elsewhere."""
+    stripped = strip_comments(text)
+    heading = APPROVAL_HEADING.search(stripped)
+    if (strip_comments(without_approval(text)) != stripped[:heading.start() if heading else len(stripped)]
+            or any(APPROVAL_HEADING.search(c) for c in re.findall(r"<!--.*?-->", text, re.S))):
+        return ("the spec has an '## Approval' heading inside or next to an HTML comment: keep one '## Approval' "
+                "heading, on a line of its own, outside comments")
+    return None
 
 
 def without_section(text, title):
@@ -679,9 +710,9 @@ def ears_problems(req, text):
 def change_class(text):
     """(class, declared, problem) from the spec's Change-Class: line. Without one the spec counts as feature;
     a value that isn't exactly one class, or two different values, is a problem and counts as feature too."""
-    # Read outside the Approval section: the grill fingerprint leaves it out, and agents may still write there once
-    # the spec is approved, so a class there could change after the griller and the user passed the spec.
-    values = [v.strip() for v in CHANGE_CLASS_LINE.findall(without_approval(strip_comments(text or "")))]
+    # Not from the Approval section, where agents may still write once the spec is approved, nor from a code block,
+    # where the line is an example.
+    values = [v.strip() for v in CHANGE_CLASS_LINE.findall(without_fences(spec_body(text)))]
     distinct = sorted({v.lower() for v in values})
     if not values:
         return "feature", False, None
@@ -690,6 +721,21 @@ def change_class(text):
     if distinct[0] not in CHANGE_CLASSES:
         return "feature", True, "Change-Class '%s' is not one of %s" % (values[0], ", ".join(CHANGE_CLASSES))
     return distinct[0], True, None
+
+
+def without_fences(text):
+    """text without its fenced code blocks (``` or ~~~, closed as in Markdown; one left open runs to the end)."""
+    kept, fence = [], None
+    for line in text.splitlines(True):
+        m = FENCE.match(line.rstrip("\r\n"))
+        # A backtick in the rest of the line makes it inline code (```x```), not a fence.
+        if fence is None and m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            fence = m.group(1)
+        elif fence is None:
+            kept.append(line)
+        elif m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
+            fence = None
+    return "".join(kept)
 
 
 def class_label(text):
@@ -732,9 +778,7 @@ def validate_spec(task, text=None):
         if not all(re.search(r"\b%s\b" % word, rest, re.I) for word in ("given", "when", "then")):
             problems.append("%s is not written as Given ..., when ..., then ..." % ac)
     problems.extend("%s has no acceptance criterion" % req for req in sorted(req_ids - covered))
-    class_problem = change_class(text)[2]
-    if class_problem:
-        problems.append(class_problem)
+    problems.extend(p for p in (change_class(text)[2], approval_heading_problem(text)) if p)
     problems.extend(knowledge_citation_problems(text))
     adrs = spec_adrs(text)
     if not adrs:
@@ -1673,9 +1717,15 @@ def policy_approval(text):
     return {"rule": m.group(1), "base": base.group(1) if base else None}
 
 
+def diff_names(*args):
+    """The paths git diff args lists. A move lists both: with rename detection only its new path shows, so moving code
+    into the docs, or a file out of a sensitive or harness path, would go unseen."""
+    return [n for n in git("diff", "--name-only", "--no-renames", "-z", *args).split("\0") if n]
+
+
 def changed_files(base):
     """Code files changed since commit base (committed, staged, unstaged or untracked), outside backbone/."""
-    names = set(n for n in git("diff", "--name-only", "-z", base).split("\0") if n) if base else set()
+    names = set(diff_names(base)) if base else set()
     names |= set(n for n in git("ls-files", "-z", "--others", "--exclude-standard").split("\0") if n)
     if not base:
         names |= set(n for n in git("ls-files", "-z").split("\0") if n)
@@ -1718,7 +1768,7 @@ def content_risks(text, changed=None):
     values = conf()
     # Skills only says which skills the agents load, and explaining why `security` isn't needed ("no auth or
     # personal data") would read as risk. What the work does is in the other sections and in the diff.
-    body = without_section(without_approval(strip_comments(text)), "Skills")
+    body = without_section(spec_body(text), "Skills")
     reasons = []
     terms = re.compile(values["HARNESS_RISK_TERMS"])
     paths = re.compile(values["HARNESS_RISK_PATHS"])
@@ -2579,7 +2629,7 @@ def verify_changes(before, after, changed, done_fingerprint, allow_user_changes=
 def verify_staged():
     head = git("rev-parse", "--verify", "-q", "HEAD").strip()
     if head:
-        changed = [n for n in git("diff", "--cached", "--name-only", "-z", "HEAD").split("\0") if n]
+        changed = diff_names("--cached", "HEAD")
     else:
         changed = [n for n in git("ls-files", "-z").split("\0") if n]
     fingerprint = tree_fingerprint()
@@ -2590,7 +2640,7 @@ def verify_range(spec, allow_user_changes=False):
     base, _, tip = spec.partition("..")
     tip = tip or "HEAD"
     commits = [c for c in git("rev-list", "--reverse", "%s..%s" % (base, tip)).split() if c]
-    changed = [n for n in git("diff", "--name-only", "-z", base, tip).split("\0") if n]
+    changed = diff_names(base, tip)
     tasks_rel = TASKS.relative_to(ROOT).as_posix()
 
     def done_fingerprint(task):
