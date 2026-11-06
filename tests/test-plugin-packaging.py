@@ -37,6 +37,7 @@ class PluginPackaging(unittest.TestCase):
                         for hook in group["hooks"]:
                             self.assertIn("${%s}/plugin/launcher.py" % variable, hook["command"])
                 self.assertIn("SessionStart", hooks)
+                self.assertIn("SubagentStart", hooks)
                 self.assertIn("PreToolUse", hooks)
                 self.assertIn("PostToolUse", hooks)
                 self.assertIn("Stop", hooks)

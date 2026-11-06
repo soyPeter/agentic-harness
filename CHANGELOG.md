@@ -6,6 +6,15 @@
   and skills don't match the pinned gates. Session start says so, with both versions and the fix. In autonomous mode
   `run` and `orca` refuse to start and every call except reads is refused until they match; `doctor` lists it as an
   error there and as a warning in supervised mode.
+- **Role agents and paths in thin mode.** Subagents are told, at start, which pinned-engine paths stand in for the
+  project's missing `AGENTS.md` and `scripts/harness/` (a `SubagentStart` hook in the Claude Code and Codex plugins).
+  Codex and OpenCode sessions install the pinned role agents in the user's agents folder (a file the harness didn't
+  write is kept and reported), and agents can't edit them. OpenCode sessions get the session-start context, which it
+  has no hook for.
+- **Worktrees in thin mode.** `run --worktree` and `orca` run the pinned engine on each task's worktree, and their
+  prompts name its command. The pre-commit shim no longer refuses every commit in a linked worktree: git's hook
+  variables pointed its cache check at the project instead of the cache. `pin` also brings `.githooks/pre-commit` and
+  `harness-verify.yml` to the new release, so a fix to either reaches pinned projects.
 
 ## 0.30.0 (2026-11-06)
 
