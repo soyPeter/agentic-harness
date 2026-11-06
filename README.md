@@ -58,6 +58,7 @@ It then installs the pack's skills, writes its routes and guardrails into the pr
 | `quarkus` (requires java) | Quarkus | `no-spring`; `hexagonal-layers`; `named-use-cases` |
 | `jdbi` (requires java) | JDBI for data access | `no-orm`; `hexagonal-layers`; `flyway` |
 | `container` | Container images | engine `podman` / `docker` |
+| `triple` | Triple's delivery policy (with `HARNESS_PROFILE=triple`) | `disputes-pci`; `ears` |
 
 Stacks without a pack get project skills written during design, routed in `backbone/routing.conf`.
 
@@ -126,6 +127,21 @@ config) it lets the call through rather than stop every agent on the machine. It
 a tool writes and, for shell commands, the working directory plus every path and `cd` target the command names. A
 shell command that builds a path at run time (a variable, a computed string) can still reach another repository unseen.
 In block mode the only shell command it lets run in an unenrolled repository is the harness's own `enroll.sh`.
+
+## Profiles
+
+A profile is an organisation policy on top of the gates. Set it in `backbone/harness.conf` (user-only) or when you enroll:
+
+```sh
+./enroll.sh /path/to/repo --profile triple      # writes HARNESS_PROFILE="triple"
+```
+
+| Profile | Effect |
+|---|---|
+| (empty) | The default: no extra policy |
+| `triple` | A supervised pilot where only a human merges. `harness.py orca` refuses `--merge` and `--trust` (use `--pr`, which opens pull requests and never merges), `orca-nightly` refuses to start, and `enroll` refuses `--automation` and `--protect` before changing anything. Its catalog pack, `triple`, adds the Linear, EARS and Disputes/PCI layers (see `catalog/triple/README.md`). |
+
+`HARNESS_PROFILE=triple` or `TRIPLE_MODE=1` in the environment adds the profile to any project. Unlike other keys, the environment can't lift a profile that `harness.conf` sets: `HARNESS_PROFILE=` in a shell leaves it in force. Doctor reports an unknown profile.
 
 ## What gets installed
 

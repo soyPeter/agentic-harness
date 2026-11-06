@@ -2497,6 +2497,62 @@ contains "receipt: rounds it took" "grill rounds: 1; judge rounds: 1" "$out"
 contains "receipt: exits zero" "exit=0" "$out"
 out=$($CH receipt 7.1 --json)
 expect 0 "receipt --json parses" python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["task"]=="7.1" and d["not_verified"] and d["verified"]' "$out"
+
+section "Linear as the system of record: ticket -> spec -> receipt"
+FX="$HARNESS/tests/fixtures/linear"
+rm -f "$WORK/linear-port" "$WORK/linear-calls"
+python3 "$HARNESS/tests/fake-linear.py" "$FX" "$WORK/linear-port" "$WORK/linear-calls" & LINEAR_PID=$!
+# A cold Python on a CI runner can take several seconds to start; without the port every call is refused.
+for _ in $(seq 1 300); do [ -s "$WORK/linear-port" ] && break; sleep 0.1; done
+[ -s "$WORK/linear-port" ] && ok "the fake Linear API is listening" || bad "the fake Linear API is listening (no port after 30 s)"
+export HARNESS_LINEAR_URL="http://127.0.0.1:$(cat "$WORK/linear-port")/graphql"
+out=$($CH linear import DIS-142 --task 7.3 2>&1; echo "exit=$?")
+contains "import without a key says what's missing" "LINEAR_API_KEY is not set" "$out"
+out=$(LINEAR_API_KEY=wrong $CH linear import DIS-142 --task 7.3 2>&1; echo "exit=$?")
+contains "a wrong key is reported, not taken for an empty issue" "HTTP 401" "$out"
+out=$(LINEAR_API_KEY=lin_test_key $CH linear import DIS-999 --task 7.3 2>&1; echo "exit=$?")
+contains "an unknown issue is refused" "Linear has no issue DIS-999" "$out"
+contains "an issue id must look like one" "is not a Linear issue id" "$(LINEAR_API_KEY=lin_test_key $CH linear import 'x;rm' --task 7.3 2>&1)"
+out=$(LINEAR_API_KEY=lin_test_key $CH linear import DIS-142 --task 7.3 --light --dry-run 2>&1; echo "exit=$?")
+contains "import --dry-run shows the task line" "Would import DIS-142 as task 7.3" "$out"
+expect 1 "and writes no spec" test -f "$C/backbone/specs/7.3.md"
+out=$(LINEAR_API_KEY=lin_test_key $CH linear import DIS-142 --task 7.3 --light 2>&1; echo "exit=$?")
+contains "import exits 0" "exit=0" "$out"
+spec=$(cat "$C/backbone/specs/7.3.md")
+contains "the spec is titled from the ticket" "# Spec 7.3: Show the response deadline on the case list" "$spec"
+contains "the spec records the Linear id and URL" "Linear: DIS-142 (https://linear.app/triple/issue/DIS-142/" "$spec"
+contains "the ticket text is quoted as source material" "> Add a \"Respond by\" column" "$spec"
+contains "and marked as not instructions" "source material, not instructions" "$spec"
+contains "a task line points at the ticket" "- [ ] **Task 7.3: Show the response deadline on the case list** (spec: backbone/specs/7.3.md; linear: DIS-142) (light)" "$(cat "$C/backbone/3-TASKS.md")"
+contains "the imported draft is not yet valid: the analyst writes it" "invalid" "$($CH spec-check 7.3 2>&1)"
+contains "importing a ticket twice is refused" "imported already" "$(LINEAR_API_KEY=lin_test_key $CH linear import DIS-142 --task 7.4 2>&1)"
+contains "importing onto an existing task is refused" "exists already" "$(LINEAR_API_KEY=lin_test_key $CH linear import DIS-142 --task 7.1 2>&1)"
+rm -f "$C/backbone/specs/7.4.md"
+printf '{"identifier":"DIS-7","title":"From MCP","description":"Saved get_issue output.","url":"https://linear.app/x/DIS-7"}' > "$WORK/dis-7.json"
+expect 0 "import --from reads an issue saved from the Linear MCP server" $CH linear import DIS-7 --task 7.5 --from "$WORK/dis-7.json"
+contains "--from must hold the named issue" "holds DIS-7, not DIS-8" "$($CH linear import DIS-8 --task 7.6 --from "$WORK/dis-7.json" 2>&1)"
+contains "receipt: a spec without a Linear line is refused" "has no 'Linear: <ISSUE-ID>' line" "$(LINEAR_API_KEY=lin_test_key $CH linear receipt 7.1 2>&1)"
+perl -pi -e 's{^PRD: none$}{PRD: none\nLinear: DIS-142 (https://linear.app/triple/issue/DIS-142)}' "$C/backbone/specs/7.1.md"
+out=$(LINEAR_API_KEY=lin_test_key $CH linear receipt 7.1 --status "In Review" --dry-run 2>&1; echo "exit=$?")
+contains "receipt --dry-run shows the comment" "Would comment on DIS-142" "$out"
+contains "with the harness receipt in it" "Receipt: Task 7.1: Customer search" "$out"
+: > "$WORK/linear-calls"
+out=$(LINEAR_API_KEY=lin_test_key $CH linear receipt 7.1 --status "Done" 2>&1; echo "exit=$?")
+contains "receipt never closes a ticket" "only a human closes a ticket" "$out"
+lacks "and posts nothing when the move is refused" "commentCreate" "$(cat "$WORK/linear-calls")"
+out=$(LINEAR_API_KEY=lin_test_key $CH linear receipt 7.1 --status "Shipped" 2>&1)
+contains "an unknown state is refused with the team's states" "In Review" "$out"
+out=$(LINEAR_API_KEY=lin_test_key $CH linear receipt 7.1 --status "In Review" 2>&1; echo "exit=$?")
+contains "receipt posts the comment" "posted the receipt on DIS-142" "$out"
+contains "and moves the ticket to review" "moved DIS-142 to 'In Review'" "$out"
+calls=$(cat "$WORK/linear-calls")
+contains "the comment carries the receipt" "AC-7.1-1 (REQ-7.1-1): met" "$calls"
+contains "the comment goes to the issue's id" '"issueId": "8f2c6d1e-4b7a-4c0e-9d51-3a6f0e2b7c90"' "$calls"
+contains "the move names the review state" '"stateId": "st-review"' "$calls"
+expect 2 "agents may not post to Linear" hook "$C" pre-tool-use "$(bash_json 'python3 scripts/harness/lib/harness.py linear receipt 7.1')"
+expect 0 "agents may preview a receipt comment" hook "$C" pre-tool-use "$(bash_json 'python3 scripts/harness/lib/harness.py linear receipt 7.1 --dry-run')"
+kill "$LINEAR_PID" 2>/dev/null; wait "$LINEAR_PID" 2>/dev/null
+unset HARNESS_LINEAR_URL
 echo "# later edit" >> "$C/src/search.py"
 out=$($CH receipt 7.1; echo "exit=$?")
 contains "receipt: refused when the code changed after the judge pass" "code changed after the judge passed" "$out"
@@ -2839,6 +2895,118 @@ for i in 1 2 3; do
   HARNESS_HOOK_SLOW=2 hook "$V" post-tool-use "$(bash_json 'ls')" >/dev/null
 done
 lacks "supervised: watching 400 backbone files keeps shell hooks fast" "hook-slow" "$(cat "$V/.git/harness/events.jsonl")"
+
+section "profile triple: only a human merges"
+TR="$WORK/triple"; new_repo "$TR"
+out=$("$HARNESS/enroll.sh" "$TR" --profile triple --orca --automation daily 2>&1; echo "exit=$?")
+contains "enroll --profile triple refuses --automation" "--automation refused under HARNESS_PROFILE=triple" "$out"
+contains "with a usage error" "exit=2" "$out"
+expect 1 "and installs nothing" test -f "$TR/backbone/.harness-lock.json"
+expect 64 "enroll refuses an unknown profile" "$HARNESS/enroll.sh" "$TR" --profile acme
+out=$("$HARNESS/enroll.sh" "$TR" --profile triple 2>&1; echo "exit=$?")
+contains "enroll --profile triple records the profile" 'HARNESS_PROFILE="triple"' "$(cat "$TR/backbone/harness.conf")"
+out=$(HARNESS_PROFILE= "$HARNESS/enroll.sh" "$TR" --protect 2>&1; echo "exit=$?")
+contains "a recorded profile refuses --protect, even with HARNESS_PROFILE emptied" "--protect refused under HARNESS_PROFILE=triple" "$out"
+TH="python3 $TR/scripts/harness/lib/harness.py"
+for flags in "--merge" "--trust" "--merge --trust"; do
+  out=$(cd "$TR" && HARNESS_PROFILE= HARNESS_AUTONOMY=autonomous $TH orca $flags 2>&1; echo "exit=$?")
+  contains "orca $flags is refused under the triple profile" "refused under HARNESS_PROFILE=triple" "$out"
+  contains "orca $flags exits 1" "exit=1" "$out"
+done
+out=$(cd "$TR" && HARNESS_ORCA_BIN=/usr/bin/true $TH orca-nightly 2>&1; echo "exit=$?")
+contains "orca-nightly is refused under the triple profile" "orca-nightly: refused under HARNESS_PROFILE=triple" "$out"
+lacks "orca-nightly opens no terminal" "started the backlog run" "$out"
+out=$(cd "$TR" && $TH orca --pr 2>&1)
+lacks "orca --pr passes the profile check" "refused under HARNESS_PROFILE" "$out"
+contains "and still needs autonomy from the user" "needs HARNESS_AUTONOMY" "$out"
+out=$(cd "$TR" && HARNESS_PROFILE=acme $TH doctor 2>&1)
+contains "doctor flags an unknown profile from the environment" "HARNESS_PROFILE must be" "$out"
+sed -i.bak 's/^HARNESS_PROFILE=.*/HARNESS_PROFILE="acme"/' "$TR/backbone/harness.conf" && rm -f "$TR/backbone/harness.conf.bak"
+contains "doctor flags an unknown profile" "HARNESS_PROFILE must be empty or one of triple" "$(cd "$TR" && $TH doctor 2>&1)"
+sed -i.bak 's/^HARNESS_PROFILE=.*/HARNESS_PROFILE="triple"/' "$TR/backbone/harness.conf" && rm -f "$TR/backbone/harness.conf.bak"
+out=$(hook "$TR" pre-tool-use "$(bash_json 'gh pr merge 12 --squash')" 2>&1; echo "exit=$?")
+contains "agents can't merge a pull request with gh under the profile" "only a human merges" "$out"
+contains "gh pr merge exits 2" "exit=2" "$out"
+contains "nor through the merge API" "only a human merges" "$(hook "$TR" pre-tool-use "$(bash_json 'gh api -X PUT repos/o/r/pulls/12/merge')" 2>&1)"
+out=$(hook "$TR" pre-tool-use '{"tool_name":"mcp__linear__merge_diff","tool_input":{"id":"d1"}}' 2>&1; echo "exit=$?")
+contains "nor with a merge tool of an MCP server" "mcp__linear__merge_diff: merging is refused" "$out"
+lacks "gh pr create stays open" "only a human merges" "$(hook "$TR" pre-tool-use "$(bash_json 'gh pr create --fill')" 2>&1)"
+lacks "without the profile, gh pr merge is the user's rules' business" "only a human merges" "$(hook "$EN" pre-tool-use "$(bash_json 'gh pr merge 12')" 2>&1)"
+out=$(cd "$EN" && TRIPLE_MODE=1 HARNESS_AUTONOMY=autonomous python3 "$EN/scripts/harness/lib/harness.py" orca --merge 2>&1)
+contains "TRIPLE_MODE=1 adds the profile to any project" "--merge refused under HARNESS_PROFILE=triple" "$out"
+out=$(TRIPLE_MODE=1 "$HARNESS/enroll.sh" "$EN" --protect 2>&1; echo "exit=$?")
+contains "and enroll honours it" "--protect refused" "$out"
+
+section "triple pack: Disputes/PCI surfaces are parked"
+sed -i.bak 's/^HARNESS_PROFILE=.*/HARNESS_PROFILE="triple"/' "$TR/backbone/harness.conf" && rm -f "$TR/backbone/harness.conf.bak"
+printf '# ADR-002: Triple pilot\n\n## Status\nAccepted\n\n## Context\nDisputes pilot.\n\n## Decision\nAdopt the triple pack with disputes-pci.\n\n## Alternatives considered\nNone.\n\n## Consequences\nParked surfaces.\n' > "$TR/backbone/adr/ADR-002-triple-pilot.md"
+out=$($TH adopt triple --adr ADR-002 2>&1)
+contains "adopting triple needs disputes-pci decided" "decide 'disputes-pci'" "$out"
+expect 0 "adopts the triple pack with disputes-pci and ears" $TH adopt triple --adr ADR-002 --with disputes-pci,ears
+[ -f "$TR/.claude/skills/disputes-pci/SKILL.md" ] && ok "installs the disputes-pci skill" || bad "installs the disputes-pci skill"
+tg() { hook "$TR" pre-tool-use "$(write_json "$TR/$1" "$2")" 2>&1; echo "exit=$?"; }
+for path in apps/disputes/src/auth/guard.ts src/billing/invoice.ts libs/payments/refund.service.ts \
+            prisma/migrations/20261105_init/migration.sql docs/pci-evidence/scope.md .env.production \
+            config/secrets/api.json certs/server.key infra/main.tf; do
+  out=$(tg "$path" 'export const x = 1;')
+  contains "parked: $path is refused" "Parked in the Disputes pilot" "$out"
+  contains "parked: $path exits 2" "exit=2" "$out"
+done
+out=$(tg apps/disputes/src/ui/CaseList.tsx 'export const x = 1;')
+lacks "UI code stays open" "Parked in the Disputes pilot" "$out"
+contains "Disputes code is routed to the disputes-pci skill" "disputes-pci" "$out"
+lacks "an author field isn't taken for auth" "Parked" "$(tg docs/authoring.md 'Write short sentences.')"
+contains "a CVV in a fixture is refused" "card verification value" "$(tg apps/disputes/test/fixtures/case.ts 'cvv: "123",')"
+contains "a card number gets a warning after the edit" "looks like a card number" "$(hook "$TR" post-tool-use "$(write_json "$TR/apps/disputes/test/fixtures/case.ts" 'const pan = "4111 1111 1111 1111";')" 2>&1)"
+out=$(hook "$TR" pre-tool-use "$(bash_json 'echo x > src/payments/key.ts')" 2>&1; echo "exit=$?")
+contains "shell writes into parked paths are refused" "exit=2" "$out"
+out=$(hook "$TR" pre-tool-use "$(bash_json 'npx prisma migrate deploy')" 2>&1; echo "exit=$?")
+contains "running migrations is refused" "Running migrations is parked" "$out"
+mkdir -p "$TR/backbone/specs"
+printf '# Task 9.1: Show the case status\n\n## Requirements\n- REQ-9.1-1: Show the PCI scope flag on a case.\n' > "$TR/backbone/specs/9.1.md"
+out=$(cd "$TR" && $TH risk 9.1 2>&1; echo "exit=$?")
+contains "card terms make a spec not low-risk" "pci" "$out"
+printf '# Task 9.2: Move the button\n\n## Requirements\n- REQ-9.2-1: Change apps/disputes/src/refunds/Button.tsx.\n' > "$TR/backbone/specs/9.2.md"
+contains "parked paths in a spec make it not low-risk" "sensitive paths" "$(cd "$TR" && $TH risk 9.2 2>&1)"
+lacks "the doctor has no error about the pack" "error" "$(cd "$TR" && $TH doctor 2>&1 | grep -i 'triple\|disputes')"
+
+section "EARS requirements (HARNESS_REQ_STYLE=ears)"
+contains "the ears option sets the requirement style" 'HARNESS_REQ_STYLE="ears"' "$(cat "$TR/backbone/harness.conf")"
+contains "session start tells agents to write EARS" "REQUIREMENTS IN EARS" "$(hook "$TR" session-start '{}')"
+contains "session start names the no-merge profile" "PROFILE triple: only a human merges" "$(hook "$TR" session-start '{}')"
+ears_spec() {  # ears_spec <task> <requirement lines> <criteria lines> [nfr lines]
+  printf '# Spec %s: Cases\n\nTask: %s\nPRD: none\n\n## Context\nAgents triage cases.\n\n## Requirements\n%s\n\n## Acceptance criteria\n%s\n\n## Non-functional requirements\n%s\n\n## Architecture\nADRs: ADR-001\nTech requirements:\n- none\n\n## Skills\n- requirements-writing: the spec\n\n## Out of scope\n- none\n\n## Assumptions\n- none\n\n## Open questions\n- none\n\n## Approval\n' \
+    "$1" "$1" "$2" "$3" "${4:--  none}" > "$TR/backbone/specs/$1.md"
+}
+ears_spec 9.3 "- REQ-9.3-1: When an agent opens a case, the case view shall show its evidence files.
+- REQ-9.3-2: If an evidence file exceeds 10 MB, then the upload form shall reject it with \"File too large\"." \
+"- AC-9.3-1 (REQ-9.3-1): Given case C-1 with two files, when an agent opens it, then both file names are listed.
+- AC-9.3-2 (REQ-9.3-2): Given an 11 MB file, when it is uploaded, then the form shows \"File too large\".
+- AC-9.3-3 (NFR-9.3-1): Given 500 cases, when the list loads, then it renders within 300 ms." "- NFR-9.3-1: The case list renders 500 cases within 300 ms at p95."
+out=$(cd "$TR" && $TH spec-check 9.3 2>&1; echo "exit=$?")
+contains "an EARS spec is valid" "  valid" "$out"
+contains "and spec-check exits 0" "exit=0" "$out"
+ears_spec 9.4 "- REQ-9.4-1: Cases shall be listed.
+- REQ-9.4-2: When the case view shall load, show evidence.
+- REQ-9.4-3: The case list shall load quickly and the export shall work.
+- REQ-9.4-4: If the upload fails the upload form shall retry." \
+"- AC-9.4-1 (REQ-9.4-1, REQ-9.4-2, REQ-9.4-3, REQ-9.4-4): Given a case, when it loads, then it shows.
+- AC-9.4-2 (NFR-9.4-7): Given a case, when it loads, then it is fast."
+out=$(cd "$TR" && $TH spec-check 9.4 2>&1; echo "exit=$?")
+contains "EARS: a requirement without a system is refused" "REQ-9.4-1 is not an EARS pattern" "$out"
+contains "EARS: passive voice is refused" "REQ-9.4-1 is passive" "$out"
+contains "EARS: a When without its trigger is refused" "REQ-9.4-2: 'When' needs a trigger" "$out"
+contains "EARS: two shalls are refused" "REQ-9.4-3 has 2 'shall's" "$out"
+contains "EARS: vague words are refused" "untestable as worded (quickly)" "$out"
+contains "EARS: If needs then" "REQ-9.4-4: 'If' needs a condition" "$out"
+contains "EARS: a criterion citing an unknown NFR is refused" "AC-9.4-2 references unknown NFR-9.4-7" "$out"
+contains "EARS: spec-check exits 1" "exit=1" "$out"
+ears_spec 9.5 "- REQ-9.5-1: The case list shall show each case's status." "- AC-9.5-1: Given case C-1, when the list loads, then it shows Open."
+contains "EARS: every criterion cites a requirement or NFR" "AC-9.5-1 does not reference the requirement or NFR it proves" "$(cd "$TR" && $TH spec-check 9.5 2>&1)"
+contains "EARS: every requirement is cited by a criterion" "REQ-9.5-1 has no acceptance criterion" "$(cd "$TR" && $TH spec-check 9.5 2>&1)"
+ears_spec 9.6 "- REQ-9.6-1: Cases shall be listed." "- AC-9.6-1 (REQ-9.6-1): Given case C-1, when the list loads, then it shows Open."
+lacks "plain style leaves the wording alone" "EARS" "$(cd "$TR" && HARNESS_REQ_STYLE=plain $TH spec-check 9.6 2>&1)"
+contains "doctor flags an unknown requirement style" "HARNESS_REQ_STYLE must be one of plain|ears" "$(cd "$TR" && HARNESS_REQ_STYLE=gherkin $TH doctor 2>&1)"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

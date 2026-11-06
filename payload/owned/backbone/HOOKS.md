@@ -315,6 +315,12 @@ Each event carries the task in progress and, inside a hook, the session and agen
 
 It refuses a task without a judge pass on the current code. `harness.py run` saves it next to the run logs and `--pr` puts it in the pull request; the Orca coordinator does the same and keeps it in `.git/harness/receipts/`.
 
+**Linear** (`harness.py linear`, user-only; agents may run only `--dry-run`). `linear import <ISSUE> --task <id> [--light] [--from <issue.json>]` writes a draft spec from the template, with a `Linear: <ISSUE> (<url>)` line and the ticket quoted in Context as source material. It also adds the pending task line, `(light)` when asked. `linear receipt <task> [--status <state>]` posts the receipt as a comment on the ticket. It refuses without a judge pass on the current code, and refuses a state that completes or cancels the ticket. Both need `LINEAR_API_KEY`; `HARNESS_LINEAR_URL` points them at another endpoint.
+
+## Profiles (`HARNESS_PROFILE`)
+
+`triple`: only a human merges. `harness.py orca` refuses `--merge` and `--trust`, `orca-nightly` refuses to start, and `enroll` refuses `--automation` and `--protect`. The shell gate refuses `gh pr merge` and GitHub's merge API, and the tool gate refuses any MCP tool whose name contains `merge`. `HARNESS_PROFILE=triple` or `TRIPLE_MODE=1` in the environment adds the profile; clearing the variable doesn't lift a profile set in `harness.conf`.
+
 ## CI judge and branch protection
 
 `harness.py ci-judge --range <base>..<tip>` re-judges every task the range marks `[x]`:
@@ -395,6 +401,8 @@ Two files of each kind apply: the core file in `scripts/harness/`, then the proj
 | `HARNESS_CONTAINER_ENGINE` | empty | Container engine chosen in the stack ADR (set when a container pack is adopted) |
 | `HARNESS_DECISION_PROVIDER`, `_MODE`, `_ADR`, `_CMD`, `_MODEL`, `_URL`, `_TIMEOUT` | `none`, `off`, empty, empty, empty, empty, `20` | Decision layer (see above). User-only, except the timeout |
 | `HARNESS_COMMIT_NUDGE` | `8` | With no `[WIP]` task, nudge to commit at this many changed tracked files; `0` turns it off |
+| `HARNESS_PROFILE` | empty | Organisation profile: empty or `triple` (see Profiles). User-only; the environment can add it, never lift it |
+| `HARNESS_REQ_STYLE` | `plain` | `plain` or `ears`: with `ears`, `spec-check` requires an EARS pattern for every requirement. User-only |
 
 ## Decision layer (advisory)
 
