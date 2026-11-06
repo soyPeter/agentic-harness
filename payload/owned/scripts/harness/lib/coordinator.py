@@ -54,6 +54,28 @@ INSTRUCTIONS = {
     "finish": "Record what task {task} taught (lessons, traps, emergent decisions) in backbone/.",
 }
 
+# A thin project (ADR-001) has no engine in its worktrees, so this coordinator's own engine runs on them.
+ENGINE_SCRIPT = Path(__file__).resolve().parent / "harness.py"
+VENDORED_CLI = "python3 scripts/harness/lib/harness.py"
+
+
+def harness_command(path):
+    """argv and environment that run the harness on path: its own copy in a full install, else this engine."""
+    env = dict(os.environ)
+    env.pop("HARNESS_ROOT", None)
+    vendored = Path(path) / "scripts/harness/lib/harness.py"
+    if vendored.is_file():
+        return ["python3", str(vendored)], env
+    env["HARNESS_ROOT"] = str(path)
+    return ["python3", str(ENGINE_SCRIPT)], env
+
+
+def harness_cli(path):
+    """The harness command as a worker in path types it."""
+    command, _ = harness_command(path)
+    return VENDORED_CLI if command[1] != str(ENGINE_SCRIPT) else "python3 " + shlex.quote(str(ENGINE_SCRIPT))
+
+
 WORKER_SPEC = """Harness step for task {task} ("{title}"): {step}.
 
 Target: this repository's task {task} (spec: backbone/specs/{task}.md).
@@ -155,8 +177,9 @@ class Coordinator(object):
     # ----------------------------------------------------------------- harness in a task's worktree
 
     def harness(self, path, *args, check=False):
-        result = subprocess.run(["python3", str(Path(path) / "scripts/harness/lib/harness.py")] + list(args),
-                                cwd=str(path), capture_output=True, text=True, timeout=1800)
+        command, env = harness_command(path)
+        result = subprocess.run(command + list(args), cwd=str(path), env=env, capture_output=True, text=True,
+                                timeout=1800)
         if check and result.returncode != 0:
             raise CoordinatorError("harness %s: %s" % (" ".join(args), (result.stdout + result.stderr).strip()[:500]))
         return result
@@ -268,6 +291,7 @@ class Coordinator(object):
 
     def start_worker(self, task, spec, role, kind, extra=None):
         info = self.tasks[task]
+        spec = spec.replace(VENDORED_CLI, harness_cli(info["path"]))
         agent = self.agent_for(role)
         args = ["orchestration", "worker-start", "--spec", spec, "--worktree", info["selector"],
                 "--task-title", "%s %s: %s" % (kind, task, role)]

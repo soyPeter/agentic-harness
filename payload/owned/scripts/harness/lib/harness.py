@@ -145,6 +145,10 @@ SHELL_PROTECTED = (r"^backbone(/|$)", r"^scripts/harness(/|$)", r"^\.claude(/|$)
 # but lie outside it, beyond the reach of the repository-relative protections.
 INSTALL_DIRS = (("HARNESS_ENGINES", "the harness engine cache"), ("HARNESS_PLUGIN_ROOT", "the harness plugin"))
 INSTALL_SCRIPTS = ("harness.py", "launcher.py", "thin.py")
+# Codex and OpenCode plugins can't ship agents, so a thin session start installs the pinned engine's role agents where
+# each CLI loads user-level agents (ADR-001). A file there without this mark is the user's own and is left alone.
+USER_AGENTS = {"codex": (".codex/agents", ".toml", "Codex"), "opencode": (".opencode/agents", ".md", "OpenCode")}
+USER_AGENT_MARK = "Agentic harness: generated from"
 # Harness files whose edits change enforcement; verify refuses commits that change them away from the lock.
 ENFORCEMENT_FILES = (r"^scripts/harness/", r"^\.claude/agents/", r"^\.github/workflows/harness-[^/]+\.ya?ml$",
                      r"^\.devcontainer/harness-agent/", r"^\.codex/(hooks\.json$|agents/|rules/harness\.rules$)",
@@ -1061,8 +1065,81 @@ def protected_path(path_str, cwd):
     return name if any(re.search(p, name) for p in SHELL_PROTECTED) else None
 
 
+def thin_mode():
+    return ENGINE != ROOT and lock().get("mode") == "thin"
+
+
+def user_agents_dir(source):
+    if source == "codex":
+        return Path(os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")) / "agents"
+    if os.environ.get("OPENCODE_CONFIG_DIR"):
+        return Path(os.environ["OPENCODE_CONFIG_DIR"]) / "agents"
+    return Path(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")) / "opencode" / "agents"
+
+
+def user_agent_files():
+    """(engine copy, user-level path) of each role agent a thin session start installs for Codex and OpenCode."""
+    if not thin_mode():
+        return []
+    return [(agent, user_agents_dir(source) / agent.name)
+            for source, (folder, suffix, _) in USER_AGENTS.items()
+            for agent in sorted((ENGINE / folder).glob("*" + suffix))]
+
+
+def install_user_agents(source):
+    """Install or refresh the pinned engine's role agents for source; session-start lines saying what happened."""
+    target, cli = user_agents_dir(source), USER_AGENTS[source][2]
+    changed, kept, failed = [], [], []
+    for agent, path in user_agent_files():
+        if path.parent != target:
+            continue
+        text = agent.read_text(encoding="utf-8")
+        try:
+            current = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            current = None
+        except OSError:
+            failed.append(path.name)
+            continue
+        if current == text:
+            continue
+        if current is not None and USER_AGENT_MARK not in current:
+            kept.append(str(path))
+            continue
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(".%s.harness-tmp" % path.name)
+            temporary.write_text(text, encoding="utf-8")
+            os.replace(str(temporary), str(path))
+            changed.append(path.stem)
+        except OSError:
+            failed.append(path.name)
+    lines = []
+    if changed:
+        lines.append("Installed the pinned engine's role agents (%s) in %s; restart %s to load them."
+                     % (", ".join(changed), target, cli))
+    if kept:
+        lines.append("Kept %s: not written by the harness, so the harness's agent of that name isn't installed. The "
+                     "user renames or removes it to use the harness's." % ", ".join(kept))
+    if failed:
+        lines.append("Could not install the role agents %s in %s." % (", ".join(failed), target))
+    return lines
+
+
+def thin_paths():
+    """The full-install paths that role agents' instructions name, as they are in a thin project."""
+    return ("This project runs the agentic harness in thin mode: it has no AGENTS.md and no scripts/harness/ folder; "
+            "the pinned engine in %s supplies them. Where instructions name those paths:\n"
+            "- `python3 scripts/harness/lib/harness.py <command>` is `python3 %s <command>`\n"
+            "- `AGENTS.md` (the agent rules) is `%s`\n"
+            "- `scripts/harness/routing.core.conf` (the core routes) is `%s`\n"
+            "- a core skill's `.claude/skills/<name>/SKILL.md` is `%s/<name>/SKILL.md` unless the project has its own"
+            % (ENGINE, shlex.quote(str(ENGINE / "scripts/harness/lib/harness.py")), ENGINE / "AGENTS.md",
+               ENGINE / "scripts/harness/routing.core.conf", ENGINE_SKILLS))
+
+
 def install_path(path_str, cwd):
-    """Which harness install (engine cache or plugin) path_str is in, or contains, else None."""
+    """Which harness install (engine cache, plugin or installed role agents) path_str is in, or contains, else None."""
     if not path_str or path_str.startswith("-"):
         return None
     path = os.path.expandvars(os.path.expanduser(path_str))
@@ -1078,6 +1155,10 @@ def install_path(path_str, cwd):
             continue   # a project inside the install (the harness developed in thin mode) keeps its own gates
         if full == base or full.startswith(base + os.sep) or base.startswith(full.rstrip(os.sep) + os.sep):
             return label
+    for _, agent in user_agent_files():
+        agent = os.path.realpath(str(agent))
+        if full == agent or agent.startswith(full.rstrip(os.sep) + os.sep):
+            return "the harness's role agents"
     return None
 
 
@@ -2498,7 +2579,7 @@ def plugin_mismatch():
 def health():
     """List of (level, message) for misconfigurations; level is 'error' or 'warn'."""
     issues = []
-    thin = lock().get("mode") == "thin" and ENGINE != ROOT
+    thin = thin_mode()
     hooks_path = git("config", "--get", "core.hooksPath").strip()
     if thin:
         if hooks_path != ".githooks":
@@ -3013,7 +3094,7 @@ def resulting_text(tool, tool_input, path_str):
 def hook_session_start(_data):
     values = conf()
     info = lock()
-    thin = info.get("mode") == "thin" and ENGINE != ROOT
+    thin = thin_mode()
     lines = ["[agentic harness %s] project: %s, stack packs: %s"
              % (info.get("harness_version") or info.get("version") or "?",
                 values["HARNESS_PROJECT_NAME"] or ROOT.name, adopted_summary(info))]
@@ -3033,6 +3114,9 @@ def hook_session_start(_data):
             rules = rules.replace("scripts/harness/routing.core.conf",
                                   str(ENGINE / "scripts/harness/routing.core.conf"))
             lines.extend(("Agent rules from the pinned engine (there is no project AGENTS.md):", rules))
+        lines.append(thin_paths())
+        if HOOK_SOURCE in USER_AGENTS:
+            lines.extend(install_user_agents(HOOK_SOURCE))
     pending = placeholders()
     if pending:
         lines.append("SETUP INCOMPLETE: %d FILL placeholder(s) in %s. Run first-run setup "
@@ -3084,6 +3168,12 @@ def hook_session_start(_data):
         add_context("SessionStart", "\n".join(lines))
     else:
         print("\n".join(lines))
+
+
+def hook_subagent_start(_data):
+    # Role agents' instructions name the full-install paths, and a subagent doesn't see the session-start context.
+    if thin_mode():
+        add_context("SubagentStart", thin_paths())
 
 
 def hook_pre_tool_use(data):
@@ -4238,6 +4328,24 @@ def agent_start_failure(log_path, code):
     return str(message or "exit %s" % code)[:300]
 
 
+def engine_command(tree):
+    """argv and environment that run the harness on tree: its own copy in a full install, else this engine (thin)."""
+    env = dict(os.environ)
+    env.pop("HARNESS_ROOT", None)
+    vendored = Path(tree) / "scripts/harness/lib/harness.py"
+    if vendored.is_file():
+        return [sys.executable, str(vendored)], env
+    env["HARNESS_ROOT"] = str(tree)
+    return [sys.executable, str(Path(__file__).resolve())], env
+
+
+def harness_cli():
+    """The harness command as agents type it in this project."""
+    if thin_mode():
+        return "python3 " + shlex.quote(str(ENGINE / "scripts/harness/lib/harness.py"))
+    return "python3 scripts/harness/lib/harness.py"
+
+
 def run_worktrees(queue, open_prs):
     """Run each task in its own worktree on branch harness/task-<id>, from the current HEAD."""
     common = git("rev-parse", "--git-common-dir").strip()
@@ -4260,8 +4368,8 @@ def run_worktrees(queue, open_prs):
             print("run: could not create a worktree for task %s: %s" % (task, added.stderr.strip()))
             summary.append((task, "error"))
             continue
-        child = subprocess.run([sys.executable, str(tree / "scripts/harness/lib/harness.py"), "run", "--only", task],
-                               cwd=str(tree), capture_output=True, text=True)
+        command, env = engine_command(tree)
+        child = subprocess.run(command + ["run", "--only", task], cwd=str(tree), env=env, capture_output=True, text=True)
         sys.stdout.write(child.stdout)
         m = re.search(r"^run: (\S+)\s+task %s$" % re.escape(task), child.stdout, re.M)
         outcome = m.group(1) if m else "error"
@@ -4283,8 +4391,8 @@ def run_worktrees(queue, open_prs):
                 state = "ready for review" if outcome == "done" else "BLOCKED, see backbone/escalations.md"
                 body = "Opened by harness.py run: task %s is %s.\n\nThe harness-verify check re-checks the gates." \
                        % (task, state)
-                receipt = subprocess.run([sys.executable, str(tree / "scripts/harness/lib/harness.py"), "receipt", task],
-                                         cwd=str(tree), capture_output=True, text=True)
+                receipt = subprocess.run(command + ["receipt", task], cwd=str(tree), env=env, capture_output=True,
+                                         text=True)
                 if receipt.returncode == 0:
                     body += "\n\n```\n%s\n```" % receipt.stdout.strip()
                 pr = subprocess.run(["gh", "pr", "create", "--head", branch, "--base", base_branch, "--title",
@@ -4447,7 +4555,8 @@ def run_command(argv):
                 break
             resume = ("The task is already [WIP]: resume it." if task_state(task) == "wip"
                       else "The task is pending.")
-            prompt = RUN_PROMPT.format(task=task, title=title, state=resume) + retry_note
+            prompt = (RUN_PROMPT.format(task=task, title=title, state=resume) + retry_note).replace(
+                "python3 scripts/harness/lib/harness.py", harness_cli())
             log_path = run_dir / ("%s-%d.log" % (slug(task), attempt))
             started_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             code, seconds = run_agent(prompt, log_path, timeout)
@@ -5614,6 +5723,7 @@ ROLE_RECORDERS = {
 
 HOOKS = {
     "session-start": hook_session_start,
+    "subagent-start": hook_subagent_start,
     "pre-tool-use": hook_pre_tool_use,
     "post-tool-use": hook_post_tool_use,
     "stop": hook_stop,

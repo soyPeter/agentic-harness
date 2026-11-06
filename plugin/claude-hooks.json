@@ -3,6 +3,9 @@
     "SessionStart": [
       {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook session-start", "timeout": 15}]}
     ],
+    "SubagentStart": [
+      {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook subagent-start", "timeout": 15}]}
+    ],
     "PreToolUse": [
       {"matcher": "^(?!(Read|Grep|Glob|LS|TodoWrite)$)", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook pre-tool-use", "timeout": 30}]}
     ],
