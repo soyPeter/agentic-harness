@@ -12,6 +12,9 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@ex
        GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com
 # The review lenses and delivery are on by default; sections that test them switch them on again.
 export HARNESS_REVIEW=off HARNESS_DELIVER=off
+# CLAUDE_CONFIG_DIR and CODEX_HOME move the CLIs' user settings, where machine.sh writes its hooks: keep the tests'
+# hooks in their throwaway homes.
+unset CLAUDE_CONFIG_DIR CODEX_HOME
 PASS=0
 FAIL=0
 
@@ -2160,7 +2163,7 @@ MH="$WORK/machine-home"; mkdir -p "$MH/.claude" "$MH/.codex" "$MH/work"
 printf '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"orca-hook.sh"}]}]},"model":"opus"}\n' > "$MH/.claude/settings.json"
 printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"orca-codex-hook.sh"}]}]}}\n' > "$MH/.codex/hooks.json"
 out=$(HOME="$MH" "$HARNESS/machine.sh" install --roots "$MH/work" --mode block 2>&1)
-contains "machine install adds the Claude Code hook" "PreToolUse hook in ~/.claude/settings.json" "$out"
+contains "machine install adds the Claude Code hook" "PreToolUse hook in $MH/.claude/settings.json" "$out"
 contains "machine install tells you to trust the Codex hook once" "run /hooks and trust" "$out"
 cs=$(cat "$MH/.claude/settings.json")
 contains "existing Claude Code hooks are kept" "orca-hook.sh" "$cs"

@@ -2,6 +2,7 @@
 the harness, an agent's edits get a reminder (warn) or are refused (block). It runs as the hook machine.sh installs or
 as the plugin's own hook (launcher.py hook machine-guard). The tests install it with machine.sh into a throwaway home
 and run the hooks a CLI would run for each tool call (the property checks need hypothesis)."""
+import itertools
 import json
 import os
 from pathlib import Path
@@ -21,7 +22,8 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parents[1]
 THIN_LOCK = {"mode": "thin", "version": "9.9.9", "commit": "0" * 40}
-USER_HOOKS = {"claude": ".claude/settings.json", "codex": ".codex/hooks.json"}
+# Where each CLI reads its user hooks: the folder its variable names, or its folder in the home.
+USER_HOOKS = {"claude": ("CLAUDE_CONFIG_DIR", ".claude", "settings.json"), "codex": ("CODEX_HOME", ".codex", "hooks.json")}
 # What backbone/.harness-lock.json holds, and whether that alone (no engine in scripts/harness/) is enrolled.
 LOCKS = (
     ("no lock", None, False),
@@ -48,7 +50,7 @@ def environment(home, work):
     for folder in (".claude", ".codex"):
         (home / folder).mkdir(parents=True, exist_ok=True)
     env = {key: value for key, value in os.environ.items()
-           if key not in ("HARNESS_MACHINE_CONFIG", "CLAUDE_PROJECT_DIR", "HARNESS_ROOT")}
+           if key not in ("HARNESS_MACHINE_CONFIG", "CLAUDE_PROJECT_DIR", "HARNESS_ROOT", "CLAUDE_CONFIG_DIR", "CODEX_HOME")}
     env.update(HOME=str(home), GIT_CONFIG_GLOBAL=os.devnull, PYTHONDONTWRITEBYTECODE="1",
                HARNESS_ENGINES=str(work / "engines"), HARNESS_ENGINE_SOURCE=str(work / "offline"),
                CLAUDE_PLUGIN_ROOT=str(ROOT), PLUGIN_ROOT=str(ROOT))
@@ -99,10 +101,15 @@ def shell(command, cwd, session="s1"):
     return {"session_id": session, "tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(cwd)}
 
 
-def enrolment_hooks(env, source, plugin):
-    """(matcher, command) of the PreToolUse hooks that check enrolment, as the CLI loads them: the user's own, where
-    machine.sh adds its guard, and, when the plugin is installed, the plugin's machine-guard hook."""
-    path = Path(env["HOME"]) / USER_HOOKS[source]
+def user_hooks(env, source):
+    variable, folder, name = USER_HOOKS[source]
+    return Path(env.get(variable) or Path(env["HOME"]) / folder) / name
+
+
+def session(env, source, plugin=False):
+    """(matcher, command) of the PreToolUse hooks that check enrolment, as a CLI session loads them when it starts: the
+    user's own, where machine.sh adds its guard, and, when the plugin is installed, the plugin's machine-guard hook."""
+    path = user_hooks(env, source)
     groups = list((json.loads(path.read_text()).get("hooks") or {}).get("PreToolUse") or []) if path.exists() else []
     if plugin:
         manifest = json.loads((ROOT / "plugin" / (source + "-hooks.json")).read_text())["hooks"]["PreToolUse"]
@@ -111,10 +118,11 @@ def enrolment_hooks(env, source, plugin):
     return [(group.get("matcher"), hook["command"]) for group in groups for hook in group["hooks"]]
 
 
-def cli(env, source, call, plugin=False):
-    """What the CLI makes of a tool call after running those hooks: (refused, the messages they gave)."""
+def cli(env, source, call, plugin=False, hooks=None):
+    """What the CLI makes of a tool call after running the hooks of a session started now, or of an earlier one's
+    hooks: (refused, the messages they gave)."""
     refused, messages = False, []
-    for matcher, command in enrolment_hooks(env, source, plugin):
+    for matcher, command in session(env, source, plugin) if hooks is None else hooks:
         if not matches(matcher, call["tool_name"]):
             continue
         result = subprocess.run(["sh", "-c", command], cwd=call["cwd"], env=env, input=json.dumps(call),
@@ -147,7 +155,8 @@ class MachineGuard(unittest.TestCase):
         return machine(self.env, "install", "--roots", str(self.roots), "--mode", mode, *flags)
 
     def user_hooks(self, source):
-        return (self.home / USER_HOOKS[source]).read_text()
+        path = user_hooks(self.env, source)
+        return path.read_text() if path.exists() else ""
 
     def test_a_thin_project_counts_as_enrolled(self):
         self.install("block")
@@ -185,8 +194,7 @@ class MachineGuard(unittest.TestCase):
         self.assertIn("agentic-harness plugin", out)
         for source in ("claude", "codex"):
             with self.subTest(source=source):
-                self.assertNotIn("--harness-machine-guard", self.user_hooks(source) if (
-                    self.home / USER_HOOKS[source]).exists() else "")
+                self.assertNotIn("--harness-machine-guard", self.user_hooks(source))
                 self.assertEqual(cli(self.env, source, edit(source, self.plain / "x.py", self.plain)), (False, []))
                 refused, messages = cli(self.env, source, edit(source, self.plain / "x.py", self.plain), plugin=True)
                 self.assertTrue(refused)
@@ -236,8 +244,7 @@ class MachineGuard(unittest.TestCase):
                 self.assertEqual(cli(self.env, source, shell("make", self.plain, session), plugin=True), (False, []))
 
     def test_install_for_the_plugin_takes_out_a_guard_hook_installed_earlier(self):
-        settings_path = self.home / USER_HOOKS["claude"]
-        settings_path.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [
+        user_hooks(self.env, "claude").write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [
             {"type": "command", "command": "true another-tool-hook"}]}]}, "model": "opus"}))
         self.install("block")
         self.assertIn("--harness-machine-guard", self.user_hooks("claude"))
@@ -248,7 +255,6 @@ class MachineGuard(unittest.TestCase):
             self.assertNotIn("--harness-machine-guard", self.user_hooks(source))
         self.assertIn("another-tool-hook", self.user_hooks("claude"))
         self.assertEqual(json.loads(self.user_hooks("claude"))["model"], "opus")
-        self.assertFalse((self.home / ".agentic-harness/guard.py").exists())
         self.assertEqual(json.loads((self.home / ".agentic-harness/machine.json").read_text())["mode"], "block")
         status = machine(self.env, "status")
         self.assertIn('"mode": "block"', status)
@@ -277,6 +283,70 @@ class MachineGuard(unittest.TestCase):
         (self.home / ".agentic-harness/machine.json").write_text("not json")
         self.assertEqual(cli(self.env, "claude", call, plugin=True), (False, []))
 
+    def open_sessions(self):
+        return {(source, plugin): session(self.env, source, plugin)
+                for source in ("claude", "codex") for plugin in (False, True)}
+
+    def test_a_session_open_during_install_for_the_plugin_still_lets_through_what_the_guard_allows(self):
+        """Claude Code and Codex load hooks when a session starts, so a session open during install --plugin keeps
+        calling the guard hook that install takes out of the settings."""
+        self.install("block")
+        sessions = self.open_sessions()
+        self.install("block", "--plugin")
+        for (source, plugin), hooks in sessions.items():
+            with self.subTest(source=source, plugin=plugin):
+                for place in (self.thin, self.full, self.outside):
+                    self.assertEqual(cli(self.env, source, edit(source, place / "x.py", place), hooks=hooks),
+                                     (False, []))
+                    self.assertEqual(cli(self.env, source, shell("make", place), hooks=hooks), (False, []))
+                refused, messages = cli(self.env, source, edit(source, self.plain / "x.py", self.plain), hooks=hooks)
+                self.assertTrue(refused)
+                for message in messages:
+                    self.assertIn("refused this edit", message)
+
+    def test_a_session_open_during_remove_is_no_longer_checked(self):
+        self.install("block")
+        sessions = self.open_sessions()
+        machine(self.env, "remove")
+        for (source, plugin), hooks in sessions.items():
+            with self.subTest(source=source, plugin=plugin):
+                for place in (self.plain, self.thin, self.full, self.outside):
+                    self.assertEqual(cli(self.env, source, edit(source, place / "x.py", place), hooks=hooks),
+                                     (False, []))
+                self.assertEqual(cli(self.env, source, shell("make", self.plain), hooks=hooks), (False, []))
+
+    def test_machine_sh_puts_the_guard_hook_where_each_cli_reads_its_settings(self):
+        env = dict(self.env, CLAUDE_CONFIG_DIR=str(self.work / "claude config"), CODEX_HOME=str(self.work / "codex home"))
+        for source in ("claude", "codex"):
+            Path(env[USER_HOOKS[source][0]]).mkdir()
+        machine(env, "install", "--roots", str(self.roots), "--mode", "block")
+        for source in ("claude", "codex"):
+            with self.subTest(source=source):
+                refused, messages = cli(env, source, edit(source, self.plain / "x.py", self.plain))
+                self.assertEqual((refused, len(messages)), (True, 1), messages)
+        self.assertEqual(machine(env, "status").count("guard hook present"), 2)
+        machine(env, "remove")
+        for source in ("claude", "codex"):
+            self.assertNotIn("--harness-machine-guard", user_hooks(env, source).read_text())
+
+    def test_the_plugin_leaves_the_check_only_to_a_guard_hook_the_cli_loads(self):
+        """Claude Code reads its user settings in CLAUDE_CONFIG_DIR and Codex in CODEX_HOME when they are set, and a
+        session's environment can differ from the one machine.sh ran in. With the plugin, an edit in a repository that
+        isn't enrolled gets one refusal wherever each of them looked."""
+        for source, flags, for_machine_sh, for_the_cli in itertools.product(
+                ("claude", "codex"), ((), ("--plugin",)), (False, True), (False, True)):
+            with self.subTest(source=source, flags=flags, set_for_machine_sh=for_machine_sh,
+                              set_for_the_cli=for_the_cli):
+                base = self.work / uuid.uuid4().hex
+                default = environment(base / "home", self.work)
+                elsewhere = dict(default, **{USER_HOOKS[source][0]: str(base / "elsewhere")})
+                (base / "elsewhere").mkdir()
+                machine(elsewhere if for_machine_sh else default, "install", "--roots", str(self.roots),
+                        "--mode", "block", *flags)
+                refused, messages = cli(elsewhere if for_the_cli else default, source,
+                                        edit(source, self.plain / "x.py", self.plain), plugin=True)
+                self.assertEqual((refused, len(messages)), (True, 1), messages)
+
 
 if given is None:
     print("skipped the property checks: hypothesis is not installed (pip install -r tests/requirements.txt)")
@@ -287,8 +357,12 @@ else:
         @classmethod
         def setUpClass(cls):
             cls.temp = tempfile.TemporaryDirectory(prefix="machine guard properties ")
-            work = Path(cls.temp.name).resolve()
+            work = cls.work = Path(cls.temp.name).resolve()
             cls.places = places(work, environment(work / "home", work))
+            roots = str(work / "repos")
+            cls.changes = {"nothing (status)": ("status",), "remove": ("remove",)}
+            for mode, plugin in itertools.product(("warn", "block"), ((), ("--plugin",))):
+                cls.changes[" ".join(("install", mode) + plugin)] = ("install", "--roots", roots, "--mode", mode) + plugin
             cls.envs = {}
             for install in ("guard", "plugin", "none"):
                 for mode in ("warn", "block"):
@@ -329,6 +403,29 @@ else:
 
             self.assertEqual(refused, answered and mode == "block", messages)
             self.assertEqual(len(messages), 1 if answered else 0, messages)
+
+        @settings(max_examples=40, deadline=None)
+        @given(before=st.sampled_from(("nothing (status)", "install warn", "install block", "install warn --plugin",
+                                       "install block --plugin")),
+               after=st.sampled_from(("install warn", "install block", "install warn --plugin",
+                                      "install block --plugin", "remove")),
+               plugin=st.booleans(), source=st.sampled_from(("claude", "codex")),
+               kind=st.sampled_from(("edit", "shell", "shell into")),
+               target=st.sampled_from(("plain", "full", "thin", "outside")),
+               cwd=st.sampled_from(("plain", "full", "thin", "outside", "desk")))
+        def test_a_session_open_while_machine_sh_changes_the_install_refuses_only_writes_into_unenrolled_repositories(
+                self, before, after, plugin, source, kind, target, cwd):
+            env = environment(self.work / uuid.uuid4().hex, self.work)
+            machine(env, *self.changes[before])
+            hooks = session(env, source, plugin)
+            machine(env, *self.changes[after])
+            touched = {"edit": {target}, "shell": {cwd}, "shell into": {target, cwd}}[kind]
+
+            refused, messages = cli(env, source, self.call(source, kind, target, cwd), hooks=hooks)
+
+            self.assertTrue(not refused or (after.startswith("install block") and "plain" in touched), messages)
+            for message in messages:
+                self.assertIn("is not enrolled in the agentic harness", message)
 
         @settings(max_examples=30, deadline=None)
         @given(source=st.sampled_from(("claude", "codex")), mode=st.sampled_from(("warn", "block")),

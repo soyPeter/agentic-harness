@@ -45,8 +45,11 @@ def repo_root(start):
 
 
 def enrolled(root):
-    """A lock that exists but can't be read counts as enrolled, as the plugin's launcher counts it: it refuses changes
-    there until the lock is fixed, which enrolling again wouldn't do."""
+    """A full install, or a thin pin. A lock that exists but can't be read (a merge conflict in the pin) counts too, as
+    a valid pin does, whether or not the CLI has the plugin: the guard judges the repository, not what the CLI has
+    installed. Run as its own hook, the guard can't tell whether the plugin is there; where it is, the plugin's launcher
+    refuses a session's changes in that repository until the lock is fixed, and a "not enrolled" answer would
+    contradict that."""
     if (root / HARNESS_FILE).is_file():
         return True
     try:

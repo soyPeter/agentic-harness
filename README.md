@@ -110,14 +110,18 @@ has it and every agent loads it:
 
   `--dry-run` shows what it would do. Enrolling again is safe.
 - **`./machine.sh install [--roots ~/Work/repos] [--mode warn|block] [--plugin]`**: a user-level guard hook for Claude
-  Code and Codex on this machine. In a git repository under the roots that isn't enrolled (it has neither a full
-  install nor a thin pin), it reminds you (warn) or refuses file edits (block) until the repository is enrolled;
-  enrolled repositories are left to their own hooks, or the plugin's. Codex asks you to trust the new hook once
-  (`/hooks`). `machine.sh status` and `machine.sh remove` show and undo it.
+  Code and Codex on this machine, in their user settings (`~/.claude` and `~/.codex`, or `$CLAUDE_CONFIG_DIR` and
+  `$CODEX_HOME` when set). In a git repository under the roots that isn't enrolled (it has neither a full install nor
+  a thin pin), it reminds you (warn) or refuses file edits (block) until the repository is enrolled; enrolled
+  repositories are left to their own hooks, or the plugin's. Codex asks you to trust the new hook once (`/hooks`).
+  `machine.sh status` and `machine.sh remove` show and undo it. The CLIs load hooks when a session starts, so restart
+  the sessions that are open after `install`, `install --plugin` or `remove`: until then they keep the hooks they
+  started with.
   - The agentic-harness plugin gives the same reminder or refusal from its own hooks, with the same settings
     (`~/.agentic-harness/machine.json`). On a machine with the plugin, `--plugin` writes only the settings and takes
-    out a guard hook installed earlier. In a CLI that has both, the guard hook answers and the plugin stays quiet, so
-    nothing is said twice. An installed guard is a copy: run `install` again after updating the harness.
+    out a guard hook installed earlier, leaving the guard copy for the sessions still open. In a CLI that has both,
+    the guard hook answers and the plugin stays quiet, so nothing is said twice. An installed guard is a copy: run
+    `install` again after updating the harness.
   - `machine.sh managed --out DIR` writes the same guard as Claude Code `managed-settings.json` and Codex
     `requirements.toml`, which nobody on the machine can switch off. Review them and install with sudo (see the
     generated INSTALL.md); the tool never writes system files. The plugin reads only the user's settings, so with a
