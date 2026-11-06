@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """Machine-level enforcement of the agentic harness, for every project on this machine.
 
-  machine.sh install [--roots DIR ...] [--mode warn|block]   user level: no root needed
+  machine.sh install [--roots DIR ...] [--mode warn|block] [--plugin]   user level: no root needed
   machine.sh status
   machine.sh remove
   machine.sh managed --out DIR [--roots DIR ...] [--mode warn|block]   admin files to review and install yourself
 
 install copies the guard (machine/guard.py) to ~/.agentic-harness/ and adds it as a user-level PreToolUse hook to
 Claude Code (~/.claude/settings.json) and Codex (~/.codex/hooks.json). In a git repository under one of --roots that
-has no harness, the guard reminds (warn) or refuses file edits (block) until the repository is enrolled; enrolled
-repositories are left to their own hooks. The harness source repository is exempt. Existing hooks (Orca's, yours)
-are kept; remove deletes only the guard's entries.
+isn't enrolled (neither a full install nor a thin one), the guard reminds (warn) or refuses file edits (block) until
+the repository is enrolled; enrolled repositories are left to their own hooks. The harness source repository is
+exempt. Existing hooks (Orca's, yours) are kept; remove deletes only the guard's entries.
+
+The agentic-harness plugin runs the same check from its own hooks, with the same settings
+(~/.agentic-harness/machine.json), except in a CLI where the guard hook is installed: there the guard alone answers.
+With the plugin, install --plugin is enough: it writes the settings only, and takes out a guard hook installed earlier.
 
 User-level hooks can be removed by the user. For a guard nobody on the machine can switch off, `managed` writes
 Claude Code's managed-settings.json and Codex's requirements.toml with the same hook (Codex trusts managed hooks by
@@ -27,6 +31,7 @@ from pathlib import Path
 
 HARNESS = Path(__file__).resolve().parent.parent
 MARK = "--harness-machine-guard"   # the token that identifies the guard's own hook entries
+HOOK_FILES = {"claude": (".claude", "settings.json"), "codex": (".codex", "hooks.json")}
 
 
 def home(*parts):
@@ -75,6 +80,20 @@ def without_guard(groups):
     return kept
 
 
+def has_guard(data):
+    groups = (data.get("hooks") or {}).get("PreToolUse") or []
+    return any(owned(hook.get("command")) for group in groups for hook in group.get("hooks", []))
+
+
+def hooked(source):
+    """Whether the guard is a hook in the user's settings of the CLI (claude or codex). The plugin's launcher leaves
+    the check to it there, so a tool call isn't reminded or refused twice."""
+    try:
+        return has_guard(json.loads(home(*HOOK_FILES[source]).read_text(encoding="utf-8")))
+    except (OSError, ValueError, AttributeError, TypeError):
+        return False
+
+
 def set_hook(path, source, guard_path, install):
     data = read_json(path)
     hooks = data.setdefault("hooks", {})
@@ -93,6 +112,8 @@ def parse(argv):
     for arg in argv:
         if arg in ("--roots", "--mode", "--out", "--platform"):
             key = arg
+        elif arg == "--plugin":
+            key = None
         elif key == "--roots":
             roots.append(arg)
         elif key == "--mode":
@@ -110,9 +131,20 @@ def install(argv):
     roots, mode, _ = parse(argv)
     guard = home(".agentic-harness", "guard.py")
     guard.parent.mkdir(parents=True, exist_ok=True)
+    settings = home(".agentic-harness", "machine.json")
+    write_json(settings, {"roots": roots, "mode": mode, "exempt": [str(HARNESS)],
+                          "enroll": str((HARNESS / "enroll.sh").resolve())})
+    if "--plugin" in argv:
+        print("  install    settings %s (mode %s, roots %s; exempt: %s)" % (settings, mode, ", ".join(roots), HARNESS))
+        print("  plugin     the agentic-harness plugin's hooks check with them, in each CLI the plugin is installed in")
+        for source, (folder, name) in HOOK_FILES.items():
+            if hooked(source):
+                set_hook(home(folder, name), source, guard, False)
+                print("  %-10s guard hook removed from ~/%s/%s" % (source, folder, name))
+        if guard.exists():
+            guard.unlink()
+        return 0
     shutil.copyfile(str(HARNESS / "machine" / "guard.py"), str(guard))
-    write_json(home(".agentic-harness", "machine.json"), {"roots": roots, "mode": mode, "exempt": [str(HARNESS)],
-                                                          "enroll": str((HARNESS / "enroll.sh").resolve())})
     set_hook(home(".claude", "settings.json"), "claude", guard, True)
     print("  install    guard %s (mode %s, roots %s; exempt: %s)" % (guard, mode, ", ".join(roots), HARNESS))
     print("  claude     PreToolUse hook in ~/.claude/settings.json (applies to new sessions)")
@@ -143,12 +175,13 @@ def status(_argv):
     try:
         shown = json.dumps(json.loads(conf.read_text(encoding="utf-8"))) if conf.exists() else "not installed"
     except ValueError:
-        shown = "%s is not valid JSON (the guard then does nothing): run install again" % conf
+        shown = "%s is not valid JSON (the guard and the plugin then check nothing): run install again" % conf
     print("  config     %s" % shown)
-    for path in (home(".claude", "settings.json"), home(".codex", "hooks.json")):
-        groups = (read_json(path).get("hooks") or {}).get("PreToolUse") if path.exists() else []
-        found = any(owned(h.get("command")) for g in groups or [] for h in g.get("hooks", []))
-        print("  %-10s %s" % ("claude" if ".claude" in str(path) else "codex", "guard hook present" if found
+    for source, (folder, name) in HOOK_FILES.items():
+        path = home(folder, name)
+        found = path.exists() and has_guard(read_json(path))
+        print("  %-10s %s" % (source, "guard hook present" if found else
+                              "no guard hook (the agentic-harness plugin checks, where installed)" if conf.exists()
                               else "no guard hook"))
     return 0
 

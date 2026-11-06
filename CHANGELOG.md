@@ -25,6 +25,14 @@
   task could pass a gate. The plugin now runs the recorder on `SubagentStop` for those agents, as the Codex plugin
   already did. A live check (`HARNESS_E2E=1 tests/test-live-plugin.py`, one short Claude Code session) runs the
   plugin's judge in a thin project and fails if its verdict isn't recorded.
+- **The machine guard knows thin projects, and the plugin gives its check.** The guard took a thin project (a
+  `"mode": "thin"` pin in `backbone/.harness-lock.json`, no `scripts/harness/`) for one that isn't enrolled: it
+  reminded the agent and, in block mode, refused its edits. A thin pin now counts, and so does a lock that can't be
+  read, where the plugin refuses changes until it is fixed. The plugin's own hooks now give the guard's reminder or
+  refusal in Claude Code and Codex, with the same `~/.agentic-harness/machine.json`, so a machine with the plugin needs
+  no guard hook: `./machine.sh install --plugin` writes only the settings and takes out a guard hook installed earlier.
+  In a CLI that still has the guard hook, the plugin leaves the check to it, so nothing is said twice. An installed
+  guard is a copy: run `./machine.sh install` again to get this fix.
 - Tests go through the harness's public commands and hooks only: the checks that grepped agent files for hook names
   now run those hooks, and the ones that imported `harness.py` to call its functions now use `approve`,
   `orca --dry-run`, `orca-digest`, `orca-nightly` and a real, held `orca` run.
