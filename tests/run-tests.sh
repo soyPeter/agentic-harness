@@ -2258,6 +2258,7 @@ mkdir -p "$SP/work/r" && git -C "$SP/work/r" init -q
 cmd=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print([h["command"] for g in d["hooks"]["PreToolUse"] for h in g["hooks"] if "--harness-machine-guard" in h["command"]][0])' "$SP/.claude/settings.json")
 out=$(printf '%s' "$(gj Write "$SP/work/r")" | HOME="$SP" sh -c "$cmd" 2>&1; echo "exit=$?")
 contains "the installed hook command runs from a home with a space and a dollar sign" "exit=2" "$out"
+expect 0 "machine guard: full and thin projects count as enrolled" python3 -B "$HARNESS/tests/test-machine-guard.py"
 
 section "CI: independent judge and branch protection"
 trust "$F"
