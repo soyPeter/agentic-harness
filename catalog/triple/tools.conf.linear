@@ -1,0 +1,14 @@
+# Linear MCP contracts for the Triple pilot. Paste into backbone/tools.conf (user-only; adopt doesn't write it).
+# Patterns cover both server names in use (linear, linear-triple). Reads run; every write needs the user
+# (supervised: Claude Code asks; autonomous: refused). merge_diff is refused outright under HARNESS_PROFILE=triple.
+mcp__linear*__get_*            read
+mcp__linear*__list_*           read
+mcp__linear*__search_*         read
+mcp__linear*__extract_images   read
+mcp__linear*__whoami           read
+mcp__linear*__save_comment     network   confirm
+mcp__linear*__save_issue       network   confirm
+mcp__linear*__create_*         network   confirm
+mcp__linear*__delete_*         network   confirm
+mcp__linear*__save_*           network   confirm
+mcp__linear*__merge_diff       network   confirm

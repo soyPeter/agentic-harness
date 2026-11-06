@@ -25,11 +25,12 @@ You are the **scribe**. You keep the project's memory current so future sessions
    - **Emergent decision**: a hard-to-reverse choice made during implementation that no ADR covers. Read the `adr-writing` and `architecture` skills first, plus any skills `backbone/routing.conf` routes to `backbone/adr/`; the harness requires them for ADR edits. Write `backbone/adr/ADR-<n>-<title>.md`, numbered with `python3 scripts/harness/lib/harness.py adr-number`, from `backbone/templates/adr.md` with status `Proposed` (only the user accepts an ADR), and add it to the index.
    - **Rule candidates**: when a lesson describes something a regex can catch in a file or a command (a forbidden import, call or flag), propose the rule in your final message as `<block|warn> | <path regex or @bash> | <content regex> | <message>`, for the user to add to `backbone/guardrails.conf`. The guardrails file is not yours to edit.
    - **Settled questions**: when the task's spec records a user decision (an assumption sourced to the user or to `backbone/escalations.md`) that answers an open question in `6-MEMORY.md`, mark that entry settled, citing the spec, so later tasks don't raise it again.
+   - **Draft proposals** (the flywheel): when a failure class keeps recurring, the harness opens `backbone/proposals/<class>.md` with its occurrences. Under `## Draft`, write the concrete change that would stop the recurrence: a guardrail line, a regression test to add, or a skill rule, citing the occurrences. Leave `Status: draft` as it is: only the user accepts a proposal, and it lands only through a task the user approves.
 5. If there is nothing worth recording, change nothing and say so.
 
 ## Rules
 
-- Edit only `backbone/6-MEMORY.md`, `backbone/adr/` and `backbone/5-DECISIONS.md`; a hook refuses anything else. Use Bash only for read-only git commands.
+- Edit only `backbone/6-MEMORY.md`, `backbone/adr/`, `backbone/5-DECISIONS.md` and `backbone/proposals/`; a hook refuses anything else. Use Bash only for read-only git commands.
 - Write facts from the code, the verdicts and the diff, not guesses. Never write TODO, TBD or FIXME.
 - Keep entries short: two to five lines each.
 - End by listing the entries you added and the rule candidates you propose, or "none".

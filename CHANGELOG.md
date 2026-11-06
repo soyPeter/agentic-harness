@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.30.0 (2026-11-06)
 
 - **The engine can run from outside the project** (first step of thin mode, ADR-001). The project is the folder in
   `HARNESS_ROOT`, otherwise the engine's own folder if it is a full install, otherwise the git repository of the
@@ -20,7 +20,7 @@
     reason, the session is told at start, and commands exit 1.
 - `init --thin` now fetches and checks the release before writing project files. It refuses older tags without thin
   plugin assets, seeds files from the pinned release, preserves existing project-owned docs, and pins Claude's
-  marketplace to that release tag. The next release version is `0.27.0`; the default install waits for its tag.
+  marketplace to that release tag. The next release version is `0.30.0`; the default install waits for its tag.
 - Thin session startup supplies the pinned engine's agent rules as context in Claude and Codex. Health checks now
   recognize the thin pre-commit shim and plugin setting.
 - **Thin mode can't be switched off from inside a session.** Agents may not change the engine cache or the plugin
@@ -28,6 +28,86 @@
   launcher and the shim refuse a cached engine with local changes, and a lock that exists but can't be parsed (an
   unresolved merge conflict) fails closed instead of reading as "not enrolled". Shell redirections to quoted paths
   with spaces are now checked.
+
+## 0.29.0 (2026-11-05)
+
+- **`typescript` pack.** The options:
+  - a package manager (`npm` | `pnpm`), which sets a `tsc --noEmit` build check and the test command;
+  - a test runner (`vitest` | `jest`), which sets the test paths and installs `typescript-test`;
+  - `strict`, which refuses `@ts-ignore` and `@ts-nocheck` and warns on `any`.
+
+  The pack always refuses `eval` and `new Function` and warns on stray `console.log`.
+- **`react` pack** (requires `typescript`). It refuses `dangerouslySetInnerHTML` and warns on index keys. Options:
+  - `nextjs` routes `app/`, server actions and the request pipeline to the `nextjs` and `security` skills, and refuses
+    secrets in `NEXT_PUBLIC_` variables;
+  - `testing-library` warns on CSS-selector queries in component tests.
+
+  There is no NestJS pack: `triple-disputes` is Next.js.
+- **Chained git hooks.** Doctor accepts a `core.hooksPath` that another manager owns (Husky's `.husky/_`) when its
+  `pre-commit`, `commit-msg` and `pre-push` call the harness's, and names any that don't.
+- **`disputes-pci` locks fit the real `triple-disputes` tree.**
+  - No longer parked: UI cards, i18n `auth` keys, intake chat sessions and deployment helpers.
+  - Now parked: PAN-handling modules, the Prisma schema, and the SAML and NextAuth routes.
+- **Runbook**: how to fit into `triple-disputes`, covering `AGENTS.md` and `CLAUDE.md`, Husky, the double type check,
+  and the PR title convention.
+
+## 0.28.1 (2026-11-05)
+
+- **Disputes pilot runbook** (`catalog/triple/RUNBOOK.md`). The runbook covers:
+  - the decisions and approvals the pilot needs;
+  - bootstrapping onto a fork or a throwaway repo with `enroll --profile triple`;
+  - adopting the `triple` pack and importing one light-lane `DIS-*` ticket;
+  - the supervised define → build → judge → receipt → PR loop, where a human merges;
+  - the metrics to record.
+- **`harness.py report` counts escalations by class** (`escalations_by_class` in `--json`).
+
+## 0.28.0 (2026-11-05)
+
+- **Failure classes.** Every escalation in `backbone/escalations.md` now records a class and the playbook that recovers
+  from it. The classes are `tool_timeout`, `invalid_args`, `missing_context`, `failed_test`, `permission_denied`,
+  `contradictory_req` and `unchanged_repeat`.
+  - The class comes from the escalation's kind and reason, or `escalate --class` sets it.
+  - When repeated judge fails escalate a task, the last debugger brief decides the class.
+  - `harness.py escalations` counts escalations by class.
+- **Coordinator recovery.** A step worker that dies before reporting gets one retry after `HARNESS_ORCA_RETRY_WAIT`
+  seconds (`tool_timeout`), and is escalated only after that.
+- **Flywheel v1.** A class escalated twice opens a draft proposal, `backbone/proposals/<class>.md`, listing every
+  occurrence. The scribe may draft the guardrail, test or skill change there. Nothing is applied until the user acts
+  on it through an approved task.
+
+## 0.27.0 (2026-11-05)
+
+Triple adapter layer for the supervised Disputes pilot, on top of the core harness.
+
+- **Profiles** (`HARNESS_PROFILE`, user-only). `triple` means only a human merges, and the code enforces it:
+  - `harness.py orca` refuses `--merge` and `--trust`, and `orca-nightly` refuses to start;
+  - `enroll` refuses `--automation` and `--protect` before changing anything (`enroll --profile triple` sets the
+    profile);
+  - the shell gate refuses `gh pr merge` and GitHub's merge API, and the tool gate refuses MCP merge tools.
+
+  `HARNESS_PROFILE=triple` or `TRIPLE_MODE=1` in the environment adds the profile, but clearing the variable never
+  lifts one that `harness.conf` sets.
+- **EARS requirements** (`HARNESS_REQ_STYLE`, user-only, `plain` | `ears`). With `ears`, `spec-check` refuses a
+  requirement that has no `shall`, more than one `shall`, no named system, a `When`/`While`/`If`/`Where` without its
+  clause, `If` without `then`, passive voice, or untestable words. Acceptance criteria stay Given/When/Then; they may
+  also prove `NFR-<task>-<n>` items, and every criterion must cite a requirement or an NFR. The analyst, architect and
+  griller prompts, the spec template and `requirements-writing/ears.md` cover the patterns.
+- **Linear as the system of record** (`harness.py linear`, user-only; agents may only run `--dry-run`).
+  - `linear import <ISSUE> --task <id> [--light] [--from <issue.json>]` writes a draft spec with a `Linear:` line and
+    the ticket quoted as source material, and adds the task line.
+  - `linear receipt <task> [--status <state>]` posts the receipt on the ticket and never moves it to a completed or
+    canceled state.
+  - Standard library only (`lib/linear.py`). It is tested against a local fake of the GraphQL API with a recorded
+    `DIS-*` fixture.
+- **`triple` catalog pack.** Option `disputes-pci` parks authentication, billing and payments, migrations, PCI
+  evidence, secrets and infrastructure:
+  - file and shell writes to them are refused, and so are running migrations and storing a CVV; card numbers get a
+    warning;
+  - those paths and terms make a task not low-risk;
+  - it installs the `disputes-pci` skill.
+
+  Option `ears` sets `HARNESS_REQ_STYLE`. `catalog/triple/tools.conf.linear` holds Linear MCP contracts for the user to
+  paste into `tools.conf`. The pack's README says the devcontainer is not a PCI attestation.
 
 ## 0.26.1 (2026-11-03)
 

@@ -129,6 +129,22 @@ In a range, any change to the harness itself (enforcement files, the lock) or to
 
 `doctor.sh` reports an error if autonomous mode runs without `HARNESS_TEST_CMD`, or with verify, the start gate or the judge gate off.
 
+### Failure classes and the flywheel
+
+Every escalation records a **class** and the **playbook** that recovers from it. The harness picks the class from the escalation's kind and reason; `escalate --class <c>` sets it. After repeated judge fails, the last debugger brief decides: a spec or test it blames (owner `analyst`, `tester` or `user`) is `contradictory_req`, anything else `failed_test`.
+
+| Class | Playbook | Typical source |
+|---|---|---|
+| `tool_timeout` | retry with backoff | A worker or tool died or timed out. The Orca coordinator retries a dead step worker once (after `HARNESS_ORCA_RETRY_WAIT` seconds, default 30), then escalates. |
+| `invalid_args` | repair the call | A tool or command called wrongly |
+| `missing_context` | retrieve the source | An unanswered question (the default) |
+| `failed_test` | repair from the debugger's brief | The judge failed the code; delivery or CI failed |
+| `permission_denied` | request approval | A gate, guardrail, contract or approval refused it |
+| `contradictory_req` | escalate to the user | The spec, ADRs or PRD disagree; the griller kept failing |
+| `unchanged_repeat` | stop | A step came back without progress |
+
+`harness.py escalations` counts escalations by class. Once a class has been escalated twice, the harness opens `backbone/proposals/<class>.md` with every occurrence and the kind of change that would stop it. The scribe may draft the concrete change there: a guardrail, a regression test or a skill rule. The harness applies nothing. A proposal stays `Status: draft` until the user acts on it through a task they approve.
+
 ## Runner (`harness.py run`)
 
 The user (or a scheduled job) runs `python3 scripts/harness/lib/harness.py run [--max-tasks N] [--dry-run]` in autonomous mode. The runner only sequences work; the hooks, gates and verify still do all the enforcing. For each ready task (a `[WIP]` one first, then pending lines in order; BLOCKED tasks are skipped), it:
@@ -315,6 +331,12 @@ Each event carries the task in progress and, inside a hook, the session and agen
 
 It refuses a task without a judge pass on the current code. `harness.py run` saves it next to the run logs and `--pr` puts it in the pull request; the Orca coordinator does the same and keeps it in `.git/harness/receipts/`.
 
+**Linear** (`harness.py linear`, user-only; agents may run only `--dry-run`). `linear import <ISSUE> --task <id> [--light] [--from <issue.json>]` writes a draft spec from the template, with a `Linear: <ISSUE> (<url>)` line and the ticket quoted in Context as source material. It also adds the pending task line, `(light)` when asked. `linear receipt <task> [--status <state>]` posts the receipt as a comment on the ticket. It refuses without a judge pass on the current code, and refuses a state that completes or cancels the ticket. Both need `LINEAR_API_KEY`; `HARNESS_LINEAR_URL` points them at another endpoint.
+
+## Profiles (`HARNESS_PROFILE`)
+
+`triple`: only a human merges. `harness.py orca` refuses `--merge` and `--trust`, `orca-nightly` refuses to start, and `enroll` refuses `--automation` and `--protect`. The shell gate refuses `gh pr merge` and GitHub's merge API, and the tool gate refuses any MCP tool whose name contains `merge`. `HARNESS_PROFILE=triple` or `TRIPLE_MODE=1` in the environment adds the profile; clearing the variable doesn't lift a profile set in `harness.conf`.
+
 ## CI judge and branch protection
 
 `harness.py ci-judge --range <base>..<tip>` re-judges every task the range marks `[x]`:
@@ -338,6 +360,8 @@ Agents can't run `ci-judge` or `ci-protect`.
 | commit-msg | Conventional Commits, types from `HARNESS_COMMIT_TYPES`, subject within `HARNESS_SUBJECT_MAX`. Merge, Revert, `fixup!`, `squash!` and `amend!` are exempt. Warns (does not block) when the scope matches no staged path, unless it is a cross-cutting scope (`HARNESS_CROSS_SCOPES`) | Yes, on format |
 
 A fresh clone needs `git config core.hooksPath scripts/harness/git-hooks` once. `doctor.sh` and the session-start note report when it is missing.
+
+**Another hook manager** (Husky, lefthook) may keep `core.hooksPath`. Then each of its `pre-commit`, `commit-msg` and `pre-push` hooks must call the harness's: `scripts/harness/git-hooks/pre-commit`, `scripts/harness/git-hooks/commit-msg "$1"` and `scripts/harness/git-hooks/pre-push "$@"`. With Husky (`core.hooksPath = .husky/_`), put the calls in `.husky/<hook>`. Doctor treats the hooks as active only when all three hand on, and names the ones that don't.
 
 ## Hook time budget
 
@@ -395,6 +419,8 @@ Two files of each kind apply: the core file in `scripts/harness/`, then the proj
 | `HARNESS_CONTAINER_ENGINE` | empty | Container engine chosen in the stack ADR (set when a container pack is adopted) |
 | `HARNESS_DECISION_PROVIDER`, `_MODE`, `_ADR`, `_CMD`, `_MODEL`, `_URL`, `_TIMEOUT` | `none`, `off`, empty, empty, empty, empty, `20` | Decision layer (see above). User-only, except the timeout |
 | `HARNESS_COMMIT_NUDGE` | `8` | With no `[WIP]` task, nudge to commit at this many changed tracked files; `0` turns it off |
+| `HARNESS_PROFILE` | empty | Organisation profile: empty or `triple` (see Profiles). User-only; the environment can add it, never lift it |
+| `HARNESS_REQ_STYLE` | `plain` | `plain` or `ears`: with `ears`, `spec-check` requires an EARS pattern for every requirement. User-only |
 
 ## Decision layer (advisory)
 

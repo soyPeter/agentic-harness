@@ -1,6 +1,6 @@
 {
   "name": "agentic-harness-opencode",
-  "version": "0.27.0",
+  "version": "0.30.0",
   "description": "OpenCode adapter for the project-pinned agentic harness",
   "type": "module",
   "exports": "./plugin/opencode.js",

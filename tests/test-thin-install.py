@@ -37,14 +37,14 @@ class ThinInstall(unittest.TestCase):
         shutil.copytree(ROOT / ".claude-plugin", self.source / ".claude-plugin")
         shutil.copytree(ROOT / ".codex-plugin", self.source / ".codex-plugin")
         shutil.copy2(ROOT / "package.json", self.source / "package.json")
-        self.set_release_version("0.27.0")
+        self.set_release_version("0.30.0")
         self.run_at(self.source, "git", "add", "-A")
         self.run_at(self.source, "git", "commit", "-qm", "thin engine")
-        self.run_at(self.source, "git", "tag", "v0.27.0")
-        self.set_release_version("0.27.1")
+        self.run_at(self.source, "git", "tag", "v0.30.0")
+        self.set_release_version("0.30.1")
         self.run_at(self.source, "git", "add", "-A")
         self.run_at(self.source, "git", "commit", "-qm", "next thin engine")
-        self.run_at(self.source, "git", "tag", "v0.27.1")
+        self.run_at(self.source, "git", "tag", "v0.30.1")
         self.run_at(self.project, "git", "init", "-q", "-b", "main")
 
     def set_release_version(self, version):
@@ -68,8 +68,8 @@ class ThinInstall(unittest.TestCase):
         self.run_at(self.project, "python3", "-B", str(ENGINE), "init", "--thin")
         lock_path = self.project / "backbone/.harness-lock.json"
         lock = json.loads(lock_path.read_text())
-        self.assertEqual(lock, {"mode": "thin", "version": "0.27.0",
-                                "commit": self.run_at(self.source, "git", "rev-parse", "v0.27.0").stdout.strip()})
+        self.assertEqual(lock, {"mode": "thin", "version": "0.30.0",
+                                "commit": self.run_at(self.source, "git", "rev-parse", "v0.30.0").stdout.strip()})
         self.assertFalse((self.project / "scripts/harness").exists())
         self.assertFalse((self.project / "AGENTS.md").exists())
         self.assertNotIn("@AGENTS.md", (self.project / "CLAUDE.md").read_text())
@@ -80,23 +80,23 @@ class ThinInstall(unittest.TestCase):
                          ".githooks")
         self.assertEqual(self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin",
                                      check=False).returncode, 2)
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "pin", "0.27.1")
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "pin", "0.30.1")
         lock = json.loads(lock_path.read_text())
-        self.assertEqual(lock["version"], "0.27.1")
-        self.assertEqual(lock["commit"], self.run_at(self.source, "git", "rev-parse", "v0.27.1").stdout.strip())
+        self.assertEqual(lock["version"], "0.30.1")
+        self.assertEqual(lock["commit"], self.run_at(self.source, "git", "rev-parse", "v0.30.1").stdout.strip())
         settings = json.loads(settings_path.read_text())
         self.assertEqual(settings["permissions"]["deny"], ["Read(./.env)"])
-        self.assertEqual(settings["extraKnownMarketplaces"]["agentic-harness"]["source"]["ref"], "v0.27.1")
+        self.assertEqual(settings["extraKnownMarketplaces"]["agentic-harness"]["source"]["ref"], "v0.30.1")
         self.assertNotIn("sha", settings["extraKnownMarketplaces"]["agentic-harness"]["source"])
         self.assertTrue(settings["enabledPlugins"]["agentic-harness@agentic-harness"])
 
     def test_pre_commit_fetches_pinned_engine_on_a_fresh_clone(self):
         self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
-        shutil.rmtree(self.work / "cache/0.27.0")
+        shutil.rmtree(self.work / "cache/0.30.0")
         self.run_at(self.project, "git", "add", "-A")
         result = self.run_at(self.project, "python3", "-B", ".githooks/pre-commit", check=False)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        cache = self.work / "cache/0.27.0"
+        cache = self.work / "cache/0.30.0"
         self.assertTrue((cache / "payload/owned/scripts/harness/lib/harness.py").is_file())
         self.assertEqual(self.run_at(cache, "git", "rev-parse", "HEAD").stdout.strip(),
                          json.loads((self.project / "backbone/.harness-lock.json").read_text())["commit"])
@@ -124,7 +124,7 @@ class ThinInstall(unittest.TestCase):
         document.parent.mkdir()
         document.write_text("project workflow\n")
         result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin",
-                             "--version", "0.27.0", check=False)
+                             "--version", "0.30.0", check=False)
         self.assertEqual(result.returncode, 2)
         self.assertEqual(document.read_text(), "project workflow\n")
         self.assertFalse((self.project / "backbone/.harness-lock.json").exists())
@@ -150,22 +150,22 @@ class ThinInstall(unittest.TestCase):
         self.assertFalse((self.project / ".github/workflows/harness-verify.yml").exists())
 
     def test_default_version_must_be_published_before_installing(self):
-        self.run_at(self.source, "git", "tag", "-d", "v0.27.0")
+        self.run_at(self.source, "git", "tag", "-d", "v0.30.0")
         result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin", check=False)
         self.assertEqual(result.returncode, 2)
-        self.assertIn("release v0.27.0 was not found", result.stderr)
+        self.assertIn("release v0.30.0 was not found", result.stderr)
         self.assertFalse((self.project / "backbone/.harness-lock.json").exists())
 
     def test_init_copies_assets_from_the_pinned_release(self):
         workflow = "payload/owned/.github/workflows/harness-verify.yml"
         (self.source / workflow).write_text("modified working tree\n")
         self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
-        expected = self.run_at(self.source, "git", "show", "v0.27.0:" + workflow).stdout
+        expected = self.run_at(self.source, "git", "show", "v0.30.0:" + workflow).stdout
         self.assertEqual((self.project / ".github/workflows/harness-verify.yml").read_text(), expected)
 
     def test_modified_engine_cache_is_rejected(self):
         self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
-        cached = self.work / "cache/0.27.0/plugin/pre-commit"
+        cached = self.work / "cache/0.30.0/plugin/pre-commit"
         cached.write_text("modified cache\n")
         other = self.work / "other-project"
         other.mkdir()
@@ -189,7 +189,7 @@ class ThinInstall(unittest.TestCase):
 
     def test_hooks_refuse_an_engine_cache_with_local_changes(self):
         self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
-        engine = self.work / "cache/0.27.0/payload/owned/scripts/harness/lib/harness.py"
+        engine = self.work / "cache/0.30.0/payload/owned/scripts/harness/lib/harness.py"
         engine.write_text("import sys\nsys.exit(0)\n" + engine.read_text())
         self.assert_hook(2, "Bash", {"command": "echo hello"}, "local changes")
         self.assert_hook(0, "Read", {"file_path": str(self.project / "CLAUDE.md")})
@@ -200,7 +200,7 @@ class ThinInstall(unittest.TestCase):
 
     def test_agents_cannot_write_the_engine_cache_or_the_plugin(self):
         self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
-        cached = self.work / "cache/0.27.0/payload/owned/scripts/harness/guardrails.core.conf"
+        cached = self.work / "cache/0.30.0/payload/owned/scripts/harness/guardrails.core.conf"
         launcher = ROOT / "plugin/launcher.py"
         for tool, tool_input in (
                 ("Write", {"file_path": str(cached), "content": ""}),
@@ -218,10 +218,10 @@ class ThinInstall(unittest.TestCase):
 
     def test_agents_cannot_move_the_pin(self):
         self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
-        engine = self.work / "cache/0.27.0/payload/owned/scripts/harness/lib/harness.py"
-        for command in ("python3 '%s' pin 0.27.1" % LAUNCHER,
-                        "python3 '%s' pin 0.27.1" % engine,
-                        "cd '%s' && python3 tools/thin.py pin 0.27.1" % ROOT):
+        engine = self.work / "cache/0.30.0/payload/owned/scripts/harness/lib/harness.py"
+        for command in ("python3 '%s' pin 0.30.1" % LAUNCHER,
+                        "python3 '%s' pin 0.30.1" % engine,
+                        "cd '%s' && python3 tools/thin.py pin 0.30.1" % ROOT):
             with self.subTest(command=command):
                 self.assert_hook(2, "Bash", {"command": command}, "pin")
         self.assert_hook(0, "Bash", {"command": "python3 '%s' doctor" % LAUNCHER})

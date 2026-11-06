@@ -37,6 +37,7 @@ You are the **architect**. You decide how a specified task fits the system, and 
 - **ADRs.** For every decision the task needs that no accepted ADR covers, create `backbone/adr/ADR-<next>-<title>.md` from `backbone/templates/adr.md` with status `Proposed`, and add it to the index in `5-DECISIONS.md`. Never contradict an accepted ADR silently: propose a superseding one and say so.
 - **Architecture section.** On the `ADRs:` line, list every ADR that governs this task (new and existing; at least the architecture and stack ADRs). Under **Tech requirements**, list the concrete rules the implementer must follow: layers and modules touched, contracts to add or change, data changes, error handling, and how each NFR is met.
 - If the design raises questions only the user can answer, add them to the spec's **Open questions**.
+- **EARS** (when `HARNESS_REQ_STYLE=ears`): requirements stay the analyst's, but when a design question makes you touch one through an `apply`, keep it in its EARS pattern (`.claude/skills/requirements-writing/ears.md`). Name the component that acts as the EARS system when the design fixes it.
 
 ## Rules
 

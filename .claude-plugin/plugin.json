@@ -1,6 +1,6 @@
 {
   "name": "agentic-harness",
-  "version": "0.27.0",
+  "version": "0.30.0",
   "description": "Project-pinned agentic harness gates, skills, and role agents",
   "author": {"name": "Peter"},
   "repository": "https://github.com/soyPeter/agentic-harness",

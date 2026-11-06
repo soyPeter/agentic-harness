@@ -2,7 +2,7 @@
 """Put a project under the agentic harness for every agent and, optionally, in Orca.
 
   enroll.sh <target> [--name NAME] [--orca] [--automation SCHEDULE] [--agents "default=claude judge=codex"]
-            [--protect] [--dry-run]
+            [--protect] [--profile triple] [--dry-run]
 
 1. Installs the harness when <target> has none, otherwise updates it (bootstrap.sh / update.sh).
 2. Runs the target's doctor and shows its errors and warnings.
@@ -12,6 +12,10 @@
    the repository on that schedule (an Orca preset, cron or RRULE). Enrolling again doesn't create a second one.
 6. --protect requires the harness checks on the default branch (`harness.py ci-protect`), when the repository has a
    GitHub remote and `gh` is installed.
+
+--profile triple sets HARNESS_PROFILE="triple" (a supervised pilot where only a human merges). Under that profile,
+from the flag, the target's harness.conf or the environment (HARNESS_PROFILE=triple, TRIPLE_MODE=1), enroll refuses
+--automation (its run merges unattended) and --protect (branch protection changes need the owner), before doing anything.
 
 --dry-run prints every action and changes nothing. enroll never pushes and never deletes.
 """
@@ -26,6 +30,7 @@ from pathlib import Path
 HARNESS = Path(__file__).resolve().parent.parent
 LOCK = "backbone/.harness-lock.json"
 CONF = "backbone/harness.conf"
+PROFILES = ("triple",)
 # Orca 1.4 runs "repo-defined setup hooks" on each new worktree, but its CLI has no command to set one (repo set only
 # changes worktree visibility; project setup-update only the setup policy). So enroll prints the step instead.
 SETUP_HINT = ("Orca has no CLI to set a repository's setup hook. In Orca's settings for this repository, set the "
@@ -125,6 +130,36 @@ def set_agents(target, agents, dry_run):
     say("agents", "%s in %s (user-only: commit it yourself, HARNESS_VERIFY=off git commit ...)" % (line, CONF))
 
 
+def target_profile(target, requested):
+    """The profile in force: the flag, the target's harness.conf or the environment; the environment can't lift one."""
+    names = {requested or "", os.environ.get("HARNESS_PROFILE", "")}
+    m = re.search(r'(?m)^\s*HARNESS_PROFILE\s*=\s*"?([A-Za-z0-9_-]*)"?\s*$',
+                  (target / CONF).read_text(encoding="utf-8") if (target / CONF).exists() else "")
+    names.add(m.group(1) if m else "")
+    if os.environ.get("TRIPLE_MODE") == "1":
+        names.add("triple")
+    return next((name for name in PROFILES if name in names), "")
+
+
+def set_profile(target, name, dry_run):
+    path = target / CONF
+    if not path.exists():
+        say("profile", "skipped: no %s yet (dry run?)" % CONF)
+        return
+    text = path.read_text(encoding="utf-8")
+    line = 'HARNESS_PROFILE="%s"' % name
+    if re.search(r"(?m)^#?\s*HARNESS_PROFILE=", text):
+        new = re.sub(r"(?m)^#?\s*HARNESS_PROFILE=.*$", line, text, count=1)
+    else:
+        new = text.rstrip("\n") + "\n\n# Organisation profile (set by enroll).\n" + line + "\n"
+    if new == text:
+        say("profile", "already %s" % line)
+        return
+    if not dry_run:
+        path.write_text(new, encoding="utf-8")
+    say("profile", "%s in %s (user-only: commit it yourself, HARNESS_VERIFY=off git commit ...)" % (line, CONF))
+
+
 def register_in_orca(target, dry_run):
     if dry_run:
         say("orca", "would register %s" % target)
@@ -208,11 +243,23 @@ def main(argv):
     if value("--automation") and "--orca" not in args:
         sys.stderr.write("enroll: --automation needs --orca\n")
         return 64
+    requested = value("--profile")
+    if requested and requested not in PROFILES:
+        sys.stderr.write("enroll: unknown --profile %s (known: %s)\n" % (requested, ", ".join(PROFILES)))
+        return 64
+    name = target_profile(target, requested)
+    refused = [flag for flag in ("--automation", "--protect") if flag in args] if name else []
+    if refused:
+        sys.stderr.write("enroll: %s refused under HARNESS_PROFILE=%s: only a human merges and changes branch "
+                         "protection; nothing was changed\n" % (" and ".join(refused), name))
+        return 2
     project = value("--name") or target.name
     print("Enrolling %s%s" % (target, " (dry run)" if dry_run else ""))
     code = install_or_update(target, value("--name"), dry_run)
     if value("--agents"):
         set_agents(target, value("--agents"), dry_run)
+    if requested:
+        set_profile(target, requested, dry_run)
     health = doctor(target, dry_run)
     if "--orca" in args:
         register_in_orca(target, dry_run)
