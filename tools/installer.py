@@ -199,13 +199,13 @@ CONF_REL = "backbone/harness.conf"
 CONF_KEY = re.compile(r"^\s*#?\s*([A-Z][A-Z0-9_]*)=")
 
 
-def migrate_conf(plan, context):
+def migrate_conf(plan, context, seed=SEED):
     """Append settings the template has and the project's harness.conf lacks, commented out.
 
     harness.conf is project-owned, so update never rewrites it. New keys arrive commented out, with the
     template's explanation: nothing changes until the user uncomments one (user-only keys: as the user)."""
     path = plan.target / CONF_REL
-    template_path = SEED / CONF_REL
+    template_path = seed / CONF_REL
     if not path.exists() or not template_path.exists():
         return
     current = path.read_text(encoding="utf-8")
@@ -272,6 +272,24 @@ def add_harness_settings(settings, fragment_path=SETTINGS_FRAGMENT):
     for rule in fragment["permissions"]["allow"]:
         if rule not in allow:
             allow.append(rule)
+    return settings
+
+
+def drop_harness_settings(settings, fragment_path=SETTINGS_FRAGMENT):
+    """Take out what add_harness_settings puts in: the harness's hook entries and the fragment's permission rules, and
+    the objects they leave empty. A rule of the user's own that is also the fragment's goes too: nothing tells them
+    apart."""
+    fragment = json.loads(fragment_path.read_text(encoding="utf-8"))
+    if not drop_harness_hooks(settings):
+        del settings["hooks"]
+    permissions = settings.get("permissions")
+    allow = permissions.get("allow") if isinstance(permissions, dict) else None
+    if isinstance(allow, list):
+        allow[:] = [rule for rule in allow if rule not in fragment["permissions"]["allow"]]
+        if not allow:
+            del permissions["allow"]
+        if not permissions:
+            del settings["permissions"]
     return settings
 
 

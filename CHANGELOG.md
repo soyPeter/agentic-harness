@@ -41,11 +41,17 @@
 - **`update.sh --to-thin` and `--to-full` switch an installed project between the full install and thin mode.**
   `--to-thin` pins the installed release (or `--version`), deletes each harness file you haven't edited, Codex's and
   OpenCode's included, and keeps an edited one as `<file>.harness-bak`; `backbone/`, `CLAUDE.md` and adopted packs'
-  files stay. It adds the pre-commit shim, `core.hooksPath=.githooks` and the plugin entries, and takes the
-  harness's hooks out of `.claude/settings.json`. `--to-full` installs the pinned release's files as `update.sh`
-  would and takes those out again. Both refuse a working tree with uncommitted changes, check everything before they
-  write, and change nothing when run again; switching there and back gives the same files. The README has a Thin
-  mode section: the plugin for each CLI, `init --thin`, `pin`, switching, CI, the plugin/pin rule and the limits.
+  files stay. The pin keeps the install date and the hashes the full install recorded for the harness's files that
+  stay (`"kept"`; `init --thin` now records them for the documents it writes). It adds the pre-commit shim,
+  `core.hooksPath=.githooks` and the plugin entries, and takes the harness's hooks and permission rules out of
+  `.claude/settings.json`. `--to-full` installs the pinned release's files as `update.sh` would, also after the pin
+  moved: a file you haven't edited becomes the release's copy, and an edited one is kept, with the release's copy in
+  `<file>.harness-new` when the release changed it too. It appends new `harness.conf` settings, commented out, and
+  takes the shim and the plugin entries out again. Both refuse a working tree with uncommitted changes, check
+  everything before they write, undo their changes when a write fails part way, and change nothing when run again.
+  Switching there and back without moving the pin gives back the install, except that an edited file outside
+  `backbone/` becomes the release's copy with the edit kept in `<file>.harness-bak`. The README has a Thin mode
+  section: the plugin for each CLI, `init --thin`, `pin`, switching, CI, the plugin/pin rule and the limits.
 - Tests go through the harness's public commands and hooks only: the checks that grepped agent files for hook names
   now run those hooks, and the ones that imported `harness.py` to call its functions now use `approve`,
   `orca --dry-run`, `orca-digest`, `orca-nightly` and a real, held `orca` run.

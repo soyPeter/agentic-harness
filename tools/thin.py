@@ -3,6 +3,7 @@
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -169,6 +170,8 @@ def init(version, name):
     backbone = release / "payload/owned/backbone"
     files = {}
     project_files = set()
+    # What a later update.sh --to-full compares the harness documents with, to tell edited ones apart.
+    harness_docs = {}
     for base in (seeds, backbone):
         for path in sorted(base.rglob("*")):
             if not path.is_file():
@@ -189,6 +192,8 @@ def init(version, name):
                         "Shared project rules belong in backbone/; the plugin supplies agent rules.")
                 content = text.encode("utf-8")
             files[rel] = content
+            if base == backbone:
+                harness_docs[rel.as_posix()] = hashlib.sha256(content).hexdigest()
     workflow = Path(".github/workflows/harness-verify.yml")
     files[workflow] = (release / "payload/owned" / workflow).read_bytes()
     shim = release / "plugin/pre-commit"
@@ -203,7 +208,8 @@ def init(version, name):
             write_new(root, rel, content, executable=rel == Path(".githooks/pre-commit"))
     (root / ".claude").mkdir(exist_ok=True)
     (root / ".claude/settings.json").write_text(settings)
-    (root / LOCK).write_text(json.dumps({"mode": "thin", "version": version, "commit": commit}, indent=2) + "\n")
+    (root / LOCK).write_text(json.dumps({"mode": "thin", "version": version, "commit": commit, "kept": harness_docs},
+                                        indent=2) + "\n")
     git("config", "core.hooksPath", ".githooks", cwd=root)
     print("Installed thin agentic harness v%s (%s) in %s" % (version, commit, root))
     if kept:

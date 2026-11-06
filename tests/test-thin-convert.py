@@ -27,6 +27,10 @@ WORKFLOW = ".github/workflows/harness-verify.yml"
 SHIM = ".githooks/pre-commit"
 PLUGIN = "agentic-harness@agentic-harness"
 FULL_HOOKS = "scripts/harness/git-hooks"
+INSTALLED = "2026-01-02"
+PACK_FILE = ".claude/skills/containers/SKILL.md"
+PACK_DOC = ".claude/skills/containers/image-building.md"
+LATER_SETTING = '# HARNESS_LATER_SETTING="off"'
 USER_SETTINGS = {"model": "opus", "permissions": {"deny": ["Read(./.env)"]},
                  "hooks": {"PreToolUse": [{"matcher": "Read", "hooks": [{"type": "command",
                                                                          "command": "echo custom-hook"}]}]}}
@@ -70,6 +74,14 @@ def content(path):
     return path.read_bytes() if path.is_file() else None
 
 
+def plugin_entries(version):
+    """What thin mode adds to .claude/settings.json for release v<version>."""
+    return {"extraKnownMarketplaces": {"agentic-harness": {"source": {"source": "github",
+                                                                      "repo": "soyPeter/agentic-harness",
+                                                                      "ref": "v" + version}}},
+            "enabledPlugins": {PLUGIN: True}}
+
+
 def run(cwd, env, *args, check=True, input=None):
     result = subprocess.run([str(a) for a in args], cwd=str(cwd), env=env, capture_output=True, text=True,
                             input=input, stdin=subprocess.DEVNULL if input is None else None)
@@ -88,7 +100,8 @@ def set_release_version(source, version):
 
 
 def build_source(source, env):
-    """Releases v0.26.1 (before thin mode), v<VERSION> (this checkout) and v99.0.0 (a later one)."""
+    """Releases v0.26.1 (before thin mode), v<VERSION> (this checkout) and v99.0.0, a later one that changes a harness
+    file, a backbone document, two of the container pack's files, the shim, the settings fragment and harness.conf."""
     source.mkdir()
     run(source, env, "git", "init", "-q", "-b", "main")
     shutil.copytree(ROOT / "payload", source / "payload")
@@ -105,9 +118,12 @@ def build_source(source, env):
     run(source, env, "git", "commit", "-qm", "release")
     run(source, env, "git", "tag", "v" + VERSION)
     set_release_version(source, "99.0.0")
-    for name in ("payload/owned/AGENTS.md", "plugin/pre-commit"):
+    for name in ("payload/owned/AGENTS.md", "payload/owned/backbone/8-WORKFLOW.md", "plugin/pre-commit",
+                 "catalog/container/install/" + PACK_FILE, "catalog/container/install/" + PACK_DOC):
         with open(str(source / name), "a") as handle:
             handle.write("# 99.0.0\n")
+    with open(str(source / "payload/seed/backbone/harness.conf"), "a") as handle:
+        handle.write('\n# A setting new in 99.0.0.\nHARNESS_LATER_SETTING="off"\n')
     fragment = json.loads((source / "payload/settings.fragment.json").read_text())
     fragment["permissions"]["allow"].append("Bash(make test)")
     (source / "payload/settings.fragment.json").write_text(json.dumps(fragment, indent=2) + "\n")
@@ -115,12 +131,18 @@ def build_source(source, env):
     run(source, env, "git", "tag", "v99.0.0")
 
 
-def install_full(project, env):
+def install_full(project, env, settings=USER_SETTINGS):
+    """A committed full install of this checkout over the user's settings (None: no settings file), installed on
+    INSTALLED."""
     project.mkdir()
     run(project, env, "git", "init", "-q", "-b", "main")
-    (project / ".claude").mkdir()
-    (project / ".claude/settings.json").write_text(json.dumps(USER_SETTINGS, indent=2) + "\n")
+    if settings is not None:
+        (project / ".claude").mkdir()
+        (project / ".claude/settings.json").write_text(json.dumps(settings, indent=2) + "\n")
     run(project, env, ROOT / "bootstrap.sh", project, "--name", "demo")
+    lock = json.loads((project / LOCK).read_text())
+    lock["installed"] = INSTALLED
+    (project / LOCK).write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n")
     run(project, env, "git", "add", "-A")
     run(project, env, "git", "commit", "-qm", "chore: adopt agentic harness")
 
@@ -199,25 +221,51 @@ class Fixture(unittest.TestCase):
         return sorted(item.relative_to(project).as_posix() for item in project.rglob("*")
                       if item.is_dir() and ".git" not in item.relative_to(project).parts and not any(item.iterdir()))
 
+    def edit(self, *names, project=None):
+        """Append a local edit to each file; returns their edited contents."""
+        project = project or self.project
+        for name in names:
+            with open(str(project / name), "a") as handle:
+                handle.write("# local edit\n")
+        return {name: (project / name).read_bytes() for name in names}
+
+    def init_thin(self, name="thin"):
+        """A committed project that init --thin installed."""
+        project = self.work / name
+        project.mkdir()
+        self.git("init", "-q", "-b", "main", project=project)
+        self.run_at(project, "python3", "-B", LAUNCHER, "init", "--thin", "--name", "demo")
+        self.commit("chore: adopt agentic harness", project=project)
+        return project
+
+    def adopt_container(self, project=None):
+        project = project or self.project
+        (project / "backbone/adr/ADR-002-containers.md").write_text(ADR)
+        self.run_at(project, "python3", "-B", LAUNCHER, "adopt", "container", "--adr", "ADR-002", "--with", "podman")
+        return self.commit("chore: adopt the container pack", hooks=False, project=project)
+
+    def locally_edited(self, project=None):
+        """The harness files update.sh status reports as edited locally."""
+        status = self.update("status", project or self.project, project=project).stdout
+        return sorted(line.split()[-1] for line in status.splitlines() if line.split()[:2] == ["edited", "locally"])
+
 
 class Conversion(Fixture):
     def test_switching_to_thin_and_back_gives_back_the_full_install(self):
         installed = self.git("rev-parse", "HEAD").stdout.strip()
+        harness_docs = {name: digest for name, digest in self.lock()["files"].items() if name.startswith("backbone/")}
         result = self.update("--to-thin", self.project)
         self.assertIn("thin mode", result.stdout)
         for name in ("AGENTS.md", "scripts/harness", ".claude/agents", ".claude/skills", ".codex", ".opencode",
                      ".devcontainer"):
             self.assertFalse((self.project / name).exists(), name)
-        self.assertEqual(self.lock(), {"mode": "thin", "version": VERSION, "commit": self.tag_commit(VERSION)})
+        self.assertEqual(self.lock(), {"mode": "thin", "version": VERSION, "commit": self.tag_commit(VERSION),
+                                       "installed": INSTALLED, "kept": harness_docs})
         self.assertEqual((self.project / SHIM).read_bytes(), self.release("plugin/pre-commit"))
         self.assertTrue(os.access(str(self.project / SHIM), os.X_OK))
         self.assertEqual(self.hooks_path(), ".githooks")
-        settings = json.loads((self.project / ".claude/settings.json").read_text())
-        self.assertTrue(settings["enabledPlugins"][PLUGIN])
-        self.assertEqual(settings["extraKnownMarketplaces"]["agentic-harness"]["source"]["ref"], "v" + VERSION)
-        self.assertNotIn("scripts/harness/", json.dumps(settings["hooks"]))
-        self.assertIn("echo custom-hook", json.dumps(settings["hooks"]))
-        self.assertEqual((settings["model"], settings["permissions"]["deny"]), ("opus", ["Read(./.env)"]))
+        self.assertEqual(json.loads((self.project / ".claude/settings.json").read_text()),
+                         dict(USER_SETTINGS, **plugin_entries(VERSION)))
         self.assertEqual(self.git("status", "--porcelain", "--", "backbone", "CLAUDE.md", ".github").stdout,
                          " M %s\n" % LOCK)
         self.assertEqual(self.empty_folders(), [])
@@ -231,7 +279,6 @@ class Conversion(Fixture):
         self.assertEqual(self.git("diff", "--cached", "--stat", installed, "--", ".", ":(exclude)" + LOCK).stdout, "")
         restored, original = self.lock(), json.loads(self.git("show", "%s:%s" % (installed, LOCK)).stdout)
         for lock in (restored, original):
-            lock.pop("installed")
             lock.pop("updated")
         self.assertEqual(restored, original)
         self.assertEqual(self.hooks_path(), FULL_HOOKS)
@@ -298,17 +345,16 @@ class Conversion(Fixture):
         self.assertFalse((self.project / "backbone/8-WORKFLOW.md.harness-bak").exists())
         self.commit("chore: switch the agentic harness to thin mode")
 
-        result = self.update("--to-full", self.project, check=False)
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("CONFLICT  backbone/8-WORKFLOW.md", result.stdout)
+        result = self.update("--to-full", self.project)
+        self.assertIn("keep      backbone/8-WORKFLOW.md", result.stdout)
         self.assertEqual((self.project / "backbone/8-WORKFLOW.md").read_bytes(), edited["backbone/8-WORKFLOW.md"])
-        self.assertEqual((self.project / "backbone/8-WORKFLOW.md.harness-new").read_bytes(),
-                         self.release("payload/owned/backbone/8-WORKFLOW.md"))
+        self.assertFalse((self.project / "backbone/8-WORKFLOW.md.harness-new").exists())
         for name in edits + (WORKFLOW,):
             with self.subTest(name=name):
                 self.assertEqual((self.project / name).read_bytes(), self.release("payload/owned/" + name))
                 self.assertEqual((self.project / (name + ".harness-bak")).read_bytes(), edited[name])
         self.assertEqual(self.lock()["harness_version"], VERSION)
+        self.assertEqual(self.locally_edited(), ["backbone/8-WORKFLOW.md"])
 
     def test_running_a_conversion_again_changes_nothing(self):
         self.update("--to-thin", self.project)
@@ -331,11 +377,7 @@ class Conversion(Fixture):
         self.assertEqual(self.snapshot(), before)
 
     def test_a_project_installed_in_thin_mode_switches_to_full(self):
-        project = self.work / "thin"
-        project.mkdir()
-        self.git("init", "-q", "-b", "main", project=project)
-        self.run_at(project, "python3", "-B", LAUNCHER, "init", "--thin", "--name", "demo")
-        self.commit("chore: adopt agentic harness", project=project)
+        project = self.init_thin()
         result = self.update("--to-full", project, project=project)
         self.assertIn("full install", result.stdout)
         lock = self.lock(project)
@@ -355,11 +397,25 @@ class Conversion(Fixture):
         for state in ("missing", "edited locally", "update available", "new upstream"):
             self.assertNotIn(state, status)
 
+    def test_a_project_installed_in_thin_mode_switches_to_full_after_the_pin_moved(self):
+        project = self.init_thin()
+        self.adopt_container(project)
+        edited = self.edit("backbone/HOOKS.md", project=project)
+        self.commit("chore: a local harness edit", hooks=False, project=project)
+        self.run_at(project, "python3", "-B", LAUNCHER, "pin", "99.0.0")
+        # Without hooks: once adopt has put files in a thin lock, verify refuses settings changes (a known bug).
+        self.commit("chore: pin the agentic harness to 99.0.0", hooks=False, project=project)
+        result = self.update("--to-full", project, project=project)
+        for line in ("update    backbone/8-WORKFLOW.md", "update    " + PACK_FILE, "keep      backbone/HOOKS.md"):
+            self.assertIn(line, result.stdout)
+        for name, source in (("backbone/8-WORKFLOW.md", "payload/owned/backbone/8-WORKFLOW.md"),
+                             (PACK_FILE, "catalog/container/install/" + PACK_FILE)):
+            self.assertEqual((project / name).read_bytes(), self.release(source, "99.0.0"), name)
+        self.assertEqual((project / "backbone/HOOKS.md").read_bytes(), edited["backbone/HOOKS.md"])
+        self.assertEqual(self.locally_edited(project), ["backbone/HOOKS.md"])
+
     def test_adopted_packs_stay_in_the_project(self):
-        (self.project / "backbone/adr/ADR-002-containers.md").write_text(ADR)
-        self.run_at(self.project, "python3", "-B", "scripts/harness/lib/harness.py", "adopt", "container", "--adr",
-                    "ADR-002", "--with", "podman")
-        installed = self.commit("chore: adopt the container pack", hooks=False)
+        installed = self.adopt_container()
         packed = [name for name in self.lock()["adopted"]["container"]["files"]]
         self.assertTrue(packed)
         self.update("--to-thin", self.project)
@@ -378,17 +434,73 @@ class Conversion(Fixture):
 
     def test_another_release_can_be_pinned_while_switching(self):
         self.update("--to-thin", self.project, "--version", "99.0.0")
-        self.assertEqual(self.lock(), {"mode": "thin", "version": "99.0.0", "commit": self.tag_commit("99.0.0")})
+        self.assertEqual({key: self.lock()[key] for key in ("mode", "version", "commit")},
+                         {"mode": "thin", "version": "99.0.0", "commit": self.tag_commit("99.0.0")})
         settings = json.loads((self.project / ".claude/settings.json").read_text())
         self.assertEqual(settings["extraKnownMarketplaces"]["agentic-harness"]["source"]["ref"], "v99.0.0")
         self.assertEqual((self.project / SHIM).read_bytes(), self.release("plugin/pre-commit", "99.0.0"))
         self.commit("chore: switch the agentic harness to thin mode")
         self.update("--to-full", self.project)
         self.assertEqual(self.lock()["harness_version"], "99.0.0")
-        self.assertEqual((self.project / "AGENTS.md").read_bytes(), self.release("payload/owned/AGENTS.md", "99.0.0"))
+        for name in ("AGENTS.md", "backbone/8-WORKFLOW.md"):
+            self.assertEqual((self.project / name).read_bytes(), self.release("payload/owned/" + name, "99.0.0"))
         self.assertIn("Bash(make test)", json.loads((self.project / ".claude/settings.json").read_text())[
             "permissions"]["allow"])
+        self.assertIn(LATER_SETTING, (self.project / "backbone/harness.conf").read_text())
         self.assertFalse((self.project / ".githooks").exists())
+
+    def test_switching_back_after_the_pin_moved_works_like_update_sh(self):
+        """Release 99.0.0 changes AGENTS.md, backbone/8-WORKFLOW.md and two of the container pack's files."""
+        self.adopt_container()
+        edited = self.edit(PACK_DOC, "backbone/HOOKS.md")
+        self.commit("chore: local harness edits", hooks=False)
+        self.update("--to-thin", self.project)
+        self.commit("chore: switch the agentic harness to thin mode")
+        self.run_at(self.project, "python3", "-B", LAUNCHER, "pin", "99.0.0")
+        self.commit("chore: pin the agentic harness to 99.0.0")
+        edited.update(self.edit(WORKFLOW))
+        self.commit("chore: a local edit to the CI check", hooks=False)
+
+        result = self.update("--to-full", self.project, check=False)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        for line in ("update    backbone/8-WORKFLOW.md", "update    " + PACK_FILE, "keep      backbone/HOOKS.md",
+                     "keep      " + WORKFLOW, "CONFLICT  " + PACK_DOC):
+            self.assertIn(line, result.stdout)
+        for name, source in (("AGENTS.md", "payload/owned/AGENTS.md"),
+                             ("backbone/8-WORKFLOW.md", "payload/owned/backbone/8-WORKFLOW.md"),
+                             (PACK_FILE, "catalog/container/install/" + PACK_FILE),
+                             (PACK_DOC + ".harness-new", "catalog/container/install/" + PACK_DOC)):
+            self.assertEqual((self.project / name).read_bytes(), self.release(source, "99.0.0"), name)
+        for name, data in edited.items():
+            self.assertEqual((self.project / name).read_bytes(), data, name)
+        self.assertEqual(sorted(path.relative_to(self.project).as_posix()
+                                for path in self.project.rglob("*.harness-new")), [PACK_DOC + ".harness-new"])
+        self.assertIn(LATER_SETTING, (self.project / "backbone/harness.conf").read_text())
+        self.assertEqual((self.lock()["harness_version"], self.lock()["installed"]), ("99.0.0", INSTALLED))
+        self.assertEqual(self.locally_edited(), sorted(edited))
+
+    def test_switching_there_and_back_twice_ends_where_it_started(self):
+        self.edit("AGENTS.md", "backbone/8-WORKFLOW.md")
+        self.commit("chore: local harness edits", hooks=False)
+        states = []
+        for direction in ("--to-thin", "--to-full", "--to-thin", "--to-full"):
+            result = self.update(direction, self.project)
+            self.assertNotIn("CONFLICT", result.stdout)
+            self.commit("chore: switch the agentic harness (%s)" % direction)
+            files, hooks, _ = self.snapshot()
+            states.append((files, hooks, self.lock()))
+        self.assertEqual(states[2], states[0])
+        self.assertEqual(states[3], states[1])
+
+    def test_the_switch_takes_out_only_what_the_harness_added_to_the_settings(self):
+        project = self.work / "no settings"
+        install_full(project, self.env, settings=None)
+        installed = (project / ".claude/settings.json").read_bytes()
+        self.update("--to-thin", project, project=project)
+        self.assertEqual(json.loads((project / ".claude/settings.json").read_text()), plugin_entries(VERSION))
+        self.commit("chore: switch the agentic harness to thin mode", project=project)
+        self.update("--to-full", project, project=project)
+        self.assertEqual((project / ".claude/settings.json").read_bytes(), installed)
 
     def test_thin_commands_on_a_full_install_point_at_the_switch(self):
         before = self.snapshot()
@@ -535,6 +647,10 @@ class Refusals(Fixture):
             ("a pin whose commit is not the release's", commit_after(pin(commit="0" * 40)), (), "the project pins"),
             ("a pin with no valid version", commit_after(pin(version="../x")), (), "no valid version"),
             ("a pin with no valid commit", commit_after(pin(commit="v" + VERSION)), (), "without a valid commit"),
+            ("a lock keeping a file outside the project", commit_after(pin(kept={"../outside.txt": "0" * 64})), (),
+             "outside the project"),
+            ("a lock whose kept files aren't a table", commit_after(pin(kept=["backbone/8-WORKFLOW.md"])), (),
+             "is corrupt"),
             ("settings that are not JSON",
              commit_after(lambda project: (project / ".claude/settings.json").write_text("{")), (),
              ".claude/settings.json"),
@@ -558,10 +674,51 @@ class Refusals(Fixture):
         self.assertEqual(self.snapshot(project), before)
 
 
+class Failures(Fixture):
+    """A switch that fails part way, here because a write fails, undoes its changes: the project is as it was, and the
+    same switch succeeds once the cause is gone."""
+
+    def test_a_switch_that_fails_part_way_is_undone(self):
+        if os.geteuid() == 0:
+            self.skipTest("root writes read-only files")
+        full = self.copy_of(self.template, "full")
+        self.edit("AGENTS.md", project=full)
+        self.commit("chore: a local harness edit", hooks=False, project=full)
+        thin = self.copy_of(full, "thin")
+        self.update("--to-thin", thin, project=thin)
+        (thin / "backbone/HOOKS.md").chmod(0o755)  # the switch back gives it the release's mode
+        self.commit("chore: switch the agentic harness to thin mode", project=thin)
+
+        def read_only_lock(project):
+            (project / LOCK).chmod(0o444)
+            return lambda: (project / LOCK).chmod(0o644)
+
+        def locked_git_config(project):
+            (project / ".git/config.lock").write_text("")
+            return (project / ".git/config.lock").unlink
+
+        for template, direction in ((full, "--to-thin"), (thin, "--to-full")):
+            for number, (case, prepare) in enumerate((("the lock can't be written", read_only_lock),
+                                                       ("git config is locked", locked_git_config))):
+                with self.subTest(direction=direction, case=case):
+                    project = self.copy_of(template, "%s %d" % (direction, number))
+                    before = self.snapshot(project)
+                    remove_cause = prepare(project)
+                    try:
+                        result = self.update(direction, project, check=False, project=project)
+                    finally:
+                        remove_cause()
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertIn("undid its changes", result.stderr)
+                    self.assertEqual(self.snapshot(project), before)
+                    self.update(direction, project, project=project)
+
+
 class Properties(Fixture):
     """For any set of harness files the user edited: the switch to thin mode keeps exactly those, as backups, and
     removes the rest, but leaves backbone/ as it is; the switch back restores every harness file and keeps the
-    backups, and only edited backbone documents conflict."""
+    backups, keeps each edited backbone document without a conflict (the release didn't change), and update.sh status
+    reports exactly those documents as edited."""
 
     @classmethod
     def setUpClass(cls):
@@ -584,10 +741,7 @@ class Properties(Fixture):
 
     def check_round_trip(self, project, edits):
         original = {name: (project / name).read_bytes() for name in self.owned}
-        for name in edits:
-            with open(str(project / name), "a") as handle:
-                handle.write("# local edit\n")
-        edited = {name: (project / name).read_bytes() for name in edits}
+        edited = self.edit(*sorted(edits), project=project)
         self.commit("chore: local harness edits", hooks=False, project=project)
         self.update("--to-thin", project, project=project)
         for name in self.owned:
@@ -605,16 +759,16 @@ class Properties(Fixture):
         self.assertEqual(self.snapshot(project), converted)
         self.commit("chore: switch the agentic harness to thin mode", project=project)
 
-        conflicts = {name for name in edits if name.startswith("backbone/")}
         result = self.update("--to-full", project, check=False, project=project)
-        self.assertEqual(result.returncode, 1 if conflicts else 0, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        kept = sorted(name for name in edits if name.startswith("backbone/"))
         for name in self.owned:
-            in_conflict = name in conflicts
-            self.assertEqual(content(project / name), edited[name] if in_conflict else original[name], name)
-            self.assertEqual(content(project / (name + ".harness-new")), original[name] if in_conflict else None, name)
+            self.assertEqual(content(project / name), edited[name] if name in kept else original[name], name)
+            self.assertIsNone(content(project / (name + ".harness-new")), name)
             self.assertEqual(content(project / (name + ".harness-bak")),
                              None if name.startswith("backbone/") else edited.get(name), name)
         self.assertEqual(self.hooks_path(project), FULL_HOOKS)
+        self.assertEqual(self.locally_edited(project), kept)
 
 
 if __name__ == "__main__":

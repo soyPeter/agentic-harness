@@ -144,15 +144,20 @@ and `harness-verify.yml` to that release. The upgrade is then one reviewed chang
 ./update.sh --to-full /path/to/repo [--force] [--dry-run]             # thin mode -> full install
 ```
 
-- Both need a clean working tree, check everything before they write, and change nothing in a project that is
-  already switched.
+- Both need a clean working tree and check everything before they write. If a write fails part way (permissions, a
+  full disk), they undo their changes. On a project that is already switched, they change nothing.
 - `--to-thin` pins the installed release, or `--version`. It deletes each harness file you haven't edited and keeps
-  an edited one as `<file>.harness-bak`. `backbone/`, `CLAUDE.md` and adopted packs' files stay as they are. It adds
-  the shim, `core.hooksPath=.githooks` and the plugin entries, and takes the harness's hooks out of
-  `.claude/settings.json`. If another hook manager owns `core.hooksPath`, it refuses unless `--force-hooks-path`.
-- `--to-full` installs the pinned release's files as `update.sh` would: a file that differs is kept, with the
-  release's copy in `<file>.harness-new`, or replaced with `--force` (keeping `<file>.harness-bak`). It takes the shim
-  and the plugin entries out again.
+  an edited one as `<file>.harness-bak`. `backbone/`, `CLAUDE.md` and adopted packs' files stay as they are. The pin
+  keeps the hashes the full install recorded for the harness's files among them (`"kept"`) and the install date. It
+  adds the shim, `core.hooksPath=.githooks` and the plugin entries, and takes the harness's hooks and permission rules
+  out of `.claude/settings.json` (a rule of yours that the harness also adds goes with them, and comes back with
+  `--to-full`). If another hook manager owns `core.hooksPath`, it refuses unless `--force-hooks-path`.
+- `--to-full` installs the pinned release's files as `update.sh` would, with the kept hashes telling your edits apart,
+  including after the pin moved: a file you haven't edited becomes the release's copy; an edited one is kept, and if
+  the release changed it too, its copy goes to `<file>.harness-new` (exit code 1), or `--force` replaces it (keeping
+  `<file>.harness-bak`). New `harness.conf` settings are appended, commented out. It takes the shim and the plugin
+  entries out again. It uses the installer of the checkout you run it from, with the pinned release's files: run it
+  from a checkout of that release or a later one.
 - Commit the switch. Its pull request needs the `harness-change-approved` label, like any harness change. After
   `--to-full`, the pre-push hook refuses it, so push with `HARNESS_VERIFY=off git push`.
 

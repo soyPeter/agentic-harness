@@ -5,12 +5,15 @@
   update.sh --to-full <target> [--force] [--force-hooks-path] [--dry-run]
 
 --to-thin deletes the vendored harness files nobody edited and keeps edited ones as <file>.harness-bak; backbone/ and
-the adopted packs' files stay. It pins the installed release (or --version) and adds what thin mode runs from: the
-pre-commit shim, core.hooksPath=.githooks and the plugin entries in .claude/settings.json.
---to-full vendors the pinned release again, as update.sh would, and takes those out.
+the adopted packs' files stay, and the pin keeps the hashes the full install recorded for them ("kept"). It pins the
+installed release (or --version) and adds what thin mode runs from: the pre-commit shim, core.hooksPath=.githooks and
+the plugin entries in .claude/settings.json, whose harness hooks and permission rules it takes out.
+--to-full vendors the pinned release again as update.sh would, telling edited files apart by those hashes, and takes
+out what thin mode added.
 
 Both refuse a working tree with uncommitted changes, so the switch is one change to review or revert. They check
-everything before writing, and change nothing in a project that is already switched.
+everything before writing, undo their changes when a write fails part way, and change nothing in a project that is
+already switched.
 """
 import argparse
 import datetime
@@ -18,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 
 sys.dont_write_bytecode = True
@@ -34,6 +38,83 @@ AGENTS_IMPORT = re.compile(r"^@AGENTS\.md[ \t]*$", re.M)
 LABEL = "Its pull request needs the harness-change-approved label: harness-verify refuses changes to the harness itself."
 
 
+class Switch(installer.Plan):
+    """A plan that saves each file as it was before changing it, so a switch that fails part way can be undone."""
+
+    def __init__(self, target, dry_run):
+        super().__init__(target, dry_run)
+        self.hooks = hooks_path(target)
+        self.saved = {}
+        self.created = []
+
+    def save(self, name):
+        path = self.target / name
+        if self.dry_run or name in self.saved:
+            return
+        self.saved[name] = (path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) if path.is_file() else None
+        folder = path.parent
+        while not folder.exists():
+            self.created.append(folder)
+            folder = folder.parent
+
+    def write(self, rel_path, data, mode_from=None):
+        self.save(rel_path)
+        super().write(rel_path, data, mode_from)
+
+    def remove(self, rel_path):
+        self.save(rel_path)
+        super().remove(rel_path)
+
+    def move(self, rel_path, dest):
+        self.save(rel_path)
+        self.save(dest)
+        if not self.dry_run:
+            os.replace(str(self.target / rel_path), str(self.target / dest))
+
+    def undo(self):
+        for name, before in reversed(list(self.saved.items())):
+            path = self.target / name
+            if before is None:
+                if path.is_file():
+                    path.unlink()
+                continue
+            data, mode = before
+            if not path.is_file() or path.read_bytes() != data:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+            if stat.S_IMODE(path.stat().st_mode) != mode:
+                path.chmod(mode)
+        for folder in sorted(self.created, key=lambda f: len(f.parts), reverse=True):
+            if folder.is_dir() and not any(folder.iterdir()):
+                folder.rmdir()
+        if hooks_path(self.target) != self.hooks:
+            installer.run_git(self.target, *hooks_path_setting(self.hooks), check=True)
+
+
+def carry_out(plan, change):
+    """change(), the writes of a switch; if it fails part way, plan's changes are undone."""
+    if plan.dry_run:
+        return change()
+    try:
+        return change()
+    except BaseException as exc:
+        cause = str(exc) or type(exc).__name__
+        try:
+            plan.undo()
+        except Exception as again:
+            raise InstallError("%s. The switch stopped there, and undoing its changes failed too (%s). The working "
+                               "tree was clean before it: git checkout -- . && git clean -fd && git %s puts it back"
+                               % (cause, again, " ".join(hooks_path_setting(plan.hooks))))
+        if isinstance(exc, (OSError, InstallError)):
+            raise InstallError("%s. The switch stopped there and undid its changes; fix that and re-run" % cause)
+        raise
+
+
+def hooks_path_setting(value):
+    """The git arguments that set core.hooksPath back to value ("" = unset)."""
+    return ("config", "core.hooksPath", value) if value else ("config", "--unset", "core.hooksPath")
+
+
 def installed_lock(target):
     if not target.is_dir():
         raise InstallError("target %s does not exist" % target)
@@ -45,10 +126,10 @@ def installed_lock(target):
     lock = installer.read_lock(target)
     if lock is None:
         raise InstallError("no harness installed in %s (bootstrap.sh installs it, init --thin in thin mode)" % target)
-    if not (isinstance(lock, dict) and isinstance(lock.get("files", {}), dict)
-            and isinstance(lock.get("adopted", {}), dict)):
+    if not (isinstance(lock, dict)
+            and all(isinstance(lock.get(key, {}), dict) for key in ("files", "kept", "adopted"))):
         raise InstallError("%s is corrupt; restore it from git" % LOCK_REL)
-    named = list(lock.get("files", {})) + sorted(pack_files(lock.get("adopted", {})))
+    named = list(lock.get("files", {})) + list(lock.get("kept", {})) + sorted(pack_files(lock.get("adopted", {})))
     outside = [name for name in named if Path(name).is_absolute() or ".." in Path(name).parts]
     if outside:
         raise InstallError("%s lists files outside the project (%s); restore it from git"
@@ -107,11 +188,6 @@ def print_plan(plan, headline):
         print("  %-9s %s%s" % (action, path, "  (%s)" % detail if detail else ""))
 
 
-def stopped(exc, previous_hooks):
-    return InstallError("the switch stopped part way: %s. The working tree was clean before it: git checkout -- . && "
-                        "git clean -fd restores it (core.hooksPath was %s)" % (exc, previous_hooks or "unset"))
-
-
 def to_thin(target, args):
     lock = installed_lock(target)
     if lock.get("mode") == "thin":
@@ -124,15 +200,14 @@ def to_thin(target, args):
         raise InstallError("core.hooksPath is %s, but thin mode runs its pre-commit hook from %s; re-run with "
                            "--force-hooks-path to replace the setting" % (previous_hooks, THIN_HOOKS_PATH))
     original, settings = installer.load_settings(target)
-    installer.drop_harness_hooks(settings)
-    updated = installer.settings_text(thin.plugin_settings(settings, version))
 
     locked, adopted = lock.get("files", {}), lock.get("adopted", {})
     packs = pack_files(adopted)
+    kept = {name: digest for name, digest in locked.items() if name.startswith("backbone/") or name in packs}
     release_files = dict(thin.RELEASE_FILES)
     removed, backed_up = [], []
     for name, digest in sorted(locked.items()):
-        if name.startswith("backbone/") or name in packs or name in release_files or not (target / name).is_file():
+        if name in kept or name in release_files or not (target / name).is_file():
             continue
         (removed if installer.file_digest(target / name) == digest else backed_up).append(name)
     if (target / VENDORED_ENGINE).is_file() and VENDORED_ENGINE not in removed + backed_up:
@@ -140,6 +215,8 @@ def to_thin(target, args):
                            "on the full install first" % (VENDORED_ENGINE, LOCK_REL))
 
     commit, release = thin.release_checkout(version)
+    updated = installer.settings_text(thin.plugin_settings(
+        installer.drop_harness_settings(settings, release / "payload/settings.fragment.json"), version))
     written = []
     for name, source in thin.RELEASE_FILES:
         data, path = (release / source).read_bytes(), target / name
@@ -153,7 +230,7 @@ def to_thin(target, args):
         written.append((name, data))
     backups_taken(target, backed_up)
 
-    plan = installer.Plan(target, args.dry_run)
+    plan = Switch(target, args.dry_run)
     for name in removed:
         plan.note("remove", name)
     for name in backed_up:
@@ -161,36 +238,40 @@ def to_thin(target, args):
     for name, _ in written:
         plan.note("update" if (target / name).exists() else "add", name)
     if updated != original:
-        plan.note("merge", SETTINGS_REL, "harness hooks out, the plugin in; other entries kept")
+        plan.note("merge", SETTINGS_REL, "harness hooks and permissions out, the plugin in; other entries kept")
     if previous_hooks != THIN_HOOKS_PATH:
         plan.note("git", "core.hooksPath", THIN_HOOKS_PATH)
     pin = {"mode": "thin", "version": version, "commit": commit}
+    if lock.get("installed"):
+        pin["installed"] = lock["installed"]
     if adopted:
         pin["adopted"] = adopted
+    # --to-full tells the kept files someone edited from the others by these hashes.
+    if kept:
+        pin["kept"] = kept
     plan.note("pin", LOCK_REL, "v%s, commit %s" % (version, commit))
     note_claude_import(plan, thin_mode=True)
     if args.dry_run:
         print_plan(plan, "Would switch %s to thin mode (dry run)" % target)
         return 0
-    try:
+
+    def switch():
         for name in backed_up:
-            os.replace(str(target / name), str(target / (name + BACKUP)))
+            plan.move(name, name + BACKUP)
         for name in removed:
-            (target / name).unlink()
+            plan.remove(name)
         prune(target, removed + backed_up)
         for name, data in written:
-            (target / name).parent.mkdir(parents=True, exist_ok=True)
-            (target / name).write_bytes(data)
+            plan.write(name, data)
             if name == thin.SHIM:
                 (target / name).chmod(0o755)
         if updated != original:
-            (target / SETTINGS_REL).parent.mkdir(exist_ok=True)
-            (target / SETTINGS_REL).write_bytes(updated.encode("utf-8"))
+            plan.write(SETTINGS_REL, updated.encode("utf-8"))
         if previous_hooks != THIN_HOOKS_PATH:
             installer.run_git(target, "config", "core.hooksPath", THIN_HOOKS_PATH, check=True)
-        (target / LOCK_REL).write_text(json.dumps(pin, indent=2) + "\n", encoding="utf-8")
-    except (OSError, InstallError) as exc:
-        raise stopped(exc, previous_hooks)
+        plan.write(LOCK_REL, (json.dumps(pin, indent=2) + "\n").encode("utf-8"))
+
+    carry_out(plan, switch)
     print_plan(plan, "Switched %s to thin mode: the agentic-harness plugin runs the pinned release v%s"
                % (target, version))
     print("\nNext: review the switch and commit it, for example git commit -m \"chore: switch the agentic harness to "
@@ -225,11 +306,19 @@ def to_full(target, args):
         if folder.is_dir() else []
     adopted = lock.get("adopted", {})
     sources = installer.owned_sources(adopted, release)
+    recorded = dict(lock.get("kept", {}))
+    recorded.update(lock.get("files", {}))
+    # --to-thin and pin write these from the pinned release, so its copy is the one the project was given.
+    for name, source in thin.RELEASE_FILES:
+        if name in sources:
+            recorded[name] = installer.file_digest(release / source)
+    seed = release / "payload/seed"
     context = {"PROJECT_NAME": target.name, "DATE": datetime.date.today().isoformat(), "HARNESS_VERSION": version}
 
     def vendor(plan):
-        files = installer.sync_owned(plan, sources, lock.get("files", {}), args.force)
-        installer.seed_project(plan, context, report_existing=False, seed=release / "payload/seed")
+        files = installer.sync_owned(plan, sources, recorded, args.force)
+        installer.seed_project(plan, context, report_existing=False, seed=seed)
+        installer.migrate_conf(plan, context, seed=seed)
         return files
 
     check = installer.Plan(target, dry_run=True)
@@ -237,13 +326,17 @@ def to_full(target, args):
     backups_taken(target, [path for action, path, _ in check.report if action == "overwrite"]
                   + ([thin.SHIM] if shim_edited else []))
 
-    plan = installer.Plan(target, args.dry_run)
-    try:
+    plan = Switch(target, args.dry_run)
+    # sync_owned sets the release's file mode on files whose content already matches, without going through the plan.
+    for name in sources:
+        if (target / name).is_file():
+            plan.save(name)
+
+    def switch():
         files = vendor(plan)
         if shim_edited:
             plan.note("backup", thin.SHIM, "edited locally; kept as %s%s" % (thin.SHIM, BACKUP))
-            if not args.dry_run:
-                os.replace(str(shim), str(target / (thin.SHIM + BACKUP)))
+            plan.move(thin.SHIM, thin.SHIM + BACKUP)
         elif shim.is_file():
             plan.remove(thin.SHIM)
             plan.note("remove", thin.SHIM)
@@ -255,10 +348,8 @@ def to_full(target, args):
         installer.configure_hooks_path(plan, args.force_hooks_path
                                        or (previous_hooks == THIN_HOOKS_PATH and not other_hooks))
         installer.write_lock(plan, lock, files, adopted, version)
-    except (OSError, InstallError) as exc:
-        if args.dry_run:
-            raise
-        raise stopped(exc, previous_hooks)
+
+    carry_out(plan, switch)
     note_claude_import(plan, thin_mode=False)
     conflicts = [path for action, path, _ in plan.report if action == "CONFLICT"]
     print_plan(plan, "%s %s to a full install of v%s%s" % ("Would switch" if args.dry_run else "Switched", target,
