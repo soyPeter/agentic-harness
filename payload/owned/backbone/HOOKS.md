@@ -226,9 +226,9 @@ The judge gate, and so `finish`, pre-commit, pre-push and CI `verify`, refuses a
 
 ## Deliverer (`HARNESS_DELIVER`)
 
-`HARNESS_DELIVER` (user-only, default `on`). A finished task is `done` only once the branch tip that holds it is delivered. After the task is `[x]` and committed, `next` returns `deliver` (the `deliverer`). With uncommitted changes or no `origin` remote, it returns `deliver` with no role and says what is `needed`. The deliverer pushes the branch, opens or updates its PR with each task's receipt and the reviews' should-fix findings as follow-ups, and watches `gh pr checks`. It writes nothing in the checkout and never merges.
+`HARNESS_DELIVER` (user-only, default `on`). A finished task is `done` only once the branch tip that holds it is delivered. After the task is `[x]` and committed, `next` returns `deliver` (the `deliverer`). With uncommitted changes or no `origin` remote, it returns `deliver` with no role and says what is `needed`. The deliverer pushes the branch, opens or updates its PR with each task's receipt and the reviews' should-fix findings as follow-ups, and watches `gh pr checks`. It labels the PR with the receipts' suggested labels: the highest `risk:*` among them and each `class:*`, creating the ones the repository lacks. On an existing PR the risk label only goes up. It writes nothing in the checkout and never merges.
 
-Its shell commands are held to the role: `gh pr merge`, `close`, `review` and `ready` are refused, and so is a push to the default branch or from it. The main session can still merge.
+Its shell commands are held to the role: `gh pr merge`, `close`, `review` and `ready` are refused, and so is a push to the default branch or from it. So is any label change beyond the receipts' labels: the deliverer may add and create only `risk:low|elevated|high` and `class:docs|refactor|feature|schema`. It may remove only a `risk:*` label lower than the one it adds in the same call, and may not label through `gh api`. A label such as `harness-change-approved`, which lets a PR change the harness, stays the user's. The main session can still merge.
 
 Its Stop hook (`deliver-stop`; Codex and OpenCode through `subagent-stop`) checks the report against git:
 - `delivered` is refused unless the tree is clean, `HEAD` equals its upstream branch, and `checks` is `passed` or `none`;
@@ -331,6 +331,13 @@ Each event carries the task in progress and, inside a hook, the session and agen
 - **Decisions:** the ADRs the spec follows, the ADRs the task added or changed (with their status), and the assumptions with their sources.
 - **Risks** and the number of grill, judge and debugger rounds.
 - **Approval needed:** ADRs that aren't Accepted and open escalations.
+- **Suggested labels** for whoever triages the pull request (`suggested_labels` with `--json`): one risk label from the spec's `Change-Class` (ADR-002) and the risks above, and `class:<class>` when the spec declares one of the four classes. A missing or unknown class is rated as `feature`. The labels are advisory: none approves or merges anything.
+
+| Change-Class | No risks | Risks |
+|---|---|---|
+| `docs`, `refactor` | `risk:low` | `risk:elevated` |
+| `feature`, or none declared | `risk:elevated` | `risk:high` |
+| `schema` | `risk:high` | `risk:high` |
 
 It refuses a task without a judge pass on the current code. `harness.py run` saves it next to the run logs and `--pr` puts it in the pull request; the Orca coordinator does the same and keeps it in `.git/harness/receipts/`.
 

@@ -1337,6 +1337,32 @@ contains "the refusal says merging is the user's" "merging is the user's" "$out"
 expect 2 "the deliverer may not approve a PR" hook "$DL" pre-tool-use "$(dbash 'gh pr review 7 --approve')"
 expect 2 "the deliverer may not push to the default branch" hook "$DL" pre-tool-use "$(dbash 'git push origin HEAD:main')"
 expect 0 "merging stays open to the main session" hook "$DL" pre-tool-use "$(bash_json 'gh pr merge 7 --squash')"
+expect 0 "the deliverer may open a PR with the receipts' labels" hook "$DL" pre-tool-use "$(dbash 'gh pr create --base main --title t --body b --label risk:high,class:schema')"
+expect 0 "the deliverer may create a missing triage label" hook "$DL" pre-tool-use "$(dbash 'gh label create risk:elevated --color FBCA04 --description "Harness triage hint"')"
+expect 0 "the deliverer may list labels" hook "$DL" pre-tool-use "$(dbash 'gh label list --search risk: --json name')"
+expect 0 "the deliverer may replace a lower risk label" hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:high --remove-label risk:low')"
+expect 0 "a label command quoted in a PR body is not run" hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --body "$(cat <<'"'"'EOF'"'"'
+gh pr edit 7 --add-label harness-change-approved
+EOF
+)"')"
+expect 0 "nor is one in a body read from a heredoc" hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --body-file - <<'"'"'EOF'"'"'
+gh pr edit 7 --add-label harness-change-approved
+EOF')"
+out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label harness-change-approved')" 2>&1; echo "exit=$?")
+contains "the deliverer may not add a label that approves a change" "exit=2" "$out"
+contains "the refusal names the labels it may apply" "risk:low, risk:elevated, risk:high" "$out"
+expect 0 "the deliverer may attach the label to -l" hook "$DL" pre-tool-use "$(dbash 'gh pr create -lrisk:low --title t --body b')"
+expect 2 "nor slip one in among the triage labels" hook "$DL" pre-tool-use "$(dbash 'gh pr create --title t --body b -lrisk:low,automerge')"
+expect 2 "nor in a cluster of short flags" hook "$DL" pre-tool-use "$(dbash 'gh pr create --title t --body b -dl automerge')"
+expect 2 "nor add one through gh issue, which labels PRs too" hook "$DL" pre-tool-use "$(dbash 'gh issue edit 7 --add-label automerge')"
+expect 2 "nor create one" hook "$DL" pre-tool-use "$(dbash 'gh label create automerge')"
+expect 2 "nor add one in a nested shell" hook "$DL" pre-tool-use "$(dbash 'bash -c "gh pr edit 7 --add-label=automerge"')"
+expect 2 "nor through eval" hook "$DL" pre-tool-use "$(dbash 'eval "gh pr edit 7 --add-label automerge"')"
+expect 2 "the deliverer may not lower a risk label" hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:low --remove-label risk:high')"
+expect 2 "the deliverer may not remove a label someone else set" hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --remove-label do-not-merge')"
+expect 2 "the deliverer may not delete or edit labels" hook "$DL" pre-tool-use "$(dbash 'gh label delete risk:low --yes')"
+expect 2 "the deliverer may not label through the API" hook "$DL" pre-tool-use "$(dbash 'gh api repos/o/r/issues/7/labels -f "labels[]=risk:low"')"
+expect 0 "other labels stay open to the main session" hook "$DL" pre-tool-use "$(bash_json 'gh pr edit 7 --add-label documentation')"
 git -C "$DL" checkout -q main
 expect 2 "the deliverer may not push while on the default branch" hook "$DL" pre-tool-use "$(dbash 'git push -u origin HEAD')"
 git -C "$DL" checkout -q feat/x
@@ -2429,9 +2455,13 @@ contains "receipt: a Proposed ADR needs the user's acceptance" "accept or reject
 contains "receipt: assumptions carry their source" "A1: Names are ASCII only (source: backbone/4-KNOWLEDGE.md)." "$out"
 contains "receipt: who approved" "Approved-by: Ana (2026-11-01)" "$out"
 contains "receipt: rounds it took" "grill rounds: 1; judge rounds: 1" "$out"
+contains "receipt: suggests triage labels that never merge" "a label never approves or merges it" "$out"
+contains "receipt: a spec without a Change-Class is rated as feature" "  - risk:elevated" "$out"
 contains "receipt: exits zero" "exit=0" "$out"
 out=$($CH receipt 7.1 --json)
 expect 0 "receipt --json parses" python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["task"]=="7.1" and d["not_verified"] and d["verified"]' "$out"
+expect 0 "receipt --json lists the suggested labels" python3 -c 'import json,sys; assert json.loads(sys.argv[1])["suggested_labels"] == ["risk:elevated"]' "$out"
+expect 0 "receipt: suggested labels for each Change-Class and risk (ADR-002)" python3 -B "$HARNESS/tests/test-triage-labels.py"
 
 section "Linear as the system of record: ticket -> spec -> receipt"
 FX="$HARNESS/tests/fixtures/linear"
@@ -2876,7 +2906,7 @@ expect 0 "thin: skill overrides, rule provenance and CI engine assets" python3 -
 
 section "thin mode: the launcher runs the engine the project pins (ADR-001)"
 expect 0 "plugin manifests and OpenCode adapter (ADR-001)" python3 -B "$HARNESS/tests/test-plugin-packaging.py"
-expect 0 "properties: a plugin agent gets its role's decisions (needs hypothesis)" python3 -B "$HARNESS/tests/test-properties.py"
+expect 0 "properties: a plugin agent gets its role's decisions; the deliverer sets only triage labels (needs hypothesis)" python3 -B "$HARNESS/tests/test-properties.py"
 expect 0 "thin init, pin and pre-commit shim (ADR-001)" python3 -B "$HARNESS/tests/test-thin-install.py"
 expect 0 "live: a plugin judge verdict is recorded (runs with HARNESS_E2E=1)" python3 -B "$HARNESS/tests/test-live-plugin.py"
 L="$HARNESS/plugin/launcher.py"

@@ -7,6 +7,14 @@
   Policy: PR merge stays human; policy `approve` must not be treated as merge. Runtime enforcement in
   `harness.py` is a follow-up.
 
+- **Suggested triage labels (ADR-002).** `harness.py receipt` suggests pull request labels for whoever triages the PR,
+  in the text receipt and as `suggested_labels` in `--json`: `risk:low`, `risk:elevated` or `risk:high` from the
+  spec's `Change-Class` and the receipt's risks, plus `class:<class>` when the spec declares one of the four classes.
+  `docs` and `refactor` start at low, `feature` (and a missing or unknown class) at elevated and `schema` at high; risks
+  raise the label one step. The deliverer puts the highest risk label and every class label on the PR, creating missing
+  labels, and only ever raises the risk label. The harness refuses any other label change by the deliverer, so it
+  can't add a label such as `harness-change-approved` or remove one a person set. Labels are advisory: none approves
+  or merges.
 - **Plugin and pin must match (thin mode).** When the installed plugin isn't the release the project pins, its agents
   and skills don't match the pinned gates. Session start says so, with both versions and the fix. In autonomous mode
   `run` and `orca` refuse to start and every call except reads is refused until they match; `doctor` lists it as an

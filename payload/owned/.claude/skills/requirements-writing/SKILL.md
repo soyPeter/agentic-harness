@@ -19,6 +19,7 @@ Specs use the format in `backbone/templates/spec.md`. Run `python3 scripts/harne
 - `feature` and `schema` always need a human `Approved-by:` line. Never rely on policy approve for them.
 - `docs` / low-risk `refactor` may use autonomous `harness.py approve` only when `HARNESS_AUTO_APPROVE=low` and `risk_reasons` is empty (see product ADR-002).
 - Optional `Parent-CHNG:`, `Parent-RFC:`, `Parent-ADR:`: if a vault change record, RFC or ADR already exists, **copy its stable id/link** into these fields. The vault (or `backbone/adr/`) remains the system of record — do not create a CHNG folder inside the harness install.
+- Write the class as a bare word (`Change-Class: docs`, no backticks); anything else counts as `feature`. The receipt turns it into the PR's suggested triage labels (`class:<class>` and a `risk:*` level), which the deliverer applies.
 
 ## Requirements (`REQ-<task>-<n>`)
 

@@ -132,6 +132,12 @@ PROFILES = ("", "triple")
 NO_MERGE_PROFILES = ("triple",)
 MERGE_ENDPOINT = re.compile(r"/pulls/\d+/merge\b|/merges\b")
 MERGE_TOOL = re.compile(r"^mcp__.*merge", re.I)
+# Pull request labels a receipt suggests for human triage (ADR-002). The risk label starts at the Change-Class's
+# step and goes one step up when the receipt lists risks: docs and refactor may be policy-approved, feature never is,
+# and schema is migrations, auth, secrets, payments and infrastructure.
+RISK_LABELS = ("risk:low", "risk:elevated", "risk:high")
+CLASS_RISK_STEP = {"docs": 0, "refactor": 0, "feature": 1, "schema": 2}
+TRIAGE_LABELS = RISK_LABELS + tuple("class:" + name for name in CLASS_RISK_STEP)
 # The knowledge source: an MCP server registered as "knowledge" (claude mcp add) over a folder of notes, that the
 # analyst, architect and griller consult when grilling raises questions. Read-only; answers are cited as vault:<path>.
 KNOWLEDGE_TOOL_PREFIX = "mcp__knowledge__"
@@ -3549,12 +3555,78 @@ def default_branch():
     return ref.rsplit("/", 1)[-1] if ref else None
 
 
+def gh_calls(command, depth=0):
+    """The words of each gh command in a shell command, including those run through `sh -c` or eval."""
+    calls = []
+    for segment, _ in split_segments(split_heredocs(command)[0]):
+        _, words = shell_words(segment)
+        if program(words) == "gh":
+            calls.append(words)
+        elif depth < 3 and program(words) in SHELLS and "-c" in words[:-1]:
+            calls.extend(gh_calls(words[words.index("-c") + 1], depth + 1))
+        elif depth < 3 and program(words) == "eval":
+            calls.extend(gh_calls(" ".join(words[1:]), depth + 1))
+    return calls
+
+
+LABEL_FLAGS = ("--label", "-l", "--add-label", "--remove-label")
+
+
+def label_changes(words):
+    """(added, removed): the label names of a gh pr|issue create|edit call. A flag may list several, comma-separated."""
+    added, removed, i = [], [], 3
+    while i < len(words):
+        word = words[i]
+        # Short flags combine (-dl <name> is --draft --label <name>), and -l's value may follow it in the same word.
+        short = None if word.startswith("--") else re.match(r"-[A-Za-z]*?l=?(.*)$", word)
+        if short:
+            word = "-l=" + short.group(1) if short.group(1) else "-l"
+        flag, eq, value = word.partition("=")
+        if flag in LABEL_FLAGS:
+            if not eq:
+                i += 1
+                value = words[i] if i < len(words) else ""
+            (removed if flag == "--remove-label" else added).extend(value.split(","))
+        i += 1
+    return added, removed
+
+
+def label_refusal(words):
+    """Why a gh call changes labels beyond adding the triage labels the receipts suggest, or None. Other labels can
+    gate CI or merges (harness-change-approved lets a PR change the harness), so they stay the user's."""
+    if words[1:2] == ["api"] and any("label" in w.lower() for w in words[2:]):
+        return ("it reads and sets labels with gh pr view, gh label list/create and gh pr create/edit, where the "
+                "harness sees which, not through gh api.")
+    if words[1:2] == ["label"]:
+        action, name = words[2:3], (words[3:4] or [None])[0]
+        if action in (["edit"], ["delete"], ["clone"]) or (action == ["create"] and name not in TRIAGE_LABELS):
+            return ("it creates only the triage labels it applies (gh label create <label> ...); creating, editing or "
+                    "deleting other labels is the user's call.")
+        return None
+    if words[1:2] not in (["pr"], ["issue"]) or words[2:3] not in (["create"], ["new"], ["edit"]):
+        return None
+    added, removed = label_changes(words)
+    foreign = [n for n in added if n not in TRIAGE_LABELS]
+    if foreign:
+        return ("it applies only the triage labels its receipts suggest (%s); %s is the user's call."
+                % (", ".join(TRIAGE_LABELS), ", ".join(foreign)))
+    top = max([RISK_LABELS.index(n) for n in added if n in RISK_LABELS] or [-1])
+    kept = [n for n in removed if n not in RISK_LABELS or RISK_LABELS.index(n) >= top]
+    if kept:
+        return ("it removes only a lower risk:* label, in the call that adds the higher one; %s may have been set by "
+                "a person." % ", ".join(kept))
+    return None
+
+
 def role_command_refusal(agent, command):
     """Why agent may not run command, or None. The deliverer reaches GitHub, but the decisions there stay the user's."""
     if agent != "deliverer":
         return None
     if re.search(r"\bgh\s+pr\s+(merge|close|review|ready)\b|\bgh\s+api\b[^;&|\n]*/merge\b", command):
         return "it opens and updates the PR; merging is the user's call, like closing or approving it."
+    refusal = next((why for why in map(label_refusal, gh_calls(command)) if why), None)
+    if refusal:
+        return refusal
     targets = {b for b in ("main", "master", default_branch()) if b}
     push = re.search(r"\bgit\s+push\b([^;&|\n]*)", command)
     on_default = git("rev-parse", "--abbrev-ref", "HEAD").strip() in targets
@@ -5059,6 +5131,20 @@ def changed_since(base):
     return sorted(found.items())
 
 
+def declared_change_class(spec_text):
+    """The class on the spec's Change-Class: line when it is one of ADR-002's four, else None (rated as feature)."""
+    m = re.search(r"(?mi)^\s*Change-Class:[ \t]*(\S*)", strip_comments(spec_text or ""))
+    value = m.group(1).lower() if m else ""
+    return value if value in CLASS_RISK_STEP else None
+
+
+def suggested_labels(spec_text, risks):
+    """One risk:* label, and class:<class> when the spec declares its class. Advisory: a label approves nothing."""
+    declared = declared_change_class(spec_text)
+    step = min(CLASS_RISK_STEP[declared or "feature"] + (1 if risks else 0), len(RISK_LABELS) - 1)
+    return [RISK_LABELS[step]] + (["class:" + declared] if declared else [])
+
+
 def receipt_data(task, base=None):
     """(receipt dict, None) for a task with a judge pass on the current code, else (None, why not)."""
     spec_text = read(spec_path(task))
@@ -5135,6 +5221,7 @@ def receipt_data(task, base=None):
         "approval": approval_lines(md_section(body, "Approval") or ""),
         "approval_needed": approval_needed,
     }
+    data["suggested_labels"] = suggested_labels(spec_text, data["risks"])
     return data, None
 
 
@@ -5156,6 +5243,10 @@ def receipt_text(d):
                 ("APPROVAL NEEDED", d["approval_needed"] or ["none"]))
     for heading, items in sections:
         lines += ["", heading] + ["  - %s" % i for i in items or ["none"]]
+    lines += ["", "SUGGESTED LABELS (for whoever triages the pull request; a label never approves or merges it)"]
+    lines += ["  - %s" % label for label in d["suggested_labels"]]
+    if not any(label.startswith("class:") for label in d["suggested_labels"]):
+        lines.append("  (the spec declares no valid Change-Class, so it is rated as feature)")
     return "\n".join(lines)
 
 
