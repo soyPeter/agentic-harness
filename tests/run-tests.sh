@@ -2476,7 +2476,7 @@ out=$(HARNESS_SKILL_MAX_AGE=1 "$M/scripts/harness/doctor.sh")
 contains "doctor warns about skills not verified recently" "was last verified" "$out"
 mkdir -p "$M/.claude/skills/undated"; printf -- '---\nname: undated\ndescription: x\n---\n# x\n' > "$M/.claude/skills/undated/SKILL.md"
 contains "doctor warns about skills without a date" "skill undated has no last-verified date" "$("$M/scripts/harness/doctor.sh")"
-for f in devcontainer.json Dockerfile init-firewall.sh trust-workspace.py; do
+for f in devcontainer.json docker-compose.yml Dockerfile init-firewall.sh trust-workspace.py; do
   [ -f "$M/.devcontainer/harness-agent/$f" ] && ok "sandbox file installed: $f" || bad "sandbox file installed: $f"
 done
 contains "the spec template has an Assumptions section" "## Assumptions" "$(cat "$M/backbone/templates/spec.md")"
@@ -2576,6 +2576,8 @@ out=$($CH receipt 7.1 --json)
 expect 0 "receipt --json parses" python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["task"]=="7.1" and d["not_verified"] and d["verified"]' "$out"
 expect 0 "receipt --json lists the suggested labels" python3 -c 'import json,sys; assert json.loads(sys.argv[1])["suggested_labels"] == ["risk:elevated"]' "$out"
 expect 0 "receipt: suggested labels for each Change-Class and risk (ADR-002)" python3 -B "$HARNESS/tests/test-triage-labels.py"
+expect 0 "receipt: the sandbox each judge pass ran in, and the runner's sandbox backend (ADR-003)" \
+  python3 -B "$HARNESS/tests/test-sandbox-evidence.py"
 
 section "Linear as the system of record: ticket -> spec -> receipt"
 FX="$HARNESS/tests/fixtures/linear"
@@ -3029,6 +3031,8 @@ expect 0 "properties: a plugin agent gets its role's decisions (needs hypothesis
 expect 0 "thin init, pin and pre-commit shim (ADR-001)" python3 -B "$HARNESS/tests/test-thin-install.py"
 expect 0 "update.sh --to-thin and --to-full, there and back (ADR-001)" python3 -B "$HARNESS/tests/test-thin-convert.py"
 expect 0 "live: a plugin judge verdict is recorded (runs with HARNESS_E2E=1)" python3 -B "$HARNESS/tests/test-live-plugin.py"
+expect 0 "live: the sandbox's allowlist, capabilities and evidence in a real container (runs with HARNESS_E2E=1)" \
+  python3 -B "$HARNESS/tests/test-sandbox-egress.py"
 L="$HARNESS/plugin/launcher.py"
 SRC="$WORK/engine-src"   # stands in for the harness repository: this checkout, committed and tagged
 mkdir -p "$SRC"

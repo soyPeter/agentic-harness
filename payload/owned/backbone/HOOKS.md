@@ -176,13 +176,16 @@ Logs go to `.git/harness/runs/<timestamp>/<task>-<attempt>.log`. Agents can't st
 - **An agent that cannot start** (not logged in, bad API key: it fails at no cost) stops the run. Retrying or moving to the next task can't help, so no task is escalated for it, and the task stays ready.
 - **Keep the machine awake.** A sleeping laptop suspends the run, so wall time grows while nothing happens. On macOS, start the runner with `caffeinate -i python3 scripts/harness/lib/harness.py run`.
 
-**Sandbox.** `.devcontainer/harness-agent/` is a container for unattended runs. It has been built and checked (firewall, hooks, self-test), and has run a real task end to end (spec, grill, policy approval, build, judge) with a subscription token. Review it before use, and add your toolchain. It provides:
-- outbound traffic limited to the Anthropic API, GitHub and `HARNESS_FIREWALL_ALLOW`;
+**Sandbox.** `.devcontainer/harness-agent/` is a sandbox for unattended runs: two containers from one image (`docker-compose.yml`), started by the devcontainer tooling. `tests/test-sandbox-egress.py` brings it up for real (`HARNESS_E2E=1`) and checks the allowlist, the agent's capabilities and the evidence; the earlier one-container version also ran a real task end to end with a subscription token. Review it before use, and add your toolchain. It provides:
+- outbound traffic limited to the Anthropic API, GitHub and `HARNESS_FIREWALL_ALLOW` (set on the `egress` service in `docker-compose.yml`). The `egress` container applies the rules (`init-firewall.sh`) in the network namespace the agent's container joins; the agent's container drops NET_ADMIN and NET_RAW, runs with `no-new-privileges` and has no sudo, so nothing the agent runs changes the rules. Outbound IPv6 is dropped. DNS is still allowed to any resolver;
+- an image built from a base pinned by digest;
 - no host credentials apart from `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`, counted against your Claude subscription) or `ANTHROPIC_API_KEY` (billed per token). The host's keychain login isn't visible in the container;
 - a trusted workspace;
 - `HARNESS_AGENT_CMD` set to `--dangerously-skip-permissions`, because the container, not the prompt, is the boundary.
 
 Add your toolchain in a Dockerfile that builds `FROM` it.
+
+**Sandbox backend and evidence** (the harness's ADR-003). The runner starts each session through a sandbox backend, `HARNESS_SANDBOX_BACKEND` (user-only). The only one is `devcontainer`, the default: it runs the session where the runner runs, inside the container when you started `run` there, else on the host. Any other value is a doctor error, so `run` and `orca` refuse to start. `verify` and `harness-verify` never use a backend. Each judge verdict records the sandbox it was recorded in, and `receipt` shows it (SANDBOX; `sandbox` in `--json`): `backend`, `isolation_class` (`container` inside the harness-agent image, `none` anywhere else), `image_digest` (the pinned base), `allowlist_hash` (sha256 of the allowlisted host names, lower-case, sorted, one per line, as the `egress` container publishes them), `region`, `control_plane` and `credential_mode` (`env` when `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` is set in the container, `login` otherwise, `host` outside it). An image built before this release reports `none` until it is rebuilt. The evidence is a record; nothing is refused because of it.
 
 `HARNESS_AGENT_CMD` defaults to `claude -p --permission-mode acceptEdits --output-format json`. The prompt arrives on stdin. That matters because `--allowedTools` takes any number of values and would swallow a prompt passed as an argument; quote each pattern, as in `--allowedTools 'Bash(git:*)' 'Bash(python3:*)'`. An unattended agent needs its tools pre-approved: allow the build and test commands in `.claude/settings.json`, or run it in a container or VM with `--dangerously-skip-permissions`. The harness hooks apply either way. Work on a branch and let the CI check gate the merge.
 
@@ -297,7 +300,7 @@ In autonomous mode the griller's questions are answered from `backbone/`. A know
 | Every assumption has a `(source: ...)`; every `vault:<path>` is an existing note inside the vault and the allowed folders | `approve` |
 | Each lookup is logged; `report` counts them | event log |
 
-**Limits.** Search results aren't filtered: a search can list notes outside `HARNESS_KNOWLEDGE_PATHS`, though reading or citing them is refused. Whatever the agents read is sent to the model, so keep notes that must never leave your machine out of the folder the server serves (or run a second server over a subset). In the sandbox, mount the vault read-only, set `HARNESS_KNOWLEDGE_ROOT` to the mount point in `containerEnv`, install the server's dependencies in your Dockerfile, and register the server in `postStartCommand` (see the comments in `devcontainer.json`).
+**Limits.** Search results aren't filtered: a search can list notes outside `HARNESS_KNOWLEDGE_PATHS`, though reading or citing them is refused. Whatever the agents read is sent to the model, so keep notes that must never leave your machine out of the folder the server serves (or run a second server over a subset). In the sandbox, mount the vault read-only, set `HARNESS_KNOWLEDGE_ROOT` to the mount point in the agent service's `environment` in `docker-compose.yml`, install the server's dependencies in your Dockerfile, and register the server in `postStartCommand` (see the comments in `devcontainer.json`).
 
 ## Out-of-band changes
 
@@ -335,6 +338,7 @@ Each event carries the task in progress and, inside a hook, the session and agen
 - **Changed:** files since the base: `--base`, else the light lane's recorded start, else the policy approval's base, else the parent of the commit that added the spec, else HEAD (only the uncommitted work).
 - **Verified:** the harness's own test run, and each AC with its tests, evidence and the test files that mention it.
 - **Not verified:** ACs not met, NFRs no AC covers, and findings the judge left open.
+- **Sandbox:** where the judge pass was recorded (`sandbox` in the JSON; see Sandbox backend and evidence). A judge pass recorded before sandbox evidence existed says "not recorded" (`null`).
 - **Decisions:** the ADRs the spec follows, the ADRs the task added or changed (with their status), and the assumptions with their sources.
 - **Risks**, headed by the spec's Change-Class (`change_class` in the JSON), and the number of grill, judge and debugger rounds.
 - **Approval needed:** ADRs that aren't Accepted and open escalations.
@@ -430,6 +434,7 @@ Two files of each kind apply: the core file in `scripts/harness/`, then the proj
 | `HARNESS_RUN_TASK_TIMEOUT` | `3600` | Seconds per agent session in a run. User-only |
 | `HARNESS_RUN_ATTEMPTS` | `2` | Sessions per task before the runner escalates it. User-only |
 | `HARNESS_RUN_MAX_COST` | empty (no limit) | Dollars per run; the runner stops before the next task once spent. User-only |
+| `HARNESS_SANDBOX_BACKEND` | `devcontainer` | Where the runner starts its sessions (ADR-003); `devcontainer` is the only backend. User-only |
 | `HARNESS_CI_JUDGE_CMD` | `claude -p --agent judge --dangerously-skip-permissions --output-format json` | The CI judge session. User-only |
 | `HARNESS_SKILL_MAX_AGE` | `180` | Days after which doctor flags a skill's `last-verified` date; `0` turns it off |
 | `HARNESS_SCOPE_CHECK` | `on` | Commit-scope warning |
