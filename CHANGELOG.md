@@ -62,6 +62,20 @@
   task could pass a gate. The plugin now runs the recorder on `SubagentStop` for those agents, as the Codex plugin
   already did. A live check (`HARNESS_E2E=1 tests/test-live-plugin.py`, one short Claude Code session) runs the
   plugin's judge in a thin project and fails if its verdict isn't recorded.
+- **`update.sh --to-thin` and `--to-full` switch an installed project between the full install and thin mode.**
+  `--to-thin` pins the installed release (or `--version`), deletes each harness file you haven't edited, Codex's and
+  OpenCode's included, and keeps an edited one as `<file>.harness-bak`; `backbone/`, `CLAUDE.md` and adopted packs'
+  files stay. The pin keeps the install date and the hashes the full install recorded for the harness's files that
+  stay (`"kept"`; `init --thin` now records them for the documents it writes). It adds the pre-commit shim,
+  `core.hooksPath=.githooks` and the plugin entries, and takes the harness's hooks and permission rules out of
+  `.claude/settings.json`. `--to-full` installs the pinned release's files as `update.sh` would, also after the pin
+  moved: a file you haven't edited becomes the release's copy, and an edited one is kept, with the release's copy in
+  `<file>.harness-new` when the release changed it too. It appends new `harness.conf` settings, commented out, and
+  takes the shim and the plugin entries out again. Both refuse a working tree with uncommitted changes, check
+  everything before they write, undo their changes when a write fails part way, and change nothing when run again.
+  Switching there and back without moving the pin gives back the install, except that an edited file outside
+  `backbone/` becomes the release's copy with the edit kept in `<file>.harness-bak`. The README has a Thin mode
+  section: the plugin for each CLI, `init --thin`, `pin`, switching, CI, the plugin/pin rule and the limits.
 - **The machine guard knows thin projects, and the plugin gives its check.** The guard took a thin project (a
   `"mode": "thin"` pin in `backbone/.harness-lock.json`, no `scripts/harness/`) for one that isn't enrolled: it
   reminded the agent and, in block mode, refused its edits. A thin pin now counts, and so does a lock that can't be
