@@ -73,6 +73,8 @@ cd /path/to/repo && git add -A && git commit -m "chore: adopt agentic harness"
 
 Then start an agent session in that repo. It reports **SETUP INCOMPLETE** and runs first-run setup with you (`AGENTS.md` section 1).
 
+To keep the engine out of the project instead, install it in [thin mode](#thin-mode).
+
 After a fresh clone, each developer runs this once to activate the git hooks:
 
 ```sh
@@ -95,6 +97,93 @@ git config core.hooksPath scripts/harness/git-hooks
 | Removed from the harness | Deleted if unedited, otherwise left in place |
 | Project file (`seed`) | Never rewritten; missing ones are created. New `harness.conf` settings are appended commented out, with their explanation, so nothing changes until you uncomment one |
 | `.claude/settings.json` | Harness hook entries replaced; everything else kept |
+
+To switch a project between this full install and thin mode, see [Thin mode](#thin-mode).
+
+## Thin mode
+
+In thin mode the engine isn't copied into the project: an agent plugin, installed once per machine, runs the release
+the project pins ([ADR-001](docs/adr/ADR-001-thin-mode-plugin.md)). The project keeps `backbone/` (its state, with the
+pin in `backbone/.harness-lock.json`: `"mode": "thin"`, `"version"`, `"commit"`), `CLAUDE.md`, its own and adopted
+skills, `.github/workflows/harness-verify.yml`, a pre-commit shim in `.githooks/` and the plugin entries in
+`.claude/settings.json`. `scripts/harness/`, `AGENTS.md`, the core agents and skills, `.codex/` and `.opencode/` come
+from the plugin and the pinned release. Thin mode needs a release that has it (0.30.0 or later).
+
+**Install the plugin** for each agent CLI you use, at the release your projects pin:
+
+- Claude Code: `/plugin marketplace add soyPeter/agentic-harness#v<version>`, then
+  `/plugin install agentic-harness@agentic-harness`. A thin project names both in `.claude/settings.json`, so Claude
+  Code offers them to teammates.
+- Codex: `codex plugin marketplace add soyPeter/agentic-harness --ref v<version>`, then
+  `codex plugin add agentic-harness@agentic-harness`. Codex runs the plugin's hooks once you trust them (`/hooks`).
+- OpenCode: a global plugin file, `~/.config/opencode/plugins/agentic-harness.js`, containing
+  `export { default } from "/path/to/agentic-harness/plugin/opencode.js";`, where the path is a checkout of the
+  release.
+
+Codex and OpenCode plugins can't ship agents, so session start installs the pinned release's role agents in the
+user's agents folder.
+
+**Start a project** from its repository root, then commit what it writes:
+
+```sh
+python3 /path/to/agentic-harness/plugin/launcher.py init --thin [--version 0.30.0] [--name my-service]
+```
+
+In Claude Code, `/agentic-harness:init` does the same. It fetches and checks the release, then writes the project seed
+(`backbone/`, `CLAUDE.md`), the pin, `harness-verify.yml`, the shim with `core.hooksPath=.githooks`, and the plugin
+entries. After a fresh clone, each developer runs `git config core.hooksPath .githooks` once.
+
+**Move the pin** to upgrade: `python3 /path/to/agentic-harness/plugin/launcher.py pin <version>` (the user's command;
+agents can't run it). It checks the release, updates the pin and the plugin's marketplace ref, and brings the shim
+and `harness-verify.yml` to that release. The upgrade is then one reviewed change.
+
+**Switch an installed project**:
+
+```sh
+./update.sh --to-thin /path/to/repo [--version 0.30.0] [--dry-run]   # full install -> thin mode
+./update.sh --to-full /path/to/repo [--force] [--dry-run]             # thin mode -> full install
+```
+
+- Both need a clean working tree and check everything before they write. If a write fails part way (permissions, a
+  full disk), they undo their changes. On a project that is already switched, they change nothing.
+- `--to-thin` pins the installed release, or `--version`. It deletes each harness file you haven't edited and keeps
+  an edited one as `<file>.harness-bak`. `backbone/`, `CLAUDE.md` and adopted packs' files stay as they are. The pin
+  keeps the hashes the full install recorded for the harness's files among them (`"kept"`) and the install date. It
+  adds the shim, `core.hooksPath=.githooks` and the plugin entries, and takes the harness's hooks and permission rules
+  out of `.claude/settings.json` (a rule of yours that the harness also adds goes with them, and comes back with
+  `--to-full`). If another hook manager owns `core.hooksPath`, it refuses unless `--force-hooks-path`.
+- `--to-full` installs the pinned release's files as `update.sh` would, with the kept hashes telling your edits apart,
+  including after the pin moved: a file you haven't edited becomes the release's copy; an edited one is kept, and if
+  the release changed it too, its copy goes to `<file>.harness-new` (exit code 1), or `--force` replaces it (keeping
+  `<file>.harness-bak`). New `harness.conf` settings are appended, commented out. It takes the shim and the plugin
+  entries out again. It uses the installer of the checkout you run it from, with the pinned release's files: run it
+  from a checkout of that release or a later one.
+- Commit the switch. Its pull request needs the `harness-change-approved` label, like any harness change. After
+  `--to-full`, the pre-push hook refuses it, so push with `HARNESS_VERIFY=off git push`.
+
+**CI**: `harness-verify` reads the pin from the base branch, fetches that commit of `soyPeter/agentic-harness` and
+runs `verify --range` with it. A pull request that moves the pin, or switches modes, is checked by the base branch's
+harness, so it can't weaken its own gate. The first thin install, with nothing on the base branch, uses the pull
+request's pin.
+
+**Plugin and pin**: the plugin supplies the agents, skills and agent rules, and the pinned release supplies the
+gates. When the plugin isn't the pinned release, session start says so. In autonomous mode, `run` and `orca` refuse
+to start and every call except reads is refused until they match. `doctor` reports it as an error in autonomous mode
+and a warning in supervised mode. Install the plugin at the pinned release, or move the pin.
+
+**Limits**:
+
+- The first session after a pin change needs the network to fetch the release; until then the hooks refuse
+  everything except reads.
+- In supervised mode, the plugin's agents and skills can drift from the pinned engine: this is reported, not
+  prevented.
+- Codex and OpenCode agents are per user, so two projects pinned to different releases share one set.
+- Codex asks you to trust the plugin's hooks once.
+- Teammates without the plugin get no gates in their agent; `harness-verify` still stops the merge once the branch
+  is protected.
+- The pre-commit shim is the only git hook: Conventional Commits (`commit-msg`) and the pre-push check run in full
+  installs only, while CI's `verify --range` applies to both.
+- The `.devcontainer/harness-agent/` sandbox for unattended runs comes with the full install only.
 
 ## Enforce it everywhere
 
@@ -186,6 +275,10 @@ Check the state of a task's definition with `python3 scripts/harness/lib/harness
 ```
 bootstrap.sh, update.sh         entry points (thin wrappers)
 tools/installer.py              install, update and status logic
+tools/thin.py                   thin mode: init --thin and pin
+tools/convert.py                update.sh --to-thin and --to-full
+plugin/                         the plugin's launcher, hooks, pre-commit shim, OpenCode adapter and init skill
+.claude-plugin/, .codex-plugin/ plugin manifests for Claude Code and Codex, and the marketplace
 tools/gen_agents.py             generates the Codex and OpenCode agents from .claude/agents/
 tools/enroll.py, enroll.sh      enroll a project (install or update, Orca, automation, CI protection)
 tools/machine.py, machine.sh    the machine guard (user level, or managed files to install)

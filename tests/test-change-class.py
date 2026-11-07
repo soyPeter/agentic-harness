@@ -6,7 +6,9 @@
   feature    never: the user approves it      when the light rules pass      -
   schema     never: the user approves it      never                          -
 
-A spec without the line counts as feature; a value that isn't one class makes the spec invalid.
+A spec without the line counts as feature; a value that isn't one class makes the spec invalid. The class is read
+only where the grill fingerprint reads, so it can't change after the griller and the user passed the spec; a class in
+a code block is an example. Documentation is a file with a documentation extension, and a move counts as both paths.
 The property checks need hypothesis (pip install -r tests/requirements.txt) and are skipped without it.
 """
 import itertools
@@ -18,7 +20,7 @@ import tempfile
 import unittest
 
 try:
-    from hypothesis import given, settings, strategies as st
+    from hypothesis import assume, example, given, settings, strategies as st
 except ImportError:
     given = None
 
@@ -61,6 +63,17 @@ Tech requirements:
 
 ## Approval
 """
+APPROVAL = "Approved-by: Ana (2026-11-06)\n"
+MISMATCH = "Change-Class docs doesn't cover a change to files that aren't documentation: %s"
+HIDDEN_HEADING = "'## Approval' heading inside or next to an HTML comment"
+LAYOUTS = (   # what a spec may put above its Change-Class line, and whether the spec is still valid
+    ("nothing",                               "",                                     True),
+    ("a comment",                             "<!-- A note for the analyst. -->\n",   True),
+    ("a commented-out Approval heading",      "<!--\n## Approval\n-->\n",             False),
+    ("a comment before an Approval heading",  "<!-- note -->## Approval\n",           False),
+)
+SNIPPETS = tuple(above for _, above, _ in LAYOUTS) + (   # for the property checks, around the Change-Class line
+    "A plain line.\n", "## Approval <!-- note -->\n", "```\nChange-Class: docs\n```\n", "<!--\nChange-Class: schema\n-->\n")
 
 
 def declared(change_class):
@@ -116,15 +129,18 @@ class Project:
     def read(self, name):
         return (self.root / name).read_text(encoding="utf-8")
 
-    def add_task(self, task, header="", context="", light=False):
+    def write_spec(self, task, header="", context=""):
         self.write("backbone/specs/%s.md" % task, SPEC.format(task=task, header=header, context=context))
+
+    def add_task(self, task, header="", context="", light=False):
+        self.write_spec(task, header, context)
         with open(self.root / "backbone/3-TASKS.md", "a", encoding="utf-8") as tasks:
             tasks.write("- [ ] **Task %s: Item** (spec: backbone/specs/%s.md)%s\n" % (task, task,
                                                                                     " (light)" if light else ""))
 
     def approve_as_user(self, task):
         with open(self.root / ("backbone/specs/%s.md" % task), "a", encoding="utf-8") as spec:
-            spec.write("Approved-by: Ana (2026-11-06)\n")
+            spec.write(APPROVAL)
 
     def set_marker(self, task, old, new):
         tasks = self.read("backbone/3-TASKS.md")
@@ -151,6 +167,35 @@ class Project:
         return self.hook("pre-tool-use", {"agent_id": "session", "tool_name": "Edit", "tool_input": {
             "file_path": str(self.root / "backbone/3-TASKS.md"), "old_string": line,
             "new_string": line.replace("[ ]", "[WIP]")}}, **settings)
+
+    def analyst_edit(self, task, tool_name, **tool_input):
+        """The hook's answer when the analyst edits the task's spec; the file is left as it is. The skill gate is off:
+        it would only ask for the requirements-writing skill first."""
+        tool_input["file_path"] = str(self.root / ("backbone/specs/%s.md" % task))
+        return self.hook("pre-tool-use", {"agent_id": "a1", "agent_type": "analyst", "tool_name": tool_name,
+                                          "tool_input": tool_input}, HARNESS_SKILL_GATE="off")
+
+    def state(self, task):
+        """The task in state --json: its class, spec problems, grill verdict (and whether it is current), approval."""
+        return next(t for t in json.loads(self.harness("state", "--json")[1])["tasks"] if t["task"] == task)
+
+    def move(self, source, destination):
+        (self.root / destination).parent.mkdir(parents=True, exist_ok=True)
+        self.git("mv", source, destination)
+
+    def receipt_risks(self, task, base, files=None):
+        """The risks on the receipt of the [WIP] task for its change since base, judged on the current code with files
+        (path: text) added; the files are removed again afterwards."""
+        files = files or {}
+        for name, text in files.items():
+            self.write(name, text)
+        self.judge_pass(task)
+        code, out = self.harness("receipt", task, "--base", base, "--json")
+        for name in files:
+            (self.root / name).unlink()
+        if code:
+            raise AssertionError(out)
+        return json.loads(out)["risks"]
 
 
 def new_project(test):
@@ -462,6 +507,205 @@ class DiffRisk(unittest.TestCase):
         self.assertEqual(code, 0, out)
 
 
+class WhatWasPassed(unittest.TestCase):
+    """The class is read only from the part of the spec that the grill fingerprint covers and approval freezes."""
+
+    def setUp(self):
+        self.project = new_project(self)
+
+    def test_policy_never_approves_a_class_changed_after_the_grill(self):
+        for n, (layout, above, _) in enumerate(LAYOUTS, 1):
+            task = "10.%d" % n
+            with self.subTest(layout=layout):
+                self.project.add_task(task, above + declared("feature"))
+                self.project.grill_pass(task)
+                self.project.write_spec(task, above + declared("refactor"))
+
+                code, out = self.project.harness("approve", task, HARNESS_AUTONOMY="autonomous")
+
+                self.assertEqual(code, 1, out)
+                self.assertNotIn("Approved-by: policy", self.project.read("backbone/specs/%s.md" % task))
+
+    def test_an_approval_heading_inside_or_next_to_a_comment_makes_the_spec_invalid(self):
+        for n, (layout, above, valid) in enumerate(LAYOUTS, 1):
+            task = "11.%d" % n
+            with self.subTest(layout=layout):
+                self.project.add_task(task, above + declared("docs"))
+                self.project.grill_pass(task)
+
+                code, out = self.project.harness("spec-check", task)
+
+                self.assertEqual(code, 0 if valid else 1, out)
+                self.assertEqual(HIDDEN_HEADING in out, not valid, out)
+                self.assertEqual(self.project.state(task)["grill"]["verdict"], "pass" if valid else "fail")
+
+    def test_an_approved_spec_stays_frozen_below_a_commented_out_approval_heading(self):
+        self.project.add_task("12.1", "<!--\n## Approval\n-->\n" + declared("docs"))
+        self.project.approve_as_user("12.1")
+        edits = (("Change-Class: docs", "Change-Class: refactor"),
+                 ("The system shall do one thing.", "The system shall do nothing."))
+        for old, new in edits:
+            with self.subTest(new=new):
+                code, out = self.project.analyst_edit("12.1", "Edit", old_string=old, new_string=new)
+
+                self.assertEqual(code, 2, out)
+                self.assertIn("approved and therefore frozen", out)
+
+
+class DocumentationPaths(unittest.TestCase):
+    # a docs task changes          it is documentation
+    TABLE = (
+        ("README.md",                True),
+        ("docs/guide.md",            True),
+        ("docs/index.mdx",           True),
+        ("docs/api.rst",             True),
+        ("manual.adoc",              True),
+        ("notes/meeting.txt",        True),
+        ("LICENSE",                  True),
+        ("LICENSE.txt",              True),
+        ("src/docs/handler.py",      False),
+        ("app/api/docs/routes.ts",   False),
+        ("tools/doc/run.sh",         False),
+        ("docs/conf.py",             False),   # Sphinx runs it
+        ("docs/hooks.py",            False),   # MkDocs hooks
+        ("mkdocs.yml",               False),
+        ("README.py",                False),
+        ("LICENSE.sh",               False),
+        ("docs/requirements.txt",    False),   # Read the Docs installs it
+        ("CMakeLists.txt",           False),
+        ("docs/Makefile",            False),
+    )
+
+    def setUp(self):
+        self.project = new_project(self)
+        self.project.add_task("13.1", declared("docs"))
+        self.project.write("tests/test_ac.py", "def test_ac():  # AC-13.1-1\n    pass\n")
+        self.project.set_marker("13.1", " ", "WIP")
+        self.base = self.project.commit("docs: start task 13.1")
+
+    def test_documentation_is_a_file_with_a_documentation_extension(self):
+        for path, documentation in self.TABLE:
+            with self.subTest(path=path):
+                risks = self.project.receipt_risks("13.1", self.base, {path: "Changed by the docs task.\n"})
+
+                self.assertEqual(MISMATCH % path in risks, not documentation, risks)
+
+
+class Moves(unittest.TestCase):
+    # Change-Class   moved from              to                 the receipt's risks
+    TABLE = (
+        ("docs",       "src/app.py",           "docs/app.md",     [MISMATCH % "src/app.py"]),
+        ("refactor",   "src/auth/session.py",  "src/session.py",  ["the change touches sensitive paths: src/auth/session.py"]),
+        ("docs",       "docs/old.md",          "docs/new.md",     []),
+        ("refactor",   "src/old.py",           "src/new.py",      []),
+    )
+    GATED = (   # a commit moves          to                             verify --range says
+        (".claude/agents/judge.md",  "docs/judge.md",               "the harness itself changes (.claude/agents/judge.md"),
+        ("backbone/harness.conf",    "backbone/harness.conf.orig",  "user-only setting(s) changed in backbone/harness.conf"),
+    )
+
+    def setUp(self):
+        self.project = new_project(self)
+
+    def test_a_move_counts_as_its_old_path_and_its_new_one(self):
+        for n, (change_class, source, destination, risks) in enumerate(self.TABLE, 1):
+            task = "14.%d" % n
+            with self.subTest(source=source, destination=destination):
+                self.project.add_task(task, declared(change_class))
+                self.project.write(source, "VALUE = '%s'\n" % task)
+                self.project.write("tests/test_ac_%d.py" % n, "def test_ac():  # AC-%s-1\n    pass\n" % task)
+                self.project.set_marker(task, " ", "WIP")
+                base = self.project.commit("chore: before task %s" % task)
+                self.project.move(source, destination)
+
+                self.assertEqual(self.project.receipt_risks(task, base), risks)
+
+                self.project.set_marker(task, "WIP", "x")
+
+    def test_a_policy_approved_docs_task_cannot_move_code_into_the_docs_and_finish(self):
+        auto = {"HARNESS_AUTONOMY": "autonomous"}
+        self.project.write("src/app.py", "VALUE = 1\n")
+        self.project.add_task("15.1", declared("docs"))
+        self.project.write("tests/test_ac.py", "def test_ac():  # AC-15.1-1\n    pass\n")
+        self.project.commit("docs: spec for task 15.1")
+        self.project.grill_pass("15.1")
+        self.assertEqual(self.project.harness("approve", "15.1", **auto)[0], 0)
+        self.assertEqual(self.project.harness("start", "15.1", **auto)[0], 0)
+        self.project.move("src/app.py", "docs/app.md")
+        self.project.judge_pass("15.1")
+
+        code, out = self.project.harness("finish", "15.1", **auto)
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("approved by policy as low-risk, but " + MISMATCH % "src/app.py", out)
+
+    def test_a_light_task_cannot_move_a_file_out_of_a_sensitive_path(self):
+        lane = {"HARNESS_LIGHT_LANE": "on"}
+        self.project.write("src/auth/session.py", "TTL = 60\n")
+        self.project.add_task("16.1", declared("refactor"), light=True)
+        self.project.approve_as_user("16.1")
+        self.project.write("tests/test_ac.py", "def test_ac():  # AC-16.1-1\n    pass\n")
+        self.project.commit("refactor: spec for task 16.1")
+        self.assertEqual(self.project.harness("start", "16.1", **lane)[0], 0)
+        self.project.move("src/auth/session.py", "src/session.py")
+        self.project.judge_pass("16.1")
+
+        code, out = self.project.harness("finish", "16.1", **lane)
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("outgrew the light lane: it touches sensitive paths: src/auth/session.py", out)
+
+    def test_verify_sees_a_staged_move_of_the_hook_settings(self):
+        self.project.move(".claude/settings.json", ".claude/settings.json.bak")
+
+        code, out = self.project.harness("verify")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn(".claude/settings.json no longer runs the harness hook(s)", out)
+
+    def test_verify_sees_a_commit_that_moves_a_gated_file_away(self):
+        for source, destination, problem in self.GATED:
+            with self.subTest(source=source):
+                base = self.project.git("rev-parse", "HEAD")
+                self.project.move(source, destination)
+                self.project.commit("chore: move %s" % source)
+
+                code, out = self.project.harness("verify", "--range", "%s..HEAD" % base)
+
+                self.assertEqual(code, 1, out)
+                self.assertIn(problem, out)
+
+
+class FencedExamples(unittest.TestCase):
+    # the lines above the spec's Context                              the class it declares
+    TABLE = (
+        ("```\nChange-Class: docs\n```\n",                            "feature"),
+        ("~~~\nChange-Class: docs\n~~~\n",                            "feature"),
+        ("````\n```\nChange-Class: docs\n```\n````\n",                "feature"),
+        ("~~~\n```\nChange-Class: docs\n```\n~~~\n",                  "feature"),
+        ("```\n```text\nChange-Class: docs\n```\n",                   "feature"),   # ```text can't close it
+        ("- For example:\n  ```\n  Change-Class: docs\n  ```\n",      "feature"),
+        ("```text\nChange-Class: docs\n",                             "feature"),   # left open: to the end
+        ("Change-Class: refactor\n```\nChange-Class: schema\n```\n",  "refactor"),
+        ("```\nChange-Class: schema\n```\nChange-Class: docs\n",      "docs"),
+        ("```inline``` code\nChange-Class: docs\n",                   "docs"),
+    )
+
+    def setUp(self):
+        self.project = new_project(self)
+
+    def test_a_class_in_a_fenced_code_block_is_an_example_not_a_declaration(self):
+        for n, (header, change_class) in enumerate(self.TABLE, 1):
+            task = "17.%d" % n
+            with self.subTest(header=header):
+                self.project.add_task(task, header)
+
+                state = self.project.state(task)
+
+                self.assertEqual(state["change_class"], change_class, state)
+                self.assertEqual([p for p in state["spec_problems"] if "Change-Class" in p], [], state)
+
+
 @unittest.skipIf(given is None, "hypothesis is not installed (pip install -r tests/requirements.txt)")
 class Properties(unittest.TestCase):
     SENTENCES = ("Nothing else changes.", RISKY, "It moves src/auth/session.py.", "Add an RBAC check.",
@@ -516,6 +760,134 @@ class Properties(unittest.TestCase):
                 self.assertIn(docs_reasons, reasons)
             if change_class in ("docs", "refactor"):
                 self.assertEqual((code, reasons), (docs_code, docs_reasons))
+
+
+@unittest.skipIf(given is None, "hypothesis is not installed (pip install -r tests/requirements.txt)")
+class SpecProperties(unittest.TestCase):
+    ids = itertools.count(1)
+
+    def setUp(self):
+        self.project = new_project(self)
+
+    def task(self):
+        return "20.%d" % next(self.ids)
+
+    if given is not None:
+        around = st.lists(st.sampled_from(SNIPPETS), max_size=3)
+        fenced = st.builds(lambda marker, length, info, values: "%s%s\n%s%s\n" % (
+            marker * length, info, "".join(declared(v) for v in values), marker * length),
+            st.sampled_from(("`", "~")), st.integers(3, 5), st.sampled_from(("", "text", "yaml")),
+            st.lists(st.sampled_from(CLASSES + ("chore", "")), min_size=1, max_size=3))
+
+        @settings(max_examples=25, deadline=None)
+        @given(above=around, below=around, old=st.sampled_from(CLASSES), new=st.sampled_from(CLASSES))
+        @example(above=["<!--\n## Approval\n-->\n"], below=[], old="feature", new="refactor")
+        def test_the_class_read_changes_only_with_the_grill_fingerprint(self, above, below, old, new):
+            task = self.task()
+            self.project.add_task(task, "".join(above) + declared(old) + "".join(below))
+            self.project.grill_pass(task)
+            graded = self.project.state(task)["change_class"]
+
+            self.project.write_spec(task, "".join(above) + declared(new) + "".join(below))
+            state = self.project.state(task)
+
+            self.assertTrue(state["change_class"] == graded or not state["grill"]["current"], (graded, state))
+
+        @settings(max_examples=20, deadline=None)
+        @given(above=around, below=around, old=st.sampled_from(CLASSES), new=st.sampled_from(CLASSES))
+        @example(above=["<!--\n## Approval\n-->\n"], below=[], old="docs", new="refactor")
+        def test_no_agent_edit_changes_the_class_of_an_approved_spec(self, above, below, old, new):
+            task = self.task()
+            self.project.add_task(task, "".join(above) + declared(old) + "".join(below))
+            self.project.approve_as_user(task)
+            approved = self.project.state(task)
+            edited = SPEC.format(task=task, header="".join(above) + declared(new) + "".join(below), context="") + APPROVAL
+
+            code, out = self.project.analyst_edit(task, "Write", content=edited)
+            self.project.write("backbone/specs/%s.md" % task, edited)
+            state = self.project.state(task)
+
+            self.assertTrue(code == 2 or not approved["approved"] or state["change_class"] == approved["change_class"],
+                            (out, approved, state))
+
+        @settings(max_examples=20, deadline=None)
+        @given(change_class=st.sampled_from(CLASSES), above=st.lists(fenced, max_size=2),
+               below=st.lists(fenced, max_size=2))
+        @example(change_class="refactor", above=[], below=["```\nChange-Class: schema\n```\n"])
+        def test_a_fenced_example_never_changes_the_declared_class(self, change_class, above, below):
+            task = self.task()
+            self.project.add_task(task, "".join(above) + declared(change_class) + "".join(below))
+
+            state = self.project.state(task)
+
+            self.assertEqual(state["change_class"], change_class, state)
+            self.assertEqual([p for p in state["spec_problems"] if "Change-Class" in p], [], state)
+
+
+@unittest.skipIf(given is None, "hypothesis is not installed (pip install -r tests/requirements.txt)")
+class ChangeProperties(unittest.TestCase):
+    FOLDERS = ("docs", "doc", "documentation", "src", "app", "notes")
+    STEMS = ("README", "LICENSE", "CHANGELOG", "index", "conf", "hooks", "guide")
+    ids = itertools.count(1)
+
+    def setUp(self):
+        self.project = new_project(self)
+        self.project.add_task("13.1", declared("docs"))
+        self.project.write("tests/test_ac.py", "def test_ac():  # AC-13.1-1\n    pass\n")
+        self.project.set_marker("13.1", " ", "WIP")
+        self.base = self.project.commit("docs: start task 13.1")
+
+    if given is not None:
+        folders = st.lists(st.sampled_from(FOLDERS), max_size=2)
+
+        @settings(max_examples=15, deadline=None)
+        @given(folders=folders, stem=st.sampled_from(STEMS), extension=st.sampled_from(
+            ("py", "ts", "js", "sh", "rb", "go", "yml", "toml", "json", "html", "css", "png")))
+        @example(folders=["docs"], stem="conf", extension="py")
+        def test_a_file_without_a_documentation_extension_is_never_documentation(self, folders, stem, extension):
+            path = "/".join(folders + ["%s.%s" % (stem, extension)])
+
+            risks = self.project.receipt_risks("13.1", self.base, {path: "Changed by the docs task.\n"})
+
+            self.assertIn(MISMATCH % path, risks)
+
+        @settings(max_examples=15, deadline=None)
+        @given(folders=folders, name=st.one_of(
+            st.tuples(st.sampled_from(STEMS), st.sampled_from(("md", "mdx", "markdown", "rst", "adoc", "asciidoc", "txt")))
+            .map(lambda parts: "%s.%s" % parts),
+            st.sampled_from(("README", "LICENSE", "CHANGELOG", "NOTICE", "AUTHORS"))))
+        @example(folders=["notes"], name="guide.txt")
+        def test_a_file_with_a_documentation_extension_is_documentation(self, folders, name):
+            path = "/".join(folders + [name])
+
+            risks = self.project.receipt_risks("13.1", self.base, {path: "Changed by the docs task.\n"})
+
+            self.assertEqual(risks, [])
+
+        @settings(max_examples=10, deadline=None)
+        @given(source=st.sampled_from(("src/app.py", "src/auth/session.py", "docs/guide.md", "db/migrations/001.sql")),
+               folder=st.sampled_from(("docs", "src", "src/auth", "archive")), suffix=st.sampled_from(("", ".md")),
+               change_class=st.sampled_from(("docs", "refactor")))
+        @example(source="src/app.py", folder="docs", suffix=".md", change_class="docs")
+        def test_staging_a_move_never_changes_how_it_is_assessed(self, source, folder, suffix, change_class):
+            n = next(self.ids)
+            task, source = "22.%d" % n, "case%d/%s" % (n, source)
+            destination = "case%d/%s/%s%s" % (n, folder, os.path.basename(source), suffix)
+            assume(destination != source)
+            self.project.add_task(task, declared(change_class))
+            self.project.write(source, "VALUE = '%s'\n" % task)
+            self.project.write("tests/test_ac_%d.py" % n, "def test_ac():  # AC-%s-1\n    pass\n" % task)
+            self.project.set_marker(task, " ", "WIP")
+            base = self.project.commit("chore: before task %s" % task)
+
+            os.renames(self.project.root / source, self.project.root / destination)
+            unstaged = self.project.receipt_risks(task, base)
+            os.renames(self.project.root / destination, self.project.root / source)
+            self.project.move(source, destination)
+            staged = self.project.receipt_risks(task, base)
+            self.project.set_marker(task, "WIP", "x")
+
+            self.assertEqual(staged, unstaged)
 
 
 if __name__ == "__main__":
