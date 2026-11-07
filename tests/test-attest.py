@@ -409,6 +409,18 @@ class Ranges(unittest.TestCase):
         self.assertIsNotNone(tasks["1.1"]["receipt"])
         self.assertIsNotNone(tasks["1.2"]["receipt"])
 
+    def test_the_rounds_count_every_recorded_verdict_and_the_latest_is_stated(self):
+        self.project.specify("1.1", "Customer search")
+        self.project.set_marker("1.1", " ", "WIP")
+        self.project.hook("judge-stop", "judge", {"verdict": "fail", "task": "1.1", "summary": "s", "criteria": [],
+                                                  "findings": [], "tests": {"command": "true", "result": "failed"}})
+        self.project.set_marker("1.1", "WIP", " ")
+        self.project.build("1.1", SEARCH)
+
+        judge = self.project.statement(self.project.adopted)["predicate"]["tasks"][0]["judge"]
+
+        self.assertEqual((judge["verdict"], judge["rounds"]), ("pass", 2))
+
     def test_a_range_that_finishes_no_task_is_attested_with_no_tasks(self):
         self.project.write("docs/guide.md", "# Guide\n")
         self.project.commit("docs: a guide")
