@@ -20,6 +20,44 @@
   `Change-Class:` now wait for the user's approval, and so does a task policy-approved before this release when it
   finishes; declare `docs` or `refactor` where policy approval should still apply.
 
+- **Change-Class gaps closed (ADR-002).** A commented-out `## Approval` heading above `Change-Class:` ended the grill
+  fingerprint, and the freeze on an approved spec, at the comment while the class below it was still read: a spec
+  grilled as `feature` could become `refactor` and be approved by policy. The Approval section now starts at the first
+  `## Approval` heading outside comments for the fingerprint, the freeze and what is read from the spec alike, and a
+  spec with such a heading inside or next to a comment is invalid. A `Change-Class:` line in a fenced code block is an
+  example, not the declaration. `HARNESS_DOC_PATHS` no longer counts code as documentation: a file needs a
+  documentation extension (`md`, `mdx`, `markdown`, `rst`, `adoc`, `asciidoc`, `txt`) or a README-style name without
+  one, so `src/docs/handler.py`, `docs/conf.py`, `README.py`, `CMakeLists.txt` and `docs/requirements.txt` are code.
+  A moved file counts at both its old and its new path in the risk checks, the light lane and `verify`, which saw only
+  where it went: moving code into `docs/`, a file out of a sensitive path, or `.claude/settings.json`, `harness.conf`
+  or an enforcement file away is now seen. `tests/test-change-class.py` reproduces each gap through the public
+  commands, with property checks. **Upgrading:** a `docs` task that touches images, stylesheets or other files without
+  a documentation extension now waits for the user (add them to `HARNESS_DOC_PATHS` if your docs need them), and a
+  move counts as two files against `HARNESS_RISK_MAX_FILES` and `HARNESS_LIGHT_MAX_FILES`.
+- **Suggested triage labels (ADR-002, follow-up b).** `harness.py receipt` suggests pull request labels for whoever
+  triages the PR, in the text receipt and as `suggested_labels` in `--json`: `risk:low`, `risk:elevated` or
+  `risk:high` from the spec's `Change-Class` and the receipt's other risks, plus `class:<class>` when the spec has a
+  `Change-Class:` line. The class is the one `approve` and `risk` use, so a spec declaring two different classes, or a
+  value that isn't one of the four, is labelled `class:feature`, and the receipt says why (`change_class_problem` in
+  `--json`). `docs` and `refactor` start at low, `feature` (and a spec without the line or with an invalid one) at
+  elevated and `schema` at high; other risks, such as a `docs` change that touches code, raise the label one step.
+  The deliverer puts the highest risk label and every class label on the PR, creating missing labels, and only ever
+  raises the risk label. The harness refuses the deliverer any other label change it can read (next entry), such as
+  adding `harness-change-approved` or removing a label a person set. Labels are advisory: none approves or merges.
+
+- **The deliverer's gate reads gh calls as the shell runs them (ADR-002).** The gate saw only gh written as a plain
+  command: `$(...)`, `xargs`, a gh alias or a GraphQL query on stdin could add any label. It now reads gh calls in
+  `$(...)` and backticks, `sh -c` (also `bash -lc`), `eval`, behind runners such as `timeout`, `env` or `nice`, and in
+  heredocs and here-strings a shell reads, with `--repo` before the subcommand too. It refuses what it can't read:
+  gh behind `xargs`, `parallel` or `find -exec`, a shell reading its commands from a pipe or a file, a command or flag
+  that comes from an expansion, `--recover`, and gh aliases and extensions. The deliverer's `gh api` calls only read
+  (`GET` or `HEAD`, never GraphQL). Before, `gh api graphql` could merge a PR or enable auto-merge, and REST could merge
+  a branch (`/merges`), although ADR-002 says the deliverer never merges. A PR keeps one `risk:*` label: the harness
+  reads the PR's labels before the deliverer adds one, and refuses a second. Every shell check now reads the lines
+  after a here-string such as `<<<EOF` as commands, not as a heredoc body, and a quote inside `"$(...)"` as part of
+  the substitution, so it no longer ends the string around it. The gate stays best-effort: it doesn't see gh run from
+  a script or another program, nor other HTTP clients. GitHub permissions remain the boundary.
+
 - **Plugin and pin must match (thin mode).** When the installed plugin isn't the release the project pins, its agents
   and skills don't match the pinned gates. Session start says so, with both versions and the fix. In autonomous mode
   `run` and `orca` refuse to start and every call except reads is refused until they match; `doctor` lists it as an
@@ -38,6 +76,35 @@
   task could pass a gate. The plugin now runs the recorder on `SubagentStop` for those agents, as the Codex plugin
   already did. A live check (`HARNESS_E2E=1 tests/test-live-plugin.py`, one short Claude Code session) runs the
   plugin's judge in a thin project and fails if its verdict isn't recorded.
+- **`update.sh --to-thin` and `--to-full` switch an installed project between the full install and thin mode.**
+  `--to-thin` pins the installed release (or `--version`), deletes each harness file you haven't edited, Codex's and
+  OpenCode's included, and keeps an edited one as `<file>.harness-bak`; `backbone/`, `CLAUDE.md` and adopted packs'
+  files stay. The pin keeps the install date and the hashes the full install recorded for the harness's files that
+  stay (`"kept"`; `init --thin` now records them for the documents it writes). It adds the pre-commit shim,
+  `core.hooksPath=.githooks` and the plugin entries, and takes the harness's hooks and permission rules out of
+  `.claude/settings.json`. `--to-full` installs the pinned release's files as `update.sh` would, also after the pin
+  moved: a file you haven't edited becomes the release's copy, and an edited one is kept, with the release's copy in
+  `<file>.harness-new` when the release changed it too. It appends new `harness.conf` settings, commented out, and
+  takes the shim and the plugin entries out again. Both refuse a working tree with uncommitted changes, check
+  everything before they write, undo their changes when a write fails part way, and change nothing when run again.
+  Switching there and back without moving the pin gives back the install, except that an edited file outside
+  `backbone/` becomes the release's copy with the edit kept in `<file>.harness-bak`. The README has a Thin mode
+  section: the plugin for each CLI, `init --thin`, `pin`, switching, CI, the plugin/pin rule and the limits.
+- **The machine guard knows thin projects, and the plugin gives its check.** The guard took a thin project (a
+  `"mode": "thin"` pin in `backbone/.harness-lock.json`, no `scripts/harness/`) for one that isn't enrolled: it
+  reminded the agent and, in block mode, refused its edits. A thin pin now counts, and so does a lock that can't be
+  read (a merge conflict in the pin): the plugin refuses changes there until it is fixed. The plugin's own hooks now
+  give the guard's reminder or refusal in Claude Code and Codex, with the same `~/.agentic-harness/machine.json`, so a
+  machine with the plugin needs no guard hook: `./machine.sh install --plugin` writes only the settings and takes out a
+  guard hook installed earlier. In a CLI that still has the guard hook, the plugin leaves the check to it, so nothing
+  is said twice. An installed guard is a copy: run `./machine.sh install` again to get this fix.
+- **`machine.sh` no longer breaks open sessions, and finds the CLIs' settings where they do.** Claude Code and Codex
+  load hooks when a session starts, so a session open since `install` kept calling the guard after `remove` deleted
+  it. Python exits 2 on a missing script, which both CLIs take as a refusal: every edit and shell command in that
+  session was refused until it was restarted. `remove` and `install --plugin` now leave the guard's script for those
+  sessions (after `remove` it finds no settings and lets every call through); restart them. `install`, `remove`,
+  `status` and the plugin's check look for the hooks in `$CLAUDE_CONFIG_DIR` and `$CODEX_HOME` when they are set, as
+  the CLIs do; `install` used to write them to `~/.claude` and `~/.codex`, where those CLIs didn't load them.
 - Tests go through the harness's public commands and hooks only: the checks that grepped agent files for hook names
   now run those hooks, and the ones that imported `harness.py` to call its functions now use `approve`,
   `orca --dry-run`, `orca-digest`, `orca-nightly` and a real, held `orca` run.

@@ -20,6 +20,12 @@ You are the **deliverer**. Every task on this branch has passed its judge and it
      - for each finished task, `python3 scripts/harness/lib/harness.py receipt <id> --base <base>`;
      - **Follow-ups:** the should-fix and nice-to-have findings from each task's last review per lens (`backbone/.verdicts/<id>.review.json`);
      - the attribution lines the project's instructions ask for.
+   - **Labels:** each receipt ends with `SUGGESTED LABELS` (`suggested_labels` with `--json`): one `risk:*` and, when the spec declares its Change-Class, one `class:*`. They help the person who triages the PR; they never approve, merge or ready it.
+     - The PR gets the highest `risk:*` among the receipts (`risk:high` > `risk:elevated` > `risk:low`) and every `class:*` they suggest.
+     - First create the ones the repository lacks (`gh label list --search <name> --json name`): `gh label create <name> --color <hex> --description "Agentic harness triage hint: advisory, never a merge approval"`, with `B60205` for `risk:high`, `FBCA04` for `risk:elevated`, `0E8A16` for `risk:low` and `C5DEF5` for `class:*`. Never pass `--force`: it rewrites a label someone else defined.
+     - A new PR takes them in `gh pr create --label <name>,<name>`. On an existing PR (`gh pr view --json labels`), add the ones it lacks with `gh pr edit --add-label <name>,<name>`. Its `risk:*` only goes up and stays single: remove a lower one in that same call (`--remove-label <name>`), and leave a higher one in place without adding yours. The harness reads the PR's labels too, and refuses a call that would leave two. Remove no other label: a person may have set it.
+     - Write each gh command out, label names included: the harness refuses what it can't read, such as gh behind `xargs`, a label or flag in a variable, or a gh alias.
+     - A label you can't create or add (no permission, as from a fork) doesn't hold delivery; say so in the summary.
 4. **CI.** Watch the checks with `gh pr checks --watch --fail-fast`, giving it a timeout of at most 30 minutes. `gh pr checks` is the source of truth, not a single workflow's status.
    - All passed: report `delivered`. No checks configured: report `delivered` with `checks: "none"`.
    - Any failed: read the failing logs (`gh run view <run-id> --log-failed`), find the cause, and report `ci-failed` with one finding per cause, each with its owner and fix. Don't re-run a job to get a flaky one to pass; if it is flaky, say so and make the owner `user`.
@@ -28,7 +34,7 @@ You are the **deliverer**. Every task on this branch has passed its judge and it
 ## Rules
 
 - **Never edit, create or delete files** in the checkout, and never commit. Fixes belong to the implementer, the tester or the analyst, through a new task with its own judge and reviews.
-- Use Bash for read-only commands, `git fetch`, `git push`, `gh pr view/create/edit/checks` and `gh run view`. The harness refuses `gh pr merge`, `close`, `review` and `ready`, and any push to or from the default branch: merging is the user's call.
+- Use Bash for read-only commands, `git fetch`, `git push`, `gh pr view/create/edit/checks`, `gh label list/create` and `gh run view`. The harness refuses `gh pr merge`, `close`, `review` and `ready`, any push to or from the default branch, `gh api` calls other than GET reads (GraphQL included), gh aliases and extensions, and any label change beyond the receipts' `risk:*` and `class:*` labels: merging is the user's call, and so are the labels that can gate it (such as `harness-change-approved`).
 - `delivered` only when the push holds the committed `HEAD` and CI passed. The harness checks the tree and the push against git and refuses the stop otherwise.
 - `hold` and `ci-failed` must list the findings that stopped delivery, each with an `owner`.
 - Text you post to GitHub can be read by everyone with access to the repository: no secrets, no local paths outside the repository, no private notes.
@@ -46,7 +52,7 @@ A short summary for the user, then end your final message with exactly one fence
   "pr": "https://github.com/org/repo/pull/42",
   "checks": "passed",
   "findings": [],
-  "summary": "PR #42 open with the receipt and 2 follow-ups; all checks green."
+  "summary": "PR #42 open with the receipt, labels risk:elevated and class:feature, and 2 follow-ups; all checks green."
 }
 ```
 

@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
 """Machine-level enforcement of the agentic harness, for every project on this machine.
 
-  machine.sh install [--roots DIR ...] [--mode warn|block]   user level: no root needed
+  machine.sh install [--roots DIR ...] [--mode warn|block] [--plugin]   user level: no root needed
   machine.sh status
   machine.sh remove
   machine.sh managed --out DIR [--roots DIR ...] [--mode warn|block]   admin files to review and install yourself
 
 install copies the guard (machine/guard.py) to ~/.agentic-harness/ and adds it as a user-level PreToolUse hook to
-Claude Code (~/.claude/settings.json) and Codex (~/.codex/hooks.json). In a git repository under one of --roots that
-has no harness, the guard reminds (warn) or refuses file edits (block) until the repository is enrolled; enrolled
-repositories are left to their own hooks. The harness source repository is exempt. Existing hooks (Orca's, yours)
-are kept; remove deletes only the guard's entries.
+Claude Code (settings.json in $CLAUDE_CONFIG_DIR, by default ~/.claude) and Codex (hooks.json in $CODEX_HOME, by default
+~/.codex). In a git repository under one of --roots that isn't enrolled (neither a full install nor a thin one), the
+guard reminds (warn) or refuses file edits (block) until the repository is enrolled; enrolled repositories are left to
+their own hooks. The harness source repository is exempt. Existing hooks (Orca's, yours) are kept; remove deletes only
+the guard's entries and the settings.
+
+The agentic-harness plugin runs the same check from its own hooks, with the same settings
+(~/.agentic-harness/machine.json), except in a CLI where the guard hook is installed: there the guard alone answers.
+With the plugin, install --plugin is enough: it writes the settings only, and takes out a guard hook installed earlier.
+
+The CLIs load hooks when a session starts, so a session that was open during install, install --plugin or remove keeps
+the hooks it started with until it is restarted.
 
 User-level hooks can be removed by the user. For a guard nobody on the machine can switch off, `managed` writes
 Claude Code's managed-settings.json and Codex's requirements.toml with the same hook (Codex trusts managed hooks by
@@ -27,10 +35,18 @@ from pathlib import Path
 
 HARNESS = Path(__file__).resolve().parent.parent
 MARK = "--harness-machine-guard"   # the token that identifies the guard's own hook entries
+# Each CLI's user settings: the variable that moves its folder, the folder in the home, the file with the hooks.
+CLI_SETTINGS = {"claude": ("CLAUDE_CONFIG_DIR", ".claude", "settings.json"),
+                "codex": ("CODEX_HOME", ".codex", "hooks.json")}
 
 
 def home(*parts):
     return Path(os.path.expanduser("~")).joinpath(*parts)
+
+
+def hook_file(source):
+    variable, folder, name = CLI_SETTINGS[source]
+    return Path(os.environ.get(variable) or home(folder)) / name
 
 
 def guard_command(source, guard_path, config=None):
@@ -75,6 +91,21 @@ def without_guard(groups):
     return kept
 
 
+def has_guard(data):
+    groups = (data.get("hooks") or {}).get("PreToolUse") or []
+    return any(owned(hook.get("command")) for group in groups for hook in group.get("hooks", []))
+
+
+def hooked(source):
+    """Whether the guard is a hook in the user settings that the CLI (claude or codex) reads, found as the CLI finds
+    them from its environment. The plugin's launcher leaves the check to it there, so a tool call isn't reminded or
+    refused twice."""
+    try:
+        return has_guard(json.loads(hook_file(source).read_text(encoding="utf-8")))
+    except (OSError, ValueError, AttributeError, TypeError):
+        return False
+
+
 def set_hook(path, source, guard_path, install):
     data = read_json(path)
     hooks = data.setdefault("hooks", {})
@@ -93,6 +124,8 @@ def parse(argv):
     for arg in argv:
         if arg in ("--roots", "--mode", "--out", "--platform"):
             key = arg
+        elif arg == "--plugin":
+            key = None
         elif key == "--roots":
             roots.append(arg)
         elif key == "--mode":
@@ -110,31 +143,45 @@ def install(argv):
     roots, mode, _ = parse(argv)
     guard = home(".agentic-harness", "guard.py")
     guard.parent.mkdir(parents=True, exist_ok=True)
+    settings = home(".agentic-harness", "machine.json")
+    write_json(settings, {"roots": roots, "mode": mode, "exempt": [str(HARNESS)],
+                          "enroll": str((HARNESS / "enroll.sh").resolve())})
+    if "--plugin" in argv:
+        print("  install    settings %s (mode %s, roots %s; exempt: %s)" % (settings, mode, ", ".join(roots), HARNESS))
+        print("  plugin     the agentic-harness plugin's hooks check with them, in each CLI the plugin is installed in")
+        for source in CLI_SETTINGS:
+            if hooked(source):
+                set_hook(hook_file(source), source, guard, False)
+                print("  %-10s guard hook removed from %s (open sessions keep it until restarted)"
+                      % (source, hook_file(source)))
+        return 0   # the guard copy stays, as in remove: sessions open now keep calling it
     shutil.copyfile(str(HARNESS / "machine" / "guard.py"), str(guard))
-    write_json(home(".agentic-harness", "machine.json"), {"roots": roots, "mode": mode, "exempt": [str(HARNESS)],
-                                                          "enroll": str((HARNESS / "enroll.sh").resolve())})
-    set_hook(home(".claude", "settings.json"), "claude", guard, True)
+    set_hook(hook_file("claude"), "claude", guard, True)
     print("  install    guard %s (mode %s, roots %s; exempt: %s)" % (guard, mode, ", ".join(roots), HARNESS))
-    print("  claude     PreToolUse hook in ~/.claude/settings.json (applies to new sessions)")
-    if home(".codex").is_dir():
-        set_hook(home(".codex", "hooks.json"), "codex", guard, True)
-        print("  codex      PreToolUse hook in ~/.codex/hooks.json. Codex runs a new user hook only after you trust "
-              "it once: open Codex, run /hooks and trust the agentic-harness guard.")
+    print("  claude     PreToolUse hook in %s (applies to new sessions)" % hook_file("claude"))
+    if hook_file("codex").parent.is_dir():
+        set_hook(hook_file("codex"), "codex", guard, True)
+        print("  codex      PreToolUse hook in %s. Codex runs a new user hook only after you trust it once: open "
+              "Codex, run /hooks and trust the agentic-harness guard." % hook_file("codex"))
     else:
-        print("  codex      skipped (no ~/.codex)")
+        print("  codex      skipped (no %s)" % hook_file("codex").parent)
     return 0
 
 
 def remove(_argv):
     guard = home(".agentic-harness", "guard.py")
-    for path, source in ((home(".claude", "settings.json"), "claude"), (home(".codex", "hooks.json"), "codex")):
-        if path.exists():
-            set_hook(path, source, guard, False)
-            print("  removed    the guard hook from %s" % path)
-    for name in ("guard.py", "machine.json"):
-        if home(".agentic-harness", name).exists():
-            home(".agentic-harness", name).unlink()
-    print("  removed    %s" % home(".agentic-harness"))
+    for source in CLI_SETTINGS:
+        if hook_file(source).exists():
+            set_hook(hook_file(source), source, guard, False)
+            print("  removed    the guard hook from %s" % hook_file(source))
+    settings = home(".agentic-harness", "machine.json")
+    if settings.exists():
+        settings.unlink()
+    print("  removed    the settings %s" % settings)
+    # The guard copy stays. A session open since install still runs it until restarted, and python3 exits 2 when its
+    # script is missing, which the CLIs take as a refusal of every edit and command. Without settings it does nothing.
+    if guard.exists():
+        print("  kept       %s for sessions still open; without the settings it lets every call through" % guard)
     return 0
 
 
@@ -143,13 +190,14 @@ def status(_argv):
     try:
         shown = json.dumps(json.loads(conf.read_text(encoding="utf-8"))) if conf.exists() else "not installed"
     except ValueError:
-        shown = "%s is not valid JSON (the guard then does nothing): run install again" % conf
+        shown = "%s is not valid JSON (the guard and the plugin then check nothing): run install again" % conf
     print("  config     %s" % shown)
-    for path in (home(".claude", "settings.json"), home(".codex", "hooks.json")):
-        groups = (read_json(path).get("hooks") or {}).get("PreToolUse") if path.exists() else []
-        found = any(owned(h.get("command")) for g in groups or [] for h in g.get("hooks", []))
-        print("  %-10s %s" % ("claude" if ".claude" in str(path) else "codex", "guard hook present" if found
-                              else "no guard hook"))
+    for source in CLI_SETTINGS:
+        path = hook_file(source)
+        found = path.exists() and has_guard(read_json(path))
+        print("  %-10s %s" % (source, "guard hook present in %s" % path if found else
+                              "no guard hook in %s (the agentic-harness plugin checks, where installed)" % path
+                              if conf.exists() else "no guard hook in %s" % path))
     return 0
 
 

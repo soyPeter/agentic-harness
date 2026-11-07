@@ -12,7 +12,13 @@ repository (HARNESS_ENGINE_SOURCE) the first time, and refuses one whose commit 
 
 A repository without the harness is left alone, and a full install keeps its own hooks. When a thin project's engine
 can't be run, hooks fail closed: reads go through, everything else is refused with the reason.
+
+`hook machine-guard` is the machine guard's check (machine/guard.py, settings in ~/.agentic-harness/machine.json from
+machine.sh install --plugin): in a repository under its roots that isn't enrolled, an agent's edits get a reminder, or
+are refused in block mode. A CLI where machine.sh installed the guard as a hook of its own gets the check from that
+hook only. Like the guard, it lets a call through when it fails.
 """
+import importlib.util
 import json
 import os
 import re
@@ -143,6 +149,25 @@ def refuse(event, reason):
     return 0
 
 
+def plugin_module(name):
+    path = Path(__file__).resolve().parents[1] / name
+    spec = importlib.util.spec_from_file_location("agentic_harness_" + path.stem, str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def machine_guard(source):
+    sys.dont_write_bytecode = True   # no __pycache__ in the plugin's folders
+    try:
+        if not plugin_module("tools/machine.py").hooked(source):
+            return plugin_module("machine/guard.py").main(["launcher.py", "--from", source])
+    except Exception:
+        pass
+    sys.stdout.write("{}\n" if source == "codex" else "")
+    return 0
+
+
 def main(argv):
     args = argv[1:]
     if args[:1] == ["pin"] or (args[:1] == ["init"] and "--thin" in args[1:]):
@@ -152,6 +177,8 @@ def main(argv):
             return 2
         return subprocess.run([sys.executable, str(installer)] + args).returncode
     event = args[1] if len(args) >= 2 and args[0] == "hook" else None
+    if event == "machine-guard":
+        return machine_guard(args[args.index("--from") + 1] if "--from" in args[:-1] else "claude")
     root = project_root()
     if root is None:
         return 0 if event else refuse(None, "not inside a git repository")
