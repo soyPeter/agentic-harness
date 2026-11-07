@@ -122,9 +122,10 @@ python3 scripts/harness/lib/harness.py linear receipt 1.1 --status "In Review" -
 python3 scripts/harness/lib/harness.py linear receipt 1.1 --status "In Review"
 ```
 
-The deliverer pushes the branch to the fork and opens the PR, with the receipt in it, then watches CI. **A human reviews
-and merges.** The harness can't: `gh pr merge` and MCP merge tools are refused under the profile, and the receipt never
-closes the Linear ticket.
+The deliverer pushes the branch to the fork and opens the PR, with the receipt in it, then watches CI. It also adds the
+receipt's suggested `risk:*` and `class:*` labels and creates the ones the repository lacks, which is a write to that
+repository; without permission it says so and delivers anyway. **A human reviews and merges.** The harness can't:
+`gh pr merge` and MCP merge tools are refused under the profile, and the receipt never closes the Linear ticket.
 
 ## 7. Metrics
 
