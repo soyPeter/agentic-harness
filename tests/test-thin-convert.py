@@ -77,7 +77,7 @@ Java with Gradle. Catalog packs: java.
 - Agents load the Java skills.
 """
 JAVA_TEST_FILES = (".claude/skills/java-test/SKILL.md", ".claude/skills/java-test/assertj.md")
-EARLIER_HASH = "0" * 64
+OTHER_HASH = "0" * 64
 
 
 def environment(source, work):
@@ -667,9 +667,9 @@ class Packs(Fixture):
 
 class PackProperties(Fixture):
     """For any set of the container pack's files the user edited in a project switched to thin mode, and wherever its
-    lock records their hashes ("kept", or "files" as an earlier engine's adopt left them, with the hash of an earlier
-    version still under "kept"), adopt --remove deletes exactly the others and keeps the edited ones, and the lock no
-    longer records any of them."""
+    lock records their hashes (under "kept", or under "files" as an earlier engine's adopt did; a different hash also
+    under "kept" checks that "files" comes first, as in update.sh --to-full), adopt --remove deletes exactly the others
+    and keeps the edited ones, and the lock no longer records any of them."""
 
     @classmethod
     def setUpClass(cls):
@@ -704,7 +704,7 @@ class PackProperties(Fixture):
     def check_removal(self, project, edits, under_files):
         lock = self.lock(project)
         lock["files"] = {name: lock["kept"][name] for name in sorted(under_files)}
-        lock["kept"].update(dict.fromkeys(under_files, EARLIER_HASH))
+        lock["kept"].update(dict.fromkeys(under_files, OTHER_HASH))
         (project / LOCK).write_text(json.dumps(lock, indent=2) + "\n")
         edited = self.edit(*sorted(edits), project=project)
         self.commit("chore: local edits to the pack", hooks=False, project=project)
