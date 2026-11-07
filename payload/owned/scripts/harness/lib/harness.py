@@ -27,6 +27,8 @@ Usage:
   harness.py linear import <ISSUE> --task <id> [--light] [--from F] | linear receipt <task> [--status S]
                                                                   (Linear as the system of record; user-only)
   harness.py trace <task-id> [--json]                             (the task's events: context, skills, edits, refusals, tests)
+  harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]
+                                                                  (derived traceability export, ADR-004)
   harness.py ci-judge --range <base>..<tip>                       (CI: independent re-judging of finished tasks)
   harness.py ci-protect [--branch main] [--with-judge] [--dry-run] (require the CI checks; needs gh)
   harness.py doctor
@@ -1480,13 +1482,15 @@ def mark_recommendations(questions):
     return marked
 
 
-def ac_test_references(task):
-    """{AC id: [test files mentioning it]}, searching tracked and untracked files outside backbone/."""
+def ac_test_references(task, rev=None):
+    """{AC id: [test files mentioning it]}, searching tracked and untracked files outside backbone/, or the files of
+    commit rev."""
     test_paths = re.compile(conf()["HARNESS_TEST_PATHS"])
-    output = git("grep", "-I", "--untracked", "-o", "-E", "AC-%s-[0-9]+" % re.escape(task).replace("\\-", "-"))
+    pattern = "AC-%s-[0-9]+" % re.escape(task).replace("\\-", "-")
+    output = git("grep", "-I", *(("-o", "-E", pattern, rev) if rev else ("--untracked", "-o", "-E", pattern)))
     found = {}
     for line in output.splitlines():
-        name, _, match = line.partition(":")
+        name, _, match = (line[len(rev) + 1:] if rev else line).partition(":")
         if name.startswith("backbone/") or not test_paths.search(name):
             continue
         found.setdefault(match, set()).add(name)
@@ -5490,6 +5494,8 @@ def trace_line(event):
 
 
 def trace_command(argv):
+    if argv[:1] == ["export"]:
+        return trace_export_command(argv[1:])
     task = next((a for a in argv if not a.startswith("--")), None)
     if not task:
         sys.stderr.write("usage: harness.py trace <task> [--json]\n")
@@ -5511,6 +5517,230 @@ def trace_command(argv):
     print("trace: task %s, %d event(s)" % (task, len(events)))
     for event in events:
         print(trace_line(event))
+    return 0
+
+
+# --------------------------------------------------------------------------- traceability export (ADR-004)
+# A derived, one-way view of the chain requirement -> criterion -> test -> verdict -> commit for ALM and docs-as-code
+# tools. backbone/ and git stay the record: nothing reads the export back, and it never touches the network.
+
+TRACE_USAGE = "usage: harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]\n"
+TASK_ID = re.compile(r"^[A-Za-z0-9._-]*[A-Za-z0-9]$")
+XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff\ud800-\udfff]")
+EARS_LEAD = re.compile(r"^((?:(?:While|When|Where)\s+.+?,\s*|If\s+.+?,\s*then\s+)*)the\s+\S.*?\s+shall\s+\S", re.I)
+EARS_KINDS = {"when": "event-driven", "while": "state-driven", "if": "unwanted behaviour", "where": "optional feature"}
+
+
+def clean(text):
+    """text without the control characters XML can't carry, so every format exports the same string."""
+    return XML_ILLEGAL.sub("", text)
+
+
+def trace_item_text(rest):
+    """A spec item's text after its id: without a criterion's leading (REQ-...) list, the colon and bold markers."""
+    return clean(re.sub(r"^\s*(\([^)]*\))?[\s:*]*", "", rest)).strip()
+
+
+def ears_pattern(rest):
+    """The EARS pattern of a requirement, read from its leading clauses as spec-check reads the shape."""
+    m = EARS_LEAD.match(re.sub(r"^[\s:*]+|\*+", "", rest).strip())
+    if not m:
+        return "not an EARS pattern"
+    kinds = sorted({k.lower() for k in re.findall(r"(?i)(?:^|,\s*)(while|when|where|if)\s", m.group(1))})
+    return "complex" if len(kinds) > 1 else EARS_KINDS[kinds[0]] if kinds else "ubiquitous"
+
+
+def commits_by_code():
+    """{code fingerprint: [commits reachable from HEAD with exactly that code, newest first]}. A commit's fingerprint
+    is its tree without the top-level backbone entry, as tree_fingerprint computes it; reading every tree through one
+    git process and hashing it here keeps this fast on a long history."""
+    pairs = [line.split() for line in git("log", "--format=%H %T", "HEAD").splitlines() if len(line.split()) == 2]
+    trees = sorted({tree for _, tree in pairs})
+    try:
+        out = subprocess.run(["git", "cat-file", "--batch"], cwd=str(ROOT), capture_output=True, timeout=GIT_TIMEOUT,
+                             input="".join(tree + "\n" for tree in trees).encode()).stdout
+    except subprocess.TimeoutExpired:
+        return {}
+    code, pos = {}, 0
+    for tree in trees:
+        end = out.find(b"\n", pos)
+        fields = out[pos:end].split()
+        if end < 0 or len(fields) != 3:
+            pos = end + 1
+            continue
+        size, oid_bytes = int(fields[2]), len(tree) // 2
+        body, pos = out[end + 1:end + 1 + size], end + 2 + size
+        kept, i = [], 0
+        while i < len(body):
+            nul = body.index(b"\0", i)
+            if body[i:nul].split(b" ", 1)[1] != b"backbone":
+                kept.append(body[i:nul + 1 + oid_bytes])
+            i = nul + 1 + oid_bytes
+        content = b"".join(kept)
+        code[tree] = hashlib.new("sha1" if oid_bytes == 20 else "sha256",
+                                 b"tree %d\0" % len(content) + content).hexdigest()
+    found = {}
+    for commit, tree in pairs:
+        if tree in code:
+            found.setdefault(code[tree], []).append(commit)
+    return found
+
+
+def trace_task(task, current, by_code):
+    """One task's part of the export: its requirements, criteria and test files, the latest verdicts on them, the
+    commits that carry the judged code, and the gaps the harness can see."""
+    text = read(spec_path(task))
+    body = strip_comments(text)
+    nfr_section = md_section(body, "Non-functional requirements") or ""
+    ears = conf()["HARNESS_REQ_STYLE"] == "ears"
+    requirements = []
+    for kind, items in (("REQ", spec_items(body, "REQ", task)), ("NFR", spec_items(nfr_section, "NFR", task))):
+        for rid, rest in items:
+            if rid not in {r["id"] for r in requirements}:
+                requirements.append({"id": rid, "kind": kind, "text": trace_item_text(rest),
+                                     "ears_pattern": ears_pattern(rest) if ears and kind == "REQ" else None})
+    judge = verdict_history(task, "judge")
+    last = judge[-1] if judge else None
+    fingerprint = last.get("fingerprint") if last else None
+    verdict = ("not judged" if last is None else "fail" if last.get("verdict") != "pass" else
+               "pass on the current code" if fingerprint == current else "pass on earlier code")
+    commits = by_code.get(fingerprint, []) if fingerprint else []
+    if last is None or fingerprint == current:
+        references, files_from = ac_test_references(task), "the current code"
+    elif commits:
+        references, files_from = ac_test_references(task, commits[0]), "commit %s" % commits[0]
+    else:
+        references, files_from = {}, None
+    gaps = {"not judged": ["no judge verdict: nothing in this task is verified"],
+            "fail": ["the latest judge verdict is a fail"],
+            "pass on earlier code": ["the judge's pass is on earlier code, not on the current code"]}.get(verdict, [])
+    if files_from is None:
+        gaps.append("the judged code is in no commit, so its test files are unknown")
+    known = [r["id"] for r in requirements]
+    judged = {str(c.get("id")): c for c in (last or {}).get("criteria") or [] if isinstance(c, dict)}
+    criteria, tests = [], {}
+    for aid, rest in spec_items(body, "AC", task):
+        if aid in {c["id"] for c in criteria}:
+            continue
+        cited = list(dict.fromkeys(re.findall(r"\b(?:REQ|NFR)-%s-\d+\b" % re.escape(task), rest)))
+        item = judged.get(aid)
+        result = ("not judged" if last is None else "not evaluated" if item is None else
+                  "met" if item.get("met") is True else "not met")
+        files = references.get(aid, [])
+        for name in files:
+            tests.setdefault(name, []).append(aid)
+        criteria.append({"id": aid, "text": trace_item_text(rest), "proves": [r for r in cited if r in known],
+                         "unknown": [r for r in cited if r not in known], "result": result, "files": files,
+                         "evidence": clean(str(item.get("evidence") or "")) if item else "",
+                         "judge_tests": [clean(str(t)) for t in item.get("tests") or []] if item else [],
+                         "tests": [trace_test_id(task, name) for name in files]})
+    proven = {r for c in criteria for r in c["proves"]}
+    gaps += ["%s has no acceptance criterion" % rid for rid in known if rid not in proven]
+    for c in criteria:
+        gaps += ["%s references %s, which the spec doesn't define" % (c["id"], rid) for rid in c["unknown"]]
+        if c["result"] in ("not met", "not evaluated"):
+            gaps.append("%s: %s" % (c["id"], c["result"] if c["result"] == "not met" else "not evaluated by the judge"))
+        if files_from and not c["files"]:
+            gaps.append("%s: no test file mentions it" % c["id"])
+    gaps += ["NFR without an id, so no criterion traces it: %s" % clean(n) for n in top_level_items(nfr_section)
+             if n.lower().rstrip(".") not in ("none", "n/a") and not re.match(r"\**NFR-%s-\d+" % re.escape(task), n)]
+    for f in (last or {}).get("findings") or []:
+        if isinstance(f, dict):
+            where = ":".join(str(x) for x in (f.get("file"), f.get("line")) if x not in (None, ""))
+            gaps.append(clean("%s finding left open: %s%s" % (f.get("severity", "minor"), f.get("issue", "?"),
+                                                              " (%s)" % where if where else "")))
+    grills = verdict_history(task, "grill")
+    grill = grills[-1] if grills else None
+    run = (last or {}).get("test_run")
+    cls, declared, problem = change_class(text)
+    _, line = task_line(task)
+    title = re.match(r"^#\s+Spec\s+\S+:\s*(.+)$", body.strip().splitlines()[0]) if body.strip() else None
+    return {
+        "id": task,
+        "title": clean(title.group(1).strip() if title else task_title(task)),
+        "status": ("not in 3-TASKS.md" if line is None else "blocked" if BLOCKED_NOTE.search(line) else
+                   "in progress" if WIP_LINE.match(line) else "done" if DONE_LINE.match(line) else "pending"),
+        "spec": spec_rel(task),
+        "spec_fingerprint": spec_fingerprint(task, text),
+        "change_class": cls + (" (the declared one is invalid)" if problem else "" if declared else " (not declared)"),
+        "grill": "none" if grill is None else "%s on %s (%s)" % (
+            grill.get("verdict"), "the current spec" if grill.get("fingerprint") == spec_fingerprint(task, text)
+            else "an earlier spec", grill.get("at")),
+        "approval": [clean(a) for a in approval_lines(md_section(body, "Approval") or "")],
+        "verdict": verdict,
+        "judged_at": last.get("at") if last else None,
+        "code_fingerprint": fingerprint,
+        "commits": commits,
+        "test_run": "%s: exit %s in %ss, output sha256 %s" % (clean(str(run.get("command"))), run.get("exit"),
+                                                               run.get("seconds"), run.get("output_sha256"))
+        if isinstance(run, dict) else None,
+        "test_files_from": files_from or "unknown",
+        "reviews": "; ".join("%s: %s" % (lens, "none" if e is None else e.get("verdict") + (
+            "" if e.get("fingerprint") == fingerprint else " on other code than the judged code"))
+            for lens, e in lens_reviews(task).items()),
+        "requirements": requirements,
+        "criteria": criteria,
+        "tests": [{"id": trace_test_id(task, name), "path": clean(name), "criteria": acs}
+                  for name, acs in sorted(tests.items())],
+        "gaps": gaps,
+    }
+
+
+def trace_test_id(task, path):
+    return "TEST-%s-%s" % (task, hashlib.sha256(path.encode("utf-8")).hexdigest()[:12])
+
+
+def trace_model(tasks):
+    head = git("rev-parse", "-q", "--verify", "HEAD").strip() or None
+    current = code_fingerprint()
+    by_code = commits_by_code()
+    version = lock().get("harness_version") or lock().get("version") or "unknown"
+    return {"project": clean(conf()["HARNESS_PROJECT_NAME"] or ROOT.name), "version": version,
+            "tool": "agentic-harness %s" % version, "head": head,
+            "time": git("log", "-1", "--format=%cI", "HEAD").strip() if head else "1970-01-01T00:00:00+00:00",
+            "code_fingerprint": current, "code_matches_head": bool(head) and head in by_code.get(current, []),
+            "req_style": conf()["HARNESS_REQ_STYLE"],
+            "tasks": [trace_task(task, current, by_code) for task in tasks]}
+
+
+def trace_export_command(argv):
+    import traceability
+    flags, rest = {"--format": None, "--out": None, "--task": None}, list(argv)
+    while rest:
+        flag = rest.pop(0)
+        if flag not in flags or flags[flag] is not None or not rest:
+            sys.stderr.write(TRACE_USAGE)
+            return 64
+        flags[flag] = rest.pop(0)
+    if flags["--format"] not in traceability.FORMATS:
+        sys.stderr.write(TRACE_USAGE)
+        return 64
+    render, name = traceability.FORMATS[flags["--format"]]
+    task = flags["--task"]
+    if task is not None and not (TASK_ID.match(task) and spec_path(task).is_file()):
+        print("trace export: no spec at %s" % spec_rel(task))
+        return 1
+    tasks = [task] if task else sorted((p.stem for p in SPECS.glob("*.md") if TASK_ID.match(p.stem)),
+                                       key=lambda t: [int(p) if p.isdigit() else p for p in re.split(r"(\d+)", t)])
+    target = Path(flags["--out"]).expanduser().resolve() / name if flags["--out"] else None
+    if target is not None and (target == ROOT or ROOT in target.parents):
+        rel = target.relative_to(ROOT).as_posix()
+        if not git("check-ignore", "--", rel).strip():
+            print("trace export: %s is inside the repository and git doesn't ignore it: an untracked file there "
+                  "counts as code and would make the judge's passes stale. Write it outside the repository or to a "
+                  "git-ignored folder, or redirect stdout." % rel)
+            return 1
+    document = render(trace_model(tasks))
+    if target is None:
+        sys.stdout.write(document)
+        return 0
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(document, encoding="utf-8")
+    except OSError as exc:
+        print("trace export: can't write %s: %s" % (target, exc))
+        return 1
+    print("trace export: wrote %s" % target)
     return 0
 
 
