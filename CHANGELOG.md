@@ -52,6 +52,21 @@
   Switching there and back without moving the pin gives back the install, except that an edited file outside
   `backbone/` becomes the release's copy with the edit kept in `<file>.harness-bak`. The README has a Thin mode
   section: the plugin for each CLI, `init --thin`, `pin`, switching, CI, the plugin/pin rule and the limits.
+- **The machine guard knows thin projects, and the plugin gives its check.** The guard took a thin project (a
+  `"mode": "thin"` pin in `backbone/.harness-lock.json`, no `scripts/harness/`) for one that isn't enrolled: it
+  reminded the agent and, in block mode, refused its edits. A thin pin now counts, and so does a lock that can't be
+  read (a merge conflict in the pin): the plugin refuses changes there until it is fixed. The plugin's own hooks now
+  give the guard's reminder or refusal in Claude Code and Codex, with the same `~/.agentic-harness/machine.json`, so a
+  machine with the plugin needs no guard hook: `./machine.sh install --plugin` writes only the settings and takes out a
+  guard hook installed earlier. In a CLI that still has the guard hook, the plugin leaves the check to it, so nothing
+  is said twice. An installed guard is a copy: run `./machine.sh install` again to get this fix.
+- **`machine.sh` no longer breaks open sessions, and finds the CLIs' settings where they do.** Claude Code and Codex
+  load hooks when a session starts, so a session open since `install` kept calling the guard after `remove` deleted
+  it. Python exits 2 on a missing script, which both CLIs take as a refusal: every edit and shell command in that
+  session was refused until it was restarted. `remove` and `install --plugin` now leave the guard's script for those
+  sessions (after `remove` it finds no settings and lets every call through); restart them. `install`, `remove`,
+  `status` and the plugin's check look for the hooks in `$CLAUDE_CONFIG_DIR` and `$CODEX_HOME` when they are set, as
+  the CLIs do; `install` used to write them to `~/.claude` and `~/.codex`, where those CLIs didn't load them.
 - Tests go through the harness's public commands and hooks only: the checks that grepped agent files for hook names
   now run those hooks, and the ones that imported `harness.py` to call its functions now use `approve`,
   `orca --dry-run`, `orca-digest`, `orca-nightly` and a real, held `orca` run.

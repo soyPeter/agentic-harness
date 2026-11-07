@@ -3,8 +3,10 @@
 
 A user-level (or managed) PreToolUse hook for Claude Code and Codex. It runs in every project and does one thing:
 in a git repository under one of your work folders that has no agentic harness, it warns (mode "warn") or refuses
-file edits (mode "block") until the repository is enrolled (enroll.sh <path>). In an enrolled repository it does
-nothing, because the repository's own hooks enforce the gates.
+file edits (mode "block") until the repository is enrolled (enroll.sh <path>). A repository is enrolled when it has
+a full install (its own engine in scripts/harness/) or a thin one (a "thin" pin in backbone/.harness-lock.json, run
+by the agentic-harness plugin); there it does nothing, because the repository's own hooks or the plugin's enforce
+the gates.
 
 Config: ~/.agentic-harness/machine.json (or HARNESS_MACHINE_CONFIG): {"roots": [...], "mode": "warn"|"block",
 "exempt": [...]}. A guard error never blocks: the repository's own hooks are the enforcement; this only enrolls.
@@ -18,6 +20,7 @@ from pathlib import Path
 
 EDIT_TOOLS = ("Write", "Edit", "MultiEdit", "apply_patch")
 HARNESS_FILE = "scripts/harness/lib/harness.py"
+LOCK_FILE = "backbone/.harness-lock.json"
 # In block mode, a shell command in an unenrolled repository runs only if it enrolls it: a shell can write in too many
 # ways (redirections, wrappers, substitutions, tools with delete flags) for an allowlist to be safe. Reads work through
 # the agents' file tools.
@@ -39,6 +42,23 @@ def repo_root(start):
     except (OSError, subprocess.TimeoutExpired):
         return None
     return Path(out.stdout.strip()).resolve() if out.returncode == 0 and out.stdout.strip() else None
+
+
+def enrolled(root):
+    """A full install, or a thin pin. A lock that exists but can't be read (a merge conflict in the pin) counts too, as
+    a valid pin does, whether or not the CLI has the plugin: the guard judges the repository, not what the CLI has
+    installed. Run as its own hook, the guard can't tell whether the plugin is there; where it is, the plugin's launcher
+    refuses a session's changes in that repository until the lock is fixed, and a "not enrolled" answer would
+    contradict that."""
+    if (root / HARNESS_FILE).is_file():
+        return True
+    try:
+        lock = json.loads((root / LOCK_FILE).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+    return not isinstance(lock, dict) or lock.get("mode") == "thin"
 
 
 def inside(path, folders):
@@ -157,7 +177,7 @@ def main(argv):
     for target in targets(data, base):
         root = repo_root(nearest_dir(target))
         if (root is None or not inside(root, settings.get("roots") or []) or inside(root, settings.get("exempt") or [])
-                or (root / HARNESS_FILE).is_file()):
+                or enrolled(root)):
             continue
         if root not in unenrolled:
             unenrolled.append(root)
