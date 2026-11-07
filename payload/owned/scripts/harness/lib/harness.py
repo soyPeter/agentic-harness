@@ -181,6 +181,12 @@ CLASS_GATES = {
     "feature": "the user approves it, never policy",
     "schema": "the user approves it, never policy; it never takes the light lane",
 }
+# Pull request labels a receipt suggests for human triage. The risk label starts at the class's step and goes one
+# step up when the receipt lists other risks: docs and refactor may be policy-approved, feature never is, and schema
+# is migrations, auth, secrets, payments and infrastructure.
+RISK_LABELS = ("risk:low", "risk:elevated", "risk:high")
+CLASS_RISK_STEP = {"docs": 0, "refactor": 0, "feature": 1, "schema": 2}
+TRIAGE_LABELS = RISK_LABELS + tuple("class:" + name for name in CHANGE_CLASSES)
 
 # Write scope per agent: ("allow", patterns) permits only matches; ("deny", patterns) refuses matches.
 AGENT_SCOPES = {
@@ -1045,7 +1051,8 @@ SHELLS = ("sh", "bash", "zsh", "dash", "ksh")
 INTERPRETERS = ("python", "python3", "perl", "ruby", "node")
 WRAPPERS = ("sudo", "env", "time", "nohup", "command", "exec", "nice")
 MUTATORS = ("rm", "rmdir", "unlink", "mv", "chmod", "chown", "truncate", "tee", "touch")
-HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+# Not <<<, a here-string: the lines after it are commands, not a body.
+HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 SETTING_ASSIGNMENT = re.compile(r"^(HARNESS_[A-Z0-9_]+|SKIP_BUILD)=")
 PROTECTED_MENTION = re.compile(r"(?:^|[\s'\"/=(:])(backbone/|scripts/harness/|\.claude/|AGENTS\.md|CLAUDE\.md"
                                r"|\.git/(?:hooks|harness|config))")
@@ -1084,6 +1091,12 @@ def split_segments(command):
             current.append(ch)
             if ch == quote:
                 quote = None
+            elif quote == '"' and (ch == "`" or command.startswith("$(", i)):
+                # A quote inside "$(...)" belongs to the substitution, not to the string around it.
+                end = closing_paren(command, i + 1) if ch == "$" else command.find("`", i + 1)
+                end = len(command) if end < 0 else end
+                current.append(command[i + 1:end + 1])
+                i = end
             elif ch == "\\" and quote == '"' and i + 1 < len(command):
                 current.append(command[i + 1])
                 i += 1
@@ -3675,12 +3688,407 @@ def default_branch():
     return ref.rsplit("/", 1)[-1] if ref else None
 
 
-def role_command_refusal(agent, command):
+# The deliverer's gh calls, read as the shell and gh would read them. What the harness can't read is refused.
+RUNNERS = ("timeout", "gtimeout", "nice", "nohup", "stdbuf", "time", "env", "sudo", "doas", "command", "exec",
+           "watch", "ionice", "chronic", "caffeinate", "flock", "setsid", "unbuffer", "script", "su")
+SHELL_KEYWORDS = ("!", "(", ")", "{", "}", "if", "then", "else", "elif", "fi", "do", "done", "while", "until")
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+REDIRECTION = re.compile(r"^[0-9]*(<<<|<<-?|<>|<&|>&|>>|>\||&>>|&>|<|>)")
+EXPANSION = re.compile(r"\$\S|`")
+GH_COMMANDS = ("agent-task", "alias", "api", "attestation", "auth", "browse", "cache", "codespace", "completion",
+               "config", "copilot", "discussion", "extension", "extensions", "ext", "gist", "gpg-key", "help", "issue",
+               "label", "licenses", "org", "pr", "preview", "project", "release", "repo", "ruleset", "run", "search",
+               "secret", "skill", "ssh-key", "status", "variable", "version", "workflow")
+# The flags that take a value (gh pr|issue create|new|edit, gh api, gh label create). Every other flag is a switch.
+ITEM_VALUE_FLAGS = ("-a", "-B", "-b", "-F", "-H", "-l", "-m", "-p", "-r", "-R", "-T", "-t", "--add-assignee",
+                    "--add-blocked-by", "--add-blocking", "--add-label", "--add-project", "--add-reviewer",
+                    "--add-sub-issue", "--assignee", "--attach", "--base", "--blocked-by", "--blocking", "--body",
+                    "--body-file", "--head", "--label", "--milestone", "--parent", "--project", "--recover", "--repo",
+                    "--remove-assignee", "--remove-blocked-by", "--remove-blocking", "--remove-label",
+                    "--remove-project", "--remove-reviewer", "--remove-sub-issue", "--reviewer", "--template",
+                    "--title", "--type")
+API_VALUE_FLAGS = ("-F", "-f", "-H", "-p", "-q", "-t", "-X", "--cache", "--field", "--header", "--hostname", "--input",
+                   "--jq", "--method", "--preview", "--raw-field", "--template")
+LABEL_VALUE_FLAGS = ("-c", "-d", "-R", "--color", "--description", "--repo")
+MERGE_REFUSAL = "it opens and updates the PR; merging is the user's call, like closing or approving it."
+EXPANSION_REFUSAL = ("write the gh command out: an expansion ($... or `...`) outside a flag's value can add flags or "
+                     "commands the harness can't read.")
+
+
+def scan_expansions(text, quotes=True):
+    """(the commands text runs in $(...), `...`, <(...) and >(...), whether an expansion sits outside quotes, where
+    word splitting can make it several words). Nothing expands in single quotes; a heredoc body (quotes=False) has
+    no quotes."""
+    commands, bare, quote, i = [], False, None, 0
+    while i < len(text):
+        ch, after = text[i], text[i + 1:i + 2]
+        if quote == "'":
+            quote = None if ch == "'" else quote
+        elif ch == "\\":
+            i += 1
+        elif quotes and ch == "'" and quote is None:
+            quote = "'"
+        elif quotes and ch == '"':
+            quote = None if quote else '"'
+        elif ch == "`":
+            end = text.find("`", i + 1)
+            end = len(text) if end < 0 else end
+            commands.append(text[i + 1:end])
+            bare, i = bare or quote is None, end
+        elif after == "(" and (ch == "$" or (ch in "<>" and quote is None)):
+            end = closing_paren(text, i + 1)
+            commands.append(text[i + 2:end])
+            bare, i = bare or (ch == "$" and quote is None), end
+        elif ch == "$" and quote is None and after.strip():
+            bare = True
+        i += 1
+    return commands, bare
+
+
+def closing_paren(text, start):
+    """The index of the ) that closes the ( at text[start] (quotes and nested $(...) included), or len(text)."""
+    depth, quote, i = 0, None, start
+    while i < len(text):
+        ch = text[i]
+        if quote == "'":
+            quote = None if ch == "'" else quote
+        elif ch == "\\":
+            i += 1
+        elif quote == '"':
+            if ch == '"':
+                quote = None
+            elif ch == "$" and text[i + 1:i + 2] == "(":
+                i = closing_paren(text, i + 1)
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return len(text)
+
+
+def shell_split(text):
+    """The words of a segment as the shell splits them, quotes removed. A $(...) or `...` stays whole inside its word,
+    whatever quotes it holds: shlex reads it as plain text, and a quote in it can fold the next arguments into one."""
+    words, word, quote, i = [], None, None, 0
+    while i < len(text):
+        ch = text[i]
+        if quote == "'":
+            quote, word = (None, word) if ch == "'" else (quote, word + ch)
+        elif ch == "\\" and i + 1 < len(text):
+            nxt = text[i + 1]
+            word = (word or "") + ("" if nxt == "\n" else "\\" + nxt if quote and nxt not in '$`"\\' else nxt)
+            i += 1
+        elif ch == "`" or text.startswith("$(", i):
+            end = closing_paren(text, i + 1) if ch == "$" else text.find("`", i + 1)
+            end = len(text) if end < 0 else end
+            word, i = (word or "") + text[i:end + 1], end
+        elif quote == '"':
+            quote, word = (None, word) if ch == '"' else (quote, word + ch)
+        elif ch in "'\"":
+            quote, word = ch, word or ""
+        elif ch.isspace():
+            if word is not None:
+                words.append(word)
+            word = None
+        elif ch == "#" and word is None:
+            break
+        else:
+            word = (word or "") + ch
+        i += 1
+    return words + ([word] if word is not None else [])
+
+
+def run_words(words):
+    """(the words of the command a segment runs, why the harness can't read it or ""). Keywords, grouping, leading
+    assignments and redirections go; runners such as timeout 60, env -i or nice -n 5 run the command after their own
+    options. xargs, parallel and find -exec add arguments the command line doesn't show, and a command named by an
+    expansion can be any command."""
+    while words:
+        first = words[0]
+        if first == "case":
+            words = words[words.index("in") + 1:] if "in" in words else []
+        elif first == "function":
+            words = words[2:]
+        elif REDIRECTION.match(first):
+            words = words[1 + (REDIRECTION.match(first).end() == len(first)):]
+        elif (first in SHELL_KEYWORDS or first in WRAPPERS or ASSIGNMENT.match(first) or first.endswith("()")
+              or (first.endswith(")") and "(" not in first)):
+            words = words[1:]
+        elif first[:1] in ("(", "{") and first.lstrip("({"):
+            words = [first.lstrip("({")] + words[1:]
+        else:
+            break
+    named = "it runs a command named by an expansion ($... or `...`), which the harness can't read."
+    if words and EXPANSION.search(words[0]):
+        return words, named
+    prog, runs = program(words), ("gh", "eval") + SHELLS
+    if prog == "find":
+        start = next((i + 1 for i, w in enumerate(words) if w in ("-exec", "-execdir", "-ok", "-okdir")), len(words))
+        if words[start:] and (program(words[start:]) in runs or EXPANSION.search(words[start])):
+            return words[start:], "find -exec adds arguments the harness can't read; run gh with them written out."
+    elif prog in RUNNERS + ("xargs", "parallel") or prog.startswith("-"):
+        hidden = ("%s adds arguments the harness can't read; run gh with them written out." % prog
+                  if prog in ("xargs", "parallel") else "")
+        for j in range(1, len(words)):
+            if program(words[j:]) in runs:
+                return words[j:], hidden
+            if program(words[j:]) in RUNNERS + ("xargs", "parallel", "find"):
+                inner, why = run_words(words[j:])
+                return inner, hidden or why
+            if EXPANSION.search(words[j]):
+                return words[j:], named
+    return words, ""
+
+
+def shell_script(words):
+    """(the command string a shell runs with -c, its other operands): bash -lc 'x', sh -e -c 'x' and
+    bash -o pipefail -c 'x' run x; bash file.sh reads file.sh. Redirections aren't operands."""
+    i, has_c = 1, False
+    while i < len(words) and len(words[i]) > 1 and words[i][0] in "-+" and words[i] != "--":
+        if words[i] in ("-o", "+o", "-O", "+O"):
+            i += 1
+        elif words[i][0] == "-" and not words[i].startswith("--") and "c" in words[i]:
+            has_c = True
+        i += 1
+    operands, skip = [], False
+    for word in words[i + (words[i:i + 1] == ["--"]):]:
+        m = REDIRECTION.match(word)
+        if not skip and not m:
+            operands.append(word)
+        skip = not skip and bool(m) and m.end() == len(word)
+    return (operands[0] if has_c and operands else None), operands
+
+
+def gh_calls(command, depth=0):
+    """(segment, words, why the harness can't read it or "") of each gh call command runs: direct, behind a runner
+    such as timeout or env, in sh -c or eval, in $(...) or backticks, in a heredoc or here-string a shell reads, and
+    in $(...) in an unquoted heredoc. Commands it can't read come with why: gh behind xargs, a shell reading its
+    commands from a pipe or a file, a command named by an expansion."""
+    if depth > 4:
+        return [(command, [], "its commands nest deeper than the harness reads; write them out.")]
+    calls = []
+    kept, bodies = split_heredocs(command)
+    for inner in scan_expansions(kept)[0]:
+        calls += gh_calls(inner, depth + 1)
+    segments = split_segments(kept)
+    for index, (segment, _) in enumerate(segments):
+        calls += segment_calls(segment, index > 0 and segments[index - 1][1] == "|", depth)
+    for opening, body in bodies:
+        if any(not m.group(1) for m in HEREDOC.finditer(opening)):
+            for inner in scan_expansions(body, quotes=False)[0]:
+                calls += gh_calls(inner, depth + 1)
+        if any(program(run_words(shell_split(seg))[0]) in SHELLS
+               for seg, _ in split_segments(opening) if HEREDOC.search(seg)):
+            calls += gh_calls(body, depth + 1)
+    return calls
+
+
+def segment_calls(segment, piped, depth):
+    words, why = run_words(shell_split(segment))
+    prog = program(words)
+    if why or prog == "gh":
+        return [(segment, words, why)]
+    if prog == "eval":
+        return gh_calls(" ".join(words[1:]), depth + 1)
+    if prog in SHELLS:
+        script, operands = shell_script(words)
+        here = next((w[3:] or (words[i + 1:i + 2] or [""])[0] for i, w in enumerate(words) if w.startswith("<<<")),
+                    None)
+        if script is not None or here is not None:
+            return gh_calls(here if script is None else script, depth + 1)
+        if not any(re.match(r"^[0-9]*<<", w) for w in words) and (
+                piped or operands or any(re.match(r"^[0-9]*<(?![<&>])", w) for w in words)):
+            return [(segment, words, "a shell that reads its commands from a pipe or a file runs commands the harness "
+                                     "can't read; run them written out.")]
+        return []
+    if prog in RUNNERS or prog.startswith("-"):
+        # watch 'gh ...', script -c 'gh ...': the command is one word
+        return [call for w in words[1:] if re.search(r"\s", w.strip()) for call in gh_calls(w, depth + 1)]
+    return []
+
+
+def gh_parts(words):
+    """(command, subcommand, arguments) of a gh call. --repo may come before the subcommand: gh pr -R o/r edit 7 is
+    ("pr", "edit", ["-R", "o/r", "7"]). gh api has no subcommand; its endpoint stays among the arguments."""
+    command, sub, args, i = None, None, [], 1
+    while i < len(words):
+        word = words[i]
+        if command and command != "api" and sub is None and word in ("-R", "--repo"):
+            args += words[i:i + 2]
+            i += 2
+            continue
+        if word.startswith("-") or sub is not None or command == "api":
+            args.append(word)
+        elif command is None:
+            command = word
+        else:
+            sub = word
+        i += 1
+    return command, sub, args
+
+
+def gh_flags(args, value_flags):
+    """([(flag, value)], positional words), as gh's flag parser reads args: a flag in value_flags takes the rest of
+    its word or the next word, whatever it holds (--title --add-label is the title "--add-label"); short switches
+    combine (-dl x is -d -l x); everything after -- is positional."""
+    flags, positional, i = [], [], 0
+    while i < len(args):
+        word = args[i]
+        if word == "--":
+            positional += args[i + 1:]
+            break
+        if word.startswith("--"):
+            name, eq, value = word.partition("=")
+            if name in value_flags and not eq:
+                i += 1
+                value = args[i] if i < len(args) else ""
+            flags.append((name, value))
+        elif word.startswith("-") and word != "-":
+            for k in range(1, len(word)):
+                name, rest = "-" + word[k], word[k + 1:]
+                if name not in value_flags:
+                    flags.append((name, ""))
+                    continue
+                if len(rest) > 1 and rest[0] == "=":
+                    value = rest[1:]
+                elif rest:
+                    value = rest
+                else:
+                    i += 1
+                    value = args[i] if i < len(args) else ""
+                flags.append((name, value))
+                break
+        else:
+            positional.append(word)
+        i += 1
+    return flags, positional
+
+
+def hidden_arguments(segment, flags, positional):
+    """Whether expansions could give gh flags the harness doesn't see: one outside quotes (word splitting), one in a
+    flag's name, or one at the start of a positional word, which can expand to a flag."""
+    return (scan_expansions(segment)[1] or any(EXPANSION.search(name) or name.endswith("$") for name, _ in flags)
+            or any(word.startswith(("$", "`")) for word in positional))
+
+
+def gh_refusal(segment, words, cwd):
+    """Why the deliverer may not run this gh call, or None."""
+    command, sub, args = gh_parts(words)
+    if command is None:
+        return None
+    if EXPANSION.search(command + " " + (sub or "")):
+        return EXPANSION_REFUSAL
+    if command not in GH_COMMANDS:
+        return "it runs gh's own commands; %s is an alias or an extension, which can run any gh command." % command
+    if command in ("alias", "extension", "extensions", "ext") and sub not in (None, "list", "ls"):
+        return "it neither defines nor runs gh aliases and extensions: they can run any gh command."
+    if command == "pr" and sub in ("merge", "close", "review", "ready"):
+        return MERGE_REFUSAL
+    if command == "api":
+        return api_refusal(segment, args)
+    if command == "label":
+        name = (gh_flags(args, LABEL_VALUE_FLAGS)[1] or [None])[0]
+        if sub in ("edit", "delete", "clone") or (sub == "create" and name not in TRIAGE_LABELS):
+            return ("it creates only the triage labels it applies (gh label create <label> ...); creating, editing or "
+                    "deleting other labels is the user's call.")
+        return None
+    if command in ("pr", "issue") and sub in ("create", "new", "edit"):
+        return label_change_refusal(command, sub, segment, args, cwd)
+    return None
+
+
+def api_refusal(segment, args):
+    """Why a gh api call could change something, or None. GraphQL can label, merge and enable auto-merge, and a
+    REST write can do the same through a body the harness may not see."""
+    flags, positional = gh_flags(args, API_VALUE_FLAGS)
+    if hidden_arguments(segment, flags, positional):
+        return EXPANSION_REFUSAL
+    endpoint = (positional or [""])[0].split("?")[0]
+    method = next((value for name, value in reversed(flags) if name in ("-X", "--method")), None)
+    sends = any(name in ("-f", "-F", "--raw-field", "--field", "--input") for name, _ in flags)
+    sent = (method or ("POST" if sends else "GET")).upper()
+    if re.search(r"(^|/)graphql/?$", endpoint) or sent not in ("GET", "HEAD"):
+        return ("gh api only reads (GET), and never through GraphQL: it changes the PR with gh pr create/edit and gh "
+                "label create, where the harness sees what changes.")
+    return None
+
+
+def label_change_refusal(command, sub, segment, args, cwd):
+    """Why a gh pr|issue create|edit call changes labels beyond the triage labels the receipts suggest, or None.
+    Other labels can gate CI or merges (harness-change-approved lets a PR change the harness), so they stay the
+    user's."""
+    flags, positional = gh_flags(args, ITEM_VALUE_FLAGS)
+    if hidden_arguments(segment, flags, positional):
+        return EXPANSION_REFUSAL
+    if any(name == "--recover" for name, _ in flags):
+        return "it doesn't use --recover: the file it reads can carry labels the harness can't see."
+    added = [n for name, value in flags if name in ("-l", "--label", "--add-label") for n in value.split(",")]
+    removed = [n for name, value in flags if name == "--remove-label" for n in value.split(",")]
+    foreign = [n for n in added if n not in TRIAGE_LABELS]
+    if foreign:
+        return ("it applies only the triage labels its receipts suggest (%s); %s is the user's call."
+                % (", ".join(TRIAGE_LABELS), ", ".join(foreign)))
+    risk = [n for n in RISK_LABELS if n in added]
+    if len(risk) > 1:
+        return "a PR keeps one risk:* label: add only the highest the receipts suggest, %s." % risk[-1]
+    top = RISK_LABELS.index(risk[0]) if risk else -1
+    kept = [n for n in removed if n not in RISK_LABELS or RISK_LABELS.index(n) >= top]
+    if kept:
+        return ("it removes only a lower risk:* label, in the call that adds the higher one; %s may have been set by "
+                "a person." % ", ".join(kept))
+    if sub == "edit" and risk:
+        repo = next((value for name, value in reversed(flags) if name in ("-R", "--repo")), None)
+        return risk_label_refusal(command, positional if command == "issue" else positional[:1], repo, risk[0],
+                                  removed, cwd)
+    return None
+
+
+def risk_label_refusal(command, targets, repo, added, removed, cwd):
+    """Why adding the risk label added would leave a second risk label on the PR, as GitHub has its labels, or None."""
+    for target in targets or [None]:
+        names, error = item_labels(command, target, repo, cwd)
+        if names is None:
+            return ("it adds a risk:* label only once the harness has read the PR's labels, and gh %s view failed: %s"
+                    % (command, error))
+        others = [n for n in RISK_LABELS if n in names and n != added and n not in removed]
+        higher = [n for n in others if RISK_LABELS.index(n) > RISK_LABELS.index(added)]
+        if higher:
+            return ("the PR already has %s, and a risk label only goes up: leave it, without adding %s."
+                    % (higher[-1], added))
+        if others:
+            return ("the PR has %s: remove it in the same call (--remove-label %s), so the PR keeps one risk:* label."
+                    % (", ".join(others), ",".join(others)))
+    return None
+
+
+def item_labels(command, target, repo, cwd):
+    """(the names of the labels on a pull request or issue, None), or (None, why gh couldn't read them)."""
+    args = ["gh", command, "view"] + ([target] if target else []) + (["--repo", repo] if repo else [])
+    try:
+        result = subprocess.run(args + ["--json", "labels"], cwd=cwd or str(ROOT), capture_output=True, text=True,
+                                timeout=15)
+        if result.returncode == 0:
+            return [label["name"] for label in json.loads(result.stdout)["labels"]], None
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as exc:
+        return None, str(exc) or type(exc).__name__
+    return None, (result.stderr.strip().splitlines() or ["exit %d" % result.returncode])[-1]
+
+
+def role_command_refusal(agent, command, cwd=None):
     """Why agent may not run command, or None. The deliverer reaches GitHub, but the decisions there stay the user's."""
     if agent != "deliverer":
         return None
     if re.search(r"\bgh\s+pr\s+(merge|close|review|ready)\b|\bgh\s+api\b[^;&|\n]*/merge\b", command):
-        return "it opens and updates the PR; merging is the user's call, like closing or approving it."
+        return MERGE_REFUSAL
+    for segment, words, why in gh_calls(command):
+        refusal = why or gh_refusal(segment, words, cwd)
+        if refusal:
+            return refusal
     targets = {b for b in ("main", "master", default_branch()) if b}
     push = re.search(r"\bgit\s+push\b([^;&|\n]*)", command)
     on_default = git("rev-parse", "--abbrev-ref", "HEAD").strip() in targets
@@ -3694,7 +4102,7 @@ def hook_agent_guard(data, agent):
     scope = role_scope(agent)
     tool_input = data.get("tool_input") or {}
     if data.get("tool_name") == "Bash":
-        why = role_command_refusal(agent, tool_input.get("command") or "")
+        why = role_command_refusal(agent, tool_input.get("command") or "", data.get("cwd"))
         if why:
             deny("The %s agent may not run this: %s" % (agent, why))
         return
@@ -5188,6 +5596,17 @@ def changed_since(base):
     return sorted(found.items())
 
 
+def suggested_labels(spec_text, risks):
+    """One risk:* label, and class:<class> when the spec has a Change-Class line: the class approve and risk use, so
+    feature when the declared one is invalid. Advisory: a label approves nothing."""
+    cls, declared, _ = change_class(spec_text)
+    # risks holds the class's own reason (the user approves feature and schema work); the step already counts it.
+    own = class_risks(spec_text)
+    raised = any(reason not in own for reason in risks)
+    step = min(CLASS_RISK_STEP[cls] + (1 if raised else 0), len(RISK_LABELS) - 1)
+    return [RISK_LABELS[step]] + (["class:" + cls] if declared else [])
+
+
 def receipt_data(task, base=None):
     """(receipt dict, None) for a task with a judge pass on the current code, else (None, why not)."""
     spec_text = read(spec_path(task))
@@ -5259,12 +5678,14 @@ def receipt_data(task, base=None):
         "not_verified": not_verified,
         "decisions": {"governing_adrs": governing, "adrs_changed": adrs, "assumptions": assumptions},
         "change_class": change_class(spec_text)[0],
+        "change_class_problem": change_class(spec_text)[2],
         "risks": risk_reasons(task, base),
         "rounds": {"grill": len(grills), "judge": len(judge), "debug": len(verdict_history(task, "debug"))},
         "judged_at": passed.get("at"),
         "approval": approval_lines(md_section(body, "Approval") or ""),
         "approval_needed": approval_needed,
     }
+    data["suggested_labels"] = suggested_labels(spec_text, data["risks"])
     return data, None
 
 
@@ -5287,6 +5708,12 @@ def receipt_text(d):
                 ("APPROVAL NEEDED", d["approval_needed"] or ["none"]))
     for heading, items in sections:
         lines += ["", heading] + ["  - %s" % i for i in items or ["none"]]
+    lines += ["", "SUGGESTED LABELS (for whoever triages the pull request; a label never approves or merges it)"]
+    lines += ["  - %s" % label for label in d["suggested_labels"]]
+    if d["change_class_problem"]:
+        lines.append("  (labelled as feature, as approve and risk count it, because %s)" % d["change_class_problem"])
+    elif not any(label.startswith("class:") for label in d["suggested_labels"]):
+        lines.append("  (rated as feature, as approve and risk count it, because the spec declares no Change-Class)")
     return "\n".join(lines)
 
 
