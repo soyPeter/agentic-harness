@@ -15,8 +15,8 @@ can't be run, hooks fail closed: reads go through, everything else is refused wi
 
 `hook machine-guard` is the machine guard's check (machine/guard.py, settings in ~/.agentic-harness/machine.json from
 machine.sh install --plugin): in a repository under its roots that isn't enrolled, an agent's edits get a reminder, or
-are refused in block mode. A CLI where machine.sh installed the guard as a hook of its own gets the check from that
-hook only. Like the guard, it lets a call through when it fails.
+are refused in block mode. A CLI that runs the guard hook machine.sh installed (Codex: once the user has trusted it in
+/hooks, as it is now) gets the check from that hook only. Like the guard, it lets a call through when it fails.
 """
 import importlib.util
 import json

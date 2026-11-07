@@ -14,8 +14,10 @@ their own hooks. The harness source repository is exempt. Existing hooks (Orca's
 the guard's entries and the settings.
 
 The agentic-harness plugin runs the same check from its own hooks, with the same settings
-(~/.agentic-harness/machine.json), except in a CLI where the guard hook is installed: there the guard alone answers.
-With the plugin, install --plugin is enough: it writes the settings only, and takes out a guard hook installed earlier.
+(~/.agentic-harness/machine.json), except in a CLI that runs the guard hook: there the guard alone answers. Codex runs
+it only once you have trusted it in /hooks, as it is now and switched on; until then, and whenever Codex's records of
+that (in its config.toml) can't be read, the plugin checks. With the plugin, install --plugin is enough: it writes the
+settings only, and takes out a guard hook installed earlier.
 
 The CLIs load hooks when a session starts, so a session that was open during install, install --plugin or remove keeps
 the hooks it started with until it is restarted.
@@ -25,6 +27,8 @@ Claude Code's managed-settings.json and Codex's requirements.toml with the same 
 policy). They are written to --out for you to review; installing them in /Library or /etc needs sudo, and this tool
 never does that.
 """
+import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -32,6 +36,11 @@ import shlex
 import shutil
 import sys
 from pathlib import Path
+
+try:
+    import tomllib
+except ImportError:   # Python 3.10
+    tomllib = None
 
 HARNESS = Path(__file__).resolve().parent.parent
 MARK = "--harness-machine-guard"   # the token that identifies the guard's own hook entries
@@ -96,14 +105,140 @@ def has_guard(data):
     return any(owned(hook.get("command")) for group in groups for hook in group.get("hooks", []))
 
 
-def hooked(source):
+def listed(source):
     """Whether the guard is a hook in the user settings that the CLI (claude or codex) reads, found as the CLI finds
-    them from its environment. The plugin's launcher leaves the check to it there, so a tool call isn't reminded or
-    refused twice."""
+    them from its environment."""
     try:
         return has_guard(json.loads(hook_file(source).read_text(encoding="utf-8")))
     except (OSError, ValueError, AttributeError, TypeError):
         return False
+
+
+def hooked(source):
+    """Whether the CLI runs the guard hook: listed and, in Codex, trusted as it is now and switched on. The plugin's
+    launcher leaves the check to it there, so a tool call isn't reminded or refused twice."""
+    if source != "codex":
+        return listed(source)
+    try:
+        return codex_guard(json.loads(hook_file(source).read_text(encoding="utf-8"))) == "runs"
+    except (OSError, ValueError, AttributeError, TypeError, Unreadable):
+        return False
+
+
+class Unreadable(Exception):
+    """Codex's hook trust records can't be read."""
+
+
+def codex_folder():
+    """Codex's folder as its hook keys name it: Codex resolves the symlinks in $CODEX_HOME, but not in ~/.codex."""
+    value = os.environ.get("CODEX_HOME")
+    return Path(os.path.realpath(value)) if value else home(".codex")
+
+
+def codex_hash(group, hook):
+    """The hash Codex records when the user trusts this PreToolUse hook in /hooks: SHA-256 of the hook's normalized
+    identity, as compact JSON with sorted keys (hook_hash in codex-rs/hooks/src/engine/discovery.rs, Codex 0.164).
+    None for a hook Codex wouldn't load."""
+    command, timeout, limit = hook.get("command"), hook.get("timeout"), hook.get("additionalContextLimit")
+    timeout = 600 if timeout is None else timeout
+    if (hook.get("type") != "command" or not isinstance(command, str) or not command.strip()
+            or not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 0
+            or not isinstance(hook.get("async", False), bool)):
+        return None
+    identity = {"type": "command", "command": command, "timeout": max(timeout, 1), "async": hook.get("async", False)}
+    if hook.get("statusMessage") is not None:
+        identity["statusMessage"] = hook["statusMessage"]
+    if limit is not None and limit != 2500:   # Codex's default threshold, which it leaves out of the hash
+        identity["additionalContextLimit"] = limit
+    identity = {"event_name": "pre_tool_use", "hooks": [identity]}
+    if group.get("matcher") is not None:
+        identity["matcher"] = group["matcher"]
+    text = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+TOML_TABLE = re.compile(r"\s*\[(?!\[)(.*)\]\s*(?:#.*)?$")
+TOML_KEY = re.compile(r"""\s*(?:([A-Za-z0-9_-]+)|"((?:[^"\\]|\\.)*)"|'([^']*)')\s*""")
+TOML_STATE = re.compile(r"""\s*(trusted_hash|enabled)\s*=\s*(?:"([^"\\]*)"|'([^']*)'|(true|false))\s*(?:#.*)?$""")
+
+
+def toml_key(text):
+    """The parts of a TOML dotted key, or None."""
+    parts, position = [], 0
+    while True:
+        match = TOML_KEY.match(text, position)
+        if not match:
+            return None
+        bare, basic, literal = match.groups()
+        if basic is not None:
+            try:
+                basic = json.loads('"%s"' % basic)
+            except ValueError:
+                return None
+        parts.append(bare if bare is not None else basic if basic is not None else literal)
+        position = match.end()
+        if position == len(text):
+            return parts
+        if text[position] != ".":
+            return None
+        position += 1
+
+
+def codex_states():
+    """{key: state} of the user hook states in Codex's config.toml, where /hooks records trust and the on/off switch.
+    Without tomllib (Python 3.10), only the [hooks.state."<key>"] tables Codex writes are read, one setting a line."""
+    path = codex_folder() / "config.toml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        raise Unreadable("%s can't be read: %s" % (path, exc))
+    if tomllib is not None:
+        try:
+            hooks = tomllib.loads(text).get("hooks")
+        except tomllib.TOMLDecodeError:
+            raise Unreadable("%s is not valid TOML" % path)
+        states = hooks.get("state") if isinstance(hooks, dict) else None
+        return {key.strip(): state for key, state in states.items()} if isinstance(states, dict) else {}
+    states, current = {}, None
+    for line in text.splitlines():
+        if line.lstrip().startswith("["):
+            table = TOML_TABLE.match(line)
+            name = toml_key(table.group(1)) if table else None
+            current = (states.setdefault(name[2].strip(), {}) if name and len(name) == 3
+                       and name[:2] == ["hooks", "state"] else None)
+            continue
+        setting = TOML_STATE.match(line) if current is not None else None
+        if setting:
+            name, basic, literal, flag = setting.groups()
+            current[name] = flag == "true" if flag else basic if basic is not None else literal
+    return states
+
+
+def codex_guard(data):
+    """What Codex does with the guard hook in its user hooks (data, from hooks.json): "runs", or why it skips it ("not
+    trusted", "changed" since it was trusted, "turned off"); None when no guard hook is listed. Codex keeps each hook's
+    trust under its file and position, and skips a state it can't read as a whole."""
+    found, states = None, None
+    for number, group in enumerate((data.get("hooks") or {}).get("PreToolUse") or []):
+        for index, hook in enumerate(group.get("hooks") or []):
+            if not owned(hook.get("command")):
+                continue
+            if states is None:
+                states = codex_states()
+            state = states.get("%s:pre_tool_use:%d:%d" % (codex_folder() / "hooks.json", number, index))
+            if (not isinstance(state, dict) or not isinstance(state.get("enabled", True), bool)
+                    or not all(isinstance(state.get(name, ""), str) for name in ("trusted_hash",
+                                                                                "trusted_content_hash"))):
+                state = {}
+            if state.get("enabled") is False:
+                found = "turned off"
+            elif state.get("trusted_hash") is not None and state["trusted_hash"] == codex_hash(group, hook):
+                return "runs"
+            else:
+                found = "changed" if state.get("trusted_hash") is not None else "not trusted"
+    return found
 
 
 def set_hook(path, source, guard_path, install):
@@ -150,7 +285,7 @@ def install(argv):
         print("  install    settings %s (mode %s, roots %s; exempt: %s)" % (settings, mode, ", ".join(roots), HARNESS))
         print("  plugin     the agentic-harness plugin's hooks check with them, in each CLI the plugin is installed in")
         for source in CLI_SETTINGS:
-            if hooked(source):
+            if listed(source):
                 set_hook(hook_file(source), source, guard, False)
                 print("  %-10s guard hook removed from %s (open sessions keep it until restarted)"
                       % (source, hook_file(source)))
@@ -162,7 +297,8 @@ def install(argv):
     if hook_file("codex").parent.is_dir():
         set_hook(hook_file("codex"), "codex", guard, True)
         print("  codex      PreToolUse hook in %s. Codex runs a new user hook only after you trust it once: open "
-              "Codex, run /hooks and trust the agentic-harness guard." % hook_file("codex"))
+              "Codex, run /hooks and trust the agentic-harness guard (machine.sh status says whether Codex runs it)."
+              % hook_file("codex"))
     else:
         print("  codex      skipped (no %s)" % hook_file("codex").parent)
     return 0
@@ -185,19 +321,49 @@ def remove(_argv):
     return 0
 
 
+CODEX_SKIPS = {
+    "not trusted": "guard hook in %s is not trusted in Codex, so Codex skips it: open Codex, run /hooks and trust it",
+    "changed": "guard hook in %s changed since it was trusted in Codex, so Codex skips it: trust it again in /hooks",
+    "turned off": "guard hook in %s is turned off in Codex's /hooks, so Codex skips it",
+}
+
+
+def guard_module():
+    """machine/guard.py, whose rules for the settings the guard copy carries too."""
+    sys.dont_write_bytecode = True
+    spec = importlib.util.spec_from_file_location("agentic_harness_guard", str(HARNESS / "machine" / "guard.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def status(_argv):
     conf = home(".agentic-harness", "machine.json")
+    usable = False
     try:
-        shown = json.dumps(json.loads(conf.read_text(encoding="utf-8"))) if conf.exists() else "not installed"
+        settings = json.loads(conf.read_text(encoding="utf-8")) if conf.exists() else None
+        problem = guard_module().problem(settings) if conf.exists() else None
+        usable = conf.exists() and problem is None
+        shown = ("not installed" if not conf.exists() else json.dumps(settings) if problem is None else
+                 "%s: %s, so the guard and the plugin check nothing: run install again" % (conf, problem))
     except ValueError:
         shown = "%s is not valid JSON (the guard and the plugin then check nothing): run install again" % conf
     print("  config     %s" % shown)
+    plugin = " (the agentic-harness plugin checks, where installed)" if usable else ""
     for source in CLI_SETTINGS:
         path = hook_file(source)
-        found = path.exists() and has_guard(read_json(path))
-        print("  %-10s %s" % (source, "guard hook present in %s" % path if found else
-                              "no guard hook in %s (the agentic-harness plugin checks, where installed)" % path
-                              if conf.exists() else "no guard hook in %s" % path))
+        data = read_json(path)
+        if not has_guard(data):
+            print("  %-10s no guard hook in %s%s" % (source, path, plugin))
+            continue
+        try:
+            state = codex_guard(data) if source == "codex" else "runs"
+        except Unreadable as exc:
+            print("  %-10s guard hook in %s, but whether Codex runs it can't be told: %s%s" % (source, path, exc,
+                                                                                          plugin))
+            continue
+        print("  %-10s %s" % (source, "guard hook present in %s" % path if state == "runs" else
+                              CODEX_SKIPS[state] % path + plugin))
     return 0
 
 
