@@ -34,6 +34,20 @@
   commands, with property checks. **Upgrading:** a `docs` task that touches images, stylesheets or other files without
   a documentation extension now waits for the user (add them to `HARNESS_DOC_PATHS` if your docs need them), and a
   move counts as two files against `HARNESS_RISK_MAX_FILES` and `HARNESS_LIGHT_MAX_FILES`.
+
+- **An `## Approval` heading in a code block no longer ends the spec (ADR-002).** A fenced example showing a spec's
+  `## Approval` heading ended the grill fingerprint, the freeze on an approved spec and what is read from the spec at
+  the example: the risk checks missed every requirement below it, so policy could approve a `docs` spec that stores
+  passwords in plain text, and everything below it could change after approval. `approved()` started the section at
+  the example too, so an example with an `Approved-by:` line counted as the user's approval, and the user's own
+  approval below it didn't count. The Approval section now starts at the first `## Approval` heading outside comments
+  and fenced code blocks for the fingerprint, the freeze, `Change-Class`, the risk checks, `approve`, `approved` and
+  the receipt alike; an `Approved-by:` line in a code block is an example; and a spec with such a heading inside a
+  code block is invalid (indent the heading in an example). `tests/test-change-class.py` reproduces it through the
+  public commands, with property checks that any edit below a fenced heading makes the grill pass stale or the spec
+  invalid, and is refused as frozen or leaves the spec invalid. **Upgrading:** a spec with an `## Approval` heading
+  in a code block fails `spec-check` until the example's heading is indented.
+
 - **Suggested triage labels (ADR-002, follow-up b).** `harness.py receipt` suggests pull request labels for whoever
   triages the PR, in the text receipt and as `suggested_labels` in `--json`: `risk:low`, `risk:elevated` or
   `risk:high` from the spec's `Change-Class` and the receipt's other risks, plus `class:<class>` when the spec has a
