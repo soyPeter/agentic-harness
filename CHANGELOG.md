@@ -44,6 +44,18 @@
   the substitution, so it no longer ends the string around it. The gate stays best-effort: it doesn't see gh run from
   a script or another program, nor other HTTP clients. GitHub permissions remain the boundary.
 
+- **The deliverer's gh access is an allowlist (ADR-002).** The gate refused some gh commands and let the rest through,
+  so the deliverer could turn on auto-merge or change the default branch (`gh repo edit`), run a workflow, set a
+  secret or variable, close an issue, reopen a PR or publish a release. It now runs only what delivery needs:
+  `gh pr create`, `edit`, `view`, `checks`, `list` and `comment`, `gh run view`, `list` and `watch`, `gh label list`
+  and `create`, `gh repo view`, and `gh api` reads. Every other gh command is refused as the user's call, `gh issue`
+  included: the deliverer labels its PR with `gh pr`. Also refused now: `gh label create --force`, which rewrites a
+  label someone else defined; shell alias definitions, since a shell that expands aliases (Claude Code's often does)
+  ran `g pr merge 7` as `gh pr merge 7` after `alias g=gh` on the line before; `source` and `.`, which read commands
+  the harness can't see; and a command whose gh calls add different `risk:*` labels, which each passed against the
+  PR's labels as they were before the command ran. gh behind `builtin`, `noglob` or `nocorrect` is read like gh
+  behind `command`.
+
 - **Plugin and pin must match (thin mode).** When the installed plugin isn't the release the project pins, its agents
   and skills don't match the pinned gates. Session start says so, with both versions and the fix. In autonomous mode
   `run` and `orca` refuse to start and every call except reads is refused until they match; `doctor` lists it as an

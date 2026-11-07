@@ -3642,13 +3642,16 @@ def default_branch():
 RUNNERS = ("timeout", "gtimeout", "nice", "nohup", "stdbuf", "time", "env", "sudo", "doas", "command", "exec",
            "watch", "ionice", "chronic", "caffeinate", "flock", "setsid", "unbuffer", "script", "su")
 SHELL_KEYWORDS = ("!", "(", ")", "{", "}", "if", "then", "else", "elif", "fi", "do", "done", "while", "until")
+# bash's and zsh's precommand modifiers, which take no options: the command follows them.
+PRECOMMANDS = ("builtin", "noglob", "nocorrect")
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 REDIRECTION = re.compile(r"^[0-9]*(<<<|<<-?|<>|<&|>&|>>|>\||&>>|&>|<|>)")
 EXPANSION = re.compile(r"\$\S|`")
-GH_COMMANDS = ("agent-task", "alias", "api", "attestation", "auth", "browse", "cache", "codespace", "completion",
-               "config", "copilot", "discussion", "extension", "extensions", "ext", "gist", "gpg-key", "help", "issue",
-               "label", "licenses", "org", "pr", "preview", "project", "release", "repo", "ruleset", "run", "search",
-               "secret", "skill", "ssh-key", "status", "variable", "version", "workflow")
+# bash's and zsh's alias tables: setting an entry defines an alias, as the alias builtin does.
+ALIAS_TABLE = re.compile(r"^(BASH_ALIASES|aliases)(\[[^\]]*\])?\+?=")
+# The gh commands delivery needs (ADR-002), with gh's own aliases for them. gh api, held to reads, is checked apart.
+DELIVERY_GH = {"pr": ("create", "new", "edit", "view", "checks", "list", "ls", "comment"),
+               "run": ("view", "list", "ls", "watch"), "label": ("create", "list", "ls"), "repo": ("view",)}
 # The flags that take a value (gh pr|issue create|new|edit, gh api, gh label create). Every other flag is a switch.
 ITEM_VALUE_FLAGS = ("-a", "-B", "-b", "-F", "-H", "-l", "-m", "-p", "-r", "-R", "-T", "-t", "--add-assignee",
                     "--add-blocked-by", "--add-blocking", "--add-label", "--add-project", "--add-reviewer",
@@ -3663,6 +3666,13 @@ LABEL_VALUE_FLAGS = ("-c", "-d", "-R", "--color", "--description", "--repo")
 MERGE_REFUSAL = "it opens and updates the PR; merging is the user's call, like closing or approving it."
 EXPANSION_REFUSAL = ("write the gh command out: an expansion ($... or `...`) outside a flag's value can add flags or "
                      "commands the harness can't read.")
+DELIVERY_GH_REFUSAL = ("it runs only the gh commands delivery needs: gh pr create, edit, view, checks, list and comment, "
+                       "gh run view, list and watch, gh label list and create, gh repo view, and gh api reads. %s is "
+                       "the user's call.")
+ALIAS_REFUSAL = ("it defines no shell aliases: the shell can expand one on a later line into a gh command the harness "
+                 "doesn't see.")
+SHELL_INPUT_REFUSAL = ("a shell that reads its commands from a pipe or a file runs commands the harness can't read; run "
+                       "them written out.")
 
 
 def scan_expansions(text, quotes=True):
@@ -3766,8 +3776,8 @@ def run_words(words):
             words = words[2:]
         elif REDIRECTION.match(first):
             words = words[1 + (REDIRECTION.match(first).end() == len(first)):]
-        elif (first in SHELL_KEYWORDS or first in WRAPPERS or ASSIGNMENT.match(first) or first.endswith("()")
-              or (first.endswith(")") and "(" not in first)):
+        elif (first in SHELL_KEYWORDS or first in WRAPPERS or first in PRECOMMANDS or ASSIGNMENT.match(first)
+              or first.endswith("()") or (first.endswith(")") and "(" not in first)):
             words = words[1:]
         elif first[:1] in ("(", "{") and first.lstrip("({"):
             words = [first.lstrip("({")] + words[1:]
@@ -3818,7 +3828,7 @@ def gh_calls(command, depth=0):
     """(segment, words, why the harness can't read it or "") of each gh call command runs: direct, behind a runner
     such as timeout or env, in sh -c or eval, in $(...) or backticks, in a heredoc or here-string a shell reads, and
     in $(...) in an unquoted heredoc. Commands it can't read come with why: gh behind xargs, a shell reading its
-    commands from a pipe or a file, a command named by an expansion."""
+    commands from a pipe or a file, a command named by an expansion, an alias definition."""
     if depth > 4:
         return [(command, [], "its commands nest deeper than the harness reads; write them out.")]
     calls = []
@@ -3839,10 +3849,15 @@ def gh_calls(command, depth=0):
 
 
 def segment_calls(segment, piped, depth):
-    words, why = run_words(shell_split(segment))
+    written = shell_split(segment)
+    words, why = run_words(written)
     prog = program(words)
     if why or prog == "gh":
         return [(segment, words, why)]
+    if prog == "alias" or any(ALIAS_TABLE.match(word) for word in written):
+        return [(segment, words, ALIAS_REFUSAL)]
+    if prog in ("source", "."):
+        return [(segment, words, SHELL_INPUT_REFUSAL)]
     if prog == "eval":
         return gh_calls(" ".join(words[1:]), depth + 1)
     if prog in SHELLS:
@@ -3853,8 +3868,7 @@ def segment_calls(segment, piped, depth):
             return gh_calls(here if script is None else script, depth + 1)
         if not any(re.match(r"^[0-9]*<<", w) for w in words) and (
                 piped or operands or any(re.match(r"^[0-9]*<(?![<&>])", w) for w in words)):
-            return [(segment, words, "a shell that reads its commands from a pipe or a file runs commands the harness "
-                                     "can't read; run them written out.")]
+            return [(segment, words, SHELL_INPUT_REFUSAL)]
         return []
     if prog in RUNNERS or prog.startswith("-"):
         # watch 'gh ...', script -c 'gh ...': the command is one word
@@ -3926,29 +3940,37 @@ def hidden_arguments(segment, flags, positional):
             or any(word.startswith(("$", "`")) for word in positional))
 
 
-def gh_refusal(segment, words, cwd):
-    """Why the deliverer may not run this gh call, or None."""
+def gh_refusal(segment, words, cwd, risk_added):
+    """Why the deliverer may not run this gh call, or None. risk_added holds the risk labels that the command's
+    other gh calls add."""
     command, sub, args = gh_parts(words)
     if command is None:
         return None
     if EXPANSION.search(command + " " + (sub or "")):
         return EXPANSION_REFUSAL
-    if command not in GH_COMMANDS:
-        return "it runs gh's own commands; %s is an alias or an extension, which can run any gh command." % command
-    if command in ("alias", "extension", "extensions", "ext") and sub not in (None, "list", "ls"):
-        return "it neither defines nor runs gh aliases and extensions: they can run any gh command."
     if command == "pr" and sub in ("merge", "close", "review", "ready"):
         return MERGE_REFUSAL
     if command == "api":
         return api_refusal(segment, args)
-    if command == "label":
-        name = (gh_flags(args, LABEL_VALUE_FLAGS)[1] or [None])[0]
-        if sub in ("edit", "delete", "clone") or (sub == "create" and name not in TRIAGE_LABELS):
-            return ("it creates only the triage labels it applies (gh label create <label> ...); creating, editing or "
-                    "deleting other labels is the user's call.")
-        return None
-    if command in ("pr", "issue") and sub in ("create", "new", "edit"):
-        return label_change_refusal(command, sub, segment, args, cwd)
+    if sub not in DELIVERY_GH.get(command, ()):
+        return DELIVERY_GH_REFUSAL % " ".join(w for w in ("gh", command, sub) if w)
+    if command == "label" and sub == "create":
+        return label_create_refusal(segment, args)
+    if command == "pr" and sub in ("create", "new", "edit"):
+        return label_change_refusal(sub, segment, args, cwd, risk_added)
+    return None
+
+
+def label_create_refusal(segment, args):
+    """Why a gh label create call would make a label other than the triage labels, or rewrite one, or None."""
+    flags, positional = gh_flags(args, LABEL_VALUE_FLAGS)
+    if hidden_arguments(segment, flags, positional):
+        return EXPANSION_REFUSAL
+    if (positional or [None])[0] not in TRIAGE_LABELS:
+        return ("it creates only the triage labels it applies (gh label create <label> ...); other labels are the "
+                "user's call.")
+    if any(name in ("-f", "--force") for name, _ in flags):
+        return "it creates a missing triage label without --force, which rewrites a label someone else defined."
     return None
 
 
@@ -3968,10 +3990,10 @@ def api_refusal(segment, args):
     return None
 
 
-def label_change_refusal(command, sub, segment, args, cwd):
-    """Why a gh pr|issue create|edit call changes labels beyond the triage labels the receipts suggest, or None.
-    Other labels can gate CI or merges (harness-change-approved lets a PR change the harness), so they stay the
-    user's."""
+def label_change_refusal(sub, segment, args, cwd, risk_added):
+    """Why a gh pr create|edit call changes labels beyond the triage labels the receipts suggest, or None, adding its
+    risk label to risk_added. Other labels can gate CI or merges (harness-change-approved lets a PR change the
+    harness), so they stay the user's."""
     flags, positional = gh_flags(args, ITEM_VALUE_FLAGS)
     if hidden_arguments(segment, flags, positional):
         return EXPANSION_REFUSAL
@@ -3991,20 +4013,25 @@ def label_change_refusal(command, sub, segment, args, cwd):
     if kept:
         return ("it removes only a lower risk:* label, in the call that adds the higher one; %s may have been set by "
                 "a person." % ", ".join(kept))
+    # Every call is checked against the PR's labels before the command runs, so the next call can't see this one's.
+    others = sorted(risk_added - set(risk), key=RISK_LABELS.index)
+    if risk and others:
+        return ("a PR keeps one risk:* label, and another gh call in this command adds %s: add only the highest the "
+                "receipts suggest, %s, in one call." % (", ".join(others), max(others + risk, key=RISK_LABELS.index)))
+    risk_added.update(risk)
     if sub == "edit" and risk:
         repo = next((value for name, value in reversed(flags) if name in ("-R", "--repo")), None)
-        return risk_label_refusal(command, positional if command == "issue" else positional[:1], repo, risk[0],
-                                  removed, cwd)
+        return risk_label_refusal(positional[:1], repo, risk[0], removed, cwd)
     return None
 
 
-def risk_label_refusal(command, targets, repo, added, removed, cwd):
+def risk_label_refusal(targets, repo, added, removed, cwd):
     """Why adding the risk label added would leave a second risk label on the PR, as GitHub has its labels, or None."""
     for target in targets or [None]:
-        names, error = item_labels(command, target, repo, cwd)
+        names, error = pr_labels(target, repo, cwd)
         if names is None:
-            return ("it adds a risk:* label only once the harness has read the PR's labels, and gh %s view failed: %s"
-                    % (command, error))
+            return ("it adds a risk:* label only once the harness has read the PR's labels, and gh pr view failed: %s"
+                    % error)
         others = [n for n in RISK_LABELS if n in names and n != added and n not in removed]
         higher = [n for n in others if RISK_LABELS.index(n) > RISK_LABELS.index(added)]
         if higher:
@@ -4016,9 +4043,9 @@ def risk_label_refusal(command, targets, repo, added, removed, cwd):
     return None
 
 
-def item_labels(command, target, repo, cwd):
-    """(the names of the labels on a pull request or issue, None), or (None, why gh couldn't read them)."""
-    args = ["gh", command, "view"] + ([target] if target else []) + (["--repo", repo] if repo else [])
+def pr_labels(target, repo, cwd):
+    """(the names of the labels on a pull request, None), or (None, why gh couldn't read them)."""
+    args = ["gh", "pr", "view"] + ([target] if target else []) + (["--repo", repo] if repo else [])
     try:
         result = subprocess.run(args + ["--json", "labels"], cwd=cwd or str(ROOT), capture_output=True, text=True,
                                 timeout=15)
@@ -4035,8 +4062,9 @@ def role_command_refusal(agent, command, cwd=None):
         return None
     if re.search(r"\bgh\s+pr\s+(merge|close|review|ready)\b|\bgh\s+api\b[^;&|\n]*/merge\b", command):
         return MERGE_REFUSAL
+    risk_added = set()
     for segment, words, why in gh_calls(command):
-        refusal = why or gh_refusal(segment, words, cwd)
+        refusal = why or gh_refusal(segment, words, cwd, risk_added)
         if refusal:
             return refusal
     targets = {b for b in ("main", "master", default_branch()) if b}
