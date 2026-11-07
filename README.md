@@ -28,6 +28,7 @@ A stack-agnostic harness for AI coding agents such as Claude Code. Install it in
 - **Coordinator API**: `state`, `next`, `questions`, `start` and `finish` let a coordinator (Orca, a script) drive tasks without knowing the workflow.
 - **Knowledge source** (opt-in, user-only): in autonomous mode, griller questions `backbone/` can't answer are looked up in a read-only notes vault behind an MCP server (`knowledge`). Clear answers are recorded with a `vault:<path>` citation the harness checks; the rest are escalated.
 - **Runner and CI**: `harness.py run` drives ready tasks unattended (optionally one worktree, branch and PR per task, with a cost budget), one fresh agent session per task, with time and attempt budgets, escalating stalls. The installed `harness-verify` workflow re-checks every pull request with the **base branch's** verifier, so a pull request can't weaken the check that gates it. `harness.py report` summarises the event log, and `harness.py trace <id>` shows one task's history: the context and skills its agents loaded, the files they edited, what the hooks refused, test runs and verdicts.
+- **Signed verdict attestations** (optional, [ADR-005](docs/adr/ADR-005-verdict-attestations.md), Proposed): `harness.py attest --range <base>..<tip>` prints an in-toto Statement about the tip commit with each finished task's verdict chain (spec fingerprint, grill, judge and review verdicts, Change-Class, risk and receipt), only for a range that passes `verify --range`, and the same bytes for the same commits. With a cosign key in the secrets `HARNESS_ATTEST_KEY` and `HARNESS_ATTEST_PASSWORD`, `harness-verify` signs it after a passing verify, without a transparency log, and keeps it as the `harness-attestation` artifact. It claims no SLSA level. Details and limits in `backbone/HOOKS.md`.
 - **Verify**: the pre-commit hook re-checks the gates on the staged state, and CI runs the same check on a pull request's commits (`harness.py verify --range`), so a change made any other way is still caught.
 - **Safe updates**: harness files are tracked by hash. Local edits are detected and never overwritten silently.
 
@@ -263,7 +264,7 @@ A profile is an organisation policy on top of the gates. Set it in `backbone/har
 | `backbone/.verdicts/` | hooks | Griller and judge verdicts per task, with fingerprints (audit trail) |
 | `backbone/.harness-lock.json` | harness | Installed version and file hashes |
 | `scripts/harness/` | harness | Runtime (`lib/harness.py`), git hooks, core rules and routes, `doctor.sh` |
-| `.github/workflows/harness-verify.yml` | harness | CI: `verify --range` with the base branch's verifier on every pull request |
+| `.github/workflows/harness-verify.yml` | harness | CI: `verify --range` with the base branch's verifier on every pull request; with `HARNESS_ATTEST_KEY` set, also a signed verdict attestation |
 | `.github/workflows/harness-judge.yml` | project | CI: an independent judge session re-judges tasks a pull request finishes (needs `ANTHROPIC_API_KEY`; add your toolchain) |
 | `.devcontainer/harness-agent/` | harness | Sandbox for unattended runs: outbound allowlist, trusted workspace, no prompts (checked; has run a real task end to end) |
 | `.claude/settings.json` | shared | Merged: harness hook entries plus a few read-only permissions |
