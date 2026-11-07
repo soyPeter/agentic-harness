@@ -7,7 +7,7 @@
 --to-thin deletes the vendored harness files nobody edited and keeps edited ones as <file>.harness-bak; backbone/ and
 the adopted packs' files stay, and the pin keeps the hashes the full install recorded for them ("kept"). It pins the
 installed release (or --version) and adds what thin mode runs from: the pre-commit shim, core.hooksPath=.githooks and
-the plugin entries in .claude/settings.json, whose harness hooks and permission rules it takes out.
+the plugin entries in .claude/settings.json, whose harness hooks and installed release's permission rules it takes out.
 --to-full vendors the pinned release again as update.sh would, telling edited files apart by those hashes, and takes
 out what thin mode added.
 
@@ -31,6 +31,7 @@ from installer import InstallError, LOCK_REL, SETTINGS_REL  # noqa: E402
 import thin  # noqa: E402
 
 BACKUP = ".harness-bak"
+FRAGMENT = "payload/settings.fragment.json"
 THIN_HOOKS_PATH = ".githooks"
 # The launcher treats a project holding this file as a full install, whatever its lock says.
 VENDORED_ENGINE = "scripts/harness/lib/harness.py"
@@ -143,6 +144,20 @@ def pack_files(adopted):
     return {name for entry in adopted.values() if isinstance(entry, dict) for name in entry.get("files") or []}
 
 
+def installed_fragment(lock, version, release):
+    """The settings fragment of the installed release, whose permission rules the full install added; release is the
+    checkout of v<version>, the release being pinned."""
+    installed = str(lock.get("harness_version") or "")
+    if installed == version:
+        return release / FRAGMENT
+    try:
+        return thin.cached_release(installed, thin.release_commit(installed)) / FRAGMENT
+    except thin.ThinError as exc:
+        raise InstallError("%s; the switch needs the installed release (v%s) to take its permission rules out of %s. "
+                           "If it was never published, update the project to a published release with update.sh first"
+                           % (exc, installed, SETTINGS_REL))
+
+
 def require_clean(target):
     status = installer.run_git(target, "status", "--porcelain")
     if status.returncode or status.stdout.strip():
@@ -216,7 +231,7 @@ def to_thin(target, args):
 
     commit, release = thin.release_checkout(version)
     updated = installer.settings_text(thin.plugin_settings(
-        installer.drop_harness_settings(settings, release / "payload/settings.fragment.json"), version))
+        installer.drop_harness_settings(settings, installed_fragment(lock, version, release)), version))
     written = []
     for name, source in thin.RELEASE_FILES:
         data, path = (release / source).read_bytes(), target / name
@@ -294,11 +309,10 @@ def to_full(target, args):
     original, settings = installer.load_settings(target)
     previous_hooks = hooks_path(target)
     release = thin.cached_release(version, commit)
-    for name in ("payload/owned", "payload/seed", "payload/settings.fragment.json", "plugin/pre-commit"):
+    for name in ("payload/owned", "payload/seed", FRAGMENT, "plugin/pre-commit"):
         if not (release / name).exists():
             raise InstallError("release v%s has no %s to install" % (version, name))
-    updated = installer.settings_text(installer.add_harness_settings(thin.without_plugin(settings),
-                                                                     release / "payload/settings.fragment.json"))
+    updated = installer.settings_text(installer.add_harness_settings(thin.without_plugin(settings), release / FRAGMENT))
     shim = target / thin.SHIM
     shim_edited = shim.is_file() and shim.read_bytes() != (release / "plugin/pre-commit").read_bytes()
     folder = target / THIN_HOOKS_PATH

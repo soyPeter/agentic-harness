@@ -85,6 +85,9 @@
   `.claude/settings.json`, and CI runs the base branch's engine, perhaps an older release. 0.30.0's `adopt` gave a thin
   lock `"files"`; adopting such a pack again, or removing it, takes its files out. Like the backbone documents a thin
   lock keeps, `doctor` doesn't report these files as edited.
+- **`update.sh --to-thin --version V` takes the installed release's permission rules out of `.claude/settings.json`,
+  not those of `V`.** Otherwise a rule only the installed release had would stay, and a rule of yours that only `V`
+  adds would go. It fetches the installed release to read them, and refuses when it can't.
 - **The machine guard knows thin projects, and the plugin gives its check.** The guard took a thin project (a
   `"mode": "thin"` pin in `backbone/.harness-lock.json`, no `scripts/harness/`) for one that isn't enrolled: it
   reminded the agent and, in block mode, refused its edits. A thin pin now counts, and so does a lock that can't be

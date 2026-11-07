@@ -151,9 +151,10 @@ and `harness-verify.yml` to that release. The upgrade is then one reviewed chang
   keeps the hashes the full install recorded for the harness's files among them (`"kept"`) and the install date.
   `harness.py adopt` and `adopt --remove` work from these hashes as they do from a full install's, so a pack can be
   adopted again after the pin moved, and removing one deletes the files you haven't edited. It adds the shim,
-  `core.hooksPath=.githooks` and the plugin entries, and takes the harness's hooks and permission rules out of
-  `.claude/settings.json` (a rule of yours that the harness also adds goes with them, and comes back with
-  `--to-full`). If another hook manager owns `core.hooksPath`, it refuses unless `--force-hooks-path`.
+  `core.hooksPath=.githooks` and the plugin entries, and takes the harness's hooks and the installed release's
+  permission rules out of `.claude/settings.json` (a rule of yours that the harness also adds goes with them, and comes
+  back with `--to-full`). With `--version`, it fetches the installed release to read those rules, and refuses if it
+  can't. If another hook manager owns `core.hooksPath`, it refuses unless `--force-hooks-path`.
 - `--to-full` installs the pinned release's files as `update.sh` would, with the kept hashes telling your edits apart,
   including after the pin moved: a file you haven't edited becomes the release's copy; an edited one is kept, and if
   the release changed it too, its copy goes to `<file>.harness-new` (exit code 1), or `--force` replaces it (keeping
