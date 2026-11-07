@@ -31,7 +31,6 @@ from pathlib import Path
 
 HARNESS_ROOT = Path(__file__).resolve().parents[1]
 PAYLOAD = HARNESS_ROOT / "payload"
-OWNED = PAYLOAD / "owned"
 SEED = PAYLOAD / "seed"
 CATALOG = HARNESS_ROOT / "catalog"
 SETTINGS_FRAGMENT = PAYLOAD / "settings.fragment.json"
@@ -86,13 +85,15 @@ def pack_names():
     return sorted(p.parent.name for p in CATALOG.glob("*/pack.json"))
 
 
-def owned_sources(adopted):
-    """{target path: source} for the core payload, the inert catalog copy, and adopted packs' files."""
-    sources = {rel: OWNED / rel for rel in files_under(OWNED)}
-    for rel in files_under(CATALOG) if CATALOG.is_dir() else []:
-        sources["scripts/harness/catalog/" + rel] = CATALOG / rel
+def owned_sources(adopted, release=HARNESS_ROOT):
+    """{target path: source} for the core payload, the inert catalog copy, and adopted packs' files of a release
+    (this checkout, or another release's checkout)."""
+    owned, catalog = release / "payload/owned", release / "catalog"
+    sources = {rel: owned / rel for rel in files_under(owned)}
+    for rel in files_under(catalog) if catalog.is_dir() else []:
+        sources["scripts/harness/catalog/" + rel] = catalog / rel
     for name, entry in sorted(adopted.items()):
-        pack = CATALOG / name
+        pack = catalog / name
         if not (pack / "pack.json").is_file():
             continue
         roots = [pack / "install"] + [pack / "options" / o / "install" for o in entry.get("options", [])]
@@ -184,13 +185,13 @@ def sync_owned(plan, sources, lock_files, force):
     return new_lock
 
 
-def seed_project(plan, context, report_existing):
-    for rel_path in files_under(SEED):
+def seed_project(plan, context, report_existing, seed=SEED):
+    for rel_path in files_under(seed):
         if (plan.target / rel_path).exists():
             if report_existing:
                 plan.note("exists", rel_path, "project file kept as is")
             continue
-        plan.write(rel_path, render((SEED / rel_path).read_bytes(), context), SEED / rel_path)
+        plan.write(rel_path, render((seed / rel_path).read_bytes(), context), seed / rel_path)
         plan.note("seed", rel_path)
 
 
@@ -198,13 +199,13 @@ CONF_REL = "backbone/harness.conf"
 CONF_KEY = re.compile(r"^\s*#?\s*([A-Z][A-Z0-9_]*)=")
 
 
-def migrate_conf(plan, context):
+def migrate_conf(plan, context, seed=SEED):
     """Append settings the template has and the project's harness.conf lacks, commented out.
 
     harness.conf is project-owned, so update never rewrites it. New keys arrive commented out, with the
     template's explanation: nothing changes until the user uncomments one (user-only keys: as the user)."""
     path = plan.target / CONF_REL
-    template_path = SEED / CONF_REL
+    template_path = seed / CONF_REL
     if not path.exists() or not template_path.exists():
         return
     current = path.read_text(encoding="utf-8")
@@ -231,15 +232,21 @@ def migrate_conf(plan, context):
     plan.note("migrate", CONF_REL, "new setting(s), commented out: %s" % ", ".join(added))
 
 
-def merge_settings(plan):
-    path = plan.target / SETTINGS_REL
+def load_settings(target):
+    """(text, settings) of the target's .claude/settings.json: ("", {}) when there is none."""
+    path = target / SETTINGS_REL
     original = path.read_text(encoding="utf-8") if path.exists() else ""
     try:
         settings = json.loads(original) if original.strip() else {}
     except ValueError as exc:
         raise InstallError("%s is not valid JSON (%s); fix it and re-run" % (SETTINGS_REL, exc))
-    fragment = json.loads(SETTINGS_FRAGMENT.read_text(encoding="utf-8"))
+    if not isinstance(settings, dict):
+        raise InstallError("%s is not a JSON object; fix it and re-run" % SETTINGS_REL)
+    return original, settings
 
+
+def drop_harness_hooks(settings):
+    """Remove the hook entries the harness owns from settings, and the events they leave empty; returns the hooks."""
     hooks = settings.get("hooks") or {}
     for event in list(hooks):
         kept = []
@@ -251,16 +258,48 @@ def merge_settings(plan):
             hooks[event] = kept
         else:
             del hooks[event]
+    settings["hooks"] = hooks
+    return hooks
+
+
+def add_harness_settings(settings, fragment_path=SETTINGS_FRAGMENT):
+    """Replace the harness's hook entries in settings with the fragment's, and add its permissions."""
+    fragment = json.loads(fragment_path.read_text(encoding="utf-8"))
+    hooks = drop_harness_hooks(settings)
     for event, groups in fragment["hooks"].items():
         hooks.setdefault(event, []).extend(groups)
-    settings["hooks"] = hooks
-
     allow = settings.setdefault("permissions", {}).setdefault("allow", [])
     for rule in fragment["permissions"]["allow"]:
         if rule not in allow:
             allow.append(rule)
+    return settings
 
-    updated = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
+
+def drop_harness_settings(settings, fragment_path=SETTINGS_FRAGMENT):
+    """Take out what add_harness_settings puts in: the harness's hook entries and the fragment's permission rules, and
+    the objects they leave empty. A rule of the user's own that is also the fragment's goes too: nothing tells them
+    apart."""
+    fragment = json.loads(fragment_path.read_text(encoding="utf-8"))
+    if not drop_harness_hooks(settings):
+        del settings["hooks"]
+    permissions = settings.get("permissions")
+    allow = permissions.get("allow") if isinstance(permissions, dict) else None
+    if isinstance(allow, list):
+        allow[:] = [rule for rule in allow if rule not in fragment["permissions"]["allow"]]
+        if not allow:
+            del permissions["allow"]
+        if not permissions:
+            del settings["permissions"]
+    return settings
+
+
+def settings_text(settings):
+    return json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
+
+
+def merge_settings(plan):
+    original, settings = load_settings(plan.target)
+    updated = settings_text(add_harness_settings(settings))
     if updated != original:
         plan.write(SETTINGS_REL, updated.encode("utf-8"))
         plan.note("merge" if original else "add", SETTINGS_REL, "harness hooks and permissions; other entries kept")
@@ -295,10 +334,10 @@ def read_lock(target):
         raise InstallError("%s is corrupt; restore it from git" % LOCK_REL)
 
 
-def write_lock(plan, previous, files, adopted):
+def write_lock(plan, previous, files, adopted, version=VERSION):
     today = datetime.date.today().isoformat()
     lock = {
-        "harness_version": VERSION,
+        "harness_version": version,
         "installed": (previous or {}).get("installed", today),
         "updated": today,
         "adopted": adopted,

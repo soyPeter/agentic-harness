@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -71,8 +72,12 @@ class ThinInstall(unittest.TestCase):
         self.run_at(self.project, "python3", "-B", str(ENGINE), "init", "--thin")
         lock_path = self.project / "backbone/.harness-lock.json"
         lock = json.loads(lock_path.read_text())
+        harness_docs = ROOT / "payload/owned/backbone"
         self.assertEqual(lock, {"mode": "thin", "version": "0.30.0",
-                                "commit": self.run_at(self.source, "git", "rev-parse", "v0.30.0").stdout.strip()})
+                                "commit": self.run_at(self.source, "git", "rev-parse", "v0.30.0").stdout.strip(),
+                                "kept": {"backbone/" + path.relative_to(harness_docs).as_posix():
+                                         hashlib.sha256(path.read_bytes()).hexdigest()
+                                         for path in sorted(harness_docs.rglob("*")) if path.is_file()}})
         self.assertFalse((self.project / "scripts/harness").exists())
         self.assertFalse((self.project / "AGENTS.md").exists())
         self.assertNotIn("@AGENTS.md", (self.project / "CLAUDE.md").read_text())
