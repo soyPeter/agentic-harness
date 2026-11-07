@@ -47,6 +47,17 @@
   observes; Testcontainers for integration tests and Playwright (through its MCP server) for end-to-end flows where
   the stack has them; reproduce a bug in a failing test before fixing it; find missing tests with mutation and
   property-based testing. The judge checklist checks that tests go through public APIs.
+- **The code fingerprint comes from the files' content.** The fingerprint that judge, review and debug verdicts
+  record, and that `finish`, the receipt, `next` and `state` compare with the code now, trusted git's index for every
+  file whose size and timestamps hadn't changed. It read a copy of the index dated when the copy was made, so a
+  same-size edit made within the second of the last index write hashed as the old content from the next second on. A
+  judge pass could then name code the judge never saw (restoring the staged version after the judge passed got
+  through `finish`), and committing the judged code could make the receipt refuse it: "the code changed after the
+  judge passed", the intermittent failure in `tests/test-change-class.py`. Every file is now hashed, so a same-size
+  edit that keeps the file's mtime (`cp -p`, `touch -r`) counts too where git doesn't trust ctime
+  (`core.trustctime=false`). Files marked assume-unchanged or skip-worktree keep their index content, as in a commit.
+  It costs more on large checkouts: about 0.4 s for 5,000 files, up from 0.06 s. `tests/test-code-fingerprint.py`
+  covers it.
 
 ## 0.30.0 (2026-11-06)
 
