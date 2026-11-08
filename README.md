@@ -212,7 +212,8 @@ has it and every agent loads it:
   nor a thin pin), it reminds you (warn) or refuses file edits (block) until the repository is enrolled; enrolled
   repositories are left to their own hooks, or the plugin's. Codex runs the new hook only once you trust it in
   `/hooks`, and once more after it changes. `machine.sh status` shows it, and says whether Codex runs it; `machine.sh
-  remove` undoes it. Settings whose `roots` or `exempt` aren't lists of folders count as none: `status` says so. The
+  remove` undoes it. Settings that aren't usable count as none: `roots` or `exempt` that aren't lists of absolute folder
+  paths, or an `enroll` that isn't one. `status` says which. The
   CLIs load hooks when a session starts, so restart the sessions that are open after `install`, `install --plugin` or
   `remove`: until then they keep the hooks they started with.
   - The agentic-harness plugin gives the same reminder or refusal from its own hooks, with the same settings
@@ -222,7 +223,8 @@ has it and every agent loads it:
     it is trusted as it is now and switched on (Codex's `config.toml`); until then the plugin answers in its place.
     Where the plugin can't tell (it can't read that file, or Codex runs with `--dangerously-bypass-hook-trust`), it
     answers as well: a refusal can come twice, a reminder still comes once per session and repository. An installed
-    guard is a copy: run `install` again after updating the harness.
+    guard is a copy: run `install` again after updating the harness. Until you do, the plugin doesn't leave the check
+    to that copy, and `status` says it is outdated.
   - `machine.sh managed --out DIR` writes the same guard as Claude Code `managed-settings.json` and Codex
     `requirements.toml`, which nobody on the machine can switch off. Review them and install with sudo (see the
     generated INSTALL.md); the tool never writes system files. The plugin reads only the user's settings, so with a

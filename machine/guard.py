@@ -38,14 +38,23 @@ def config():
 
 def problem(settings):
     """Why these settings can't be used, or None. A string in place of a list of folders would be read character by
-    character, and "/" holds every path."""
+    character, and "/" holds every path. A blank or relative folder resolves against each session's working directory,
+    so it names a different folder in each session."""
     if not isinstance(settings, dict):
         return "the settings are not a JSON object"
     for name in ("roots", "exempt"):
         value = settings.get(name, [])
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
             return '"%s" must be a list of folders' % name
+        if not all(absolute(item) for item in value):
+            return '"%s" must list folders by their absolute paths' % name
+    if "enroll" in settings and not absolute(settings["enroll"]):
+        return '"enroll" must be the path to enroll.sh'
     return None
+
+
+def absolute(path):
+    return isinstance(path, str) and bool(path.strip()) and os.path.isabs(os.path.expanduser(path))
 
 
 def repo_root(start):
