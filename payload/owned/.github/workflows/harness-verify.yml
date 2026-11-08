@@ -7,10 +7,11 @@
 # `harness-change-approved` label (restrict who may label pull requests accordingly).
 #
 # Optional (ADR-005): the `attest` job runs on a push to the default branch (`main` below: change it to yours). It
-# verifies the pushed range, writes an in-toto statement of its verdicts and signs it with the key in the
-# `harness-attest` environment, which only the default branch may use. Pull requests never run it, so they never see the
-# key. Set the environment up as ADR-005 describes before adding the secrets HARNESS_ATTEST_KEY and
-# HARNESS_ATTEST_PASSWORD. Without the key the job does nothing.
+# verifies the pushed range with the engine the push starts from (the previous tip), writes an in-toto statement of its
+# verdicts and signs it with the key in the `harness-attest` environment, which only the default branch may use. Pull
+# requests never run it, so they never see the key. Run `harness.py ci-protect --attest` once, then add the secrets
+# HARNESS_ATTEST_KEY and HARNESS_ATTEST_PASSWORD to that environment (ADR-005 describes it). Without the key the job
+# does nothing.
 name: harness-verify
 
 on:
@@ -130,11 +131,26 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
-      - name: Take the verifier from the pushed commit
+      - name: Check the pushed range
         if: env.HARNESS_ATTEST_SIGN == 'true'
         shell: bash
         env:
-          BASE_REF: ${{ github.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [[ ! "$BEFORE" =~ ^[0-9a-f]{40}$ ]] || [[ "$BEFORE" =~ ^0+$ ]]; then
+            echo "::error::The push has no previous tip (a first push): no statement."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$BEFORE" "$GITHUB_SHA"; then
+            echo "::error::The previous tip $BEFORE is not an ancestor of $GITHUB_SHA (a forced push): no statement."
+            exit 1
+          fi
+
+      - name: Take the verifier from the commit before the push
+        if: env.HARNESS_ATTEST_SIGN == 'true'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.event.before }}
         run: |
           set -o pipefail
           assets=(scripts/harness/lib scripts/harness/guardrails.core.conf
@@ -208,6 +224,28 @@ jobs:
           fi
           echo "ENGINE_SCRIPT=$engine" >> "$GITHUB_ENV"
 
+      - name: Check the harness-attest environment
+        if: env.HARNESS_ATTEST_SIGN == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RECORDED_BRANCH: ${{ vars.HARNESS_ATTEST_BRANCH }}
+        run: |
+          dir="$RUNNER_TEMP/harness-attest-environment"
+          mkdir -p "$dir"
+          if gh api "repos/$REPOSITORY/environments/harness-attest" > "$dir/environment.json" 2>/dev/null \
+            && gh api "repos/$REPOSITORY/environments/harness-attest/deployment-branch-policies" \
+              > "$dir/policies.json" 2>/dev/null; then
+            python3 "$ENGINE_SCRIPT" environment-check "$dir/environment.json" "$dir/policies.json" "$DEFAULT_BRANCH"
+          elif [[ -n "$RECORDED_BRANCH" && "$RECORDED_BRANCH" == "$DEFAULT_BRANCH" ]]; then
+            echo "The job's token can't read the harness-attest environment; ci-protect --attest recorded that it deploys only from $DEFAULT_BRANCH."
+          else
+            echo "::error::The job's token can't read the harness-attest environment, and no ci-protect --attest record says it deploys only from $DEFAULT_BRANCH: no statement. Run harness.py ci-protect --attest as a maintainer."
+            exit 1
+          fi
+
       - name: Write the verdict attestation
         if: env.HARNESS_ATTEST_SIGN == 'true'
         shell: bash
@@ -215,10 +253,6 @@ jobs:
           BEFORE: ${{ github.event.before }}
           HARNESS_ROOT: ${{ github.workspace }}
         run: |
-          if ! git merge-base --is-ancestor "$BEFORE" HEAD 2>/dev/null; then
-            echo "::error::The pushed range's base $BEFORE is not an ancestor of $GITHUB_SHA (a first or forced push): no statement." >&2
-            exit 1
-          fi
           out="$RUNNER_TEMP/harness-attestation/harness-verdicts.intoto.json"
           mkdir -p "$RUNNER_TEMP/harness-attestation"
           if ! python3 "$ENGINE_SCRIPT" attest --range "$BEFORE..HEAD" > "$out"; then
