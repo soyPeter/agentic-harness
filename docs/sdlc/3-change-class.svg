@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1700 1150" width="1700" height="1150" role="img" aria-labelledby="t d">
+<title id="t">Who decides, by Change-Class</title>
+<desc id="d">For each Change-Class (docs, refactor, feature, schema): whether the light lane applies, who approves the spec in supervised and autonomous mode, which risk label the receipt suggests, and who merges. A person approves every spec in supervised mode and merges every pull request.</desc>
+<style>
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; letter-spacing: 0.12em; fill: #262523; }
+  .sans { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #262523; }
+  .h1 { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 30px; fill: #262523; }
+  .stage { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 31px; fill: #262523; }
+  .num { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; font-size: 15px; letter-spacing: 0.08em; fill: #E2602A; }
+  .ref { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; font-size: 14px; letter-spacing: 0.08em; fill: #5F5B55; }
+  .label { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; font-size: 15px; letter-spacing: 0.14em; fill: #262523; }
+  .chip { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; font-size: 14px; letter-spacing: 0.12em; fill: #262523; }
+  .tiny { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; font-size: 13px; letter-spacing: 0.1em; fill: #5F5B55; }
+  .title { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 25px; fill: #262523; }
+  .title-s { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 22px; fill: #262523; }
+  .body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 18px; fill: #5F5B55; }
+  .item { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 19px; fill: #262523; }
+  .note { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 17px; fill: #5F5B55; }
+  .gov { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 18px; fill: #262523; }
+  .code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; font-size: 15px; letter-spacing: 0; fill: #262523; }
+  .msg { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 16px; fill: #262523; }
+  .msg-s { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 15px; fill: #5F5B55; }
+  .code-s { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; font-size: 14px; letter-spacing: 0; fill: #262523; }
+</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#46443F"/></marker><marker id="arrow-o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#E2602A"/></marker><marker id="arrow-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#8C8880"/></marker></defs>
+<rect x="0" y="0" width="1700" height="1150" rx="3" fill="#F1EFEA" stroke="none" stroke-width="1.5"/>
+<text x="48" y="84" class="h1">Who decides, by Change-Class</text>
+<text x="1652" y="80" class="tiny" text-anchor="end">ADR-002 · ENFORCED IN RISK, APPROVE AND THE LIGHT LANE</text>
+<line x1="40" y1="112" x2="1660" y2="112" stroke="#CFCBC3" stroke-width="1.5"/>
+<text x="78" y="160" class="label">CHANGE-CLASS</text>
+<text x="78" y="186" class="tiny">DECLARED IN THE SPEC</text>
+<text x="372" y="160" class="label">LIGHT LANE</text>
+<text x="372" y="186" class="tiny">IF THE USER SWITCHED IT ON</text>
+<text x="654" y="160" class="label">SUPERVISED</text>
+<text x="654" y="186" class="tiny">SPEC APPROVAL · DEFAULT</text>
+<text x="914" y="160" class="label">AUTONOMOUS</text>
+<text x="914" y="186" class="tiny">SPEC APPROVAL · OPT-IN</text>
+<text x="1208" y="160" class="label">RECEIPT LABEL</text>
+<text x="1208" y="186" class="tiny">WITHOUT → WITH OTHER RISKS</text>
+<text x="1492" y="160" class="label">PR MERGE</text>
+<text x="1492" y="186" class="tiny">EVERY CLASS</text>
+<line x1="48" y1="220" x2="48" y2="762" stroke="#8C8880" stroke-width="1.6" marker-end="url(#arrow-g)"/>
+<text x="38" y="491.0" class="tiny" text-anchor="middle" transform="rotate(-90 38 491.0)">MORE ASSURANCE</text>
+<rect x="68" y="214" width="1402" height="128" rx="3" fill="#FAF9F6" stroke="#CFCBC3" stroke-width="1.5"/>
+<text x="92" y="262" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; font-size: 26px; fill: #262523;">docs</text>
+<text x="92" y="294" class="note"><tspan x="92" dy="0">Markdown, comments and other</tspan><tspan x="92" dy="21">docs nothing runs</tspan></text>
+<g><rect x="380" y="261.0" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="380" y1="273.24" x2="398" y2="273.24" stroke="#E2602A" stroke-width="2"/><line x1="380" y1="282.76" x2="398" y2="282.76" stroke="#E2602A" stroke-width="2"/></g>
+<text x="420" y="260.0" class="item"><tspan x="420" dy="0">With the user's</tspan><tspan x="420" dy="24">(light) mark, if the</tspan><tspan x="420" dy="24">rules pass</tspan></text>
+<g><rect x="922" y="261.0" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="922" y1="273.24" x2="940" y2="273.24" stroke="#E2602A" stroke-width="2"/><line x1="922" y1="282.76" x2="940" y2="282.76" stroke="#E2602A" stroke-width="2"/></g>
+<text x="962" y="272.0" class="item"><tspan x="962" dy="0">Policy approves when</tspan><tspan x="962" dy="24">nothing is risky</tspan></text>
+<rect x="1212" y="262.0" width="90.8" height="32" rx="16" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/>
+<text x="1257.4" y="283.0" class="code-s" text-anchor="middle" fill="#5F5B55">risk:low</text>
+<text x="1308.8" y="284.0" class="item" fill="#8C8880">→</text>
+<rect x="1332.8" y="262.0" width="133.8" height="32" rx="16" fill="#FBEFE7" stroke="#E2602A" stroke-width="1.5"/>
+<text x="1399.7" y="283.0" class="code-s" text-anchor="middle" fill="#B4461A">risk:elevated</text>
+<rect x="68" y="356" width="1402" height="128" rx="3" fill="#FAF9F6" stroke="#CFCBC3" stroke-width="1.5"/>
+<text x="92" y="404" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; font-size: 26px; fill: #262523;">refactor</text>
+<text x="92" y="436" class="note"><tspan x="92" dy="0">Rename or extract, with no</tspan><tspan x="92" dy="21">change in behaviour</tspan></text>
+<g><rect x="380" y="403.0" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="380" y1="415.24" x2="398" y2="415.24" stroke="#E2602A" stroke-width="2"/><line x1="380" y1="424.76" x2="398" y2="424.76" stroke="#E2602A" stroke-width="2"/></g>
+<text x="420" y="402.0" class="item"><tspan x="420" dy="0">With the user's</tspan><tspan x="420" dy="24">(light) mark, if the</tspan><tspan x="420" dy="24">rules pass</tspan></text>
+<g><rect x="922" y="403.0" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="922" y1="415.24" x2="940" y2="415.24" stroke="#E2602A" stroke-width="2"/><line x1="922" y1="424.76" x2="940" y2="424.76" stroke="#E2602A" stroke-width="2"/></g>
+<text x="962" y="414.0" class="item"><tspan x="962" dy="0">Policy approves when</tspan><tspan x="962" dy="24">nothing is risky</tspan></text>
+<rect x="1212" y="404.0" width="90.8" height="32" rx="16" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/>
+<text x="1257.4" y="425.0" class="code-s" text-anchor="middle" fill="#5F5B55">risk:low</text>
+<text x="1308.8" y="426.0" class="item" fill="#8C8880">→</text>
+<rect x="1332.8" y="404.0" width="133.8" height="32" rx="16" fill="#FBEFE7" stroke="#E2602A" stroke-width="1.5"/>
+<text x="1399.7" y="425.0" class="code-s" text-anchor="middle" fill="#B4461A">risk:elevated</text>
+<rect x="68" y="498" width="1402" height="128" rx="3" fill="#FAF9F6" stroke="#CFCBC3" stroke-width="1.5"/>
+<text x="92" y="546" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; font-size: 26px; fill: #262523;">feature</text>
+<text x="92" y="578" class="note"><tspan x="92" dy="0">New or changed requirements,</tspan><tspan x="92" dy="21">and any spec without the line</tspan></text>
+<g><rect x="380" y="545.0" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="380" y1="557.24" x2="398" y2="557.24" stroke="#E2602A" stroke-width="2"/><line x1="380" y1="566.76" x2="398" y2="566.76" stroke="#E2602A" stroke-width="2"/></g>
+<text x="420" y="544.0" class="item"><tspan x="420" dy="0">With the user's</tspan><tspan x="420" dy="24">(light) mark, if the</tspan><tspan x="420" dy="24">rules pass</tspan></text>
+<g><circle cx="932" cy="562.0" r="16" fill="#FAF9F6" stroke="#E2602A" stroke-width="2.2"/><circle cx="932" cy="557.8" r="4.4" fill="none" stroke="#E2602A" stroke-width="1.9"/><path d="M923.8,571.5 C924.5,564.2 939.5,564.2 940.2,571.5" fill="none" stroke="#E2602A" stroke-width="1.9"/></g>
+<text x="962" y="556.0" class="item"><tspan x="962" dy="0">Escalated: a person</tspan><tspan x="962" dy="24">approves</tspan></text>
+<rect x="1212" y="546.0" width="133.8" height="32" rx="16" fill="#FBEFE7" stroke="#E2602A" stroke-width="1.5"/>
+<text x="1278.9" y="567.0" class="code-s" text-anchor="middle" fill="#B4461A">risk:elevated</text>
+<text x="1351.8" y="568.0" class="item" fill="#8C8880">→</text>
+<rect x="1375.8" y="546.0" width="99.39999999999999" height="32" rx="16" fill="#E2602A" stroke="#E2602A" stroke-width="1.5"/>
+<text x="1425.5" y="567.0" class="code-s" text-anchor="middle" fill="#FFFFFF">risk:high</text>
+<rect x="68" y="640" width="1402" height="128" rx="3" fill="#FAF9F6" stroke="#CFCBC3" stroke-width="1.5"/>
+<text x="92" y="688" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; font-size: 26px; fill: #262523;">schema</text>
+<text x="92" y="720" class="note"><tspan x="92" dy="0">Migrations, auth, secrets,</tspan><tspan x="92" dy="21">payments, deploy and</tspan><tspan x="92" dy="21">infrastructure</tspan></text>
+<g><circle cx="390" cy="704.0" r="15" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.8" stroke-dasharray="4 3"/><path d="M384,698.0 L396,710.0 M396,698.0 L384,710.0" stroke="#8C8880" stroke-width="2"/></g>
+<text x="420" y="710.0" class="item"><tspan x="420" dy="0">Never</tspan></text>
+<g><circle cx="932" cy="704.0" r="16" fill="#FAF9F6" stroke="#E2602A" stroke-width="2.2"/><circle cx="932" cy="699.8" r="4.4" fill="none" stroke="#E2602A" stroke-width="1.9"/><path d="M923.8,713.5 C924.5,706.2 939.5,706.2 940.2,713.5" fill="none" stroke="#E2602A" stroke-width="1.9"/></g>
+<text x="962" y="698.0" class="item"><tspan x="962" dy="0">Escalated: a person</tspan><tspan x="962" dy="24">approves</tspan></text>
+<rect x="1212" y="688.0" width="99.39999999999999" height="32" rx="16" fill="#E2602A" stroke="#E2602A" stroke-width="1.5"/>
+<text x="1261.7" y="709.0" class="code-s" text-anchor="middle" fill="#FFFFFF">risk:high</text>
+<text x="1317.4" y="710.0" class="item" fill="#8C8880">→</text>
+<rect x="1341.4" y="688.0" width="99.39999999999999" height="32" rx="16" fill="#E2602A" stroke="#E2602A" stroke-width="1.5"/>
+<text x="1391.1000000000001" y="709.0" class="code-s" text-anchor="middle" fill="#FFFFFF">risk:high</text>
+<rect x="642" y="214" width="254" height="554" rx="3" fill="#EFEDE8" stroke="#A9A49B" stroke-width="1.5"/>
+<g><circle cx="769.0" cy="421.0" r="26" fill="#FAF9F6" stroke="#E2602A" stroke-width="2.2"/><circle cx="769.0" cy="414.175" r="7.15" fill="none" stroke="#E2602A" stroke-width="1.9"/><path d="M755.675,436.4375 C756.8125,424.575 781.1875,424.575 782.325,436.4375" fill="none" stroke="#E2602A" stroke-width="1.9"/></g>
+<text x="769.0" y="481.0" class="item" text-anchor="middle"><tspan x="769.0" dy="0">A person writes</tspan><tspan x="769.0" dy="26">Approved-by for every</tspan><tspan x="769.0" dy="26">class. The approved</tspan><tspan x="769.0" dy="26">spec is frozen.</tspan></text>
+<rect x="1484" y="214" width="176" height="554" rx="3" fill="#EFEDE8" stroke="#A9A49B" stroke-width="1.5"/>
+<g><circle cx="1572.0" cy="421.0" r="26" fill="#FAF9F6" stroke="#E2602A" stroke-width="2.2"/><circle cx="1572.0" cy="414.175" r="7.15" fill="none" stroke="#E2602A" stroke-width="1.9"/><path d="M1558.675,436.4375 C1559.8125,424.575 1584.1875,424.575 1585.325,436.4375" fill="none" stroke="#E2602A" stroke-width="1.9"/></g>
+<text x="1572.0" y="481.0" class="item" text-anchor="middle"><tspan x="1572.0" dy="0">A person</tspan><tspan x="1572.0" dy="26">merges every</tspan><tspan x="1572.0" dy="26">PR. Labels</tspan><tspan x="1572.0" dy="26">never approve</tspan><tspan x="1572.0" dy="26">or merge.</tspan></text>
+<text x="48" y="832" class="label">WHATEVER THE CLASS</text>
+<g><rect x="48" y="856" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="48" y1="868.24" x2="66" y2="868.24" stroke="#E2602A" stroke-width="2"/><line x1="48" y1="877.76" x2="66" y2="877.76" stroke="#E2602A" stroke-width="2"/></g>
+<text x="88" y="878" class="note"><tspan x="88" dy="0">A risk term, a risk path or an ADR that isn't Accepted makes any spec not</tspan><tspan x="88" dy="23">low-risk.</tspan></text>
+<g><rect x="870" y="856" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="870" y1="868.24" x2="888" y2="868.24" stroke="#E2602A" stroke-width="2"/><line x1="870" y1="877.76" x2="888" y2="877.76" stroke="#E2602A" stroke-width="2"/></g>
+<text x="910" y="878" class="note"><tspan x="910" dy="0">An unknown Change-Class, or two values, fails spec-check; the receipt labels it</tspan><tspan x="910" dy="23">class:feature.</tspan></text>
+<g><rect x="48" y="940" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="48" y1="952.24" x2="66" y2="952.24" stroke="#E2602A" stroke-width="2"/><line x1="48" y1="961.76" x2="66" y2="961.76" stroke="#E2602A" stroke-width="2"/></g>
+<text x="88" y="962" class="note"><tspan x="88" dy="0">At finish, a policy-approved change that touched a sensitive path, more than 20</tspan><tspan x="88" dy="23">files, or, for docs, anything but documentation is refused until escalated.</tspan></text>
+<g><circle cx="880" cy="956" r="14" fill="#FAF9F6" stroke="#E2602A" stroke-width="2.2"/><circle cx="880" cy="952.325" r="3.8500000000000005" fill="none" stroke="#E2602A" stroke-width="1.9"/><path d="M872.825,964.3125 C873.4375,957.925 886.5625,957.925 887.175,964.3125" fill="none" stroke="#E2602A" stroke-width="1.9"/></g>
+<text x="910" y="962" class="note"><tspan x="910" dy="0">The light lane needs the user's (light) mark and at most 3 requirements and</tspan><tspan x="910" dy="23">criteria and 3 changed files. It skips the architect and the griller; approval,</tspan><tspan x="910" dy="23">the judge and verify still apply.</tspan></text>
+<g><circle cx="58" cy="1040" r="14" fill="#FAF9F6" stroke="#E2602A" stroke-width="2.2"/><circle cx="58" cy="1036.325" r="3.8500000000000005" fill="none" stroke="#E2602A" stroke-width="1.9"/><path d="M50.825,1048.3125 C51.4375,1041.925 64.5625,1041.925 65.175,1048.3125" fill="none" stroke="#E2602A" stroke-width="1.9"/></g>
+<text x="88" y="1046" class="note"><tspan x="88" dy="0">Profile triple: only a person merges. orca --merge and --trust, nightly runs</tspan><tspan x="88" dy="23">and enroll --automation are refused.</tspan></text>
+<g><rect x="870" y="1024" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="870" y1="1036.24" x2="888" y2="1036.24" stroke="#E2602A" stroke-width="2"/><line x1="870" y1="1045.76" x2="888" y2="1045.76" stroke="#E2602A" stroke-width="2"/></g>
+<text x="910" y="1046" class="note"><tspan x="910" dy="0">Labels go on the PR for triage: the highest risk:* among its tasks, which only</tspan><tspan x="910" dy="23">goes up, and each class:*.</tspan></text>
+<g><circle cx="62" cy="1114" r="15" fill="#FAF9F6" stroke="#E2602A" stroke-width="2.2"/><circle cx="62" cy="1110.0625" r="4.125" fill="none" stroke="#E2602A" stroke-width="1.9"/><path d="M54.3125,1122.90625 C54.96875,1116.0625 69.03125,1116.0625 69.6875,1122.90625" fill="none" stroke="#E2602A" stroke-width="1.9"/></g>
+<text x="88" y="1120" class="tiny">A PERSON DECIDES</text>
+<g><rect x="330" y="1097" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="330" y1="1109.24" x2="348" y2="1109.24" stroke="#E2602A" stroke-width="2"/><line x1="330" y1="1118.76" x2="348" y2="1118.76" stroke="#E2602A" stroke-width="2"/></g>
+<text x="360" y="1120" class="tiny">AUTOMATED CHECK</text>
+<g><circle cx="590" cy="1114" r="15" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.8" stroke-dasharray="4 3"/><path d="M584,1108 L596,1120 M596,1108 L584,1120" stroke="#8C8880" stroke-width="2"/></g>
+<text x="616" y="1120" class="tiny">NOT ALLOWED</text>
+<text x="1652" y="1120" class="tiny" text-anchor="end">SOURCES: ADR-002, HOOKS.MD (RISK, LIGHT LANE, CHANGE RECEIPT)</text>
+</svg>
