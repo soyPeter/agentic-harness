@@ -549,11 +549,29 @@ def validate_adr(text, name):
     return problems + stubs(name, body)
 
 
+def blank_fences(text):
+    """text with its fenced code blocks blanked out but line breaks kept, so an offset in it is an offset in text."""
+    return "".join(re.sub(r"[^\n]", " ", line) if fenced else line for line, fenced in fence_lines(text))
+
+
+def spec_outline(text):
+    """text with its HTML comments and fenced code blocks blanked out, offsets kept: where the spec's own headings are.
+    Fences are found once the comments are blanked, so a fence marker inside a comment opens nothing."""
+    return blank_fences(blank_comments(text or ""))
+
+
 def without_approval(text):
-    """text above its Approval section. A heading inside an HTML comment doesn't start the section: approved() doesn't
-    see it either, and cutting there would leave the rest of the spec out of the grill fingerprint and the freeze."""
-    m = APPROVAL_HEADING.search(blank_comments(text))
+    """text above its Approval section. A heading inside an HTML comment or a fenced code block doesn't start the
+    section: approved() doesn't see it either, and cutting there would leave the rest of the spec out of the grill
+    fingerprint, the freeze and what is read from the spec (the class, the risk checks)."""
+    m = APPROVAL_HEADING.search(spec_outline(text))
     return text[:m.start()] if m else text
+
+
+def approval_section(text):
+    """The Approval section as approved() and policy approval read it: from the heading without_approval() cuts at,
+    without comments, and without code blocks, where an Approved-by: line is an example."""
+    return md_section(spec_outline(text), "Approval")
 
 
 def spec_body(text):
@@ -563,15 +581,19 @@ def spec_body(text):
 
 
 def approval_heading_problem(text):
-    """Why the spec's '## Approval' heading is ambiguous, or None: one inside a comment, or one that only reads as a
-    heading once a comment on its line is removed, where approved() would start the section while the grill
-    fingerprint and the freeze end elsewhere."""
+    """Why the spec's '## Approval' heading is ambiguous, or None: one inside a comment or a fenced code block, or one
+    that only reads as a heading once a comment on its line is removed. The gates skip those, but a reader that
+    doesn't (a Markdown section parser, an agent, the user's editor) would start the Approval section there, where
+    the grill fingerprint and the freeze don't end."""
     stripped = strip_comments(text)
-    heading = APPROVAL_HEADING.search(stripped)
+    heading = APPROVAL_HEADING.search(blank_fences(stripped))
     if (strip_comments(without_approval(text)) != stripped[:heading.start() if heading else len(stripped)]
             or any(APPROVAL_HEADING.search(c) for c in re.findall(r"<!--.*?-->", text, re.S))):
         return ("the spec has an '## Approval' heading inside or next to an HTML comment: keep one '## Approval' "
                 "heading, on a line of its own, outside comments")
+    if any(fenced and APPROVAL_HEADING.match(line) for line, fenced in fence_lines(blank_comments(text))):
+        return ("the spec has an '## Approval' heading inside a fenced code block: keep one '## Approval' heading, "
+                "on a line of its own, outside code blocks (indent an example's heading)")
     return None
 
 
@@ -678,7 +700,7 @@ def approval_lines(text):
 
 
 def approved(text):
-    return bool(approval_lines(md_section(strip_comments(text), "Approval") or ""))
+    return bool(approval_lines(approval_section(text) or ""))
 
 
 def ears_problems(req, text):
@@ -729,19 +751,27 @@ def change_class(text):
     return distinct[0], True, None
 
 
-def without_fences(text):
-    """text without its fenced code blocks (``` or ~~~, closed as in Markdown; one left open runs to the end)."""
-    kept, fence = [], None
-    for line in text.splitlines(True):
+def fence_lines(text):
+    """(line, whether it belongs to a fenced code block) for each line of text: ``` or ~~~, closed as in Markdown; one
+    left open runs to the end."""
+    fence = None
+    # Lines end at \n only, as for the ^ and $ of the regexes that read the spec: splitlines() would also end one at
+    # \x1c or  , so a fence could open inside what those regexes read as a heading line.
+    for line in re.findall(r"[^\n]*\n|[^\n]+\Z", text):
         m = FENCE.match(line.rstrip("\r\n"))
-        # A backtick in the rest of the line makes it inline code (```x```), not a fence.
-        if fence is None and m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
-            fence = m.group(1)
-        elif fence is None:
-            kept.append(line)
-        elif m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
-            fence = None
-    return "".join(kept)
+        if fence is None:
+            # A backtick in the rest of the line makes it inline code (```x```), not a fence.
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                fence = m.group(1)
+            yield line, fence is not None
+        else:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
+                fence = None
+            yield line, True
+
+
+def without_fences(text):
+    return "".join(line for line, fenced in fence_lines(text) if not fenced)
 
 
 def class_label(text):
@@ -1727,7 +1757,7 @@ def blocked_tasks(text):
 
 def policy_approval(text):
     """{'rule', 'base'} of a policy approval line in the spec text, or None."""
-    m = POLICY_APPROVAL.search(md_section(strip_comments(text or ""), "Approval") or "")
+    m = POLICY_APPROVAL.search(approval_section(text) or "")
     if not m:
         return None
     base = re.search(r"\bbase ([0-9a-f]{7,40})", m.group(2))
@@ -1995,7 +2025,7 @@ def approve_command(task):
     base = git("rev-parse", "--verify", "-q", "HEAD").strip()[:12] or "none"
     line = "Approved-by: policy:low-risk (%s; base %s; %s)" % (
         time.strftime("%Y-%m-%d"), base, "light lane" if light else "grill %s" % last.get("fingerprint", "")[:12])
-    m = re.search(r"^##\s+Approval\s*$", text, re.M | re.I)
+    m = APPROVAL_HEADING.search(spec_outline(text))
     text = (text.rstrip("\n") + "\n\n## Approval\n" if not m else text.rstrip("\n")) + "\n" + line + "\n"
     spec_path(task).write_text(text, encoding="utf-8")
     log_event("approval", task=task, rule="low-risk", base=base)
@@ -5733,7 +5763,7 @@ def receipt_data(task, base=None):
         "risks": risk_reasons(task, base),
         "rounds": {"grill": len(grills), "judge": len(judge), "debug": len(verdict_history(task, "debug"))},
         "judged_at": passed.get("at"),
-        "approval": approval_lines(md_section(body, "Approval") or ""),
+        "approval": approval_lines(approval_section(spec_text) or ""),
         "approval_needed": approval_needed,
     }
     data["suggested_labels"] = suggested_labels(spec_text, data["risks"])
