@@ -117,6 +117,18 @@ The hooks guard edits made through the tools. `harness.py verify` checks the **r
 
 In a range, any change to the harness itself (enforcement files, the lock) or to user-only settings fails. The only way through is the `harness-change-approved` label, which the workflow turns into `--allow-user-changes`. Make the check required in branch protection, and restrict who may label pull requests.
 
+**Signed verdict attestation** (optional, the harness's ADR-005). `harness.py attest --range <base>..<tip> [--allow-user-changes]` prints an unsigned in-toto Statement (predicate type `https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1`) about the tip commit and its code tree without `backbone/`. It names the engine that made it and the release the base commit's lock pins, the range, the flag and the gate settings, and, for each task finished in the range, the commit that finished it, the spec's fingerprint and approval lines, the Change-Class, the latest grill, judge and review verdicts, the receipt's risks, suggested labels and verified / not-verified lists. It runs the checks of `verify --range` and prints nothing (exit 1, verify's problems on stderr) when they fail, and it refuses a checkout that isn't the tip with a clean working tree. The same commits, settings and engine give the same bytes.
+
+With the repository secrets `HARNESS_ATTEST_KEY` (a cosign private key, `cosign generate-key-pair`) and `HARNESS_ATTEST_PASSWORD`, `harness-verify` does this after a passing verify, with the base branch's engine: it signs the statement with cosign 3.1.4 (downloaded and checked against its SHA-256), sending nothing to a transparency log, and uploads the statement and its Sigstore bundle as the `harness-attestation` artifact. A failure in these steps fails the job; without the key they don't run. Publish the public key and check an attestation with:
+
+```sh
+cosign verify-blob-attestation --key harness-attest.pub --bundle harness-verdicts.sigstore.json \
+  --type https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1 \
+  --digest "$(git rev-parse <commit>)" --digestAlg gitCommit --insecure-ignore-tlog
+```
+
+The secret reaches any workflow run that gets secrets, including a same-repository pull request that edits the workflow, so a signature shows that a `harness-verify` run of this repository signed the statement, not that the base branch's unedited workflow did. Artifacts expire with the repository's retention setting. Set the secrets once the base branch runs a release with `attest`: an older engine fails the step.
+
 ## Autonomous mode (`HARNESS_AUTONOMY`)
 
 `supervised` (default) or `autonomous`, user-only. In autonomous mode no human is in the loop, and AGENTS.md section 7 replaces every "ask the user":
@@ -178,13 +190,16 @@ Logs go to `.git/harness/runs/<timestamp>/<task>-<attempt>.log`. Agents can't st
 - **An agent that cannot start** (not logged in, bad API key: it fails at no cost) stops the run. Retrying or moving to the next task can't help, so no task is escalated for it, and the task stays ready.
 - **Keep the machine awake.** A sleeping laptop suspends the run, so wall time grows while nothing happens. On macOS, start the runner with `caffeinate -i python3 scripts/harness/lib/harness.py run`.
 
-**Sandbox.** `.devcontainer/harness-agent/` is a container for unattended runs. It has been built and checked (firewall, hooks, self-test), and has run a real task end to end (spec, grill, policy approval, build, judge) with a subscription token. Review it before use, and add your toolchain. It provides:
-- outbound traffic limited to the Anthropic API, GitHub and `HARNESS_FIREWALL_ALLOW`;
+**Sandbox.** `.devcontainer/harness-agent/` is a sandbox for unattended runs: two containers from one image (`docker-compose.yml`), started by the devcontainer tooling. `tests/test-sandbox-egress.py` brings it up for real (`HARNESS_E2E=1`) and checks the allowlist, the agent's capabilities and the evidence; the earlier one-container version also ran a real task end to end with a subscription token. Review it before use, and add your toolchain. It provides:
+- outbound traffic limited to the Anthropic API, GitHub and `HARNESS_FIREWALL_ALLOW` (set on the `egress` service in `docker-compose.yml`). The `egress` container applies the rules (`init-firewall.sh`) in the network namespace the agent's container joins; the agent's container drops NET_ADMIN and NET_RAW, runs with `no-new-privileges` and has no sudo, so nothing the agent runs changes the rules. Outbound IPv6 is dropped. DNS is still allowed to any resolver;
+- an image built from a base pinned by digest;
 - no host credentials apart from `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`, counted against your Claude subscription) or `ANTHROPIC_API_KEY` (billed per token). The host's keychain login isn't visible in the container;
 - a trusted workspace;
 - `HARNESS_AGENT_CMD` set to `--dangerously-skip-permissions`, because the container, not the prompt, is the boundary.
 
 Add your toolchain in a Dockerfile that builds `FROM` it.
+
+**Sandbox backend and evidence** (the harness's ADR-003). The runner starts each session through a sandbox backend, `HARNESS_SANDBOX_BACKEND` (user-only). The only one is `devcontainer`, the default: it runs the session where the runner runs, inside the container when you started `run` there, else on the host. Any other value is a doctor error, so `run` and `orca` refuse to start. `verify` and `harness-verify` never use a backend. Each judge verdict records the sandbox it was recorded in, and `receipt` shows it (SANDBOX; `sandbox` in `--json`): `backend`, `isolation_class` (`container` inside the harness-agent image, `none` anywhere else), `image_digest` (the pinned base), `allowlist_hash` (sha256 of the allowlisted host names, lower-case, sorted, one per line, as the `egress` container publishes them), `region`, `control_plane` and `credential_mode` (`env` when `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` is set in the container, `login` otherwise, `host` outside it). An image built before this release reports `none` until it is rebuilt. The evidence is a record; nothing is refused because of it.
 
 `HARNESS_AGENT_CMD` defaults to `claude -p --permission-mode acceptEdits --output-format json`. The prompt arrives on stdin. That matters because `--allowedTools` takes any number of values and would swallow a prompt passed as an argument; quote each pattern, as in `--allowedTools 'Bash(git:*)' 'Bash(python3:*)'`. An unattended agent needs its tools pre-approved: allow the build and test commands in `.claude/settings.json`, or run it in a container or VM with `--dangerously-skip-permissions`. The harness hooks apply either way. Work on a branch and let the CI check gate the merge.
 
@@ -299,7 +314,7 @@ In autonomous mode the griller's questions are answered from `backbone/`. A know
 | Every assumption has a `(source: ...)`; every `vault:<path>` is an existing note inside the vault and the allowed folders | `approve` |
 | Each lookup is logged; `report` counts them | event log |
 
-**Limits.** Search results aren't filtered: a search can list notes outside `HARNESS_KNOWLEDGE_PATHS`, though reading or citing them is refused. Whatever the agents read is sent to the model, so keep notes that must never leave your machine out of the folder the server serves (or run a second server over a subset). In the sandbox, mount the vault read-only, set `HARNESS_KNOWLEDGE_ROOT` to the mount point in `containerEnv`, install the server's dependencies in your Dockerfile, and register the server in `postStartCommand` (see the comments in `devcontainer.json`).
+**Limits.** Search results aren't filtered: a search can list notes outside `HARNESS_KNOWLEDGE_PATHS`, though reading or citing them is refused. Whatever the agents read is sent to the model, so keep notes that must never leave your machine out of the folder the server serves (or run a second server over a subset). In the sandbox, mount the vault read-only, set `HARNESS_KNOWLEDGE_ROOT` to the mount point in the agent service's `environment` in `docker-compose.yml`, install the server's dependencies in your Dockerfile, and register the server in `postStartCommand` (see the comments in `devcontainer.json`).
 
 ## Out-of-band changes
 
@@ -337,6 +352,7 @@ Each event carries the task in progress and, inside a hook, the session and agen
 - **Changed:** files since the base: `--base`, else the light lane's recorded start, else the policy approval's base, else the parent of the commit that added the spec, else HEAD (only the uncommitted work).
 - **Verified:** the harness's own test run, and each AC with its tests, evidence and the test files that mention it.
 - **Not verified:** ACs not met, NFRs no AC covers, and findings the judge left open.
+- **Sandbox:** where the judge pass was recorded (`sandbox` in the JSON; see Sandbox backend and evidence). A judge pass recorded before sandbox evidence existed says "not recorded" (`null`).
 - **Decisions:** the ADRs the spec follows, the ADRs the task added or changed (with their status), and the assumptions with their sources.
 - **Risks**, headed by the spec's Change-Class (`change_class` in the JSON), and the number of grill, judge and debugger rounds.
 - **Approval needed:** ADRs that aren't Accepted and open escalations.
@@ -349,6 +365,13 @@ Each event carries the task in progress and, inside a hook, the session and agen
 | `schema` | `risk:high` | `risk:high` |
 
 It refuses a task without a judge pass on the current code. `harness.py run` saves it next to the run logs and `--pr` puts it in the pull request; the Orca coordinator does the same and keeps it in `.git/harness/receipts/`.
+
+**Traceability export** (ADR-004 in the agentic-harness repository). `harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]` writes every task with a spec (or `--task`) as the chain requirement → acceptance criterion → test file → judge verdict → commit. It is derived and one-way: `backbone/` and git stay the record, it makes no network call, and no gate reads it.
+- **Formats:** `reqif` (ReqIF 1.2: one `SPECIFICATION` per task, requirements, criteria and test files as `SPEC-OBJECT`s, `Verifies` and `Tests` relations, `ReqIF.ForeignID`/`ReqIF.Text`/`ReqIF.Name` and `Harness.*` string attributes), `needs` (Sphinx-Needs `needs.json`, format 1: need types `task`, `req`, `ac`, `test`, link fields `verifies` and `tests`, fields `harness_*`; ids contain dots and dashes, so a Sphinx project sets `needs_id_regex` to allow them) and `html` (one self-contained page, no script or external resource).
+- **Ids:** the spec's own `REQ-`, `NFR-` and `AC-<task>-<n>`, `TASK-<task>`, and `TEST-<task>-<first 12 hex digits of the SHA-256 of the path>`. An NFR without an id is listed as a gap.
+- **Verdict:** the latest judge verdict: *pass on the current code*, *pass on earlier code*, *fail* or *not judged*, with its time, code fingerprint and test run, and each criterion's result. Its commits are every commit reachable from `HEAD` whose code (the tree without `backbone/`) is the verdict's fingerprint; CI needs the full history for them. Test files are those that mention the criterion in the judged code.
+- **EARS** (`HARNESS_REQ_STYLE=ears`): each requirement's pattern (ubiquitous, event-driven, state-driven, unwanted behaviour, optional feature, complex, or not an EARS pattern).
+- **Output:** stdout, or `DIR/traceability.reqif`, `DIR/needs.json` or `DIR/traceability.html` with `--out`. An `--out` inside the repository is refused unless git ignores it, since an untracked file counts as code and would make the judge's passes stale. The same repository state gives the same bytes.
 
 **Linear** (`harness.py linear`, user-only; agents may run only `--dry-run`). `linear import <ISSUE> --task <id> [--light] [--from <issue.json>]` writes a draft spec from the template, with a `Linear: <ISSUE> (<url>)` line and the ticket quoted in Context as source material. It also adds the pending task line, `(light)` when asked. `linear receipt <task> [--status <state>]` posts the receipt as a comment on the ticket. It refuses without a judge pass on the current code, and refuses a state that completes or cancels the ticket. Both need `LINEAR_API_KEY`; `HARNESS_LINEAR_URL` points them at another endpoint.
 
@@ -432,6 +455,7 @@ Two files of each kind apply: the core file in `scripts/harness/`, then the proj
 | `HARNESS_RUN_TASK_TIMEOUT` | `3600` | Seconds per agent session in a run. User-only |
 | `HARNESS_RUN_ATTEMPTS` | `2` | Sessions per task before the runner escalates it. User-only |
 | `HARNESS_RUN_MAX_COST` | empty (no limit) | Dollars per run; the runner stops before the next task once spent. User-only |
+| `HARNESS_SANDBOX_BACKEND` | `devcontainer` | Where the runner starts its sessions (ADR-003); `devcontainer` is the only backend. User-only |
 | `HARNESS_CI_JUDGE_CMD` | `claude -p --agent judge --dangerously-skip-permissions --output-format json` | The CI judge session. User-only |
 | `HARNESS_SKILL_MAX_AGE` | `180` | Days after which doctor flags a skill's `last-verified` date; `0` turns it off |
 | `HARNESS_SCOPE_CHECK` | `on` | Commit-scope warning |

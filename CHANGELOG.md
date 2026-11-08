@@ -8,6 +8,70 @@
   `adopt` exits 1, as `update.sh` does. A thin lock's hashes that an earlier engine recorded under `"files"` move to
   `"kept"` when a pack is adopted again, so `verify` no longer reads the project as a full install.
 
+- **Traceability export (ADR-004).** `harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]`
+  writes the chain requirement → acceptance criterion → test file → judge verdict → commit for every task with a spec,
+  or one task: as ReqIF 1.2 (written with `xml.etree`), as a Sphinx-Needs `needs.json` in format 1, or as a
+  self-contained HTML matrix to attach to a pull request. It is derived from `backbone/` and git and one-way: no
+  network, no new dependency, and no gate reads it. Ids are the spec's own; each task says whether its latest judge
+  pass is on the current code, lists every commit whose code is the judged code and the test files that mention each
+  criterion in it, and lists the gaps (requirements without a criterion, criteria without a test file, undefined
+  references, NFRs without an id, open findings). Under `HARNESS_REQ_STYLE=ears` each requirement carries its EARS
+  pattern. `--out` inside the repository is refused unless git ignores the file. The same repository state gives the
+  same bytes. `docs/adr/ADR-004-traceability-export.md` records the decision, including what a regulated team can and
+  can't claim from it (it isn't signed, validated or PCI DSS evidence). `tests/test-trace-export.py` checks the ReqIF
+  output against a minimal subset of the OMG schema vendored in `tests/reqif_check.py`, offline, plus the
+  `needs.json` shape and the HTML matrix, with property checks.
+
+- **Signed verdict attestations (ADR-005, Proposed).** `docs/adr/ADR-005-verdict-attestations.md` decides how
+  `harness-verify` turns its verdict into evidence others can check: an in-toto Statement, a custom predicate type
+  (`https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1`, no SLSA level claimed), cosign with a
+  self-managed key first, a KMS next and keyless only as an explicit opt-in. This release ships its first slice:
+  - `harness.py attest --range <base>..<tip> [--allow-user-changes]` prints the unsigned Statement. Its subjects are
+    the tip commit (`gitCommit`) and its code tree without `backbone/` (`gitTree`, the judge's fingerprint). The
+    predicate names the engine (its SHA-256) and the release the base commit's lock pins, the range, the flag and the
+    gate settings, and for each task finished in the range: the commit that finished it, the spec's fingerprint and
+    approval lines, the Change-Class, the latest grill, judge and review verdicts, and the receipt's risks, suggested
+    labels and verified / not-verified lists. It runs the checks of `verify --range` and prints nothing (exit 1,
+    verify's problems on stderr) when they fail, and refuses a checkout that isn't the tip with a clean working tree.
+    Standard library only; the same commits, settings and engine give the same bytes.
+  - `harness-verify.yml`: with the secrets `HARNESS_ATTEST_KEY` (a cosign private key) and
+    `HARNESS_ATTEST_PASSWORD`, a passing run writes the Statement with the base branch's engine, signs it with cosign
+    3.1.4 (checked against its SHA-256) and a signing config without services, so nothing goes to a transparency log,
+    and uploads the Statement and its Sigstore bundle as the `harness-attestation` artifact. Without the key the steps
+    don't run; with it, a failure in them fails the job. A v1 signature shows that a `harness-verify` run of the
+    repository signed it, not that the base branch's unedited workflow did (see the ADR). Set the secrets once the base
+    branch runs a release with `attest`.
+  - `tests/test-attest.py` checks the Statement's content, refusals and bytes through the command and the workflow's
+    statement step, in full and thin projects, with property checks; no cosign needed.
+
+- **verify --range no longer fails a range whose later commit changes `backbone/`.** The code fingerprint of a
+  commit kept the `backbone/` files that differ from both HEAD and the checkout, so a task marked done in one commit
+  looked changed once a later commit in the range touched `backbone/` (another task's spec, a memory note), and CI
+  failed the pull request.
+- **Sandbox backends and sandbox evidence (ADR-003, Proposed).** `docs/adr/ADR-003-sandbox-backends.md` decides a
+  sandbox backend interface for unattended runs (create, exec, copy in and out, egress policy, teardown, identity),
+  with the local devcontainer as the default and the only backend the CI floor may use, and lists E2B, Freestyle and
+  Coder as later candidates with the research's risks. This release ships its v1:
+  - `harness.py run` starts each agent session through the backend `HARNESS_SANDBOX_BACKEND` names (new, user-only,
+    default `devcontainer`). `devcontainer` runs it where the runner runs, as before. Any other value is a doctor
+    error, so `run` and `orca` refuse to start; `verify` never reads it.
+  - Each judge verdict records the sandbox it was recorded in, and `receipt` shows it (a SANDBOX section; `sandbox`
+    in `--json`): `backend`, `isolation_class`, `image_digest`, `allowlist_hash`, `region`, `control_plane`,
+    `credential_mode`. Outside the harness-agent container it says `isolation_class: none`; a judge pass recorded
+    before this release says "not recorded". The evidence never holds a credential, and refuses nothing.
+  - `.devcontainer/harness-agent/` builds from `node:22-bookworm` pinned by digest, and bakes the reference into
+    the image (`HARNESS_SANDBOX_IMAGE`).
+  - The egress allowlist moved out of the agent's container: a second container (`egress`, `docker-compose.yml`)
+    applies `init-firewall.sh` in the network namespace the agent's container joins, and publishes the host list the
+    evidence hashes. The agent's container drops NET_ADMIN and NET_RAW, runs with `no-new-privileges` and has no
+    sudo, so the agent can no longer re-run the firewall script as root. Outbound IPv6 is dropped. DNS is still open
+    to any resolver.
+  - `tests/test-sandbox-evidence.py` (in the self-test) and `tests/test-sandbox-egress.py` (a real container, with
+    `HARNESS_E2E=1`, docker and the devcontainer CLI).
+  - **Upgrading:** the sandbox is now two containers. Move an edited `HARNESS_FIREWALL_ALLOW` or knowledge mount from
+    `devcontainer.json` to `docker-compose.yml`, and rebuild the container; an image built before this release
+    records `isolation_class: none`.
+
 - **Change-Class ladder (ADR-002).** Spec template and `requirements-writing` skill declare `Change-Class`
   (`docs` | `refactor` | `feature` | `schema`) plus optional `Parent-CHNG` / `Parent-RFC` / `Parent-ADR` links.
   Policy: PR merge stays human; policy `approve` must not be treated as merge. Runtime enforcement in

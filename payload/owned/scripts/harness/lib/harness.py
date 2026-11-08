@@ -17,6 +17,7 @@ Usage:
   harness.py adopt <pack>[,<pack>] --adr ADR-NNN --with <opts> --without <opts> [--dry-run]
   harness.py adopt --remove <pack>[,<pack>] [--dry-run]
   harness.py verify [--range <base>..<tip>] [--allow-user-changes]   (gates on the staged change, or a CI range)
+  harness.py attest --range <base>..<tip> [--allow-user-changes]     (in-toto statement of a verified range, ADR-005)
   harness.py approve <task-id>                                    (autonomous mode: policy approval of a low-risk spec)
   harness.py escalate <task-id> --reason <text> [--kind <k>] [--class <failure class>] [--needed <text>]
   harness.py escalations                                          (open escalations for the user)
@@ -27,6 +28,8 @@ Usage:
   harness.py linear import <ISSUE> --task <id> [--light] [--from F] | linear receipt <task> [--status S]
                                                                   (Linear as the system of record; user-only)
   harness.py trace <task-id> [--json]                             (the task's events: context, skills, edits, refusals, tests)
+  harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]
+                                                                  (derived traceability export, ADR-004)
   harness.py ci-judge --range <base>..<tip>                       (CI: independent re-judging of finished tasks)
   harness.py ci-protect [--branch main] [--with-judge] [--dry-run] (require the CI checks; needs gh)
   harness.py doctor
@@ -49,6 +52,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True   # no __pycache__ in the project
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import decisions  # noqa: E402  (sibling module)
+import sandbox  # noqa: E402  (sibling module)
 
 # The engine is the folder holding scripts/harness/: the project itself in a full install, or a pinned release outside
 # it in thin mode (ADR-001). Engine-owned files (core rules and routes, core skills, agents, catalog) come from here.
@@ -125,7 +129,8 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
                   "HARNESS_KNOWLEDGE_ROOT", "HARNESS_KNOWLEDGE_TOOLS", "HARNESS_KNOWLEDGE_PATHS",
                   "HARNESS_TESTER", "HARNESS_ACCEPTANCE_PATHS", "HARNESS_ORCA_AGENTS", "HARNESS_ORCA_LAUNCH",
                   "HARNESS_SPEC_MAX_ITEMS", "HARNESS_LIGHT_LANE", "HARNESS_LIGHT_MAX_ITEMS", "HARNESS_LIGHT_MAX_FILES",
-                  "HARNESS_REVIEW", "HARNESS_DELIVER", "HARNESS_PROFILE", "HARNESS_REQ_STYLE")
+                  "HARNESS_REVIEW", "HARNESS_DELIVER", "HARNESS_PROFILE", "HARNESS_REQ_STYLE",
+                  "HARNESS_SANDBOX_BACKEND")
 # Organisation profiles (HARNESS_PROFILE, user-only). "triple": a supervised pilot where only a human merges, so the
 # coordinator's --merge and --trust and the scheduled backlog run are refused.
 PROFILES = ("", "triple")
@@ -269,6 +274,7 @@ DEFAULTS = {
     "HARNESS_RUN_TASK_TIMEOUT": "3600",
     "HARNESS_RUN_ATTEMPTS": "2",
     "HARNESS_RUN_MAX_COST": "",
+    "HARNESS_SANDBOX_BACKEND": "devcontainer",
     "HARNESS_CI_JUDGE_CMD": "claude -p --agent judge --dangerously-skip-permissions --output-format json",
     "HARNESS_SKILL_MAX_AGE": "180",
     "HARNESS_HOOK_SLOW": "5",
@@ -1558,13 +1564,15 @@ def mark_recommendations(questions):
     return marked
 
 
-def ac_test_references(task):
-    """{AC id: [test files mentioning it]}, searching tracked and untracked files outside backbone/."""
+def ac_test_references(task, rev=None):
+    """{AC id: [test files mentioning it]}, searching tracked and untracked files outside backbone/, or the files of
+    commit rev."""
     test_paths = re.compile(conf()["HARNESS_TEST_PATHS"])
-    output = git("grep", "-I", "--untracked", "-o", "-E", "AC-%s-[0-9]+" % re.escape(task).replace("\\-", "-"))
+    pattern = "AC-%s-[0-9]+" % re.escape(task).replace("\\-", "-")
+    output = git("grep", "-I", *(("-o", "-E", pattern, rev) if rev else ("--untracked", "-o", "-E", pattern)))
     found = {}
     for line in output.splitlines():
-        name, _, match = line.partition(":")
+        name, _, match = (line[len(rev) + 1:] if rev else line).partition(":")
         if name.startswith("backbone/") or not test_paths.search(name):
             continue
         found.setdefault(match, set()).add(name)
@@ -1672,7 +1680,7 @@ def record_verdict(data, kind):
             if report["test_run"] is not None:
                 verdict, reasons = effective_judge(task, report)
         details = {"criteria": report.get("criteria"), "findings": report.get("findings"), "tests": report.get("tests"),
-                   "test_run": report.get("test_run")}
+                   "test_run": report.get("test_run"), "sandbox": sandbox.evidence(conf()["HARNESS_SANDBOX_BACKEND"])}
     history = verdict_history(task, kind)
     entry = {"verdict": verdict, "claimed": report.get("verdict"), "reasons": reasons, "fingerprint": fingerprint,
              "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "summary": report.get("summary")}
@@ -2577,7 +2585,9 @@ def tree_fingerprint(commit=None):
             run("read-tree", commit)
         elif os.path.isfile(os.path.join(git_dir, "index")):
             shutil.copyfile(os.path.join(git_dir, "index"), index)
-        run("rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", "backbone")
+        # Without -f, git keeps an entry that differs from both HEAD and the checkout, as backbone/ files of an
+        # older commit do, and the fingerprint would include them.
+        run("rm", "-r", "--cached", "-q", "-f", "--ignore-unmatch", "--", "backbone")
         result = run("write-tree")
         return result.stdout.strip() if result.returncode == 0 else None
     finally:
@@ -2688,15 +2698,14 @@ def verify_range(spec, allow_user_changes=False):
     tip = tip or "HEAD"
     commits = [c for c in git("rev-list", "--reverse", "%s..%s" % (base, tip)).split() if c]
     changed = diff_names(base, tip)
+    return verify_changes(base, tip, changed, lambda task: tree_fingerprint(done_commit(task, commits, tip)),
+                          allow_user_changes)
+
+
+def done_commit(task, commits, tip):
+    """The first of commits (oldest first) whose task list marks task done, else tip."""
     tasks_rel = TASKS.relative_to(ROOT).as_posix()
-
-    def done_fingerprint(task):
-        for commit in commits:
-            if task in task_states(show(commit, tasks_rel))[1]:
-                return tree_fingerprint(commit)
-        return tree_fingerprint(tip)
-
-    return verify_changes(base, tip, changed, done_fingerprint, allow_user_changes)
+    return next((c for c in commits if task in task_states(show(c, tasks_rel))[1]), tip)
 
 
 def verify_command(argv):
@@ -2714,6 +2723,125 @@ def verify_command(argv):
     if not problems:
         print("verify: ok")
     return 1 if problems else 0
+
+
+# --------------------------------------------------------------------------- attestation (ADR-005)
+
+STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
+VERDICTS_PREDICATE = "https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1"
+VERIFIER_ID = "https://github.com/soyPeter/agentic-harness"
+ATTEST_USAGE = "usage: harness.py attest --range <base>..<tip> [--allow-user-changes]\n"
+
+
+def verdict_brief(history):
+    """The latest of a verdict history as the statement states it, or None."""
+    if not history:
+        return None
+    last = history[-1]
+    return {"verdict": last.get("verdict"), "fingerprint": last.get("fingerprint"), "at": last.get("at"),
+            "rounds": len(history)}
+
+
+def base_lock(base):
+    """The release base's backbone/.harness-lock.json names: what CI runs as the verifier. None without a lock."""
+    try:
+        data = json.loads(show(base, LOCK_FILE.relative_to(ROOT).as_posix()) or "null")
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("mode") == "thin":
+        return {"mode": "thin", "version": data.get("version"), "commit": data.get("commit")}
+    return {"mode": "full", "version": data.get("harness_version")}
+
+
+def attested_task(task, commits, tip):
+    """A finished task's verdict chain. The receipt is matched against the code of the commit that finished the task,
+    which verify has checked, so an earlier task keeps its receipt when a later commit in the range changes code."""
+    spec_text = read(spec_path(task))
+    finished_in = done_commit(task, commits, tip)
+    base = receipt_base(task, spec_text)
+    risks = risk_reasons(task, base)
+    cls, declared, problem = change_class(spec_text)
+    receipt, _ = receipt_data(task, base, code=tree_fingerprint(finished_in))
+    judges = verdict_history(task, "judge")
+    judge = verdict_brief(judges)
+    if judge:
+        run = judges[-1].get("test_run")
+        judge["testRun"] = {"command": run.get("command"), "exit": run.get("exit"),
+                            "outputSha256": run.get("output_sha256")} if isinstance(run, dict) else None
+    reviews = verdict_history(task, "review")
+    return {
+        "task": task,
+        "title": task_title(task),
+        "finishedIn": finished_in,
+        "spec": {"path": spec_rel(task),
+                 "fingerprint": spec_fingerprint(task, spec_text) if spec_text.strip() else None,
+                 "approval": approval_lines(md_section(strip_comments(spec_text), "Approval") or "")},
+        "changeClass": {"class": cls, "declared": declared, "problem": problem},
+        "grill": verdict_brief(verdict_history(task, "grill")),
+        "judge": judge,
+        "reviews": {lens: verdict_brief([e for e in reviews if e.get("lens") == lens]) for lens in REVIEW_LENSES},
+        "risk": {"reasons": risks, "labels": suggested_labels(spec_text, risks)},
+        "receipt": {"verified": receipt["verified"], "notVerified": receipt["not_verified"],
+                    "approvalNeeded": receipt["approval_needed"]} if receipt else None,
+    }
+
+
+def attest_statement(base_ref, tip_ref, allow_user_changes=False):
+    """(in-toto Statement, []) for a range that passes verify, checked out at its tip; else (None, problems)."""
+    commits_of = {}
+    for ref in (base_ref, tip_ref):
+        commits_of[ref] = git("rev-parse", "-q", "--verify", ref + "^{commit}").strip()
+        if not commits_of[ref]:
+            return None, ["%s is not a commit" % ref]
+    base, tip = commits_of[base_ref], commits_of[tip_ref]
+    head = git("rev-parse", "-q", "--verify", "HEAD").strip()
+    if head != tip:
+        return None, ["the checkout is at %s, not %s: check out the commit the statement is about"
+                      % (head[:12], tip[:12])]
+    # Receipts, risks and fingerprints read the checkout, so it has to be exactly the commit.
+    dirty = [line[3:] for line in git("status", "--porcelain", "--untracked-files=all").splitlines() if line.strip()]
+    if dirty:
+        return None, ["the checkout has uncommitted or untracked files (%s); the statement is about commit %s, so "
+                      "commit or remove them first" % (", ".join(dirty[:5]), tip[:12])]
+    problems = verify_range("%s..%s" % (base, tip), allow_user_changes)
+    if problems:
+        return None, problems
+    commits = [c for c in git("rev-list", "--reverse", "%s..%s" % (base, tip)).split() if c]
+    tasks_rel = TASKS.relative_to(ROOT).as_posix()
+    finished = sorted(task_states(show(tip, tasks_rel))[1] - task_states(show(base, tasks_rel))[1])
+    values = conf()
+    return {
+        "_type": STATEMENT_TYPE,
+        "subject": [{"name": "commit", "digest": {"gitCommit": tip}},
+                    {"name": "code", "digest": {"gitTree": tree_fingerprint(tip)}}],
+        "predicateType": VERDICTS_PREDICATE,
+        "predicate": {
+            "verifier": {"id": VERIFIER_ID, "engineSha256": sha256(__file__), "baseLock": base_lock(base)},
+            "verification": {"base": base, "tip": tip, "result": "PASSED", "allowUserChanges": allow_user_changes,
+                             "gates": {"spec": values["HARNESS_SPEC_GATE"], "judge": values["HARNESS_JUDGE_GATE"],
+                                       "review": values["HARNESS_REVIEW"], "tester": values["HARNESS_TESTER"]}},
+            "tasks": [attested_task(task, commits, tip) for task in finished],
+        },
+    }, []
+
+
+def attest_command(argv):
+    """Print the in-toto Statement of a verified range; nothing on stdout when the range doesn't verify."""
+    allow = "--allow-user-changes" in argv
+    args = [a for a in argv if a != "--allow-user-changes"]
+    if args[:1] != ["--range"] or len(args) != 2 or ".." not in args[1] or args[1].startswith(".."):
+        sys.stderr.write(ATTEST_USAGE)
+        return 64
+    base, _, tip = args[1].partition("..")
+    statement, problems = attest_statement(base, tip or "HEAD", allow)
+    for problem in problems:
+        sys.stderr.write("attest: %s\n" % problem)
+    if problems:
+        return 1
+    sys.stdout.write(json.dumps(statement, indent=2, sort_keys=True) + "\n")
+    return 0
 
 
 # --------------------------------------------------------------------------- health
@@ -2812,6 +2940,9 @@ def health():
         issues.append(("error", "HARNESS_REQ_STYLE must be one of %s" % "|".join(REQ_STYLES)))
     if values["HARNESS_PROFILE"] not in PROFILES:
         issues.append(("error", "HARNESS_PROFILE must be empty or one of %s" % "|".join(p for p in PROFILES if p)))
+    unusable = sandbox.problem(values["HARNESS_SANDBOX_BACKEND"])
+    if unusable:
+        issues.append(("error", unusable))
     if values["HARNESS_AUTONOMY"] not in AUTONOMY_MODES:
         issues.append(("error", "HARNESS_AUTONOMY must be one of %s" % "|".join(AUTONOMY_MODES)))
     elif values["HARNESS_AUTONOMY"] == "autonomous":
@@ -5132,16 +5263,16 @@ def trust_problem(command=None):
 
 
 def run_agent(prompt, log_path, timeout):
-    command = conf()["HARNESS_AGENT_CMD"]
+    values = conf()
+    backend = sandbox.backend(values["HARNESS_SANDBOX_BACKEND"])
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.time()
-    with log_path.open("w", encoding="utf-8") as log:
-        try:
-            result = subprocess.run(command, shell=True, cwd=str(ROOT), input=prompt, stdout=log,
-                                    stderr=subprocess.STDOUT, text=True, timeout=timeout)
-            code = result.returncode
-        except subprocess.TimeoutExpired:
-            code = None
+    box = backend.create(ROOT)
+    try:
+        with log_path.open("w", encoding="utf-8") as log:
+            code = backend.exec(box, values["HARNESS_AGENT_CMD"], stdin=prompt, log=log, timeout=timeout)
+    finally:
+        backend.teardown(box)
     return code, round(time.time() - started, 1)
 
 
@@ -5646,6 +5777,8 @@ def trace_line(event):
 
 
 def trace_command(argv):
+    if argv[:1] == ["export"]:
+        return trace_export_command(argv[1:])
     task = next((a for a in argv if not a.startswith("--")), None)
     if not task:
         sys.stderr.write("usage: harness.py trace <task> [--json]\n")
@@ -5667,6 +5800,230 @@ def trace_command(argv):
     print("trace: task %s, %d event(s)" % (task, len(events)))
     for event in events:
         print(trace_line(event))
+    return 0
+
+
+# --------------------------------------------------------------------------- traceability export (ADR-004)
+# A derived, one-way view of the chain requirement -> criterion -> test -> verdict -> commit for ALM and docs-as-code
+# tools. backbone/ and git stay the record: nothing reads the export back, and it never touches the network.
+
+TRACE_USAGE = "usage: harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]\n"
+TASK_ID = re.compile(r"^[A-Za-z0-9._-]*[A-Za-z0-9]$")
+XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff\ud800-\udfff]")
+EARS_LEAD = re.compile(r"^((?:(?:While|When|Where)\s+.+?,\s*|If\s+.+?,\s*then\s+)*)the\s+\S.*?\s+shall\s+\S", re.I)
+EARS_KINDS = {"when": "event-driven", "while": "state-driven", "if": "unwanted behaviour", "where": "optional feature"}
+
+
+def clean(text):
+    """text without the control characters XML can't carry, so every format exports the same string."""
+    return XML_ILLEGAL.sub("", text)
+
+
+def trace_item_text(rest):
+    """A spec item's text after its id: without a criterion's leading (REQ-...) list, the colon and bold markers."""
+    return clean(re.sub(r"^\s*(\([^)]*\))?[\s:*]*", "", rest)).strip()
+
+
+def ears_pattern(rest):
+    """The EARS pattern of a requirement, read from its leading clauses as spec-check reads the shape."""
+    m = EARS_LEAD.match(re.sub(r"^[\s:*]+|\*+", "", rest).strip())
+    if not m:
+        return "not an EARS pattern"
+    kinds = sorted({k.lower() for k in re.findall(r"(?i)(?:^|,\s*)(while|when|where|if)\s", m.group(1))})
+    return "complex" if len(kinds) > 1 else EARS_KINDS[kinds[0]] if kinds else "ubiquitous"
+
+
+def commits_by_code():
+    """{code fingerprint: [commits reachable from HEAD with exactly that code, newest first]}. A commit's fingerprint
+    is its tree without the top-level backbone entry, as tree_fingerprint computes it; reading every tree through one
+    git process and hashing it here keeps this fast on a long history."""
+    pairs = [line.split() for line in git("log", "--format=%H %T", "HEAD").splitlines() if len(line.split()) == 2]
+    trees = sorted({tree for _, tree in pairs})
+    try:
+        out = subprocess.run(["git", "cat-file", "--batch"], cwd=str(ROOT), capture_output=True, timeout=GIT_TIMEOUT,
+                             input="".join(tree + "\n" for tree in trees).encode()).stdout
+    except subprocess.TimeoutExpired:
+        return {}
+    code, pos = {}, 0
+    for tree in trees:
+        end = out.find(b"\n", pos)
+        fields = out[pos:end].split()
+        if end < 0 or len(fields) != 3:
+            pos = end + 1
+            continue
+        size, oid_bytes = int(fields[2]), len(tree) // 2
+        body, pos = out[end + 1:end + 1 + size], end + 2 + size
+        kept, i = [], 0
+        while i < len(body):
+            nul = body.index(b"\0", i)
+            if body[i:nul].split(b" ", 1)[1] != b"backbone":
+                kept.append(body[i:nul + 1 + oid_bytes])
+            i = nul + 1 + oid_bytes
+        content = b"".join(kept)
+        code[tree] = hashlib.new("sha1" if oid_bytes == 20 else "sha256",
+                                 b"tree %d\0" % len(content) + content).hexdigest()
+    found = {}
+    for commit, tree in pairs:
+        if tree in code:
+            found.setdefault(code[tree], []).append(commit)
+    return found
+
+
+def trace_task(task, current, by_code):
+    """One task's part of the export: its requirements, criteria and test files, the latest verdicts on them, the
+    commits that carry the judged code, and the gaps the harness can see."""
+    text = read(spec_path(task))
+    body = strip_comments(text)
+    nfr_section = md_section(body, "Non-functional requirements") or ""
+    ears = conf()["HARNESS_REQ_STYLE"] == "ears"
+    requirements = []
+    for kind, items in (("REQ", spec_items(body, "REQ", task)), ("NFR", spec_items(nfr_section, "NFR", task))):
+        for rid, rest in items:
+            if rid not in {r["id"] for r in requirements}:
+                requirements.append({"id": rid, "kind": kind, "text": trace_item_text(rest),
+                                     "ears_pattern": ears_pattern(rest) if ears and kind == "REQ" else None})
+    judge = verdict_history(task, "judge")
+    last = judge[-1] if judge else None
+    fingerprint = last.get("fingerprint") if last else None
+    verdict = ("not judged" if last is None else "fail" if last.get("verdict") != "pass" else
+               "pass on the current code" if fingerprint == current else "pass on earlier code")
+    commits = by_code.get(fingerprint, []) if fingerprint else []
+    if last is None or fingerprint == current:
+        references, files_from = ac_test_references(task), "the current code"
+    elif commits:
+        references, files_from = ac_test_references(task, commits[0]), "commit %s" % commits[0]
+    else:
+        references, files_from = {}, None
+    gaps = {"not judged": ["no judge verdict: nothing in this task is verified"],
+            "fail": ["the latest judge verdict is a fail"],
+            "pass on earlier code": ["the judge's pass is on earlier code, not on the current code"]}.get(verdict, [])
+    if files_from is None:
+        gaps.append("the judged code is in no commit, so its test files are unknown")
+    known = [r["id"] for r in requirements]
+    judged = {str(c.get("id")): c for c in (last or {}).get("criteria") or [] if isinstance(c, dict)}
+    criteria, tests = [], {}
+    for aid, rest in spec_items(body, "AC", task):
+        if aid in {c["id"] for c in criteria}:
+            continue
+        cited = list(dict.fromkeys(re.findall(r"\b(?:REQ|NFR)-%s-\d+\b" % re.escape(task), rest)))
+        item = judged.get(aid)
+        result = ("not judged" if last is None else "not evaluated" if item is None else
+                  "met" if item.get("met") is True else "not met")
+        files = references.get(aid, [])
+        for name in files:
+            tests.setdefault(name, []).append(aid)
+        criteria.append({"id": aid, "text": trace_item_text(rest), "proves": [r for r in cited if r in known],
+                         "unknown": [r for r in cited if r not in known], "result": result, "files": files,
+                         "evidence": clean(str(item.get("evidence") or "")) if item else "",
+                         "judge_tests": [clean(str(t)) for t in item.get("tests") or []] if item else [],
+                         "tests": [trace_test_id(task, name) for name in files]})
+    proven = {r for c in criteria for r in c["proves"]}
+    gaps += ["%s has no acceptance criterion" % rid for rid in known if rid not in proven]
+    for c in criteria:
+        gaps += ["%s references %s, which the spec doesn't define" % (c["id"], rid) for rid in c["unknown"]]
+        if c["result"] in ("not met", "not evaluated"):
+            gaps.append("%s: %s" % (c["id"], c["result"] if c["result"] == "not met" else "not evaluated by the judge"))
+        if files_from and not c["files"]:
+            gaps.append("%s: no test file mentions it" % c["id"])
+    gaps += ["NFR without an id, so no criterion traces it: %s" % clean(n) for n in top_level_items(nfr_section)
+             if n.lower().rstrip(".") not in ("none", "n/a") and not re.match(r"\**NFR-%s-\d+" % re.escape(task), n)]
+    for f in (last or {}).get("findings") or []:
+        if isinstance(f, dict):
+            where = ":".join(str(x) for x in (f.get("file"), f.get("line")) if x not in (None, ""))
+            gaps.append(clean("%s finding left open: %s%s" % (f.get("severity", "minor"), f.get("issue", "?"),
+                                                              " (%s)" % where if where else "")))
+    grills = verdict_history(task, "grill")
+    grill = grills[-1] if grills else None
+    run = (last or {}).get("test_run")
+    cls, declared, problem = change_class(text)
+    _, line = task_line(task)
+    title = re.match(r"^#\s+Spec\s+\S+:\s*(.+)$", body.strip().splitlines()[0]) if body.strip() else None
+    return {
+        "id": task,
+        "title": clean(title.group(1).strip() if title else task_title(task)),
+        "status": ("not in 3-TASKS.md" if line is None else "blocked" if BLOCKED_NOTE.search(line) else
+                   "in progress" if WIP_LINE.match(line) else "done" if DONE_LINE.match(line) else "pending"),
+        "spec": spec_rel(task),
+        "spec_fingerprint": spec_fingerprint(task, text),
+        "change_class": cls + (" (the declared one is invalid)" if problem else "" if declared else " (not declared)"),
+        "grill": "none" if grill is None else "%s on %s (%s)" % (
+            grill.get("verdict"), "the current spec" if grill.get("fingerprint") == spec_fingerprint(task, text)
+            else "an earlier spec", grill.get("at")),
+        "approval": [clean(a) for a in approval_lines(md_section(body, "Approval") or "")],
+        "verdict": verdict,
+        "judged_at": last.get("at") if last else None,
+        "code_fingerprint": fingerprint,
+        "commits": commits,
+        "test_run": "%s: exit %s in %ss, output sha256 %s" % (clean(str(run.get("command"))), run.get("exit"),
+                                                               run.get("seconds"), run.get("output_sha256"))
+        if isinstance(run, dict) else None,
+        "test_files_from": files_from or "unknown",
+        "reviews": "; ".join("%s: %s" % (lens, "none" if e is None else e.get("verdict") + (
+            "" if e.get("fingerprint") == fingerprint else " on other code than the judged code"))
+            for lens, e in lens_reviews(task).items()),
+        "requirements": requirements,
+        "criteria": criteria,
+        "tests": [{"id": trace_test_id(task, name), "path": clean(name), "criteria": acs}
+                  for name, acs in sorted(tests.items())],
+        "gaps": gaps,
+    }
+
+
+def trace_test_id(task, path):
+    return "TEST-%s-%s" % (task, hashlib.sha256(path.encode("utf-8")).hexdigest()[:12])
+
+
+def trace_model(tasks):
+    head = git("rev-parse", "-q", "--verify", "HEAD").strip() or None
+    current = code_fingerprint()
+    by_code = commits_by_code()
+    version = lock().get("harness_version") or lock().get("version") or "unknown"
+    return {"project": clean(conf()["HARNESS_PROJECT_NAME"] or ROOT.name), "version": version,
+            "tool": "agentic-harness %s" % version, "head": head,
+            "time": git("log", "-1", "--format=%cI", "HEAD").strip() if head else "1970-01-01T00:00:00+00:00",
+            "code_fingerprint": current, "code_matches_head": bool(head) and head in by_code.get(current, []),
+            "req_style": conf()["HARNESS_REQ_STYLE"],
+            "tasks": [trace_task(task, current, by_code) for task in tasks]}
+
+
+def trace_export_command(argv):
+    import traceability
+    flags, rest = {"--format": None, "--out": None, "--task": None}, list(argv)
+    while rest:
+        flag = rest.pop(0)
+        if flag not in flags or flags[flag] is not None or not rest:
+            sys.stderr.write(TRACE_USAGE)
+            return 64
+        flags[flag] = rest.pop(0)
+    if flags["--format"] not in traceability.FORMATS:
+        sys.stderr.write(TRACE_USAGE)
+        return 64
+    render, name = traceability.FORMATS[flags["--format"]]
+    task = flags["--task"]
+    if task is not None and not (TASK_ID.match(task) and spec_path(task).is_file()):
+        print("trace export: no spec at %s" % spec_rel(task))
+        return 1
+    tasks = [task] if task else sorted((p.stem for p in SPECS.glob("*.md") if TASK_ID.match(p.stem)),
+                                       key=lambda t: [int(p) if p.isdigit() else p for p in re.split(r"(\d+)", t)])
+    target = Path(flags["--out"]).expanduser().resolve() / name if flags["--out"] else None
+    if target is not None and (target == ROOT or ROOT in target.parents):
+        rel = target.relative_to(ROOT).as_posix()
+        if not git("check-ignore", "--", rel).strip():
+            print("trace export: %s is inside the repository and git doesn't ignore it: an untracked file there "
+                  "counts as code and would make the judge's passes stale. Write it outside the repository or to a "
+                  "git-ignored folder, or redirect stdout." % rel)
+            return 1
+    document = render(trace_model(tasks))
+    if target is None:
+        sys.stdout.write(document)
+        return 0
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(document, encoding="utf-8")
+    except OSError as exc:
+        print("trace export: can't write %s: %s" % (target, exc))
+        return 1
+    print("trace export: wrote %s" % target)
     return 0
 
 
@@ -5713,8 +6070,9 @@ def suggested_labels(spec_text, risks):
     return [RISK_LABELS[step]] + (["class:" + cls] if declared else [])
 
 
-def receipt_data(task, base=None):
-    """(receipt dict, None) for a task with a judge pass on the current code, else (None, why not)."""
+def receipt_data(task, base=None, code=None):
+    """(receipt dict, None) for a task with a judge pass on the current code (or on code, a code fingerprint), else
+    (None, why not)."""
     spec_text = read(spec_path(task))
     judge = verdict_history(task, "judge")
     passed = judge[-1] if judge and judge[-1].get("verdict") == "pass" else None
@@ -5722,7 +6080,7 @@ def receipt_data(task, base=None):
         return None, "task %s has no judge pass on record; a receipt states only what the judge proved" % task
     if not spec_text.strip():
         return None, "no spec at %s" % spec_rel(task)
-    if passed.get("fingerprint") != code_fingerprint():
+    if passed.get("fingerprint") != (code or code_fingerprint()):
         return None, "the code changed after the judge passed task %s; judge it again first" % task
     body = strip_comments(spec_text)
     title = re.match(r"^#\s+Spec\s+\S+:\s*(.+)$", body.strip().splitlines()[0]) if body.strip() else None
@@ -5788,11 +6146,21 @@ def receipt_data(task, base=None):
         "risks": risk_reasons(task, base),
         "rounds": {"grill": len(grills), "judge": len(judge), "debug": len(verdict_history(task, "debug"))},
         "judged_at": passed.get("at"),
+        "sandbox": passed.get("sandbox"),
         "approval": approval_lines(approval_section(spec_text) or ""),
         "approval_needed": approval_needed,
     }
     data["suggested_labels"] = suggested_labels(spec_text, data["risks"])
     return data, None
+
+
+def sandbox_lines(evidence):
+    if not evidence:
+        return ["not recorded: the judge pass predates sandbox evidence (ADR-003); judge the task again to record it"]
+    lines = ["%s: %s" % (field, evidence.get(field, "unknown")) for field in sandbox.EVIDENCE_FIELDS]
+    if evidence.get("isolation_class") == "none":
+        lines.append("nothing isolated the session from the host: it ran outside the harness-agent container")
+    return lines
 
 
 def receipt_text(d):
@@ -5804,6 +6172,7 @@ def receipt_text(d):
         lines.append("  backbone: %s" % ", ".join(c["path"] for c in d["backbone_changed"]))
     sections = (("VERIFIED (judge pass %s, re-checked by the harness)" % d["judged_at"], d["verified"]),
                 ("NOT VERIFIED", d["not_verified"] or ["nothing outside the acceptance criteria"]),
+                ("SANDBOX (where the judge pass was recorded)", sandbox_lines(d["sandbox"])),
                 ("DECISIONS", ["follows %s" % a for a in d["decisions"]["governing_adrs"]] +
                  ["ADR changed: %s" % a for a in d["decisions"]["adrs_changed"]] +
                  ["assumption %s" % a for a in d["decisions"]["assumptions"]]),
@@ -6491,6 +6860,8 @@ def main(argv):
         return adopt_command(argv[2:])
     if argv[1:2] == ["verify"]:
         return verify_command(argv[2:])
+    if argv[1:2] == ["attest"]:
+        return attest_command(argv[2:])
     if len(argv) == 3 and argv[1] == "approve":
         return approve_command(argv[2])
     if argv[1:2] == ["escalate"]:
