@@ -8,7 +8,9 @@
 
 A spec without the line counts as feature; a value that isn't one class makes the spec invalid. The class is read
 only where the grill fingerprint reads, so it can't change after the griller and the user passed the spec; a class in
-a code block is an example. Documentation is a file with a documentation extension, and a move counts as both paths.
+a code block is an example. The Approval section starts at the first '## Approval' heading outside comments and code
+blocks, for the fingerprint, the freeze, the class, the risk checks and approval alike, and a heading inside either
+makes the spec invalid. Documentation is a file with a documentation extension, and a move counts as both paths.
 The property checks need hypothesis (pip install -r tests/requirements.txt) and are skipped without it.
 """
 import itertools
@@ -66,11 +68,14 @@ Tech requirements:
 APPROVAL = "Approved-by: Ana (2026-11-06)\n"
 MISMATCH = "Change-Class docs doesn't cover a change to files that aren't documentation: %s"
 HIDDEN_HEADING = "'## Approval' heading inside or next to an HTML comment"
-LAYOUTS = (   # what a spec may put above its Change-Class line, and whether the spec is still valid
-    ("nothing",                               "",                                     True),
-    ("a comment",                             "<!-- A note for the analyst. -->\n",   True),
-    ("a commented-out Approval heading",      "<!--\n## Approval\n-->\n",             False),
-    ("a comment before an Approval heading",  "<!-- note -->## Approval\n",           False),
+FENCED_HEADING = "'## Approval' heading inside a fenced code block"
+LAYOUTS = (   # what a spec may put above its Change-Class line, and the problem that makes the spec invalid
+    ("nothing",                               "",                                     None),
+    ("a comment",                             "<!-- A note for the analyst. -->\n",   None),
+    ("a commented-out Approval heading",      "<!--\n## Approval\n-->\n",             HIDDEN_HEADING),
+    ("a comment before an Approval heading",  "<!-- note -->## Approval\n",           HIDDEN_HEADING),
+    ("an Approval heading in a code block",   "```\n## Approval\n```\n",              FENCED_HEADING),
+    ("one in a tilde code block",             "~~~markdown\n## Approval\n~~~\n",      FENCED_HEADING),
 )
 SNIPPETS = tuple(above for _, above, _ in LAYOUTS) + (   # for the property checks, around the Change-Class line
     "A plain line.\n", "## Approval <!-- note -->\n", "```\nChange-Class: docs\n```\n", "<!--\nChange-Class: schema\n-->\n")
@@ -526,8 +531,8 @@ class WhatWasPassed(unittest.TestCase):
                 self.assertEqual(code, 1, out)
                 self.assertNotIn("Approved-by: policy", self.project.read("backbone/specs/%s.md" % task))
 
-    def test_an_approval_heading_inside_or_next_to_a_comment_makes_the_spec_invalid(self):
-        for n, (layout, above, valid) in enumerate(LAYOUTS, 1):
+    def test_an_approval_heading_in_a_comment_or_a_code_block_makes_the_spec_invalid(self):
+        for n, (layout, above, problem) in enumerate(LAYOUTS, 1):
             task = "11.%d" % n
             with self.subTest(layout=layout):
                 self.project.add_task(task, above + declared("docs"))
@@ -535,21 +540,100 @@ class WhatWasPassed(unittest.TestCase):
 
                 code, out = self.project.harness("spec-check", task)
 
-                self.assertEqual(code, 0 if valid else 1, out)
-                self.assertEqual(HIDDEN_HEADING in out, not valid, out)
-                self.assertEqual(self.project.state(task)["grill"]["verdict"], "pass" if valid else "fail")
+                self.assertEqual(code, 1 if problem else 0, out)
+                self.assertEqual(HIDDEN_HEADING in out, problem == HIDDEN_HEADING, out)
+                self.assertEqual(FENCED_HEADING in out, problem == FENCED_HEADING, out)
+                self.assertEqual(self.project.state(task)["grill"]["verdict"], "fail" if problem else "pass")
 
-    def test_an_approved_spec_stays_frozen_below_a_commented_out_approval_heading(self):
-        self.project.add_task("12.1", "<!--\n## Approval\n-->\n" + declared("docs"))
-        self.project.approve_as_user("12.1")
+    def test_an_approved_spec_stays_frozen_whatever_is_above_its_class(self):
         edits = (("Change-Class: docs", "Change-Class: refactor"),
                  ("The system shall do one thing.", "The system shall do nothing."))
-        for old, new in edits:
-            with self.subTest(new=new):
-                code, out = self.project.analyst_edit("12.1", "Edit", old_string=old, new_string=new)
+        for n, (layout, above, _) in enumerate(LAYOUTS, 1):
+            task = "12.%d" % n
+            self.project.add_task(task, above + declared("docs"))
+            self.project.approve_as_user(task)
+            for old, new in edits:
+                with self.subTest(layout=layout, new=new):
+                    code, out = self.project.analyst_edit(task, "Edit", old_string=old, new_string=new)
 
-                self.assertEqual(code, 2, out)
-                self.assertIn("approved and therefore frozen", out)
+                    self.assertEqual(code, 2, out)
+                    self.assertIn("approved and therefore frozen", out)
+
+
+class FencedApproval(unittest.TestCase):
+    """A '## Approval' heading in a fenced code block is an example: the spec's own heading starts the Approval section
+    for the grill fingerprint, the freeze, the class, the risk checks and approval."""
+    EXAMPLE = "Every spec ends like this:\n\n```markdown\n## Approval\n```\n"
+    STORAGE = "Passwords are stored in plain text."
+
+    def setUp(self):
+        self.project = new_project(self)
+
+    def add_task(self, task, example=EXAMPLE, header=declared("docs")):
+        """A task whose Context shows example, followed by a requirement that is a risk."""
+        self.project.add_task(task, header, example)
+        spec = "backbone/specs/%s.md" % task
+        self.project.write(spec, self.project.read(spec).replace("## Requirements\n",
+                                                                 "## Requirements\n%s\n" % self.STORAGE))
+
+    def test_the_risk_checks_read_the_spec_below_the_example(self):
+        self.add_task("30.1")
+
+        code, out = self.project.harness("risk", "30.1")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("the spec involves password", out)
+
+    def test_policy_does_not_approve_the_spec(self):
+        self.add_task("30.1")
+        self.project.grill_pass("30.1")
+
+        code, out = self.project.harness("approve", "30.1", HARNESS_AUTONOMY="autonomous")
+
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("Approved-by: policy", self.project.read("backbone/specs/30.1.md"))
+
+    def test_spec_check_says_the_heading_is_in_a_code_block(self):
+        self.add_task("30.1")
+
+        code, out = self.project.harness("spec-check", "30.1")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn(FENCED_HEADING, out)
+
+    def test_the_grill_pass_covers_the_spec_below_the_example(self):
+        self.add_task("30.1")
+        self.project.grill_pass("30.1")
+        spec = "backbone/specs/30.1.md"
+
+        self.project.write(spec, self.project.read(spec).replace(self.STORAGE, "Passwords are hashed."))
+
+        self.assertFalse(self.project.state("30.1")["grill"]["current"])
+
+    def test_the_users_approval_freezes_the_spec_below_the_example(self):
+        self.add_task("30.1")
+        self.project.approve_as_user("30.1")
+
+        code, out = self.project.analyst_edit("30.1", "Edit", old_string=self.STORAGE,
+                                              new_string="Passwords are hashed.")
+
+        self.assertEqual(code, 2, out)
+        self.assertIn("approved and therefore frozen", out)
+
+    def test_the_class_below_the_example_is_the_declared_one(self):
+        self.add_task("30.1", header=self.EXAMPLE + declared("refactor"), example="")
+
+        self.assertEqual(self.project.state("30.1")["change_class"], "refactor")
+
+    def test_an_approved_by_line_in_a_code_block_is_an_example_not_the_users_approval(self):
+        self.add_task("30.1", self.EXAMPLE.replace("## Approval\n", "## Approval\n" + APPROVAL))
+        self.add_task("30.2", "")
+        with open(self.project.root / "backbone/specs/30.2.md", "a", encoding="utf-8") as spec:
+            spec.write("```\n%s```\n" % APPROVAL)
+
+        for task in ("30.1", "30.2"):
+            with self.subTest(task=task):
+                self.assertFalse(self.project.state(task)["approved"])
 
 
 class DocumentationPaths(unittest.TestCase):
@@ -822,6 +906,59 @@ class SpecProperties(unittest.TestCase):
 
             self.assertEqual(state["change_class"], change_class, state)
             self.assertEqual([p for p in state["spec_problems"] if "Change-Class" in p], [], state)
+
+        example_lines = st.lists(st.sampled_from((APPROVAL, declared("docs"), "## Requirements\n", "\n",
+                                                  "- The system shall log users in.\n")), max_size=2)
+        approval_example = st.builds(lambda marker, length, info, before, after: "%s%s\n%s## Approval\n%s%s\n" % (
+            marker * length, info, "".join(before), "".join(after), marker * length),
+            st.sampled_from(("`", "~")), st.integers(3, 5), st.sampled_from(("", "markdown", "text")),
+            example_lines, example_lines)
+        replacement = st.one_of(
+            st.text(st.characters(blacklist_categories=("Cs", "Cc")), max_size=12),
+            st.lists(st.sampled_from(("## Approval\n", "```\n", "~~~\n", "<!--", "-->", "\n", declared("refactor"),
+                                      FencedApproval.STORAGE)), min_size=1, max_size=4).map("".join))
+
+        def edit_below(self, task, example, data):
+            """The spec with one span, between the example's '## Approval' line and the spec's own, replaced."""
+            text = self.project.read("backbone/specs/%s.md" % task)
+            low = text.index(example) + example.index("## Approval\n") + len("## Approval\n")
+            start, stop = sorted(data.draw(st.lists(st.integers(low, text.rindex("## Approval\n")),
+                                                    min_size=2, max_size=2)))
+            edited = text[:start] + data.draw(self.replacement) + text[stop:]
+            assume(edited != text)
+            return edited
+
+        def write_task(self, example, above_class):
+            task = self.task()
+            self.project.add_task(task, example + declared("docs") if above_class else declared("docs"),
+                                  "" if above_class else "\n" + example)
+            return task
+
+        @settings(max_examples=25, deadline=None)
+        @given(example=approval_example, above_class=st.booleans(), data=st.data())
+        def test_an_edit_below_a_fenced_approval_heading_stales_the_grill_or_invalidates_the_spec(
+                self, example, above_class, data):
+            task = self.write_task(example, above_class)
+            self.project.grill_pass(task)
+
+            self.project.write("backbone/specs/%s.md" % task, self.edit_below(task, example, data))
+            state = self.project.state(task)
+
+            self.assertTrue(not state["grill"]["current"] or state["spec_problems"], state)
+
+        @settings(max_examples=25, deadline=None)
+        @given(example=approval_example, above_class=st.booleans(), data=st.data())
+        def test_an_agent_edit_below_a_fenced_approval_heading_is_frozen_or_invalidates_the_spec(
+                self, example, above_class, data):
+            task = self.write_task(example, above_class)
+            self.project.approve_as_user(task)
+            edited = self.edit_below(task, example, data)
+
+            code, out = self.project.analyst_edit(task, "Write", content=edited)
+            self.project.write("backbone/specs/%s.md" % task, edited)
+            state = self.project.state(task)
+
+            self.assertTrue(code == 2 or state["spec_problems"], (out, state))
 
 
 @unittest.skipIf(given is None, "hypothesis is not installed (pip install -r tests/requirements.txt)")

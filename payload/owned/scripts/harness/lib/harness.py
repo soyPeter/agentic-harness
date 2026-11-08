@@ -552,11 +552,29 @@ def validate_adr(text, name):
     return problems + stubs(name, body)
 
 
+def blank_fences(text):
+    """text with its fenced code blocks blanked out but line breaks kept, so an offset in it is an offset in text."""
+    return "".join(re.sub(r"[^\n]", " ", line) if fenced else line for line, fenced in fence_lines(text))
+
+
+def spec_outline(text):
+    """text with its HTML comments and fenced code blocks blanked out, offsets kept: where the spec's own headings are.
+    Fences are found once the comments are blanked, so a fence marker inside a comment opens nothing."""
+    return blank_fences(blank_comments(text or ""))
+
+
 def without_approval(text):
-    """text above its Approval section. A heading inside an HTML comment doesn't start the section: approved() doesn't
-    see it either, and cutting there would leave the rest of the spec out of the grill fingerprint and the freeze."""
-    m = APPROVAL_HEADING.search(blank_comments(text))
+    """text above its Approval section. A heading inside an HTML comment or a fenced code block doesn't start the
+    section: approved() doesn't see it either, and cutting there would leave the rest of the spec out of the grill
+    fingerprint, the freeze and what is read from the spec (the class, the risk checks)."""
+    m = APPROVAL_HEADING.search(spec_outline(text))
     return text[:m.start()] if m else text
+
+
+def approval_section(text):
+    """The Approval section as approved() and policy approval read it: from the heading without_approval() cuts at,
+    without comments, and without code blocks, where an Approved-by: line is an example."""
+    return md_section(spec_outline(text), "Approval")
 
 
 def spec_body(text):
@@ -566,15 +584,19 @@ def spec_body(text):
 
 
 def approval_heading_problem(text):
-    """Why the spec's '## Approval' heading is ambiguous, or None: one inside a comment, or one that only reads as a
-    heading once a comment on its line is removed, where approved() would start the section while the grill
-    fingerprint and the freeze end elsewhere."""
+    """Why the spec's '## Approval' heading is ambiguous, or None: one inside a comment or a fenced code block, or one
+    that only reads as a heading once a comment on its line is removed. The gates skip those, but a reader that
+    doesn't (a Markdown section parser, an agent, the user's editor) would start the Approval section there, where
+    the grill fingerprint and the freeze don't end."""
     stripped = strip_comments(text)
-    heading = APPROVAL_HEADING.search(stripped)
+    heading = APPROVAL_HEADING.search(blank_fences(stripped))
     if (strip_comments(without_approval(text)) != stripped[:heading.start() if heading else len(stripped)]
             or any(APPROVAL_HEADING.search(c) for c in re.findall(r"<!--.*?-->", text, re.S))):
         return ("the spec has an '## Approval' heading inside or next to an HTML comment: keep one '## Approval' "
                 "heading, on a line of its own, outside comments")
+    if any(fenced and APPROVAL_HEADING.match(line) for line, fenced in fence_lines(blank_comments(text))):
+        return ("the spec has an '## Approval' heading inside a fenced code block: keep one '## Approval' heading, "
+                "on a line of its own, outside code blocks (indent an example's heading)")
     return None
 
 
@@ -681,7 +703,7 @@ def approval_lines(text):
 
 
 def approved(text):
-    return bool(approval_lines(md_section(strip_comments(text), "Approval") or ""))
+    return bool(approval_lines(approval_section(text) or ""))
 
 
 def ears_problems(req, text):
@@ -732,19 +754,27 @@ def change_class(text):
     return distinct[0], True, None
 
 
-def without_fences(text):
-    """text without its fenced code blocks (``` or ~~~, closed as in Markdown; one left open runs to the end)."""
-    kept, fence = [], None
-    for line in text.splitlines(True):
+def fence_lines(text):
+    """(line, whether it belongs to a fenced code block) for each line of text: ``` or ~~~, closed as in Markdown; one
+    left open runs to the end."""
+    fence = None
+    # Lines end at \n only, as for the ^ and $ of the regexes that read the spec: splitlines() would also end one at
+    # \x1c or  , so a fence could open inside what those regexes read as a heading line.
+    for line in re.findall(r"[^\n]*\n|[^\n]+\Z", text):
         m = FENCE.match(line.rstrip("\r\n"))
-        # A backtick in the rest of the line makes it inline code (```x```), not a fence.
-        if fence is None and m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
-            fence = m.group(1)
-        elif fence is None:
-            kept.append(line)
-        elif m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
-            fence = None
-    return "".join(kept)
+        if fence is None:
+            # A backtick in the rest of the line makes it inline code (```x```), not a fence.
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                fence = m.group(1)
+            yield line, fence is not None
+        else:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
+                fence = None
+            yield line, True
+
+
+def without_fences(text):
+    return "".join(line for line, fenced in fence_lines(text) if not fenced)
 
 
 def class_label(text):
@@ -1430,7 +1460,7 @@ def consecutive_fails(history):
 
 
 def code_fingerprint(include_backbone=False):
-    """Git tree hash of the working tree (tracked and untracked, ignores respected),
+    """Git tree hash of the working tree, hashed from the files' content (tracked and untracked, ignores respected),
     excluding backbone/ unless include_backbone. Identical code gives an identical hash, committed or not."""
     git_dir = git("rev-parse", "--absolute-git-dir").strip()
     if not git_dir:
@@ -1440,6 +1470,10 @@ def code_fingerprint(include_backbone=False):
         index = os.path.join(tmp, "index")
         if os.path.isfile(os.path.join(git_dir, "index")):
             shutil.copyfile(os.path.join(git_dir, "index"), index)
+            # Git skips hashing a file whose size and timestamps match its index entry, unless the entry is as new as
+            # the index file. Dated 1970 (not 0, which git reads as no date), the copy is older than every entry, so
+            # git hashes every file: a same-size edit made within the second of an index write is still seen.
+            os.utime(index, (1, 1))
         env = dict(os.environ, GIT_INDEX_FILE=index)
 
         def run(*args):
@@ -1726,7 +1760,7 @@ def blocked_tasks(text):
 
 def policy_approval(text):
     """{'rule', 'base'} of a policy approval line in the spec text, or None."""
-    m = POLICY_APPROVAL.search(md_section(strip_comments(text or ""), "Approval") or "")
+    m = POLICY_APPROVAL.search(approval_section(text) or "")
     if not m:
         return None
     base = re.search(r"\bbase ([0-9a-f]{7,40})", m.group(2))
@@ -1994,7 +2028,7 @@ def approve_command(task):
     base = git("rev-parse", "--verify", "-q", "HEAD").strip()[:12] or "none"
     line = "Approved-by: policy:low-risk (%s; base %s; %s)" % (
         time.strftime("%Y-%m-%d"), base, "light lane" if light else "grill %s" % last.get("fingerprint", "")[:12])
-    m = re.search(r"^##\s+Approval\s*$", text, re.M | re.I)
+    m = APPROVAL_HEADING.search(spec_outline(text))
     text = (text.rstrip("\n") + "\n\n## Approval\n" if not m else text.rstrip("\n")) + "\n" + line + "\n"
     spec_path(task).write_text(text, encoding="utf-8")
     log_event("approval", task=task, rule="low-risk", base=base)
@@ -3029,10 +3063,30 @@ def write_lock(data):
     LOCK_FILE.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def recorded_hash(info, rel_path):
+    """The hash the lock records for a harness file: under "files", or under "kept" in a thin project."""
+    for table in ("files", "kept"):
+        if rel_path in (info.get(table) or {}):
+            return info[table][rel_path]
+    return None
+
+
+def record_hash(info, rel_path, digest):
+    forget_hash(info, rel_path)
+    # verify takes a lock with "files" for a full install's and refuses every change to .claude/settings.json; CI runs
+    # the base branch's engine, perhaps an older release, so a thin lock keeps its hashes under "kept", as
+    # update.sh --to-thin and init --thin do.
+    info.setdefault("kept" if info.get("mode") == "thin" else "files", {})[rel_path] = digest
+
+
+def forget_hash(info, rel_path):
+    for table in ("files", "kept"):
+        (info.get(table) or {}).pop(rel_path, None)
+
+
 def adopt(names, adr, chosen, declined, dry_run):
     info = lock()
     adopted = info.setdefault("adopted", {})
-    tracked = info.setdefault("files", {})
     for name in names:
         for required in pack_meta(name).get("requires", []):
             if required not in names and required not in adopted:
@@ -3060,15 +3114,15 @@ def adopt(names, adr, chosen, declined, dry_run):
         previous = set((adopted.get(name) or {}).get("files", []))
         for rel_path, src in sorted(files.items()):
             dest = ROOT / rel_path
-            if dest.exists() and rel_path not in tracked and sha256(dest) != sha256(src):
+            if dest.exists() and recorded_hash(info, rel_path) is None and sha256(dest) != sha256(src):
                 raise HarnessError("%s already exists as a project file; rename it or remove it before adopting %s"
                                    % (rel_path, name))
         for rel_path in sorted(previous - set(files)):
-            if sha256(ROOT / rel_path) == tracked.get(rel_path):
+            if sha256(ROOT / rel_path) == recorded_hash(info, rel_path):
                 report.append("remove  %s" % rel_path)
                 if not dry_run:
                     (ROOT / rel_path).unlink()
-                    tracked.pop(rel_path, None)
+                    forget_hash(info, rel_path)
         for rel_path, src in sorted(files.items()):
             report.append("install %s" % rel_path)
             if not dry_run:
@@ -3076,7 +3130,7 @@ def adopt(names, adr, chosen, declined, dry_run):
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(str(src), str(dest))
                 shutil.copymode(str(src), str(dest))
-                tracked[rel_path] = sha256(dest)
+                record_hash(info, rel_path, sha256(dest))
         header = "(%s, %s; options: %s)" % (adr, today, ", ".join(options) or "none")
         guardrails = replace_block(guardrails, name, rules or ["# (no rules)"], header)
         routing = replace_block(routing, name, routes or ["# (no routes)"], header)
@@ -3100,7 +3154,6 @@ def adopt(names, adr, chosen, declined, dry_run):
 def unadopt(names, dry_run):
     info = lock()
     adopted = info.get("adopted", {})
-    tracked = info.get("files", {})
     for name in names:
         if name not in adopted:
             raise HarnessError("%s is not adopted" % name)
@@ -3111,13 +3164,13 @@ def unadopt(names, dry_run):
     report = []
     for name in names:
         for rel_path in adopted[name].get("files", []):
-            if sha256(ROOT / rel_path) == tracked.get(rel_path):
+            if sha256(ROOT / rel_path) == recorded_hash(info, rel_path):
                 report.append("remove  %s" % rel_path)
                 if not dry_run:
                     (ROOT / rel_path).unlink()
             else:
                 report.append("kept    %s (edited locally; delete it yourself if unwanted)" % rel_path)
-            tracked.pop(rel_path, None)
+            forget_hash(info, rel_path)
         guardrails = replace_block(guardrails, name, None)
         routing = replace_block(routing, name, None)
         del adopted[name]
@@ -3698,13 +3751,16 @@ def default_branch():
 RUNNERS = ("timeout", "gtimeout", "nice", "nohup", "stdbuf", "time", "env", "sudo", "doas", "command", "exec",
            "watch", "ionice", "chronic", "caffeinate", "flock", "setsid", "unbuffer", "script", "su")
 SHELL_KEYWORDS = ("!", "(", ")", "{", "}", "if", "then", "else", "elif", "fi", "do", "done", "while", "until")
+# bash's and zsh's precommand modifiers, which take no options: the command follows them.
+PRECOMMANDS = ("builtin", "noglob", "nocorrect")
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 REDIRECTION = re.compile(r"^[0-9]*(<<<|<<-?|<>|<&|>&|>>|>\||&>>|&>|<|>)")
 EXPANSION = re.compile(r"\$\S|`")
-GH_COMMANDS = ("agent-task", "alias", "api", "attestation", "auth", "browse", "cache", "codespace", "completion",
-               "config", "copilot", "discussion", "extension", "extensions", "ext", "gist", "gpg-key", "help", "issue",
-               "label", "licenses", "org", "pr", "preview", "project", "release", "repo", "ruleset", "run", "search",
-               "secret", "skill", "ssh-key", "status", "variable", "version", "workflow")
+# bash's and zsh's alias tables: setting an entry defines an alias, as the alias builtin does.
+ALIAS_TABLE = re.compile(r"^(BASH_ALIASES|aliases)(\[[^\]]*\])?\+?=")
+# The gh commands delivery needs (ADR-002), with gh's own aliases for them. gh api, held to reads, is checked apart.
+DELIVERY_GH = {"pr": ("create", "new", "edit", "view", "checks", "list", "ls", "comment"),
+               "run": ("view", "list", "ls", "watch"), "label": ("create", "list", "ls"), "repo": ("view",)}
 # The flags that take a value (gh pr|issue create|new|edit, gh api, gh label create). Every other flag is a switch.
 ITEM_VALUE_FLAGS = ("-a", "-B", "-b", "-F", "-H", "-l", "-m", "-p", "-r", "-R", "-T", "-t", "--add-assignee",
                     "--add-blocked-by", "--add-blocking", "--add-label", "--add-project", "--add-reviewer",
@@ -3719,6 +3775,13 @@ LABEL_VALUE_FLAGS = ("-c", "-d", "-R", "--color", "--description", "--repo")
 MERGE_REFUSAL = "it opens and updates the PR; merging is the user's call, like closing or approving it."
 EXPANSION_REFUSAL = ("write the gh command out: an expansion ($... or `...`) outside a flag's value can add flags or "
                      "commands the harness can't read.")
+DELIVERY_GH_REFUSAL = ("it runs only the gh commands delivery needs: gh pr create, edit, view, checks, list and comment, "
+                       "gh run view, list and watch, gh label list and create, gh repo view, and gh api reads. %s is "
+                       "the user's call.")
+ALIAS_REFUSAL = ("it defines no shell aliases: the shell can expand one on a later line into a gh command the harness "
+                 "doesn't see.")
+SHELL_INPUT_REFUSAL = ("a shell that reads its commands from a pipe or a file runs commands the harness can't read; run "
+                       "them written out.")
 
 
 def scan_expansions(text, quotes=True):
@@ -3822,8 +3885,8 @@ def run_words(words):
             words = words[2:]
         elif REDIRECTION.match(first):
             words = words[1 + (REDIRECTION.match(first).end() == len(first)):]
-        elif (first in SHELL_KEYWORDS or first in WRAPPERS or ASSIGNMENT.match(first) or first.endswith("()")
-              or (first.endswith(")") and "(" not in first)):
+        elif (first in SHELL_KEYWORDS or first in WRAPPERS or first in PRECOMMANDS or ASSIGNMENT.match(first)
+              or first.endswith("()") or (first.endswith(")") and "(" not in first)):
             words = words[1:]
         elif first[:1] in ("(", "{") and first.lstrip("({"):
             words = [first.lstrip("({")] + words[1:]
@@ -3874,7 +3937,7 @@ def gh_calls(command, depth=0):
     """(segment, words, why the harness can't read it or "") of each gh call command runs: direct, behind a runner
     such as timeout or env, in sh -c or eval, in $(...) or backticks, in a heredoc or here-string a shell reads, and
     in $(...) in an unquoted heredoc. Commands it can't read come with why: gh behind xargs, a shell reading its
-    commands from a pipe or a file, a command named by an expansion."""
+    commands from a pipe or a file, a command named by an expansion, an alias definition."""
     if depth > 4:
         return [(command, [], "its commands nest deeper than the harness reads; write them out.")]
     calls = []
@@ -3895,10 +3958,15 @@ def gh_calls(command, depth=0):
 
 
 def segment_calls(segment, piped, depth):
-    words, why = run_words(shell_split(segment))
+    written = shell_split(segment)
+    words, why = run_words(written)
     prog = program(words)
     if why or prog == "gh":
         return [(segment, words, why)]
+    if prog == "alias" or any(ALIAS_TABLE.match(word) for word in written):
+        return [(segment, words, ALIAS_REFUSAL)]
+    if prog in ("source", "."):
+        return [(segment, words, SHELL_INPUT_REFUSAL)]
     if prog == "eval":
         return gh_calls(" ".join(words[1:]), depth + 1)
     if prog in SHELLS:
@@ -3909,8 +3977,7 @@ def segment_calls(segment, piped, depth):
             return gh_calls(here if script is None else script, depth + 1)
         if not any(re.match(r"^[0-9]*<<", w) for w in words) and (
                 piped or operands or any(re.match(r"^[0-9]*<(?![<&>])", w) for w in words)):
-            return [(segment, words, "a shell that reads its commands from a pipe or a file runs commands the harness "
-                                     "can't read; run them written out.")]
+            return [(segment, words, SHELL_INPUT_REFUSAL)]
         return []
     if prog in RUNNERS or prog.startswith("-"):
         # watch 'gh ...', script -c 'gh ...': the command is one word
@@ -3982,29 +4049,37 @@ def hidden_arguments(segment, flags, positional):
             or any(word.startswith(("$", "`")) for word in positional))
 
 
-def gh_refusal(segment, words, cwd):
-    """Why the deliverer may not run this gh call, or None."""
+def gh_refusal(segment, words, cwd, risk_added):
+    """Why the deliverer may not run this gh call, or None. risk_added holds the risk labels that the command's
+    other gh calls add."""
     command, sub, args = gh_parts(words)
     if command is None:
         return None
     if EXPANSION.search(command + " " + (sub or "")):
         return EXPANSION_REFUSAL
-    if command not in GH_COMMANDS:
-        return "it runs gh's own commands; %s is an alias or an extension, which can run any gh command." % command
-    if command in ("alias", "extension", "extensions", "ext") and sub not in (None, "list", "ls"):
-        return "it neither defines nor runs gh aliases and extensions: they can run any gh command."
     if command == "pr" and sub in ("merge", "close", "review", "ready"):
         return MERGE_REFUSAL
     if command == "api":
         return api_refusal(segment, args)
-    if command == "label":
-        name = (gh_flags(args, LABEL_VALUE_FLAGS)[1] or [None])[0]
-        if sub in ("edit", "delete", "clone") or (sub == "create" and name not in TRIAGE_LABELS):
-            return ("it creates only the triage labels it applies (gh label create <label> ...); creating, editing or "
-                    "deleting other labels is the user's call.")
-        return None
-    if command in ("pr", "issue") and sub in ("create", "new", "edit"):
-        return label_change_refusal(command, sub, segment, args, cwd)
+    if sub not in DELIVERY_GH.get(command, ()):
+        return DELIVERY_GH_REFUSAL % " ".join(w for w in ("gh", command, sub) if w)
+    if command == "label" and sub == "create":
+        return label_create_refusal(segment, args)
+    if command == "pr" and sub in ("create", "new", "edit"):
+        return label_change_refusal(sub, segment, args, cwd, risk_added)
+    return None
+
+
+def label_create_refusal(segment, args):
+    """Why a gh label create call would make a label other than the triage labels, or rewrite one, or None."""
+    flags, positional = gh_flags(args, LABEL_VALUE_FLAGS)
+    if hidden_arguments(segment, flags, positional):
+        return EXPANSION_REFUSAL
+    if (positional or [None])[0] not in TRIAGE_LABELS:
+        return ("it creates only the triage labels it applies (gh label create <label> ...); other labels are the "
+                "user's call.")
+    if any(name in ("-f", "--force") for name, _ in flags):
+        return "it creates a missing triage label without --force, which rewrites a label someone else defined."
     return None
 
 
@@ -4024,10 +4099,10 @@ def api_refusal(segment, args):
     return None
 
 
-def label_change_refusal(command, sub, segment, args, cwd):
-    """Why a gh pr|issue create|edit call changes labels beyond the triage labels the receipts suggest, or None.
-    Other labels can gate CI or merges (harness-change-approved lets a PR change the harness), so they stay the
-    user's."""
+def label_change_refusal(sub, segment, args, cwd, risk_added):
+    """Why a gh pr create|edit call changes labels beyond the triage labels the receipts suggest, or None, adding its
+    risk label to risk_added. Other labels can gate CI or merges (harness-change-approved lets a PR change the
+    harness), so they stay the user's."""
     flags, positional = gh_flags(args, ITEM_VALUE_FLAGS)
     if hidden_arguments(segment, flags, positional):
         return EXPANSION_REFUSAL
@@ -4047,20 +4122,25 @@ def label_change_refusal(command, sub, segment, args, cwd):
     if kept:
         return ("it removes only a lower risk:* label, in the call that adds the higher one; %s may have been set by "
                 "a person." % ", ".join(kept))
+    # Every call is checked against the PR's labels before the command runs, so the next call can't see this one's.
+    others = sorted(risk_added - set(risk), key=RISK_LABELS.index)
+    if risk and others:
+        return ("a PR keeps one risk:* label, and another gh call in this command adds %s: add only the highest the "
+                "receipts suggest, %s, in one call." % (", ".join(others), max(others + risk, key=RISK_LABELS.index)))
+    risk_added.update(risk)
     if sub == "edit" and risk:
         repo = next((value for name, value in reversed(flags) if name in ("-R", "--repo")), None)
-        return risk_label_refusal(command, positional if command == "issue" else positional[:1], repo, risk[0],
-                                  removed, cwd)
+        return risk_label_refusal(positional[:1], repo, risk[0], removed, cwd)
     return None
 
 
-def risk_label_refusal(command, targets, repo, added, removed, cwd):
+def risk_label_refusal(targets, repo, added, removed, cwd):
     """Why adding the risk label added would leave a second risk label on the PR, as GitHub has its labels, or None."""
     for target in targets or [None]:
-        names, error = item_labels(command, target, repo, cwd)
+        names, error = pr_labels(target, repo, cwd)
         if names is None:
-            return ("it adds a risk:* label only once the harness has read the PR's labels, and gh %s view failed: %s"
-                    % (command, error))
+            return ("it adds a risk:* label only once the harness has read the PR's labels, and gh pr view failed: %s"
+                    % error)
         others = [n for n in RISK_LABELS if n in names and n != added and n not in removed]
         higher = [n for n in others if RISK_LABELS.index(n) > RISK_LABELS.index(added)]
         if higher:
@@ -4072,9 +4152,9 @@ def risk_label_refusal(command, targets, repo, added, removed, cwd):
     return None
 
 
-def item_labels(command, target, repo, cwd):
-    """(the names of the labels on a pull request or issue, None), or (None, why gh couldn't read them)."""
-    args = ["gh", command, "view"] + ([target] if target else []) + (["--repo", repo] if repo else [])
+def pr_labels(target, repo, cwd):
+    """(the names of the labels on a pull request, None), or (None, why gh couldn't read them)."""
+    args = ["gh", "pr", "view"] + ([target] if target else []) + (["--repo", repo] if repo else [])
     try:
         result = subprocess.run(args + ["--json", "labels"], cwd=cwd or str(ROOT), capture_output=True, text=True,
                                 timeout=15)
@@ -4091,8 +4171,9 @@ def role_command_refusal(agent, command, cwd=None):
         return None
     if re.search(r"\bgh\s+pr\s+(merge|close|review|ready)\b|\bgh\s+api\b[^;&|\n]*/merge\b", command):
         return MERGE_REFUSAL
+    risk_added = set()
     for segment, words, why in gh_calls(command):
-        refusal = why or gh_refusal(segment, words, cwd)
+        refusal = why or gh_refusal(segment, words, cwd, risk_added)
         if refusal:
             return refusal
     targets = {b for b in ("main", "master", default_branch()) if b}
@@ -5689,7 +5770,7 @@ def receipt_data(task, base=None):
         "rounds": {"grill": len(grills), "judge": len(judge), "debug": len(verdict_history(task, "debug"))},
         "judged_at": passed.get("at"),
         "sandbox": passed.get("sandbox"),
-        "approval": approval_lines(md_section(body, "Approval") or ""),
+        "approval": approval_lines(approval_section(spec_text) or ""),
         "approval_needed": approval_needed,
     }
     data["suggested_labels"] = suggested_labels(spec_text, data["risks"])

@@ -58,6 +58,20 @@
   commands, with property checks. **Upgrading:** a `docs` task that touches images, stylesheets or other files without
   a documentation extension now waits for the user (add them to `HARNESS_DOC_PATHS` if your docs need them), and a
   move counts as two files against `HARNESS_RISK_MAX_FILES` and `HARNESS_LIGHT_MAX_FILES`.
+
+- **An `## Approval` heading in a code block no longer ends the spec (ADR-002).** A fenced example showing a spec's
+  `## Approval` heading ended the grill fingerprint, the freeze on an approved spec and what is read from the spec at
+  the example: the risk checks missed every requirement below it, so policy could approve a `docs` spec that stores
+  passwords in plain text, and everything below it could change after approval. `approved()` started the section at
+  the example too, so an example with an `Approved-by:` line counted as the user's approval, and the user's own
+  approval below it didn't count. The Approval section now starts at the first `## Approval` heading outside comments
+  and fenced code blocks for the fingerprint, the freeze, `Change-Class`, the risk checks, `approve`, `approved` and
+  the receipt alike; an `Approved-by:` line in a code block is an example; and a spec with such a heading inside a
+  code block is invalid (indent the heading in an example). `tests/test-change-class.py` reproduces it through the
+  public commands, with property checks that any edit below a fenced heading makes the grill pass stale or the spec
+  invalid, and is refused as frozen or leaves the spec invalid. **Upgrading:** a spec with an `## Approval` heading
+  in a code block fails `spec-check` until the example's heading is indented.
+
 - **Suggested triage labels (ADR-002, follow-up b).** `harness.py receipt` suggests pull request labels for whoever
   triages the PR, in the text receipt and as `suggested_labels` in `--json`: `risk:low`, `risk:elevated` or
   `risk:high` from the spec's `Change-Class` and the receipt's other risks, plus `class:<class>` when the spec has a
@@ -81,6 +95,18 @@
   after a here-string such as `<<<EOF` as commands, not as a heredoc body, and a quote inside `"$(...)"` as part of
   the substitution, so it no longer ends the string around it. The gate stays best-effort: it doesn't see gh run from
   a script or another program, nor other HTTP clients. GitHub permissions remain the boundary.
+
+- **The deliverer's gh access is an allowlist (ADR-002).** The gate refused some gh commands and let the rest through,
+  so the deliverer could turn on auto-merge or change the default branch (`gh repo edit`), run a workflow, set a
+  secret or variable, close an issue, reopen a PR or publish a release. It now runs only what delivery needs:
+  `gh pr create`, `edit`, `view`, `checks`, `list` and `comment`, `gh run view`, `list` and `watch`, `gh label list`
+  and `create`, `gh repo view`, and `gh api` reads. Every other gh command is refused as the user's call, `gh issue`
+  included: the deliverer labels its PR with `gh pr`. Also refused now: `gh label create --force`, which rewrites a
+  label someone else defined; shell alias definitions, since a shell that expands aliases (Claude Code's often does)
+  ran `g pr merge 7` as `gh pr merge 7` after `alias g=gh` on the line before; `source` and `.`, which read commands
+  the harness can't see; and a command whose gh calls add different `risk:*` labels, which each passed against the
+  PR's labels as they were before the command ran. gh behind `builtin`, `noglob` or `nocorrect` is read like gh
+  behind `command`.
 
 - **Plugin and pin must match (thin mode).** When the installed plugin isn't the release the project pins, its agents
   and skills don't match the pinned gates. Session start says so, with both versions and the fix. In autonomous mode
@@ -114,6 +140,18 @@
   Switching there and back without moving the pin gives back the install, except that an edited file outside
   `backbone/` becomes the release's copy with the edit kept in `<file>.harness-bak`. The README has a Thin mode
   section: the plugin for each CLI, `init --thin`, `pin`, switching, CI, the plugin/pin rule and the limits.
+- **Packs in a thin project work from the hashes the pin keeps.** `harness.py adopt` and `adopt --remove` read a
+  file's hash from the lock's `"kept"` when its `"files"` doesn't list it. So in a project switched with
+  `update.sh --to-thin`, a pack can be adopted again after the pin moved, adopting it again without an option deletes
+  that option's unedited files, and removing it deletes the files nobody edited and keeps the edited ones. In a thin
+  lock, `adopt` records a pack's hashes under `"kept"` instead of `"files"`, and a removed pack's files leave both
+  tables: `verify` takes a lock with `"files"` for a full install's and refuses every change to
+  `.claude/settings.json`, and CI runs the base branch's engine, perhaps an older release. 0.30.0's `adopt` gave a thin
+  lock `"files"`; adopting such a pack again, or removing it, takes its files out. Like the backbone documents a thin
+  lock keeps, `doctor` doesn't report these files as edited.
+- **`update.sh --to-thin --version V` takes the installed release's permission rules out of `.claude/settings.json`,
+  not those of `V`.** Otherwise a rule only the installed release had would stay, and a rule of yours that only `V`
+  adds would go. It fetches the installed release to read them, and refuses when it can't.
 - **The machine guard knows thin projects, and the plugin gives its check.** The guard took a thin project (a
   `"mode": "thin"` pin in `backbone/.harness-lock.json`, no `scripts/harness/`) for one that isn't enrolled: it
   reminded the agent and, in block mode, refused its edits. A thin pin now counts, and so does a lock that can't be
@@ -129,6 +167,23 @@
   sessions (after `remove` it finds no settings and lets every call through); restart them. `install`, `remove`,
   `status` and the plugin's check look for the hooks in `$CLAUDE_CONFIG_DIR` and `$CODEX_HOME` when they are set, as
   the CLIs do; `install` used to write them to `~/.claude` and `~/.codex`, where those CLIs didn't load them.
+- **The plugin no longer waits for a Codex guard hook that Codex skips.** Codex runs a new user hook only once the
+  user trusts it in `/hooks`, but the plugin left the check to any guard hook listed in Codex's `hooks.json`: after
+  `./machine.sh install` without that step, nothing checked in Codex. The plugin now reads the trust Codex records in
+  its `config.toml` (a hash of the hook under its file and position, and the on/off switch) and leaves the check to
+  the guard hook only while Codex runs it: trusted as it is now, and switched on. Otherwise it answers itself, also
+  when it can't read that file, and in sessions started with `--dangerously-bypass-hook-trust`, which it can't see
+  (there a refusal can come twice). `machine.sh status` says when the Codex guard hook isn't trusted, changed since it
+  was trusted, or is turned off. `install --plugin` takes out an untrusted guard hook too. A live check
+  (`tests/test-machine-guard.py`, needs `codex` on the PATH, no model calls) compares this with what `codex
+  app-server` itself lists and records.
+- **One reminder per session, also for hooks and tool calls run at once.** Claude Code and Codex run a call's hooks,
+  and a session's tool calls, in parallel, and two guard checks could both find no reminder recorded yet and both
+  remind. The record is now created atomically, so only one of them reminds. Run `./machine.sh install` again for the
+  installed guard copy.
+- **Machine settings with `roots` or `exempt` that aren't lists of folders count as none.** A string in place of the
+  list of roots put every repository on the machine in scope (the guard read it character by character, and `/` holds
+  every path). Such settings now check nothing, never block, and `machine.sh status` names the field to fix.
 - Tests go through the harness's public commands and hooks only: the checks that grepped agent files for hook names
   now run those hooks, and the ones that imported `harness.py` to call its functions now use `approve`,
   `orca --dry-run`, `orca-digest`, `orca-nightly` and a real, held `orca` run.
@@ -138,6 +193,17 @@
   observes; Testcontainers for integration tests and Playwright (through its MCP server) for end-to-end flows where
   the stack has them; reproduce a bug in a failing test before fixing it; find missing tests with mutation and
   property-based testing. The judge checklist checks that tests go through public APIs.
+- **The code fingerprint comes from the files' content.** The fingerprint that judge, review and debug verdicts
+  record, and that `finish`, the receipt, `next` and `state` compare with the code now, trusted git's index for every
+  file whose size and timestamps hadn't changed. It read a copy of the index dated when the copy was made, so a
+  same-size edit made within the second of the last index write hashed as the old content from the next second on. A
+  judge pass could then name code the judge never saw (restoring the staged version after the judge passed got
+  through `finish`), and committing the judged code could make the receipt refuse it: "the code changed after the
+  judge passed", the intermittent failure in `tests/test-change-class.py`. Every file is now hashed, so a same-size
+  edit that keeps the file's mtime (`cp -p`, `touch -r`) counts too where git doesn't trust ctime
+  (`core.trustctime=false`). Files marked assume-unchanged or skip-worktree keep their index content, as in a commit.
+  It costs more on large checkouts: about 0.4 s for 5,000 files, up from 0.06 s. `tests/test-code-fingerprint.py`
+  covers it.
 
 ## 0.30.0 (2026-11-06)
 

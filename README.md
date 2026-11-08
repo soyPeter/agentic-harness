@@ -148,10 +148,13 @@ and `harness-verify.yml` to that release. The upgrade is then one reviewed chang
   full disk), they undo their changes. On a project that is already switched, they change nothing.
 - `--to-thin` pins the installed release, or `--version`. It deletes each harness file you haven't edited and keeps
   an edited one as `<file>.harness-bak`. `backbone/`, `CLAUDE.md` and adopted packs' files stay as they are. The pin
-  keeps the hashes the full install recorded for the harness's files among them (`"kept"`) and the install date. It
-  adds the shim, `core.hooksPath=.githooks` and the plugin entries, and takes the harness's hooks and permission rules
-  out of `.claude/settings.json` (a rule of yours that the harness also adds goes with them, and comes back with
-  `--to-full`). If another hook manager owns `core.hooksPath`, it refuses unless `--force-hooks-path`.
+  keeps the hashes the full install recorded for the harness's files among them (`"kept"`) and the install date.
+  `harness.py adopt` and `adopt --remove` work from these hashes as they do from a full install's, so a pack can be
+  adopted again after the pin moved, and removing one deletes the files you haven't edited. It adds the shim,
+  `core.hooksPath=.githooks` and the plugin entries, and takes the harness's hooks and the installed release's
+  permission rules out of `.claude/settings.json` (a rule of yours that the harness also adds goes with them, and comes
+  back with `--to-full`). With `--version`, it fetches the installed release to read those rules, and refuses if it
+  can't. If another hook manager owns `core.hooksPath`, it refuses unless `--force-hooks-path`.
 - `--to-full` installs the pinned release's files as `update.sh` would, with the kept hashes telling your edits apart,
   including after the pin moved: a file you haven't edited becomes the release's copy; an edited one is kept, and if
   the release changed it too, its copy goes to `<file>.harness-new` (exit code 1), or `--force` replaces it (keeping
@@ -198,19 +201,23 @@ has it and every agent loads it:
   - with `--protect`, requires the CI checks on the GitHub default branch, keeping its existing checks and rules.
 
   `--dry-run` shows what it would do. Enrolling again is safe.
-- **`./machine.sh install [--roots ~/Work/repos] [--mode warn|block] [--plugin]`**: a user-level guard hook for Claude
-  Code and Codex on this machine, in their user settings (`~/.claude` and `~/.codex`, or `$CLAUDE_CONFIG_DIR` and
-  `$CODEX_HOME` when set). In a git repository under the roots that isn't enrolled (it has neither a full install nor
-  a thin pin), it reminds you (warn) or refuses file edits (block) until the repository is enrolled; enrolled
-  repositories are left to their own hooks, or the plugin's. Codex asks you to trust the new hook once (`/hooks`).
-  `machine.sh status` and `machine.sh remove` show and undo it. The CLIs load hooks when a session starts, so restart
-  the sessions that are open after `install`, `install --plugin` or `remove`: until then they keep the hooks they
-  started with.
+- **`./machine.sh install [--roots ~/Work/repos] [--mode warn|block] [--plugin]`**: a user-level guard hook for
+  Claude Code and Codex on this machine, in their user settings (`~/.claude` and `~/.codex`, or `$CLAUDE_CONFIG_DIR`
+  and `$CODEX_HOME` when set). In a git repository under the roots that isn't enrolled (it has neither a full install
+  nor a thin pin), it reminds you (warn) or refuses file edits (block) until the repository is enrolled; enrolled
+  repositories are left to their own hooks, or the plugin's. Codex runs the new hook only once you trust it in
+  `/hooks`, and once more after it changes. `machine.sh status` shows it, and says whether Codex runs it; `machine.sh
+  remove` undoes it. Settings whose `roots` or `exempt` aren't lists of folders count as none: `status` says so. The
+  CLIs load hooks when a session starts, so restart the sessions that are open after `install`, `install --plugin` or
+  `remove`: until then they keep the hooks they started with.
   - The agentic-harness plugin gives the same reminder or refusal from its own hooks, with the same settings
     (`~/.agentic-harness/machine.json`). On a machine with the plugin, `--plugin` writes only the settings and takes
-    out a guard hook installed earlier, leaving the guard copy for the sessions still open. In a CLI that has both,
-    the guard hook answers and the plugin stays quiet, so nothing is said twice. An installed guard is a copy: run
-    `install` again after updating the harness.
+    out a guard hook installed earlier, leaving the guard copy for the sessions still open. In a CLI that runs both,
+    the guard hook answers and the plugin stays quiet, so nothing is said twice. Codex runs the guard hook only while
+    it is trusted as it is now and switched on (Codex's `config.toml`); until then the plugin answers in its place.
+    Where the plugin can't tell (it can't read that file, or Codex runs with `--dangerously-bypass-hook-trust`), it
+    answers as well: a refusal can come twice, a reminder still comes once per session and repository. An installed
+    guard is a copy: run `install` again after updating the harness.
   - `machine.sh managed --out DIR` writes the same guard as Claude Code `managed-settings.json` and Codex
     `requirements.toml`, which nobody on the machine can switch off. Review them and install with sudo (see the
     generated INSTALL.md); the tool never writes system files. The plugin reads only the user's settings, so with a
