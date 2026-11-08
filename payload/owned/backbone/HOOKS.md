@@ -117,6 +117,18 @@ The hooks guard edits made through the tools. `harness.py verify` checks the **r
 
 In a range, any change to the harness itself (enforcement files, the lock) or to user-only settings fails. The only way through is the `harness-change-approved` label, which the workflow turns into `--allow-user-changes`. Make the check required in branch protection, and restrict who may label pull requests.
 
+**Signed verdict attestation** (optional, the harness's ADR-005). `harness.py attest --range <base>..<tip> [--allow-user-changes]` prints an unsigned in-toto Statement (predicate type `https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1`) about the tip commit and its code tree without `backbone/`. It names the engine that made it and the release the base commit's lock pins, the range, the flag and the gate settings, and, for each task finished in the range, the commit that finished it, the spec's fingerprint and approval lines, the Change-Class, the latest grill, judge and review verdicts, the receipt's risks, suggested labels and verified / not-verified lists. It runs the checks of `verify --range` and prints nothing (exit 1, verify's problems on stderr) when they fail, and it refuses a checkout that isn't the tip with a clean working tree. The same commits, settings and engine give the same bytes.
+
+With the repository secrets `HARNESS_ATTEST_KEY` (a cosign private key, `cosign generate-key-pair`) and `HARNESS_ATTEST_PASSWORD`, `harness-verify` does this after a passing verify, with the base branch's engine: it signs the statement with cosign 3.1.4 (downloaded and checked against its SHA-256), sending nothing to a transparency log, and uploads the statement and its Sigstore bundle as the `harness-attestation` artifact. A failure in these steps fails the job; without the key they don't run. Publish the public key and check an attestation with:
+
+```sh
+cosign verify-blob-attestation --key harness-attest.pub --bundle harness-verdicts.sigstore.json \
+  --type https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1 \
+  --digest "$(git rev-parse <commit>)" --digestAlg gitCommit --insecure-ignore-tlog
+```
+
+The secret reaches any workflow run that gets secrets, including a same-repository pull request that edits the workflow, so a signature shows that a `harness-verify` run of this repository signed the statement, not that the base branch's unedited workflow did. Artifacts expire with the repository's retention setting. Set the secrets once the base branch runs a release with `attest`: an older engine fails the step.
+
 ## Autonomous mode (`HARNESS_AUTONOMY`)
 
 `supervised` (default) or `autonomous`, user-only. In autonomous mode no human is in the loop, and AGENTS.md section 7 replaces every "ask the user":
@@ -353,6 +365,13 @@ Each event carries the task in progress and, inside a hook, the session and agen
 | `schema` | `risk:high` | `risk:high` |
 
 It refuses a task without a judge pass on the current code. `harness.py run` saves it next to the run logs and `--pr` puts it in the pull request; the Orca coordinator does the same and keeps it in `.git/harness/receipts/`.
+
+**Traceability export** (ADR-004 in the agentic-harness repository). `harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]` writes every task with a spec (or `--task`) as the chain requirement → acceptance criterion → test file → judge verdict → commit. It is derived and one-way: `backbone/` and git stay the record, it makes no network call, and no gate reads it.
+- **Formats:** `reqif` (ReqIF 1.2: one `SPECIFICATION` per task, requirements, criteria and test files as `SPEC-OBJECT`s, `Verifies` and `Tests` relations, `ReqIF.ForeignID`/`ReqIF.Text`/`ReqIF.Name` and `Harness.*` string attributes), `needs` (Sphinx-Needs `needs.json`, format 1: need types `task`, `req`, `ac`, `test`, link fields `verifies` and `tests`, fields `harness_*`; ids contain dots and dashes, so a Sphinx project sets `needs_id_regex` to allow them) and `html` (one self-contained page, no script or external resource).
+- **Ids:** the spec's own `REQ-`, `NFR-` and `AC-<task>-<n>`, `TASK-<task>`, and `TEST-<task>-<first 12 hex digits of the SHA-256 of the path>`. An NFR without an id is listed as a gap.
+- **Verdict:** the latest judge verdict: *pass on the current code*, *pass on earlier code*, *fail* or *not judged*, with its time, code fingerprint and test run, and each criterion's result. Its commits are every commit reachable from `HEAD` whose code (the tree without `backbone/`) is the verdict's fingerprint; CI needs the full history for them. Test files are those that mention the criterion in the judged code.
+- **EARS** (`HARNESS_REQ_STYLE=ears`): each requirement's pattern (ubiquitous, event-driven, state-driven, unwanted behaviour, optional feature, complex, or not an EARS pattern).
+- **Output:** stdout, or `DIR/traceability.reqif`, `DIR/needs.json` or `DIR/traceability.html` with `--out`. An `--out` inside the repository is refused unless git ignores it, since an untracked file counts as code and would make the judge's passes stale. The same repository state gives the same bytes.
 
 **Linear** (`harness.py linear`, user-only; agents may run only `--dry-run`). `linear import <ISSUE> --task <id> [--light] [--from <issue.json>]` writes a draft spec from the template, with a `Linear: <ISSUE> (<url>)` line and the ticket quoted in Context as source material. It also adds the pending task line, `(light)` when asked. `linear receipt <task> [--status <state>]` posts the receipt as a comment on the ticket. It refuses without a judge pass on the current code, and refuses a state that completes or cancels the ticket. Both need `LINEAR_API_KEY`; `HARNESS_LINEAR_URL` points them at another endpoint.
 
