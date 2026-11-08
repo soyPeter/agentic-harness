@@ -8,8 +8,10 @@
   `adopt` exits 1, as `update.sh` does. The lock then records the release's copy, as `update.sh` does, so once you have
   merged `<file>.harness-new` and deleted it, the next `adopt` is clean. An existing `<file>.harness-new` is never
   overwritten: `adopt` refuses before it writes anything and names the file (`update.sh` still overwrites one).
-  `adopt --remove` lists a `<file>.harness-new` it leaves in place. A file that a removed option leaves behind no longer
-  has a hash, so `doctor` stops warning about it. A thin lock's hashes that an earlier engine recorded under `"files"`
+  `adopt --remove` lists a `<file>.harness-new` it leaves in place. Adopting again while a `<file>.harness-new` is still
+  unmerged reports it as `pending` and exits 1, not 0. A file that a removed option leaves behind no longer has a hash,
+  so `doctor` stops warning about it; its pack remembers it, so adding the option back treats it as an edited pack file
+  (the release's copy goes to `<file>.harness-new`) instead of refusing the project file. A thin lock's hashes that an earlier engine recorded under `"files"`
   move to `"kept"` when a pack is adopted again, removed, or the pin moves (`harness.py adopt`, `adopt --remove`,
   `pin`), so `verify` no longer reads the project as a full install and refuses the next `.claude/settings.json`
   commit.

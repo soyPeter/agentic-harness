@@ -155,7 +155,9 @@ and `harness-verify.yml` to that release. The upgrade is then one reviewed chang
   adopted again after the pin moved, and removing one deletes the files you haven't edited. Adopting again never
   overwrites an edited pack file: it keeps the edit, and when the release changed that file too, writes the release's
   copy to `<file>.harness-new` and exits 1, as `update.sh` does; an existing `<file>.harness-new` is never written over,
-  and `adopt` refuses until you merge it or delete it. The switch adds the shim,
+  and `adopt` refuses until you merge it or delete it. Adopting again while such a `<file>.harness-new` is still there
+  reports it as pending and exits 1 until it is gone. An edited file that a dropped option leaves behind is kept, and
+  adding the option back treats it as an edited pack file. The switch adds the shim,
   `core.hooksPath=.githooks` and the plugin entries, and takes the harness's hooks and the installed release's
   permission rules out of `.claude/settings.json` (a rule of yours that the harness also adds goes with them, and comes
   back with `--to-full`). With `--version`, it fetches the installed release to read those rules, and refuses if it
