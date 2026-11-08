@@ -9,6 +9,32 @@
   the default branch. `gh pr comment`, which delivery doesn't use, is refused. Gh text in quoted arguments and heredoc
   bodies is no longer read as a command.
 
+- **Signed verdict attestations (ADR-005, Proposed).** `docs/adr/ADR-005-verdict-attestations.md` decides how
+  `harness-verify` turns its verdict into evidence others can check: an in-toto Statement, a custom predicate type
+  (`https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1`, no SLSA level claimed), cosign with a
+  self-managed key first, a KMS next and keyless only as an explicit opt-in. This release ships its first slice:
+  - `harness.py attest --range <base>..<tip> [--allow-user-changes]` prints the unsigned Statement. Its subjects are
+    the tip commit (`gitCommit`) and its code tree without `backbone/` (`gitTree`, the judge's fingerprint). The
+    predicate names the engine (its SHA-256) and the release the base commit's lock pins, the range, the flag and the
+    gate settings, and for each task finished in the range: the commit that finished it, the spec's fingerprint and
+    approval lines, the Change-Class, the latest grill, judge and review verdicts, and the receipt's risks, suggested
+    labels and verified / not-verified lists. It runs the checks of `verify --range` and prints nothing (exit 1,
+    verify's problems on stderr) when they fail, and refuses a checkout that isn't the tip with a clean working tree.
+    Standard library only; the same commits, settings and engine give the same bytes.
+  - `harness-verify.yml`: with the secrets `HARNESS_ATTEST_KEY` (a cosign private key) and
+    `HARNESS_ATTEST_PASSWORD`, a passing run writes the Statement with the base branch's engine, signs it with cosign
+    3.1.4 (checked against its SHA-256) and a signing config without services, so nothing goes to a transparency log,
+    and uploads the Statement and its Sigstore bundle as the `harness-attestation` artifact. Without the key the steps
+    don't run; with it, a failure in them fails the job. A v1 signature shows that a `harness-verify` run of the
+    repository signed it, not that the base branch's unedited workflow did (see the ADR). Set the secrets once the base
+    branch runs a release with `attest`.
+  - `tests/test-attest.py` checks the Statement's content, refusals and bytes through the command and the workflow's
+    statement step, in full and thin projects, with property checks; no cosign needed.
+
+- **verify --range no longer fails a range whose later commit changes `backbone/`.** The code fingerprint of a
+  commit kept the `backbone/` files that differ from both HEAD and the checkout, so a task marked done in one commit
+  looked changed once a later commit in the range touched `backbone/` (another task's spec, a memory note), and CI
+  failed the pull request.
 - **Sandbox backends and sandbox evidence (ADR-003, Proposed).** `docs/adr/ADR-003-sandbox-backends.md` decides a
   sandbox backend interface for unattended runs (create, exec, copy in and out, egress policy, teardown, identity),
   with the local devcontainer as the default and the only backend the CI floor may use, and lists E2B, Freestyle and
