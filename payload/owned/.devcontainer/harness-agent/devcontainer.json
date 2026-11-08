@@ -2,32 +2,28 @@
 // Open the project in this container ("Dev Containers: Reopen in Container", then pick harness-agent),
 // or use the devcontainer CLI, and run: python3 scripts/harness/lib/harness.py run
 // Inside, the agent may skip permission prompts because the container is the boundary:
-// outbound network is limited to an allowlist (init-firewall.sh), there are no host credentials,
-// and the workspace is the only mount. The harness hooks still apply to everything the agent does.
+// outbound network is limited to an allowlist that a second container enforces (docker-compose.yml), there are no
+// host credentials, and the workspace is the only folder from the host. The harness hooks still apply to everything
+// the agent does, and each judge verdict records this sandbox as evidence (ADR-003).
+// Extra hosts for the allowlist: HARNESS_FIREWALL_ALLOW in docker-compose.yml.
 // Credentials come from the host environment: CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`, uses your
 // Claude subscription) or ANTHROPIC_API_KEY (billed per token). The host's keychain login is not visible here.
-// Knowledge source (backbone/HOOKS.md): mount the vault read-only, point the harness at the mount and register
-// the server inside the container, for example:
-//   "mounts": [..., "source=/path/to/vault,target=/knowledge,type=bind,readonly"]
-//   "containerEnv": { ..., "HARNESS_KNOWLEDGE_ROOT": "/knowledge" }
+// Knowledge source (backbone/HOOKS.md): mount the vault read-only in the agent service of docker-compose.yml, point
+// the harness at the mount and register the server inside the container, for example:
+//   volumes:      - /path/to/vault:/knowledge:ro                   (agent service, docker-compose.yml)
+//   environment:  HARNESS_KNOWLEDGE_ROOT: /knowledge               (agent service, docker-compose.yml)
 //   "postStartCommand": "... && claude mcp add -s user knowledge -- python3 /knowledge/<server script>"
 // and install the server's dependencies in a Dockerfile that builds FROM this one.
 {
   "name": "harness-agent",
-  "build": { "dockerfile": "Dockerfile" },
-  "runArgs": ["--cap-add=NET_ADMIN", "--cap-add=NET_RAW"],
-  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "agent",
+  "runServices": ["egress", "agent"],
   "workspaceFolder": "/workspace",
   "remoteUser": "agent",
-  "containerEnv": {
-    "HARNESS_AGENT_CMD": "claude -p --dangerously-skip-permissions --output-format json",
-    // Extra hosts the build and tests need (space-separated), e.g. "repo.maven.apache.org pypi.org".
-    "HARNESS_FIREWALL_ALLOW": ""
-  },
   "remoteEnv": {
     "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
     "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}"
   },
-  "mounts": ["source=harness-agent-claude-config,target=/home/agent/.claude,type=volume"],
-  "postStartCommand": "sudo /usr/local/bin/init-firewall.sh && python3 /usr/local/bin/trust-workspace.py /workspace"
+  "postStartCommand": "python3 /usr/local/bin/trust-workspace.py /workspace"
 }

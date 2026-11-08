@@ -31,6 +31,8 @@ INSTALLED = "2026-01-02"
 PACK_FILE = ".claude/skills/containers/SKILL.md"
 PACK_DOC = ".claude/skills/containers/image-building.md"
 LATER_SETTING = '# HARNESS_LATER_SETTING="off"'
+LATER_RULE = "Bash(make test)"
+DROPPED_RULE = "Bash(scripts/harness/doctor.sh)"
 USER_SETTINGS = {"model": "opus", "permissions": {"deny": ["Read(./.env)"]},
                  "hooks": {"PreToolUse": [{"matcher": "Read", "hooks": [{"type": "command",
                                                                          "command": "echo custom-hook"}]}]}}
@@ -54,6 +56,28 @@ Podman images. Catalog packs: container.
 ## Consequences
 - Agents load the container skills.
 """
+JAVA_ADR = """# ADR-003: Java
+
+## Status
+Accepted
+
+## Date
+2026-11-02
+
+## Context
+The service runs on the JVM.
+
+## Decision
+Java with Gradle. Catalog packs: java.
+
+## Alternatives considered
+- Kotlin: not chosen.
+
+## Consequences
+- Agents load the Java skills.
+"""
+JAVA_TEST_FILES = (".claude/skills/java-test/SKILL.md", ".claude/skills/java-test/assertj.md")
+OTHER_HASH = "0" * 64
 
 
 def environment(source, work):
@@ -101,7 +125,8 @@ def set_release_version(source, version):
 
 def build_source(source, env):
     """Releases v0.26.1 (before thin mode), v<VERSION> (this checkout) and v99.0.0, a later one that changes a harness
-    file, a backbone document, two of the container pack's files, the shim, the settings fragment and harness.conf."""
+    file, a backbone document, two of the container pack's files, the shim, the settings fragment (a permission rule
+    more, LATER_RULE, and one fewer, DROPPED_RULE) and harness.conf."""
     source.mkdir()
     run(source, env, "git", "init", "-q", "-b", "main")
     shutil.copytree(ROOT / "payload", source / "payload")
@@ -125,7 +150,8 @@ def build_source(source, env):
     with open(str(source / "payload/seed/backbone/harness.conf"), "a") as handle:
         handle.write('\n# A setting new in 99.0.0.\nHARNESS_LATER_SETTING="off"\n')
     fragment = json.loads((source / "payload/settings.fragment.json").read_text())
-    fragment["permissions"]["allow"].append("Bash(make test)")
+    fragment["permissions"]["allow"].remove(DROPPED_RULE)
+    fragment["permissions"]["allow"].append(LATER_RULE)
     (source / "payload/settings.fragment.json").write_text(json.dumps(fragment, indent=2) + "\n")
     run(source, env, "git", "commit", "-qam", "later release")
     run(source, env, "git", "tag", "v99.0.0")
@@ -403,8 +429,7 @@ class Conversion(Fixture):
         edited = self.edit("backbone/HOOKS.md", project=project)
         self.commit("chore: a local harness edit", hooks=False, project=project)
         self.run_at(project, "python3", "-B", LAUNCHER, "pin", "99.0.0")
-        # Without hooks: once adopt has put files in a thin lock, verify refuses settings changes (a known bug).
-        self.commit("chore: pin the agentic harness to 99.0.0", hooks=False, project=project)
+        self.commit("chore: pin the agentic harness to 99.0.0", project=project)
         result = self.update("--to-full", project, project=project)
         for line in ("update    backbone/8-WORKFLOW.md", "update    " + PACK_FILE, "keep      backbone/HOOKS.md"):
             self.assertIn(line, result.stdout)
@@ -444,7 +469,7 @@ class Conversion(Fixture):
         self.assertEqual(self.lock()["harness_version"], "99.0.0")
         for name in ("AGENTS.md", "backbone/8-WORKFLOW.md"):
             self.assertEqual((self.project / name).read_bytes(), self.release("payload/owned/" + name, "99.0.0"))
-        self.assertIn("Bash(make test)", json.loads((self.project / ".claude/settings.json").read_text())[
+        self.assertIn(LATER_RULE, json.loads((self.project / ".claude/settings.json").read_text())[
             "permissions"]["allow"])
         self.assertIn(LATER_SETTING, (self.project / "backbone/harness.conf").read_text())
         self.assertFalse((self.project / ".githooks").exists())
@@ -502,6 +527,17 @@ class Conversion(Fixture):
         self.update("--to-full", project, project=project)
         self.assertEqual((project / ".claude/settings.json").read_bytes(), installed)
 
+    def test_switching_to_another_release_takes_out_the_installed_release_s_rules(self):
+        """The installed release added DROPPED_RULE, which v99.0.0 no longer has; LATER_RULE, new in v99.0.0, is the
+        user's own here."""
+        own = dict(USER_SETTINGS, permissions={"allow": [LATER_RULE], "deny": ["Read(./.env)"]})
+        project = self.work / "own rule"
+        install_full(project, self.env, settings=own)
+        self.assertIn(DROPPED_RULE, json.loads((project / ".claude/settings.json").read_text())["permissions"]["allow"])
+        self.update("--to-thin", project, "--version", "99.0.0", project=project)
+        self.assertEqual(json.loads((project / ".claude/settings.json").read_text()),
+                         dict(own, **plugin_entries("99.0.0")))
+
     def test_thin_commands_on_a_full_install_point_at_the_switch(self):
         before = self.snapshot()
         for command in (("init", "--thin"), ("pin", VERSION)):
@@ -539,6 +575,147 @@ class Conversion(Fixture):
         self.assertFalse((self.project / "backbone/8-WORKFLOW.md.harness-new").exists())
 
 
+class Packs(Fixture):
+    """harness.py adopt and adopt --remove in a project switched to thin mode. Its lock keeps the hashes of the packs'
+    files under "kept" and has no "files": verify takes a lock with "files" for a full install's and refuses every
+    change to .claude/settings.json."""
+
+    def harness(self, *args, check=True):
+        return self.run_at(self.project, "python3", "-B", LAUNCHER, *args, check=check)
+
+    def switch_to_thin(self, hooks=True):
+        self.update("--to-thin", self.project)
+        self.commit("chore: switch the agentic harness to thin mode", hooks=hooks)
+
+    def change_the_settings(self):
+        """Commit a change to .claude/settings.json through the hooks."""
+        settings = json.loads((self.project / ".claude/settings.json").read_text())
+        settings["permissions"]["deny"].append("Read(./secrets/**)")
+        (self.project / ".claude/settings.json").write_text(json.dumps(settings, indent=2) + "\n")
+        self.commit("chore: deny reading secrets")
+
+    def test_a_pack_is_adopted_again_after_the_pin_moved(self):
+        """Release 99.0.0 changes two of the container pack's files. Removing the pack at the end shows that the lock
+        holds the hashes of the files adopt installed."""
+        self.adopt_container()
+        packed = self.lock()["adopted"]["container"]["files"]
+        self.switch_to_thin()
+        self.harness("pin", "99.0.0")
+        self.commit("chore: pin the agentic harness to 99.0.0")
+        result = self.harness("adopt", "container", "--adr", "ADR-002", "--with", "podman", check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name in packed:
+            self.assertEqual((self.project / name).read_bytes(),
+                             self.release("catalog/container/install/" + name, "99.0.0"), name)
+        self.commit("chore: adopt the container pack of 99.0.0")
+        self.change_the_settings()
+        result = self.harness("adopt", "--remove", "container")
+        for name in packed:
+            self.assertIn("remove  " + name, result.stdout)
+            self.assertFalse((self.project / name).exists(), name)
+
+    def test_removing_a_pack_deletes_the_files_nobody_edited(self):
+        self.adopt_container()
+        packed = self.lock()["adopted"]["container"]["files"]
+        edited = self.edit(PACK_DOC)
+        self.commit("chore: a local edit to a pack file", hooks=False)
+        self.switch_to_thin()
+        result = self.harness("adopt", "--remove", "container")
+        self.assertIn("kept    %s (edited locally" % PACK_DOC, result.stdout)
+        self.assertEqual((self.project / PACK_DOC).read_bytes(), edited[PACK_DOC])
+        for name in sorted(set(packed) - {PACK_DOC}):
+            self.assertIn("remove  " + name, result.stdout)
+            self.assertFalse((self.project / name).exists(), name)
+        self.git("checkout", "HEAD", "--", PACK_FILE)
+        own = (self.project / PACK_FILE).read_bytes()
+        self.commit("chore: remove the container pack but keep its skill")
+
+        result = self.update("--to-full", self.project)
+        for name in (PACK_FILE, PACK_DOC):
+            self.assertNotIn(" " + name, result.stdout)
+        self.assertEqual((self.project / PACK_FILE).read_bytes(), own)
+        self.assertEqual((self.project / PACK_DOC).read_bytes(), edited[PACK_DOC])
+
+    def test_adopting_a_pack_again_without_an_option_removes_the_option_s_files(self):
+        (self.project / "backbone/adr/ADR-003-java.md").write_text(JAVA_ADR)
+        self.harness("adopt", "java", "--adr", "ADR-003", "--with", "gradle,junit5-assertj,no-lombok")
+        self.commit("chore: adopt the java pack", hooks=False)
+        self.switch_to_thin(hooks=False)
+        result = self.harness("adopt", "java", "--adr", "ADR-003", "--with", "gradle,no-lombok",
+                              "--without", "junit5-assertj")
+        for name in JAVA_TEST_FILES:
+            self.assertIn("remove  " + name, result.stdout)
+            self.assertFalse((self.project / name).exists(), name)
+            self.assertNotIn(name, self.lock()["kept"])
+
+    def test_adopting_a_pack_again_moves_the_hashes_an_earlier_engine_recorded_under_files(self):
+        """An earlier engine's adopt recorded a thin project's pack files under "files"."""
+        self.adopt_container()
+        packed = self.lock()["adopted"]["container"]["files"]
+        self.switch_to_thin()
+        lock = self.lock()
+        lock["files"] = {name: lock["kept"].pop(name) for name in packed}
+        (self.project / LOCK).write_text(json.dumps(lock, indent=2) + "\n")
+        self.commit("chore: the lock an earlier engine's adopt left", hooks=False)
+        self.harness("adopt", "container", "--adr", "ADR-002", "--with", "podman")
+        self.commit("chore: adopt the container pack again")
+        self.change_the_settings()
+        result = self.harness("adopt", "--remove", "container")
+        for name in packed:
+            self.assertIn("remove  " + name, result.stdout)
+
+
+class PackProperties(Fixture):
+    """For any set of the container pack's files the user edited in a project switched to thin mode, and wherever its
+    lock records their hashes (under "kept", or under "files" as an earlier engine's adopt did; a different hash also
+    under "kept" checks that "files" comes first, as in update.sh --to-full), adopt --remove deletes exactly the others
+    and keeps the edited ones, and the lock no longer records any of them."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        base = Path(cls.shared.name).resolve()
+        env, cls.thin = environment(cls.source, base), base / "thin with container"
+        shutil.copytree(str(cls.template), str(cls.thin), symlinks=True)
+        (cls.thin / "backbone/adr/ADR-002-containers.md").write_text(ADR)
+        run(cls.thin, env, "python3", "-B", LAUNCHER, "adopt", "container", "--adr", "ADR-002", "--with", "podman")
+        run(cls.thin, env, "git", "add", "-A")
+        run(cls.thin, env, "git", "commit", "-qm", "chore: adopt the container pack", "--no-verify")
+        run(cls.thin, env, UPDATE, "--to-thin", cls.thin)
+        run(cls.thin, env, "git", "add", "-A")
+        run(cls.thin, env, "git", "commit", "-qm", "chore: switch the agentic harness to thin mode")
+        cls.packed = sorted(json.loads((cls.thin / LOCK).read_text())["adopted"]["container"]["files"])
+
+    if given is None:
+        def test_removing_a_pack_keeps_exactly_the_edited_files(self):
+            self.skipTest("needs hypothesis (pip install -r tests/requirements.txt)")
+    else:
+        @settings(max_examples=6, deadline=None, database=None, suppress_health_check=list(HealthCheck))
+        @given(data=st.data())
+        def test_removing_a_pack_keeps_exactly_the_edited_files(self, data):
+            edits = data.draw(st.sets(st.sampled_from(self.packed)), label="edited")
+            under_files = data.draw(st.sets(st.sampled_from(self.packed)), label="recorded under files")
+            project = self.copy_of(self.thin, "example")
+            try:
+                self.check_removal(project, edits, under_files)
+            finally:
+                shutil.rmtree(str(project), ignore_errors=True)
+
+    def check_removal(self, project, edits, under_files):
+        lock = self.lock(project)
+        lock["files"] = {name: lock["kept"][name] for name in sorted(under_files)}
+        lock["kept"].update(dict.fromkeys(under_files, OTHER_HASH))
+        (project / LOCK).write_text(json.dumps(lock, indent=2) + "\n")
+        edited = self.edit(*sorted(edits), project=project)
+        self.commit("chore: local edits to the pack", hooks=False, project=project)
+        result = self.run_at(project, "python3", "-B", LAUNCHER, "adopt", "--remove", "container")
+        for name in self.packed:
+            self.assertEqual(content(project / name), edited.get(name), name)
+            self.assertIn(("kept    %s (edited locally" if name in edits else "remove  %s") % name, result.stdout)
+        lock = self.lock(project)
+        self.assertEqual(sorted(set(self.packed) & (set(lock.get("files", {})) | set(lock.get("kept", {})))), [])
+
+
 class Refusals(Fixture):
     """Each row breaks one thing a conversion needs. The conversion must refuse before writing anything."""
 
@@ -573,11 +750,20 @@ class Refusals(Fixture):
                 (project / LOCK).write_text(json.dumps(lock, indent=2) + "\n")
             return apply
 
+        def installed_release(version):
+            def apply(project):
+                lock = self.lock(project)
+                lock["harness_version"] = version
+                (project / LOCK).write_text(json.dumps(lock, indent=2) + "\n")
+            return apply
+
         cases = (
             ("a change not committed", edit("backbone/1-PRD.md"), (), "uncommitted changes"),
             ("an untracked file", edit("notes.txt"), (), "uncommitted changes"),
             ("a release that was not published", None, ("--version", "9.9.9"), "release v9.9.9 was not found"),
             ("a release from before thin mode", None, ("--version", "0.26.1"), "does not support thin mode"),
+            ("an installed release that was not published, whose permission rules can't be read",
+             commit_after(installed_release("9.9.8")), ("--version", VERSION), "the installed release (v9.9.8)"),
             ("a backup already there", commit_after(edit("AGENTS.md"), edit("AGENTS.md.harness-bak")), (),
              "AGENTS.md.harness-bak already exists"),
             ("a pre-commit hook of the project's own", commit_after(self.own_pre_commit), (),
