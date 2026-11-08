@@ -10,11 +10,16 @@
   pass is on the current code, lists every commit whose code is the judged code and the test files that mention each
   criterion in it, and lists the gaps (requirements without a criterion, criteria without a test file, undefined
   references, NFRs without an id, open findings). Under `HARNESS_REQ_STYLE=ears` each requirement carries its EARS
-  pattern. `--out` inside the repository is refused unless git ignores the file. The same repository state gives the
-  same bytes. `docs/adr/ADR-004-traceability-export.md` records the decision, including what a regulated team can and
+  pattern. `--out`, and stdout redirected into the repository, are refused unless git ignores the file. A shallow
+  clone or a failed git read reports `history incomplete` instead of a missing commit. The export reads the committed
+  `backbone/harness.conf`, not environment overrides, so the same repository state gives the same bytes on any
+  machine. `docs/adr/ADR-004-traceability-export.md` records the decision, including what a regulated team can and
   can't claim from it (it isn't signed, validated or PCI DSS evidence). `tests/test-trace-export.py` checks the ReqIF
   output against a minimal subset of the OMG schema vendored in `tests/reqif_check.py`, offline, plus the
   `needs.json` shape and the HTML matrix, with property checks.
+
+- **`state` and `next` hash the working tree once per command.** Each judged task used to hash the whole working
+  tree again, about 0.6 s per hash on 5,000 files; now one command shares one hash across its tasks.
 
 - **Signed verdict attestations (ADR-005, Proposed).** `docs/adr/ADR-005-verdict-attestations.md` decides how
   `harness-verify` turns its verdict into evidence others can check: an in-toto Statement, a custom predicate type

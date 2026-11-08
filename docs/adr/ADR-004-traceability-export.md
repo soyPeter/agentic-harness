@@ -53,11 +53,14 @@ harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]
 - It exports every task that has a spec in `backbone/specs/`, or only `--task ID`. A task without a spec is refused.
 - Without `--out`, the document goes to stdout. With `--out DIR`, it goes to `DIR/traceability.reqif`,
   `DIR/needs.json` or `DIR/traceability.html`.
-- An `--out` inside the repository is refused unless git ignores the file. An untracked file there counts as code,
-  so writing it would make every judge pass stale. CI writes to the runner's temporary folder and keeps the file as a
-  build artifact.
-- The output depends only on the repository's state: no clock and no randomness. The same commit and working tree
-  give the same bytes, so anyone can regenerate an export and compare.
+- An `--out` inside the repository is refused unless git ignores the file, and so is stdout redirected to such a file
+  (`> trace.html`). An untracked file there counts as code, so writing it would make every judge pass stale. The
+  refusal goes to stderr, so it can't land in the file. CI writes to the runner's temporary folder and keeps the file
+  as a build artifact.
+- The output depends only on the repository's state and its committed `backbone/harness.conf`: no clock and no
+  randomness. The settings it reads are `HARNESS_REQ_STYLE`, `HARNESS_TEST_PATHS` and `HARNESS_PROJECT_NAME`, from that
+  file, never from environment overrides; an unnamed project is called `unnamed project`, not after its folder. The
+  same commit and working tree give the same bytes on any machine, so anyone can regenerate an export and compare.
 - Timestamps come from the data. The document's time is the committer date of `HEAD`; verdict times are the
   recorded ones.
 
@@ -92,9 +95,11 @@ harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]
   SHA-256 of the output. Each criterion is *met*, *not met* or *not evaluated*, with the judge's evidence and test
   names.
 - **Commits.** A verdict links to every commit reachable from `HEAD` whose tree, without `backbone/`, hashes to the
-  verdict's fingerprint. This is the definition `verify --range` uses (`tree_fingerprint`). No commit means the judged
-  code was never committed exactly as judged. A shallow clone holds only part of the history, so CI checks out with
-  `fetch-depth: 0`, as `harness-verify` already does.
+  verdict's fingerprint. This is the definition `verify --range` uses (`tree_fingerprint`). With the full history, no
+  commit means the judged code was never committed exactly as judged. A shallow clone (`actions/checkout` fetches
+  depth 1 by default) holds only part of the history, and so does a git call that times out or fails. Then the gap
+  reads `history incomplete` and says how to fetch the rest (`git fetch --unshallow`, or `fetch-depth: 0` in CI, as
+  `harness-verify` already does), and the export doesn't claim the code was never committed.
 - **Test files.** These are the files that match `HARNESS_TEST_PATHS` and mention the criterion's id, in the code the
   latest judge verdict judged: the working tree when that is the current code, otherwise a commit that carries it.
   They are unknown when no commit does. A task without a judge verdict shows the working tree's.
@@ -158,6 +163,9 @@ They cannot claim:
 
 - **A record.** The export is a copy. It isn't signed, and anyone can edit the file. Where it disagrees with
   `backbone/` and git, those win: regenerate it from the commit instead of trusting a file.
+- **That the requirement text is the ticket's.** The requirements and criteria are the spec's, in `backbone/specs/`.
+  The `triple` pilot names Linear as its system of record (`catalog/triple/`), and its Analyst writes the spec from the
+  ticket, but the export traces the spec's text. A change to the ticket changes nothing here until the spec changes.
 - **That an earlier pass covers the current code.** A pass on earlier code says nothing about the code since.
 - **Independent or qualified verification.** The judge is an agent. The harness checks its claims mechanically (a
   test file names the AC, and the tests pass), but that doesn't show that the test exercises the behaviour.
@@ -201,7 +209,8 @@ They cannot claim:
   - `harness.py trace <id>` still prints a task's events.
 - **v1 (this change)**: `trace export` with the three formats as described, and tests through the command in
   throwaway repositories: the ReqIF output against the vendored minimal schema check, the `needs.json` shape, the
-  HTML matrix, EARS specs, determinism and the `--out` guard.
+  HTML matrix, EARS specs, determinism (folder name and environment overrides), the `--out` and stdout guards, the
+  shallow-clone gap, and one fingerprint per `state` or `next` command.
 - **Follow-up work**, each as its own change:
   1. A `harness-verify` step that writes the HTML matrix with the base branch's engine, so a pull request can't change
      the exporter that describes it, and uploads it as an artifact.
