@@ -4,7 +4,7 @@
 Proposed
 
 ## Date
-2026-11-07
+2026-11-07, revised 2026-11-08 (signing moved to the default branch's push; see "Revision")
 
 ## Context
 The harness already proves things about a change, inside the repository:
@@ -23,9 +23,9 @@ are in git but unsigned: anyone who can push can write one.
 The research in [2026-11-agent-sdlc-landscape.md](../research/2026-11-agent-sdlc-landscape.md) (recommendation 3,
 and candidate 5 of its next steps, which calls it ADR-004) proposes signing the verdicts in CI instead of buying a
 compliance platform: an in-toto Statement about the commit with a custom verdict predicate, signed with cosign in
-`harness-verify`, with self-managed keys or a KMS preferred to keyless signing, and no fabricated SLSA levels.
+CI, with self-managed keys or a KMS preferred to keyless signing, and no fabricated SLSA levels.
 
-Checked on 2026-11-07:
+Checked on 2026-11-07, revised on 2026-11-08:
 
 - **in-toto Statement v1** (`"_type": "https://in-toto.io/Statement/v1"`): `subject` lists the artifacts the
   statement is about, each identified by digest; `predicateType` is a URI that names the predicate's schema. The
@@ -45,13 +45,32 @@ Checked on 2026-11-07:
     carries that commit. A wrong commit, type or key, or an edited statement, fails.
 - **Keyless signing** (Fulcio and Rekor) writes the signer's identity into a public transparency log that can't be
   edited: for a GitHub Actions run, the repository, workflow and ref; for a person, their email address.
-- **GitHub Actions secrets** reach `pull_request` runs from branches of the same repository, not from forks, and
-  such a run uses the workflow file as the pull request has it.
+- **GitHub Actions secrets** reach a `pull_request` run of a branch in the same repository, and that run uses the
+  workflow file as the pull request has it. Forks get no secrets by default, but a repository setting can send them
+  to fork pull requests (for private repositories), so a `pull_request` run is not a secrets boundary.
+- **GitHub environments**: a job that names an environment gets that environment's secrets only when the
+  environment's deployment-branch rule admits the run's ref. A name that doesn't exist yet is created on first use
+  with no rule, so the rule has to be set before the secret is added.
 
 ## Decision
-After `verify --range` passes, `harness-verify` writes an in-toto Statement about the pull request's head commit with
-the base branch's engine. When the project has configured a signing key, it signs the statement with cosign and keeps
-both as a workflow artifact.
+When a change lands on the default branch, the `attest` job of `harness-verify.yml` runs. It verifies the pushed
+range, writes an in-toto Statement about the pushed commit with the engine at that commit, and, when the project has
+configured a signing key, signs the statement with cosign inside the protected environment `harness-attest` and keeps
+both as a workflow artifact. Pull requests get the verify check only: no secrets, no signing, nothing for a pull
+request to edit into a signature.
+
+### Where and when the statement is made
+- **The pushed range** is `github.event.before..github.sha`. The statement is about the commit on the default branch.
+  For a squash or rebase merge that is not the pull request's head, and the head is not attested at all.
+- **The engine is the one at the tip.** The job takes the verifier with the same steps as the pull request check,
+  from the pushed commit. For a range that passes `verify` without `--allow-user-changes`, the one the job uses, verify
+  refuses any change to the engine (`scripts/harness/`), to the workflows (`.github/workflows/harness-*`), to the
+  lock, to the tool contracts and to user-only settings. So the engine, the workflow and the lock at the tip are the
+  ones at the base, and the statement is written by the verifier that was in force before the push.
+- **No label in CI.** The job never passes `--allow-user-changes`. A push that changes the harness, even one a
+  maintainer approved with `harness-change-approved`, gets no statement: the job fails and says why. Reading the
+  merged pull request's label to allow that case is a follow-up.
+- **A base that isn't an ancestor** (a first push, or a forced push) gets no statement. The job refuses it.
 
 ### The statement
 `harness.py attest --range <base>..<tip> [--allow-user-changes]` writes the unsigned Statement to stdout.
@@ -71,7 +90,7 @@ both as a workflow artifact.
 | `subject` | `{"name": "commit", "digest": {"gitCommit": <tip>}}` and `{"name": "code", "digest": {"gitTree": <tip's tree without backbone/>}}`. The second is the code fingerprint the judge and the reviewers pass, so it also matches the same code on another commit. |
 | `predicateType` | `https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1` |
 | `predicate.verifier` | `id` (this repository's URL), `engineSha256` (the `harness.py` that ran), `baseLock` (the mode, version and, in thin mode, commit that the base commit's `backbone/.harness-lock.json` names; null without one) |
-| `predicate.verification` | the `base` and `tip` commits, `result: "PASSED"`, `allowUserChanges` (in CI, the `harness-change-approved` label) and the gate settings verify read: `spec`, `judge`, `review`, `tester` |
+| `predicate.verification` | the `base` and `tip` commits, `result: "PASSED"`, `allowUserChanges`, and `settings`: every setting the engine resolves through `conf()` (the defaults and `backbone/harness.conf`, overridden by the environment), each as `{"value", "environment"}`, where `environment` is true when the environment set it |
 | `predicate.tasks` | one entry per task finished in the range, sorted by id |
 
 Each task entry carries the task's verdict chain:
@@ -90,15 +109,17 @@ A judge fingerprint that differs from the `code` subject means a later commit in
 task was finished. The statement shows it rather than hiding it; a consumer's policy decides what it accepts.
 
 No SLSA level is claimed anywhere, and this is neither a SLSA provenance nor a VSA. The `v0.1` in the type says the
-schema may still change; a breaking change gets a new type.
+schema may still change. v0.1 has not shipped in a release, so its shape changes in place; once a release carries it,
+a breaking change gets a new type.
 
 ### Keys
 In order of preference:
 
-1. **A self-managed key (v1).** A cosign key pair: the encrypted private key and its password are repository
-   secrets, `HARNESS_ATTEST_KEY` and `HARNESS_ATTEST_PASSWORD`. The project publishes the public key, for example
-   on its default branch and in its documentation; a verifier takes it from there, never from the change it checks.
-   Signing uses a signing config without services, so nothing leaves the runner and nothing becomes public.
+1. **A self-managed key (v1).** A cosign key pair: the encrypted private key and its password are secrets of the
+   `harness-attest` environment, `HARNESS_ATTEST_KEY` and `HARNESS_ATTEST_PASSWORD`. The project publishes the public
+   key, for example on its default branch and in its documentation; a verifier takes it from there, never from the
+   change it checks. Signing uses a signing config without services, so nothing leaves the runner and nothing becomes
+   public.
 2. **A cloud KMS key (follow-up).** `--key gcpkms://…`, `awskms://…`, `azurekms://…` or `hashivault://…`, with the
    workflow authenticating through OIDC federation. The key can't be copied out of the KMS, which logs every use.
    Preferred for regulated profiles such as `triple`.
@@ -115,43 +136,66 @@ cosign verify-blob-attestation --key harness-attest.pub --bundle harness-verdict
 
 `--insecure-ignore-tlog` is needed because a key-signed bundle has no log entry, by design. Then the verifier's own
 policy reads the predicate (it is in the bundle, and next to it as plain JSON): for example, every task's judge pass
-on the attested code, `allowUserChanges` only where a person approved the harness change, and the gates on. To check
-the verifier's output as well as its signature, run the same engine's `attest` on the same commits and compare bytes.
+on the attested code, and the settings the policy depends on (`settings`). To check the verifier's output as well as its signature, run the
+same engine's `attest` on the same commits and compare bytes.
 
 ### Where it is stored
-- **v1: a workflow artifact**, `harness-attestation`, on the pull request's run, holding the statement and the
-  bundle. It needs no extra permission and expires with the repository's artifact retention (90 days by default):
-  evidence for the review and the merge.
+- **v1: a workflow artifact**, `harness-attestation`, on the push's run, holding the statement and the bundle. It
+  needs no extra permission and expires with the repository's artifact retention (90 days by default): evidence for
+  the default branch's history, not for a pull request.
 - **A release asset (follow-up):** when a release is cut, the bundle of the release commit is attached to it and
   lives as long as the release.
 - **An OCI registry (follow-up, optional):** for organisations that keep their evidence in a registry.
 - Not in git: a commit from CI would need write access and would change the tree it attests.
 
 ### Failure behaviour
-- `verify` alone decides whether the check passes. The attestation steps come after it and run only when it passed;
-  none of them can turn a failing verify into a pass (no `continue-on-error`, no `always()`).
-- `attest` runs the checks again itself, so a statement for a failing range can't be written, not even by hand.
-- With the key configured, a failure to write, sign or upload fails the job: a project that asked for attestations
-  gets no silent gaps. Rerun once the cause (key, password, download) is fixed.
-- Without the key, and on a pull request from a fork (no secrets), the steps don't run and nothing changes.
+- The pull request's `verify` is the only check that gates a merge. Nothing in the `attest` job runs on a pull request,
+  and nothing in it can change the result of that check.
+- `attest` runs the checks again itself, so a statement for a failing range can't be written, not even by hand. The
+  job fails and the artifact is not written.
+- The push has already happened when the job runs, so a failure is an alarm, not a gate: a red run on the default
+  branch that needs a fix and a rerun. A failure to write, sign or upload fails the job when the key is configured;
+  a project that asked for attestations gets no silent gaps.
+- Without the key the job does nothing: the checkout runs and every other step is skipped. Nothing is written and
+  nothing fails.
 
 ### What a signature proves, and what it doesn't
-- In v1 it proves that a holder of the key signed the statement. A repository secret reaches every workflow run that
-  gets secrets, including a run of a same-repository pull request that edits the workflow. That edit shows in the
-  pull request and fails `verify` without the `harness-change-approved` label, but the edited run could skip
-  `verify` and sign anyway. So a v1 signature means "a harness-verify run in this repository signed this", not "the
-  base branch's workflow did".
-- Signing on the default branch after the merge closes that gap, with the key in an environment restricted to that
-  branch or a KMS key whose OIDC trust condition names that branch's workflow. It is the first follow-up.
-- Like a VSA, a signature doesn't protect against a compromised verifier (the base branch's engine) or runner.
+- It proves that a holder of the key signed the statement's bytes. The bundle carries no run, workflow or time, so it
+  does not say which run made the statement. The run is in GitHub's record of the push; a keyless signature (follow-up
+  3) would carry its identity.
+- The job signs only a statement of a range that changed no harness file (see "The engine is the one at the tip"),
+  because it never passes `--allow-user-changes`. So the workflow that signed is the one the default branch had before
+  the push. Anyone holding the key can sign a statement made by hand, so consumers check the content, not only the
+  signature: running the same engine's `attest` on the same commits must give the same bytes.
+- **Who can make one.** Anyone who can read `HARNESS_ATTEST_KEY` and its password, and any run that the
+  `harness-attest` environment admits. The environment's deployment-branch rule (only the default branch) keeps
+  pull requests out, and the repository's files can't set that rule. Set it before adding the secrets, and consider
+  required reviewers on the environment, so each signing waits for a person. A key holder can sign anything offline
+  until the key is rotated and verifiers stop trusting it.
+- **Settings are recorded as resolved.** A value placed in a setting, and in particular one placed in the environment
+  (a URL with a token in it, for example), is in the statement and in the artifact. Credentials don't belong in
+  harness settings.
+- **`gitCommit` names the default branch's commit.** A deploy gate that means "this commit" checks `gitCommit` against
+  the commit it deploys. `gitTree` says only that the code is the code that was judged; it matches any commit with the
+  same code outside `backbone/`, such as a cherry-pick on another branch.
+- **Timing.** The statement exists when the push's job has finished. A deploy gate that runs earlier has to wait for
+  the artifact (or, later, the release asset).
+- **Not covered.** A compromised engine, runner or GitHub account, and a merge a reviewer should have refused: the
+  statement records what `verify` found, not whether the merge was wise. Changes approved with the label have no
+  statement from CI in v1.
+- **Pull requests.** A pull request's `verify` runs the workflow file as the pull request has it, so a pull request
+  can edit its own check. That is the label's job (a maintainer approves such a change), and the attestation doesn't
+  rely on it: the push's job runs the workflow the default branch has after the merge, and the range check above
+  proves that the merge changed no harness file.
 
-### This change (v1)
-- `harness.py attest --range <base>..<tip> [--allow-user-changes]`, standard library only.
-- `harness-verify.yml`: when `HARNESS_ATTEST_KEY` is set, write the statement with the base branch's engine, sign
-  it with a pinned cosign release (its SHA-256 checked) and an empty signing config, and upload the statement and
-  the bundle as `harness-attestation`.
-- Tests of the statement's content and determinism through `harness.py attest` and the workflow's statement step,
-  in throwaway repositories, without cosign.
+## Revision
+The first draft signed the statement in the pull request's run with the repository's secrets. A pull request can
+edit its workflow and read the key with a step that encodes it past log masking, so a signature from that run meant
+"someone with write access signed this". The signing moved to the default branch's push, into a protected
+environment, and the pull request's run lost its secrets and its signing steps. The statement's gate settings became
+the full resolved `settings`, because verify's result depends on every setting it reads through `conf()`, not on four
+of them, and a statement that names only some of them makes a claim it can't keep. The statement is about the commit
+on the default branch, not the pull request's head.
 
 ## Alternatives considered
 - **SLSA VSA as the predicate**: `verifiedLevels` would have to carry made-up levels. The useful ideas of a VSA
@@ -164,25 +208,32 @@ the verifier's output as well as its signature, run the same engine's `attest` o
   repositories, so they are a form of the keyless option rather than the default.
 - **Keyless by default**: the easiest to set up, but it publishes identities for good; for the `triple` pilot that is
   a new data flow to review.
-- **Signing in a separate job**: signing would get its own check status, at the cost of handing the statement from
-  job to job. Possible later.
+- **Signing in the pull request's run (the first draft)**: rejected, see "Revision".
+- **Signing in a separate workflow file**: the same protection, but the push job and the pull request check then
+  duplicate their verifier steps across files. One file keeps them together, and the enforcement rule already covers
+  every `harness-*` workflow.
 - **No attestation**: the check status stays the only record, and nobody outside GitHub can check it.
 
 ## Consequences
 - **Easier**:
-  - Anyone with the public key can check, offline and later, that a commit passed `harness-verify` and with which
-    verdicts.
+  - Anyone with the public key can check, offline and later, that a commit on the default branch passed
+    `harness-verify`, and with which verdicts and settings.
   - A deploy gate or a customer's quality system can require it, and the harness depends on no compliance platform.
-  - The engine stays standard-library Python; cosign runs only in CI.
+  - The engine stays standard-library Python; cosign runs only in CI, and only on a push to the default branch.
+  - Pull requests carry no secrets and no signing, and signing can't turn a failing `verify` into a pass.
 - **Harder**:
-  - The project manages a key: rotating it, publishing the public key, and revoking by policy (a signature made with
-    an old key stays valid until verifiers stop trusting that key).
-  - CI downloads cosign, and a failed download or signature fails the job of a project that configured a key.
+  - The statement exists only after the merge. A deploy gate waits for it, and a harness change approved with the label
+    gets none in v1.
+  - The project manages a key and an environment: setting the deployment-branch rule before the secrets, rotating the
+    key, publishing the public key, and revoking by policy (a signature made with an old key stays valid until
+    verifiers stop trusting that key).
+  - The engine-taking steps are in both jobs of the workflow; a test keeps the two copies identical.
+  - CI downloads cosign, and a failed download or signature fails the `attest` job of a project that configured a key.
 - **Unchanged**:
   - What `verify` checks and how it gates.
   - Projects without the key.
 - **Follow-up work**, each as its own change:
-  1. Signing on the default branch after the merge, with a key scoped to it (environment or KMS).
+  1. Read the merged pull request's `harness-change-approved` label, so an approved harness change gets a statement.
   2. KMS key references.
   3. Keyless signing as an explicit opt-in.
   4. Durable storage: release assets, then OCI.

@@ -342,7 +342,7 @@ class Conversion(Fixture):
         script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0])
         script = script.replace("https://github.com/soyPeter/agentic-harness.git", str(self.source))
         runner = Path(tempfile.mkdtemp(prefix="runner ", dir=str(self.work)))
-        env = dict(self.env, BASE="review-base", RUNNER_TEMP=str(runner), GITHUB_ENV=str(runner / "github-env"))
+        env = dict(self.env, BASE_REF="origin/review-base", RUNNER_TEMP=str(runner), GITHUB_ENV=str(runner / "github-env"))
         self.run_at(self.project, "bash", "-e", "-o", "pipefail", "-c", script, env=env)
         engine = (runner / "github-env").read_text().strip().split("=", 1)[1]
         return self.run_at(self.project, "python3", "-B", engine, "verify", "--range", "origin/review-base..HEAD",

@@ -146,7 +146,7 @@ class ThinRegressions(unittest.TestCase):
     def extract(self, check=True, source=None):
         runner = self.work / "runner temp"
         runner.mkdir()
-        env = dict(self.env, BASE="review-base", RUNNER_TEMP=str(runner), GITHUB_ENV=str(runner / "github-env"))
+        env = dict(self.env, BASE_REF="origin/review-base", RUNNER_TEMP=str(runner), GITHUB_ENV=str(runner / "github-env"))
         result = self.run_command("bash", "-e", "-o", "pipefail", "-c", self.extraction_script(source),
                                   env=env, check=check)
         return runner / "trusted", result
