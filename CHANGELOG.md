@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Spec parsing reads Markdown the way it renders (ADR-002, follow-up).** The gates now share one reading of a spec's
+  code blocks, comments and sections. A fence closes only at a run of its own character at least as long, at 0-3
+  spaces, so an indented closer no longer ends a block early and hides the requirements below it from the freeze. An
+  `Approved-by:` line that a comment hides is read as `approved()` reads it, so an agent can't write one behind a
+  comment, and an approved spec's example line can't be moved into the Approval section. A fenced `## Skills` or
+  `## Open questions` example no longer hides the spec's own section, a comment opened in a code block no longer
+  hides what follows, and the user's approval under `  ## Approval` or `## Approval ##` is honoured. A fence marker
+  indented 4 or more columns, or with a tab, makes the spec invalid: a list item could read it differently, and so
+  does a comment that starts after text or 4 or more columns in and runs past its line. An accepted ADR's comments
+  are frozen with the rest of it. **Upgrading:** a spec with such a fence marker or comment, or with a section a
+  fenced example used to hide, is invalid until it is fixed.
+
 - **Change-Class ladder (ADR-002).** Spec template and `requirements-writing` skill declare `Change-Class`
   (`docs` | `refactor` | `feature` | `schema`) plus optional `Parent-CHNG` / `Parent-RFC` / `Parent-ADR` links.
   Policy: PR merge stays human; policy `approve` must not be treated as merge. Runtime enforcement in

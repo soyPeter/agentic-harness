@@ -636,6 +636,236 @@ class FencedApproval(unittest.TestCase):
                 self.assertFalse(self.project.state(task)["approved"])
 
 
+FENCE_INDENT = "a code fence indented 4 or more columns"
+
+
+class FenceRules(unittest.TestCase):
+    """Where a fenced code block ends, as Markdown decides it, for every gate that reads a spec. The example's '## Approval'
+    heading is a heading only when the line after it closes the block: a run of the same character at least as long as
+    the opener, at 0-3 spaces, with nothing after it. Then the passwords below it are in the Approval section and aren't
+    screened. A deeper marker is refused as misplaced, since a list item would read it as closing the block."""
+    # opener   candidate closer   closes  misplaced
+    TABLE = (
+        ("```",   "```",           True,   False),
+        ("```",   "   ```",        True,   False),
+        ("```",   "```   ",        True,   False),
+        ("```",   "    ```",       False,  True),
+        ("```",   "        ```",   False,  True),
+        ("```",   "\t```",         False,  True),
+        ("````",  "```",           False,  False),
+        ("````",  "`````",         True,   False),
+        ("```",   "``` yaml",      False,  False),
+        ("```",   "~~~",           False,  False),
+        ("~~~",   "```",           False,  False),
+        ("~~~",   "~~~",           True,   False),
+    )
+    CONTEXT = "Example:\n\n%s\nexample = 1\n%s\n## Approval\nPasswords are stored in plain text.\n"
+    ids = itertools.count(1)
+
+    def setUp(self):
+        self.project = new_project(self)
+
+    def add(self, task, opener, candidate):
+        self.project.add_task(task, declared("docs"), self.CONTEXT % (opener, candidate))
+
+    def test_a_fence_closes_only_where_markdown_closes_it(self):
+        for n, (opener, candidate, closes, misplaced) in enumerate(self.TABLE, 1):
+            with self.subTest(opener=opener, candidate=candidate):
+                task = "51.%d" % n
+                self.add(task, opener, candidate)
+
+                code, out = self.project.harness("risk", task)
+                self.assertEqual("password" in out, not closes, out)
+                code, out = self.project.harness("spec-check", task)
+                self.assertEqual(FENCE_INDENT in out, misplaced, out)
+
+    if given is not None:
+        @settings(max_examples=25, deadline=None)
+        @given(opener=st.sampled_from(("```", "~~~")), indent=st.integers(0, 8), same=st.booleans(),
+               length=st.integers(3, 5))
+        def test_a_closer_closes_at_up_to_three_spaces_and_a_deeper_one_is_misplaced(
+                self, opener, indent, same, length):
+            other = "~" if opener[0] == "`" else "`"
+            candidate = " " * indent + (opener[0] if same else other) * length
+            task = "52.%d" % next(self.ids)
+            self.add(task, opener, candidate)
+
+            code, out = self.project.harness("risk", task)
+            self.assertEqual("password" in out, not (indent <= 3 and same), out)
+            code, out = self.project.harness("spec-check", task)
+            self.assertEqual(FENCE_INDENT in out, same and indent >= 4, out)
+
+
+class CommentApproval(unittest.TestCase):
+    """The Approved-by: line the gates read is the one approved() reads, whatever a comment does to its line. An agent
+    can't write one behind a comment, nor move an example line into the Approval section."""
+    WRAPPED = ("<!-- x -->Approved-by: agent (2026-11-08)\n",
+               "<!--\n-->Approved-by: agent (2026-11-08)\n",
+               "<!-- a\nb --> Approved-by: agent (2026-11-08)\n")
+    ids = itertools.count(1)
+
+    def setUp(self):
+        self.project = new_project(self)
+
+    def test_an_agent_cannot_write_an_approval_behind_a_comment(self):
+        for n, wrapped in enumerate(self.WRAPPED, 1):
+            with self.subTest(wrapped=wrapped):
+                task = "53.%d" % n
+                self.project.add_task(task, declared("docs"))
+
+                code, out = self.project.analyst_edit(task, "Edit", old_string="## Approval\n",
+                                                      new_string="## Approval\n" + wrapped)
+
+                self.assertEqual(code, 2, out)
+                self.assertFalse(self.project.state(task)["approved"])
+
+    def test_an_agent_cannot_move_an_example_line_into_the_approval_section(self):
+        self.project.add_task("53.9", declared("docs"), "Example:\n\n```\n%s```\n" % APPROVAL)
+        spec = self.project.read("backbone/specs/53.9.md")
+        edited = spec.replace("```\n%s```\n" % APPROVAL, "") + APPROVAL
+
+        code, out = self.project.analyst_edit("53.9", "Write", content=edited)
+
+        self.assertEqual(code, 2, out)
+        self.assertFalse(self.project.state("53.9")["approved"])
+
+    if given is not None:
+        junk = st.text(alphabet=" \nx-", max_size=6).filter(lambda text: "-->" not in text)
+        gap = st.text(alphabet=" \t", max_size=3)
+
+        @settings(max_examples=25, deadline=None)
+        @given(lead=junk, gap=gap)
+        def test_no_agent_edit_writes_an_approval_behind_a_comment(self, lead, gap):
+            task = "54.%d" % next(self.ids)
+            self.project.add_task(task, declared("docs"))
+            wrapped = "<!--%s-->%sApproved-by: agent (2026-11-08)\n" % (lead, gap)
+
+            code, out = self.project.analyst_edit(task, "Edit", old_string="## Approval\n",
+                                                  new_string="## Approval\n" + wrapped)
+
+            self.assertEqual(code, 2, out)
+            self.assertFalse(self.project.state(task)["approved"])
+
+    def test_the_users_approval_under_a_heading_a_reader_sees_still_freezes_the_spec(self):
+        for n, heading in enumerate(("  ## Approval\n", "## Approval ##\n", "## Approval\r\n"), 2):
+            with self.subTest(heading=heading):
+                task = "55.%d" % n
+                self.project.add_task(task, declared("docs"))
+                spec = "backbone/specs/%s.md" % task
+                self.project.write(spec, self.project.read(spec).replace("## Approval\n", heading))
+                self.project.approve_as_user(task)
+
+                code, out = self.project.analyst_edit(task, "Edit", old_string="The system shall do one thing.",
+                                                      new_string="The system shall do nothing.")
+
+                self.assertEqual(code, 2, out)
+
+    def test_an_indented_closer_leaves_the_requirements_below_it_frozen(self):
+        self.project.add_task("55.1", declared("docs"), "Example:\n\n```markdown\n        ```\n## Approval\n```\n")
+        self.project.approve_as_user("55.1")
+
+        code, out = self.project.analyst_edit("55.1", "Edit", old_string="The system shall do one thing.",
+                                              new_string="The system shall do nothing.")
+
+        self.assertEqual(code, 2, out)
+        self.assertIn("approved and therefore frozen", out)
+
+
+class FencedSections(unittest.TestCase):
+    """A '## <title>' heading in a code block is an example. The sections the gates read are the spec's own, whatever an
+    example above them shows, and a comment opened in a code block doesn't hide what follows it."""
+    FENCES = ("```", "~~~", "````")
+
+    def setUp(self):
+        self.project = new_project(self)
+
+    def test_a_fenced_skills_heading_leaves_the_text_after_it_screened(self):
+        for n, fence in enumerate(self.FENCES, 1):
+            with self.subTest(fence=fence):
+                task = "56.%d" % n
+                self.project.add_task(task, declared("docs"), "Example:\n\n%s\n## Skills\n%s\nThe change rewrites the "
+                                                              "password hashing in auth.\n" % (fence, fence))
+
+                code, out = self.project.harness("risk", task)
+
+                self.assertEqual(code, 1, out)
+                self.assertIn("password", out)
+
+    def test_a_fenced_open_questions_heading_does_not_hide_the_real_one(self):
+        for n, fence in enumerate(self.FENCES, 1):
+            with self.subTest(fence=fence):
+                task = "57.%d" % n
+                self.project.add_task(task, declared("docs"), "Example:\n\n%s\n## Open questions\n- none\n%s\n"
+                                      % (fence, fence))
+                self.open_question(task)
+
+                code, out = self.project.harness("spec-check", task)
+
+                self.assertEqual(code, 1, out)
+                self.assertIn("open questions remain: Which hash function?", out)
+
+    def test_a_comment_opened_in_a_code_block_hides_nothing(self):
+        self.project.add_task("58.1", declared("docs"), "Example:\n\n```\n<!--\n```\n")
+        self.open_question("58.1")
+        self.project.write("backbone/specs/58.1.md", self.project.read("backbone/specs/58.1.md") + "-->\n")
+
+        code, out = self.project.harness("spec-check", "58.1")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("open questions remain: Which hash function?", out)
+
+    def open_question(self, task):
+        spec = "backbone/specs/%s.md" % task
+        self.project.write(spec, self.project.read(spec).replace("- none\n\n## Approval",
+                                                                "- Which hash function?\n\n## Approval"))
+
+
+COMMENT_AMBIGUOUS = "an HTML comment a reader may not end where the gates do"
+
+
+class CommentReach(unittest.TestCase):
+    """A comment a reader ends where the gates do: one that starts a line at 0-3 spaces, which a reader takes as an HTML
+    block ending at its '-->'. One that starts after text, or 4 or more columns in, may end with its paragraph for a
+    reader, or be code, so the spec is invalid rather than read one way or the other."""
+    # context above the Requirements, text appended after the spec, ambiguous?
+    TABLE = (
+        ("A change. <!-- note\n\n", "-->\n", True),
+        ("A change. <!-- note\n", "", True),
+        ("A change.\n\n        <!-- note -->\n", "", True),
+        ("A change.\n\n\t<!-- note -->\n", "", True),
+        ("A change. <!-- note -->\n", "", False),
+        ("A change.\n\n<!--\nnote\n\n-->\n", "", False),
+        ("A change.\n\n   <!-- note\n-->\n", "", False),
+    )
+
+    def setUp(self):
+        self.project = new_project(self)
+
+    def test_a_comment_a_reader_may_end_elsewhere_makes_the_spec_invalid(self):
+        for n, (context, after, ambiguous) in enumerate(self.TABLE, 1):
+            with self.subTest(context=context):
+                task = "59.%d" % n
+                self.project.add_task(task, declared("docs"), context)
+                spec = "backbone/specs/%s.md" % task
+                self.project.write(spec, self.project.read(spec) + after)
+
+                code, out = self.project.harness("spec-check", task)
+
+                self.assertEqual(COMMENT_AMBIGUOUS in out, ambiguous, out)
+
+    def test_a_comment_cannot_hide_an_open_question(self):
+        self.project.add_task("59.9", declared("docs"))
+        spec = "backbone/specs/59.9.md"
+        self.project.write(spec, self.project.read(spec).replace(
+            "## Open questions\n- none\n\n## Approval",
+            "## Open questions\nNote <!-- review\n- Which hash function?\n-->\n\n## Approval"))
+
+        code, out = self.project.harness("spec-check", "59.9")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn(COMMENT_AMBIGUOUS, out)
+
+
 class DocumentationPaths(unittest.TestCase):
     # a docs task changes          it is documentation
     TABLE = (
