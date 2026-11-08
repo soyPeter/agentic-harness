@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Spec parsing reads Markdown the way it renders (ADR-002, follow-up).** The gates now share one reading of a spec's
+  headings, code blocks, comments and sections. A fence closes only at a run of its own character at least as long, at
+  0-3 spaces, so an indented closer no longer ends a block early and hides the requirements below it from the freeze.
+  An `Approved-by:` line that a comment hides is read as `approved()` reads it, so an agent can't write one behind a
+  comment. A fenced `## Skills` or `## Open questions` example no longer hides the spec's own section, and a comment
+  opened in a code block no longer hides what follows. Headings and fences are read at column 0 only: one that is
+  indented, follows a list or quote marker, or sits in an HTML block makes the spec invalid, as does a setext heading
+  (text over `=` or `-`); write `## Title`. A section runs to the next `#` or `##` heading, and an approved spec is
+  frozen outside its Approval section, whichever section follows it. Only `## Approval` at column 0 is the Approval
+  section: `# Approval` and a setext heading are ordinary text, and an `Approved-by:` line under them doesn't approve.
+  **Upgrading:** a spec with an indented heading or fence, a fence or heading in a list item, quote or HTML block, or a
+  setext heading is invalid until it is rewritten. The user's approval under an indented `  ## Approval` no longer
+  counts. A section that a fenced example or an HTML block used to hide is now read, so it may need fixing too.
+
 - **Adopting a pack again keeps your edits.** `harness.py adopt` compared a pack file only with the release's copy, so
   a file edited after the last adoption was replaced by the release's copy with no backup, after a pin move or a
   `--to-thin`. An edited file is now kept. When the release changed it too, its copy goes to `<file>.harness-new` and
