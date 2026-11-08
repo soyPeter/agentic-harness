@@ -34,19 +34,20 @@
   self-managed key first, a KMS next and keyless only as an explicit opt-in. This release ships its first slice:
   - `harness.py attest --range <base>..<tip> [--allow-user-changes]` prints the unsigned Statement. Its subjects are
     the tip commit (`gitCommit`) and its code tree without `backbone/` (`gitTree`, the judge's fingerprint). The
-    predicate names the engine (its SHA-256) and the release the base commit's lock pins, the range, the flag and the
-    gate settings, and for each task finished in the range: the commit that finished it, the spec's fingerprint and
-    approval lines, the Change-Class, the latest grill, judge and review verdicts, and the receipt's risks, suggested
-    labels and verified / not-verified lists. It runs the checks of `verify --range` and prints nothing (exit 1,
+    predicate names the engine (its SHA-256) and the release the base commit's lock pins, the range, the flag and every
+    harness setting it resolved (its value, and whether the environment set it), and for each task finished in the
+    range: the commit that finished it, the spec's fingerprint and approval lines, the Change-Class, the latest grill,
+    judge and review verdicts, and the receipt's risks, suggested labels and verified / not-verified lists. It runs the checks of `verify --range` and prints nothing (exit 1,
     verify's problems on stderr) when they fail, and refuses a checkout that isn't the tip with a clean working tree.
     Standard library only; the same commits, settings and engine give the same bytes.
-  - `harness-verify.yml`: with the secrets `HARNESS_ATTEST_KEY` (a cosign private key) and
-    `HARNESS_ATTEST_PASSWORD`, a passing run writes the Statement with the base branch's engine, signs it with cosign
-    3.1.4 (checked against its SHA-256) and a signing config without services, so nothing goes to a transparency log,
-    and uploads the Statement and its Sigstore bundle as the `harness-attestation` artifact. Without the key the steps
-    don't run; with it, a failure in them fails the job. A v1 signature shows that a `harness-verify` run of the
-    repository signed it, not that the base branch's unedited workflow did (see the ADR). Set the secrets once the base
-    branch runs a release with `attest`.
+  - `harness-verify.yml`: the pull request check is unchanged and has no secrets. On a push to the default branch, the
+    `attest` job writes the Statement for the pushed range with the engine at the pushed commit and, with the secret
+    `HARNESS_ATTEST_KEY` (a cosign private key) and `HARNESS_ATTEST_PASSWORD` in the environment `harness-attest`
+    (restricted to the default branch), signs it with cosign 3.1.4 (checked against its SHA-256) and a signing config
+    without services, so nothing goes to a transparency log, and uploads the Statement and its Sigstore bundle as the
+    `harness-attestation` artifact. Without the key the job does nothing; with it, a failure fails the job, and no
+    step can change the pull request's check. A harness change never gets a CI statement in v1. Set the environment
+    and the secrets once the base branch runs a release with `attest` (see the ADR).
   - `tests/test-attest.py` checks the Statement's content, refusals and bytes through the command and the workflow's
     statement step, in full and thin projects, with property checks; no cosign needed.
 

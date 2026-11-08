@@ -2788,6 +2788,13 @@ def attested_task(task, commits, tip):
     }
 
 
+def verification_settings():
+    """Every setting the engine resolves through conf(), with its value and whether the environment set it. verify
+    reads its settings only through conf(), so this is what its result can depend on."""
+    values = conf()
+    return {key: {"value": values[key], "environment": key in os.environ} for key in sorted(values)}
+
+
 def attest_statement(base_ref, tip_ref, allow_user_changes=False):
     """(in-toto Statement, []) for a range that passes verify, checked out at its tip; else (None, problems)."""
     commits_of = {}
@@ -2811,7 +2818,6 @@ def attest_statement(base_ref, tip_ref, allow_user_changes=False):
     commits = [c for c in git("rev-list", "--reverse", "%s..%s" % (base, tip)).split() if c]
     tasks_rel = TASKS.relative_to(ROOT).as_posix()
     finished = sorted(task_states(show(tip, tasks_rel))[1] - task_states(show(base, tasks_rel))[1])
-    values = conf()
     return {
         "_type": STATEMENT_TYPE,
         "subject": [{"name": "commit", "digest": {"gitCommit": tip}},
@@ -2820,8 +2826,7 @@ def attest_statement(base_ref, tip_ref, allow_user_changes=False):
         "predicate": {
             "verifier": {"id": VERIFIER_ID, "engineSha256": sha256(__file__), "baseLock": base_lock(base)},
             "verification": {"base": base, "tip": tip, "result": "PASSED", "allowUserChanges": allow_user_changes,
-                             "gates": {"spec": values["HARNESS_SPEC_GATE"], "judge": values["HARNESS_JUDGE_GATE"],
-                                       "review": values["HARNESS_REVIEW"], "tester": values["HARNESS_TESTER"]}},
+                             "settings": verification_settings()},
             "tasks": [attested_task(task, commits, tip) for task in finished],
         },
     }, []
