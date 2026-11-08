@@ -16,8 +16,9 @@ the guard's entries and the settings.
 The agentic-harness plugin runs the same check from its own hooks, with the same settings
 (~/.agentic-harness/machine.json), except in a CLI that runs the guard hook: there the guard alone answers. Codex runs
 it only once you have trusted it in /hooks, as it is now and switched on; until then, and whenever Codex's records of
-that (in its config.toml) can't be read, the plugin checks. With the plugin, install --plugin is enough: it writes the
-settings only, and takes out a guard hook installed earlier.
+that (in its config.toml) can't be read, the plugin checks. So does the plugin when the guard copy install made isn't
+this release's (a plugin upgrade without install), since that copy may check other settings. With the plugin, install
+--plugin is enough: it writes the settings only, and takes out a guard hook installed earlier.
 
 The CLIs load hooks when a session starts, so a session that was open during install, install --plugin or remove keeps
 the hooks it started with until it is restarted.
@@ -114,9 +115,24 @@ def listed(source):
         return False
 
 
+def copy_current():
+    """Whether the guard copy install made is this release's. The hook runs that copy, and an earlier one keeps its own
+    rules after a plugin upgrade, so the plugin doesn't leave the check to it; status says to install again."""
+    try:
+        return digest(home(".agentic-harness", "guard.py")) == digest(HARNESS / "machine" / "guard.py")
+    except OSError:
+        return False
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def hooked(source):
     """Whether the CLI runs the guard hook: listed and, in Codex, trusted as it is now and switched on. The plugin's
     launcher leaves the check to it there, so a tool call isn't reminded or refused twice."""
+    if not copy_current():
+        return False
     if source != "codex":
         return listed(source)
     try:
@@ -186,7 +202,8 @@ def toml_key(text):
 
 def codex_states():
     """{key: state} of the user hook states in Codex's config.toml, where /hooks records trust and the on/off switch.
-    Without tomllib (Python 3.10), only the [hooks.state."<key>"] tables Codex writes are read, one setting a line."""
+    Without tomllib (Python 3.10), only the [hooks.state."<key>"] tables Codex writes are read, one setting a line;
+    trust written in any other form makes the states Unreadable."""
     path = codex_folder() / "config.toml"
     try:
         text = path.read_text(encoding="utf-8")
@@ -201,7 +218,7 @@ def codex_states():
             raise Unreadable("%s is not valid TOML" % path)
         states = hooks.get("state") if isinstance(hooks, dict) else None
         return {key.strip(): state for key, state in states.items()} if isinstance(states, dict) else {}
-    states, current = {}, None
+    states, current, read = {}, None, 0
     for line in text.splitlines():
         if line.lstrip().startswith("["):
             table = TOML_TABLE.match(line)
@@ -213,6 +230,9 @@ def codex_states():
         if setting:
             name, basic, literal, flag = setting.groups()
             current[name] = flag == "true" if flag else basic if basic is not None else literal
+            read += name == "trusted_hash"
+    if read != text.count("trusted_hash"):
+        raise Unreadable("%s sets hook trust in a form Python 3.10 can't read (tomllib needs 3.11)" % path)
     return states
 
 
@@ -271,7 +291,7 @@ def parse(argv):
             key = None
     if mode not in ("warn", "block"):
         raise SystemExit("machine: --mode is warn or block")
-    return roots or ["~/Work/repos"], mode, out
+    return [os.path.abspath(os.path.expanduser(root)) for root in roots or ["~/Work/repos"]], mode, out
 
 
 def install(argv):
@@ -339,6 +359,7 @@ def guard_module():
 
 def status(_argv):
     conf = home(".agentic-harness", "machine.json")
+    current = copy_current()
     usable = False
     try:
         settings = json.loads(conf.read_text(encoding="utf-8")) if conf.exists() else None
@@ -361,6 +382,10 @@ def status(_argv):
         except Unreadable as exc:
             print("  %-10s guard hook in %s, but whether Codex runs it can't be told: %s%s" % (source, path, exc,
                                                                                           plugin))
+            continue
+        if state == "runs" and not current:
+            print("  %-10s guard hook in %s runs a copy of guard.py that is missing or outdated: run ./machine.sh "
+                  "install%s" % (source, path, plugin))
             continue
         print("  %-10s %s" % (source, "guard hook present in %s" % path if state == "runs" else
                               CODEX_SKIPS[state] % path + plugin))
