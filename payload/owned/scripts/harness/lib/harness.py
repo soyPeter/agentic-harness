@@ -3078,8 +3078,17 @@ def forget_hash(info, rel_path):
         (info.get(table) or {}).pop(rel_path, None)
 
 
+def thin_hashes_under_kept(info):
+    """An earlier engine's adopt recorded a thin project's hashes under "files", and verify reads a non-empty "files"
+    as a full install: it would refuse every change to .claude/settings.json."""
+    if info.get("mode") == "thin" and "files" in info:
+        for rel_path, digest in info.pop("files").items():
+            info.setdefault("kept", {}).setdefault(rel_path, digest)
+
+
 def adopt(names, adr, chosen, declined, dry_run):
     info = lock()
+    thin_hashes_under_kept(info)
     adopted = info.setdefault("adopted", {})
     for name in names:
         for required in pack_meta(name).get("requires", []):
@@ -3102,7 +3111,7 @@ def adopt(names, adr, chosen, declined, dry_run):
     plans = [(name, decide_options(name, chosen, declined)) for name in names]
     today = time.strftime("%Y-%m-%d")
     guardrails, routing, conf_text = read(BACKBONE / "guardrails.conf"), read(BACKBONE / "routing.conf"), read(CONF_FILE)
-    report = []
+    report, conflicts = [], []
     for name, options in plans:
         files, rules, routes, values = pack_payload(name, options)
         previous = set((adopted.get(name) or {}).get("files", []))
@@ -3117,14 +3126,28 @@ def adopt(names, adr, chosen, declined, dry_run):
                 if not dry_run:
                     (ROOT / rel_path).unlink()
                     forget_hash(info, rel_path)
+            elif (ROOT / rel_path).exists():
+                report.append("kept    %s (edited locally; no longer part of the pack)" % rel_path)
         for rel_path, src in sorted(files.items()):
+            dest, release_digest = ROOT / rel_path, sha256(src)
+            current, recorded = sha256(dest), recorded_hash(info, rel_path)
+            if current not in (None, recorded, release_digest):
+                # The lock holds the release's copy as last installed, so this file differs from it by an edit.
+                if recorded == release_digest:
+                    report.append("kept    %s (edited locally; the release has not changed it)" % rel_path)
+                else:
+                    report.append("CONFLICT %s (edited locally, and the release changed it too: the new version is in "
+                                  "%s.harness-new)" % (rel_path, rel_path))
+                    conflicts.append(rel_path)
+                    if not dry_run:
+                        shutil.copyfile(str(src), str(dest) + ".harness-new")
+                continue
             report.append("install %s" % rel_path)
             if not dry_run:
-                dest = ROOT / rel_path
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(str(src), str(dest))
                 shutil.copymode(str(src), str(dest))
-                record_hash(info, rel_path, sha256(dest))
+                record_hash(info, rel_path, release_digest)
         header = "(%s, %s; options: %s)" % (adr, today, ", ".join(options) or "none")
         guardrails = replace_block(guardrails, name, rules or ["# (no rules)"], header)
         routing = replace_block(routing, name, routes or ["# (no routes)"], header)
@@ -3140,9 +3163,11 @@ def adopt(names, adr, chosen, declined, dry_run):
         write_lock(info)
     print("%s %s from %s:" % ("Would adopt" if dry_run else "Adopted", ", ".join(n for n, _ in plans), adr))
     print("\n".join("  " + line for line in report))
+    if conflicts:
+        print("Resolve each conflict: merge <file>.harness-new into <file> and delete the .harness-new file.")
     if not dry_run:
         print("Record the adoption in %s's Consequences, list the skills in backbone/9-AGENT-SKILLS.md, and commit." % adr)
-    return 0
+    return 1 if conflicts else 0
 
 
 def unadopt(names, dry_run):

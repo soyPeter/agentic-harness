@@ -30,6 +30,7 @@ FULL_HOOKS = "scripts/harness/git-hooks"
 INSTALLED = "2026-01-02"
 PACK_FILE = ".claude/skills/containers/SKILL.md"
 PACK_DOC = ".claude/skills/containers/image-building.md"
+CATALOG_INSTALL = "scripts/harness/catalog/container/install"
 LATER_SETTING = '# HARNESS_LATER_SETTING="off"'
 LATER_RULE = "Bash(make test)"
 DROPPED_RULE = "Bash(scripts/harness/doctor.sh)"
@@ -663,6 +664,140 @@ class Packs(Fixture):
         result = self.harness("adopt", "--remove", "container")
         for name in packed:
             self.assertIn("remove  " + name, result.stdout)
+
+    def test_adopting_a_pack_again_after_the_pin_moved_keeps_an_edited_file(self):
+        """Release 99.0.0 changes SKILL.md, which the user edited: adopt keeps the edit, writes the release's copy
+        beside it and exits 1, as update.sh does. The recorded hash stays the one the release installed."""
+        self.adopt_container()
+        edited = self.edit(PACK_FILE)
+        self.commit("chore: a local edit to a pack file", hooks=False)
+        self.switch_to_thin()
+        self.harness("pin", "99.0.0")
+        self.commit("chore: pin the agentic harness to 99.0.0")
+        recorded = self.lock()["kept"][PACK_FILE]
+        result = self.harness("adopt", "container", "--adr", "ADR-002", "--with", "podman", check=False)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("CONFLICT %s" % PACK_FILE, result.stdout)
+        self.assertEqual(content(self.project / PACK_FILE), edited[PACK_FILE])
+        self.assertEqual(content(self.project / (PACK_FILE + ".harness-new")),
+                         self.release("catalog/container/install/" + PACK_FILE, "99.0.0"))
+        self.assertEqual(self.lock()["kept"][PACK_FILE], recorded)
+        self.assertEqual(content(self.project / PACK_DOC),
+                         self.release("catalog/container/install/" + PACK_DOC, "99.0.0"))
+        self.assertFalse((self.project / (PACK_DOC + ".harness-new")).exists())
+
+    def test_adopting_a_pack_again_moves_an_edited_option_file_s_hash_out_of_files(self):
+        """An earlier engine recorded a thin project's pack files under "files", and verify reads a non-empty "files"
+        as a full install. The edited option file dropped by the re-adoption keeps its hash, now under "kept"."""
+        (self.project / "backbone/adr/ADR-003-java.md").write_text(JAVA_ADR)
+        self.harness("adopt", "java", "--adr", "ADR-003", "--with", "gradle,junit5-assertj,no-lombok")
+        self.commit("chore: adopt the java pack", hooks=False)
+        edited = self.edit(JAVA_TEST_FILES[1])
+        self.commit("chore: a local edit to an option file", hooks=False)
+        self.switch_to_thin(hooks=False)
+        lock = self.lock()
+        recorded = lock["kept"][JAVA_TEST_FILES[1]]
+        lock["files"] = {name: lock["kept"].pop(name) for name in JAVA_TEST_FILES}
+        (self.project / LOCK).write_text(json.dumps(lock, indent=2) + "\n")
+        self.commit("chore: the lock an earlier engine's adopt left", hooks=False)
+        result = self.harness("adopt", "java", "--adr", "ADR-003", "--with", "gradle,no-lombok",
+                              "--without", "junit5-assertj", check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(content(self.project / JAVA_TEST_FILES[1]), edited[JAVA_TEST_FILES[1]])
+        lock = self.lock()
+        self.assertFalse(lock.get("files"))
+        self.assertEqual(lock["kept"].get(JAVA_TEST_FILES[1]), recorded)
+        self.commit("chore: adopt the java pack without junit5-assertj", hooks=False)
+        self.env = dict(self.env, SKIP_BUILD="1")
+        self.change_the_settings()
+
+
+class AdoptEdits(Fixture):
+    """harness.py adopt in a full install. A pack file the user edited is never overwritten: when the release changed
+    it too, the release's copy goes to <file>.harness-new and adopt exits 1, as update.sh does. The release is the
+    vendored catalog, which a later release would replace."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        base = Path(cls.shared.name).resolve()
+        env, cls.adopted = environment(cls.source, base), base / "adopted with container"
+        shutil.copytree(str(cls.template), str(cls.adopted), symlinks=True)
+        (cls.adopted / "backbone/adr/ADR-002-containers.md").write_text(ADR)
+        run(cls.adopted, env, "python3", "-B", "scripts/harness/lib/harness.py", "adopt", "container", "--adr",
+            "ADR-002", "--with", "podman")
+        run(cls.adopted, env, "git", "add", "-A")
+        run(cls.adopted, env, "git", "commit", "-qm", "chore: adopt the container pack", "--no-verify")
+        cls.packed = sorted(json.loads((cls.adopted / LOCK).read_text())["adopted"]["container"]["files"])
+
+    def harness(self, *args, project=None, check=True):
+        return self.run_at(project or self.project, "python3", "-B", "scripts/harness/lib/harness.py", *args,
+                           check=check)
+
+    def adopt_container(self):
+        (self.project / "backbone/adr/ADR-002-containers.md").write_text(ADR)
+        self.harness("adopt", "container", "--adr", "ADR-002", "--with", "podman")
+        self.commit("chore: adopt the container pack", hooks=False)
+
+    def release_changes(self, project, *names):
+        """The vendored catalog as a later release ships it: each named file gets a line."""
+        for name in names:
+            with open(str(project / CATALOG_INSTALL / name), "a") as handle:
+                handle.write("# next release\n")
+        self.commit("chore: the vendored catalog as a later release ships it", hooks=False, project=project)
+
+    def test_adopting_again_after_the_release_changed_an_edited_file_keeps_the_edit(self):
+        self.adopt_container()
+        edited = self.edit(PACK_FILE)
+        self.commit("chore: a local edit to a pack file", hooks=False)
+        self.release_changes(self.project, PACK_FILE)
+        result = self.harness("adopt", "container", "--adr", "ADR-002", "--with", "podman", check=False)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("CONFLICT %s" % PACK_FILE, result.stdout)
+        self.assertEqual(content(self.project / PACK_FILE), edited[PACK_FILE])
+        self.assertEqual(content(self.project / (PACK_FILE + ".harness-new")),
+                         content(self.project / CATALOG_INSTALL / PACK_FILE))
+        self.assertFalse((self.project / (PACK_DOC + ".harness-new")).exists())
+
+    def test_adopting_again_with_the_same_release_keeps_the_edit_without_a_conflict(self):
+        self.adopt_container()
+        edited = self.edit(PACK_FILE)
+        self.commit("chore: a local edit to a pack file", hooks=False)
+        result = self.harness("adopt", "container", "--adr", "ADR-002", "--with", "podman", check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(content(self.project / PACK_FILE), edited[PACK_FILE])
+        self.assertFalse((self.project / (PACK_FILE + ".harness-new")).exists())
+
+    if given is None:
+        def test_adopting_again_keeps_every_edited_file_and_writes_the_release_copy_beside_it(self):
+            self.skipTest("needs hypothesis (pip install -r tests/requirements.txt)")
+    else:
+        @settings(max_examples=8, deadline=None, database=None, suppress_health_check=list(HealthCheck))
+        @given(data=st.data())
+        def test_adopting_again_keeps_every_edited_file_and_writes_the_release_copy_beside_it(self, data):
+            edits = data.draw(st.sets(st.sampled_from(self.packed)), label="edited")
+            changed = data.draw(st.sets(st.sampled_from(self.packed)), label="changed by the release")
+            project = self.copy_of(self.adopted, "example")
+            try:
+                self.check_readoption(project, edits, changed)
+            finally:
+                shutil.rmtree(str(project), ignore_errors=True)
+
+    def check_readoption(self, project, edits, changed):
+        edited = self.edit(*sorted(edits), project=project)
+        self.release_changes(project, *sorted(changed))
+        conflicts = edits & changed
+        result = self.harness("adopt", "container", "--adr", "ADR-002", "--with", "podman", project=project,
+                              check=False)
+        self.assertEqual(result.returncode, 1 if conflicts else 0, result.stdout + result.stderr)
+        recorded = json.loads((self.adopted / LOCK).read_text())["files"]
+        lock = self.lock(project)
+        for name in self.packed:
+            release = content(project / CATALOG_INSTALL / name)
+            self.assertEqual(content(project / name), edited.get(name, release), name)
+            self.assertEqual(content(project / (name + ".harness-new")), release if name in conflicts else None, name)
+            if name in edits:
+                self.assertEqual((lock.get("files") or {}).get(name) or lock["kept"].get(name), recorded[name], name)
 
 
 class PackProperties(Fixture):

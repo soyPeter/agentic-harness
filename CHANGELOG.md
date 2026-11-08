@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Adopting a pack again keeps your edits.** `harness.py adopt` compared a pack file only with the release's copy, so
+  a file edited after the last adoption was replaced by the release's copy with no backup, after a pin move or a
+  `--to-thin`. An edited file is now kept. When the release changed it too, its copy goes to `<file>.harness-new` and
+  `adopt` exits 1, as `update.sh` does. A thin lock's hashes that an earlier engine recorded under `"files"` move to
+  `"kept"` when a pack is adopted again, so `verify` no longer reads the project as a full install.
+
 - **Change-Class ladder (ADR-002).** Spec template and `requirements-writing` skill declare `Change-Class`
   (`docs` | `refactor` | `feature` | `schema`) plus optional `Parent-CHNG` / `Parent-RFC` / `Parent-ADR` links.
   Policy: PR merge stays human; policy `approve` must not be treated as merge. Runtime enforcement in
