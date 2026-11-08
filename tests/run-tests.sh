@@ -2870,6 +2870,8 @@ unset HARNESS_LIGHT_LANE HARNESS_TEST_CMD
 section "change class (ADR-002): who approves, the light lane, a diff that contradicts the class"
 expect 0 "the class table through risk, approve, next, start, finish and receipt (properties need hypothesis)" \
   python3 -B "$HARNESS/tests/test-change-class.py"
+expect 0 "spec structure: lists, quotes, HTML blocks, setext and sections as Markdown reads them (properties need hypothesis and markdown-it-py)" \
+  python3 -B "$HARNESS/tests/test-spec-structure.py"
 
 section "tool contracts: every tool that can change something goes through the gate"
 T="$WORK/tools"
