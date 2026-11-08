@@ -296,8 +296,29 @@ class TracedProject(Project):
         cls.set_task("7.2", "x")
         cls.second = cls.commit("feat: search by email")
 
+    def clone(self, name, depth=None, **settings):
+        """A clone of the project in its own folder, with settings written over its harness.conf (uncommitted)."""
+        root = self.outside / name
+        self.command("git", "clone", "-q", *(["--depth", str(depth)] if depth else []), "file://%s" % self.project,
+                     str(root), cwd=self.outside)
+        conf = root / "backbone/harness.conf"
+        text = conf.read_text()
+        for key, value in settings.items():
+            text, found = re.subn(r"(?m)^\s*%s\s*=.*$" % key, '%s="%s"' % (key, value), text)
+            if not found:
+                text += '%s="%s"\n' % (key, value)
+        conf.write_text(text)
+        return root
+
+    def export_at(self, root, fmt, *args, env=None):
+        return self.command("python3", "-B", str(root / "scripts/harness/lib/harness.py"), "trace", "export",
+                            "--format", fmt, *args, env=env, cwd=root).stdout
+
     def needs(self, *args, env=None):
-        data = json.loads(self.export("needs", *args, env=env))
+        return self.needs_at(self.project, *args, env=env)
+
+    def needs_at(self, root, *args, env=None):
+        data = json.loads(self.export_at(root, "needs", *args, env=env))
         return data["versions"][data["current_version"]]["needs"]
 
 
@@ -512,10 +533,10 @@ class HtmlMatrix(TracedProject):
 
 class Ears(TracedProject):
     def test_under_ears_each_requirement_carries_its_pattern(self):
-        ears = {"HARNESS_REQ_STYLE": "ears"}
-        needs = self.needs("--task", "8.1", env=ears)
-        objects = reqif_check.objects(self.export("reqif", "--task", "8.1", env=ears))
-        matrix = Matrix(self.export("html", "--task", "8.1", env=ears))
+        ears = self.clone("ears", HARNESS_REQ_STYLE="ears")
+        needs = self.needs_at(ears, "--task", "8.1")
+        objects = reqif_check.objects(self.export_at(ears, "reqif", "--task", "8.1"))
+        matrix = Matrix(self.export_at(ears, "html", "--task", "8.1"))
 
         for requirement, pattern in EARS_PATTERNS.items():
             with self.subTest(requirement=requirement):
@@ -533,9 +554,9 @@ class Ears(TracedProject):
         self.assertTrue(matrix.row("8.1", "REQ-8.1-2")[1].startswith("AC-8.1-1"))
 
     def test_an_nfr_with_an_id_is_a_requirement_its_criterion_verifies(self):
-        for env in ({}, {"HARNESS_REQ_STYLE": "ears"}):
-            with self.subTest(env=env):
-                needs = self.needs("--task", "8.1", env=env)
+        for root in (self.project, self.clone("ears-nfr", HARNESS_REQ_STYLE="ears")):
+            with self.subTest(root=root.name):
+                needs = self.needs_at(root, "--task", "8.1")
 
                 self.assertEqual((needs["NFR-8.1-1"]["type"], needs["NFR-8.1-1"]["harness_kind"],
                                   needs["NFR-8.1-1"]["title"]),
@@ -543,6 +564,50 @@ class Ears(TracedProject):
                 self.assertEqual(needs["AC-8.1-2"]["verifies"], ["NFR-8.1-1"])
                 self.assertIn("NFR without an id, so no criterion traces it: Closed cases stay readable for 7 years.",
                               needs["TASK-8.1"]["harness_gaps"].splitlines())
+
+
+class History(TracedProject):
+    def test_a_shallow_clone_reports_incomplete_history_not_a_missing_commit(self):
+        shallow = self.clone("shallow", depth=1)
+        needs = self.needs_at(shallow)
+
+        self.assertIn("history incomplete", needs["TASK-7.1"]["harness_gaps"])
+        self.assertIn("git fetch --unshallow", needs["TASK-7.1"]["harness_gaps"])
+        self.assertNotIn("is in no commit", needs["TASK-7.1"]["harness_gaps"])
+        self.assertNotIn("history incomplete", needs["TASK-7.2"].get("harness_gaps", ""))
+
+    def test_a_full_clone_finds_the_commit_that_carries_the_judged_code(self):
+        full = self.clone("full")
+        needs = self.needs_at(full)
+
+        self.assertEqual(needs["TASK-7.1"]["harness_test_files_from"], "commit %s" % self.specs)
+        self.assertNotIn("history incomplete", needs["TASK-7.1"]["harness_gaps"])
+
+
+class StateFingerprint(TracedProject):
+    def hashes_during(self, *args):
+        """The git write-tree calls a harness command makes: each one hashes the working tree (code_fingerprint).
+        A logging wrapper in front of the real git on PATH counts them."""
+        shim, log = self.outside / "shim", self.outside / "git-calls.txt"
+        shim.mkdir(exist_ok=True)
+        (shim / "git").write_text('#!/bin/sh\necho "$*" >> "%s"\nexec "%s" "$@"\n' % (log, shutil.which("git")))
+        (shim / "git").chmod(0o755)
+        log.write_text("")
+        result = self.harness(*args, env={"PATH": "%s:%s" % (shim, os.environ["PATH"])})
+        return result.stdout, [line for line in log.read_text().splitlines() if line.startswith("write-tree")]
+
+    def test_state_hashes_the_working_tree_once_however_many_tasks_are_judged(self):
+        out, hashed = self.hashes_during("state", "--json")
+
+        judged = {t["task"]: t["judge"]["current"] for t in json.loads(out)["tasks"] if t["judge"]}
+        self.assertEqual(judged, {"7.1": False, "7.2": True})
+        self.assertLessEqual(len(hashed), 1, hashed)
+
+    def test_next_hashes_the_working_tree_once_for_all_the_tasks_it_is_given(self):
+        out, hashed = self.hashes_during("next", "7.1", "7.2", "--json")
+
+        self.assertEqual([s["task"] for s in json.loads(out)], ["7.1", "7.2"])
+        self.assertEqual(len(hashed), 2, hashed)  # the workspace's progress, then the code shared by both tasks
 
 
 class Command(TracedProject):
@@ -578,7 +643,7 @@ class Command(TracedProject):
         refused = self.harness("trace", "export", "--format", "html", "--out", "exports", check=False)
 
         self.assertEqual(refused.returncode, 1)
-        self.assertIn("exports/traceability.html is inside the repository and git doesn't ignore it", refused.stdout)
+        self.assertIn("exports/traceability.html is inside the repository and git doesn't ignore it", refused.stderr)
         self.assertFalse((self.project / "exports").exists())
         written = self.harness("trace", "export", "--format", "html", "--out", "trace-out")
         try:
@@ -586,6 +651,38 @@ class Command(TracedProject):
             self.assertEqual(self.harness("receipt", "7.2", check=False).returncode, 0)
         finally:
             shutil.rmtree(self.project / "trace-out", ignore_errors=True)
+
+    def test_stdout_redirected_into_the_repository_is_refused_unless_git_ignores_it(self):
+        def redirect(path):
+            with open(path, "w") as out:
+                return subprocess.run(["python3", "-B", str(self.project / "scripts/harness/lib/harness.py"),
+                                       "trace", "export", "--format", "html"], cwd=self.project, env=self.env,
+                                      stdout=out, stderr=subprocess.PIPE, text=True)
+
+        untracked = self.project / "trace.html"
+        ignored = self.project / "trace-out" / "trace.html"
+        try:
+            refused = redirect(untracked)
+
+            self.assertEqual(refused.returncode, 1)
+            self.assertIn("redirect stdout outside the repository", refused.stderr)
+            self.assertEqual(untracked.read_text(), "")
+            (self.project / "trace-out").mkdir(exist_ok=True)
+            allowed = redirect(ignored)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+            self.assertEqual(ignored.read_text(), self.export("html"))
+        finally:
+            untracked.unlink(missing_ok=True)
+            shutil.rmtree(self.project / "trace-out", ignore_errors=True)
+
+    def test_the_bytes_do_not_depend_on_the_folder_name_or_environment_overrides(self):
+        first = self.clone("first", HARNESS_PROJECT_NAME="")
+        second = self.clone("second-folder", HARNESS_PROJECT_NAME="")
+        overridden = {"HARNESS_TEST_PATHS": "^nothing$", "HARNESS_REQ_STYLE": "ears", "HARNESS_PROJECT_NAME": "other"}
+        for fmt in ("reqif", "needs", "html"):
+            with self.subTest(format=fmt):
+                self.assertEqual(self.export_at(second, fmt), self.export_at(first, fmt))
+                self.assertEqual(self.export_at(first, fmt, env=overridden), self.export_at(first, fmt))
 
     def test_a_wrong_call_prints_the_usage(self):
         for args in ((), ("--format",), ("--format", "pdf"), ("--format", "html", "--task"),

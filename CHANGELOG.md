@@ -9,6 +9,18 @@
   the default branch. `gh pr comment`, which delivery doesn't use, is refused. Gh text in quoted arguments and heredoc
   bodies is no longer read as a command.
 
+- **Adopting a pack again keeps your edits.** `harness.py adopt` compared a pack file only with the release's copy, so
+  a file edited after the last adoption was replaced by the release's copy with no backup, after a pin move or a
+  `--to-thin`. An edited file is now kept. When the release changed it too, its copy goes to `<file>.harness-new` and
+  `adopt` exits 1, as `update.sh` does. The lock then records the release's copy, as `update.sh` does, so once you have
+  merged `<file>.harness-new` and deleted it, the next `adopt` is clean. An existing `<file>.harness-new` is never
+  overwritten: `adopt` refuses before it writes anything and names the file (`update.sh` still overwrites one).
+  `adopt --remove` lists a `<file>.harness-new` it leaves in place. A file that a removed option leaves behind no longer
+  has a hash, so `doctor` stops warning about it. A thin lock's hashes that an earlier engine recorded under `"files"`
+  move to `"kept"` when a pack is adopted again, removed, or the pin moves (`harness.py adopt`, `adopt --remove`,
+  `pin`), so `verify` no longer reads the project as a full install and refuses the next `.claude/settings.json`
+  commit.
+
 - **Traceability export (ADR-004).** `harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]`
   writes the chain requirement → acceptance criterion → test file → judge verdict → commit for every task with a spec,
   or one task: as ReqIF 1.2 (written with `xml.etree`), as a Sphinx-Needs `needs.json` in format 1, or as a
@@ -17,11 +29,16 @@
   pass is on the current code, lists every commit whose code is the judged code and the test files that mention each
   criterion in it, and lists the gaps (requirements without a criterion, criteria without a test file, undefined
   references, NFRs without an id, open findings). Under `HARNESS_REQ_STYLE=ears` each requirement carries its EARS
-  pattern. `--out` inside the repository is refused unless git ignores the file. The same repository state gives the
-  same bytes. `docs/adr/ADR-004-traceability-export.md` records the decision, including what a regulated team can and
+  pattern. `--out`, and stdout redirected into the repository, are refused unless git ignores the file. A shallow
+  clone or a failed git read reports `history incomplete` instead of a missing commit. The export reads the committed
+  `backbone/harness.conf`, not environment overrides, so the same repository state gives the same bytes on any
+  machine. `docs/adr/ADR-004-traceability-export.md` records the decision, including what a regulated team can and
   can't claim from it (it isn't signed, validated or PCI DSS evidence). `tests/test-trace-export.py` checks the ReqIF
   output against a minimal subset of the OMG schema vendored in `tests/reqif_check.py`, offline, plus the
   `needs.json` shape and the HTML matrix, with property checks.
+
+- **`state` and `next` hash the working tree once per command.** Each judged task used to hash the whole working
+  tree again, about 0.6 s per hash on 5,000 files; now one command shares one hash across its tasks.
 
 - **Signed verdict attestations (ADR-005, Proposed).** `docs/adr/ADR-005-verdict-attestations.md` decides how
   `harness-verify` turns its verdict into evidence others can check: an in-toto Statement, a custom predicate type
@@ -29,19 +46,20 @@
   self-managed key first, a KMS next and keyless only as an explicit opt-in. This release ships its first slice:
   - `harness.py attest --range <base>..<tip> [--allow-user-changes]` prints the unsigned Statement. Its subjects are
     the tip commit (`gitCommit`) and its code tree without `backbone/` (`gitTree`, the judge's fingerprint). The
-    predicate names the engine (its SHA-256) and the release the base commit's lock pins, the range, the flag and the
-    gate settings, and for each task finished in the range: the commit that finished it, the spec's fingerprint and
-    approval lines, the Change-Class, the latest grill, judge and review verdicts, and the receipt's risks, suggested
-    labels and verified / not-verified lists. It runs the checks of `verify --range` and prints nothing (exit 1,
+    predicate names the engine (its SHA-256) and the release the base commit's lock pins, the range, the flag and every
+    harness setting it resolved (its value, and whether the environment set it), and for each task finished in the
+    range: the commit that finished it, the spec's fingerprint and approval lines, the Change-Class, the latest grill,
+    judge and review verdicts, and the receipt's risks, suggested labels and verified / not-verified lists. It runs the checks of `verify --range` and prints nothing (exit 1,
     verify's problems on stderr) when they fail, and refuses a checkout that isn't the tip with a clean working tree.
     Standard library only; the same commits, settings and engine give the same bytes.
-  - `harness-verify.yml`: with the secrets `HARNESS_ATTEST_KEY` (a cosign private key) and
-    `HARNESS_ATTEST_PASSWORD`, a passing run writes the Statement with the base branch's engine, signs it with cosign
-    3.1.4 (checked against its SHA-256) and a signing config without services, so nothing goes to a transparency log,
-    and uploads the Statement and its Sigstore bundle as the `harness-attestation` artifact. Without the key the steps
-    don't run; with it, a failure in them fails the job. A v1 signature shows that a `harness-verify` run of the
-    repository signed it, not that the base branch's unedited workflow did (see the ADR). Set the secrets once the base
-    branch runs a release with `attest`.
+  - `harness-verify.yml`: the pull request check is unchanged and has no secrets. On a push to the default branch, the
+    `attest` job writes the Statement for the pushed range with the engine at the pushed commit and, with the secret
+    `HARNESS_ATTEST_KEY` (a cosign private key) and `HARNESS_ATTEST_PASSWORD` in the environment `harness-attest`
+    (restricted to the default branch), signs it with cosign 3.1.4 (checked against its SHA-256) and a signing config
+    without services, so nothing goes to a transparency log, and uploads the Statement and its Sigstore bundle as the
+    `harness-attestation` artifact. Without the key the job does nothing; with it, a failure fails the job, and no
+    step can change the pull request's check. A harness change never gets a CI statement in v1. Set the environment
+    and the secrets once the base branch runs a release with `attest` (see the ADR).
   - `tests/test-attest.py` checks the Statement's content, refusals and bytes through the command and the workflow's
     statement step, in full and thin projects, with property checks; no cosign needed.
 
@@ -57,21 +75,30 @@
     default `devcontainer`). `devcontainer` runs it where the runner runs, as before. Any other value is a doctor
     error, so `run` and `orca` refuse to start; `verify` never reads it.
   - Each judge verdict records the sandbox it was recorded in, and `receipt` shows it (a SANDBOX section; `sandbox`
-    in `--json`): `backend`, `isolation_class`, `image_digest`, `allowlist_hash`, `region`, `control_plane`,
-    `credential_mode`. Outside the harness-agent container it says `isolation_class: none`; a judge pass recorded
-    before this release says "not recorded". The evidence never holds a credential, and refuses nothing.
+    in `--json`): `backend`, `isolation_class`, `base_image_digest`, `allowlist_hash`, `region`, `control_plane`,
+    `credential_mode`, and `isolation_reason`. `isolation_class` is `container` only when the process is a Linux
+    container with NoNewPrivs set, no NET_ADMIN, NET_RAW or SYS_ADMIN in its effective or bounding set, and the egress
+    allowlist published at `/run/harness-egress/allowlist`; otherwise `none`, with the reason. A judge
+    pass recorded before this release says "not recorded". The evidence never holds a credential, and refuses nothing.
+    A receipt flags a container with no published allowlist, and notes that `allowlist_hash` covers host names only.
   - `.devcontainer/harness-agent/` builds from `node:22-bookworm` pinned by digest, and bakes the reference into
     the image (`HARNESS_SANDBOX_IMAGE`).
+  - Inside the harness-agent image, an egress allowlist that isn't published at `/run/harness-egress/allowlist`
+    (named by `HARNESS_EGRESS_ALLOWLIST`) is a doctor error, so `run` and `orca` refuse to start. `doctor` warns about
+    a `devcontainer.json` that names no `dockerComposeFile` (read as JSONC, with comments and trailing commas), or that
+    can't be parsed, and `update` warns when it keeps a conflicting local `devcontainer.json`.
   - The egress allowlist moved out of the agent's container: a second container (`egress`, `docker-compose.yml`)
     applies `init-firewall.sh` in the network namespace the agent's container joins, and publishes the host list the
     evidence hashes. The agent's container drops NET_ADMIN and NET_RAW, runs with `no-new-privileges` and has no
     sudo, so the agent can no longer re-run the firewall script as root. Outbound IPv6 is dropped. DNS is still open
     to any resolver.
-  - `tests/test-sandbox-evidence.py` (in the self-test) and `tests/test-sandbox-egress.py` (a real container, with
-    `HARNESS_E2E=1`, docker and the devcontainer CLI).
+  - `tests/test-sandbox-evidence.py` (in the self-test) and `tests/test-sandbox-egress.py` (real containers, with
+    `HARNESS_E2E=1`: the Compose sandbox needs docker and the devcontainer CLI; the restriction checks need only docker).
   - **Upgrading:** the sandbox is now two containers. Move an edited `HARNESS_FIREWALL_ALLOW` or knowledge mount from
     `devcontainer.json` to `docker-compose.yml`, and rebuild the container; an image built before this release
-    records `isolation_class: none`.
+    records `isolation_class: none`. If `update` reports a conflict on `devcontainer.json`, merge the new file's
+    `dockerComposeFile` and `runServices` from the `.harness-new` file first: until you do, `doctor` warns, and the
+    harness-agent image refuses to run `run` or `orca`.
 
 - **Change-Class ladder (ADR-002).** Spec template and `requirements-writing` skill declare `Change-Class`
   (`docs` | `refactor` | `feature` | `schema`) plus optional `Parent-CHNG` / `Parent-RFC` / `Parent-ADR` links.

@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -101,11 +102,15 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
+TAKE_BASE = "Take the verifier from the base branch"
+TAKE_PUSHED = "Take the verifier from the pushed commit"
+
+
 def step_script(name, source=None):
     """The shell script of the harness-verify step called name, with the harness repository's URL pointed at
     source."""
     step = WORKFLOW.read_text().split("      - name: %s\n" % name, 1)[1]
-    script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0])
+    script = textwrap.dedent(re.split(r"\n(?=      - name:|  \S)", step.split("        run: |\n", 1)[1], maxsplit=1)[0])
     return script.replace("https://github.com/soyPeter/agentic-harness.git", str(source)) if source else script
 
 
@@ -236,10 +241,18 @@ class Statement(FinishedTask):
             "id": VERIFIER, "engineSha256": sha256(self.project.engine.read_bytes()),
             "baseLock": {"mode": "full", "version": VERSION}})
 
-    def test_the_verification_names_the_range_its_result_and_the_gates(self):
-        self.assertEqual(self.made["predicate"]["verification"], {
-            "base": self.project.adopted, "tip": self.tip, "result": "PASSED", "allowUserChanges": False,
-            "gates": {"spec": "on", "judge": "on", "review": "on", "tester": "off"}})
+    def test_the_verification_names_the_range_its_result_and_every_setting_verify_read(self):
+        verification = self.made["predicate"]["verification"]
+
+        self.assertEqual({k: v for k, v in verification.items() if k != "settings"}, {
+            "base": self.project.adopted, "tip": self.tip, "result": "PASSED", "allowUserChanges": False})
+        self.assertEqual(verification["settings"]["HARNESS_SPEC_GATE"], {"value": "on", "environment": False})
+        self.assertEqual(verification["settings"]["HARNESS_JUDGE_GATE"], {"value": "on", "environment": False})
+        self.assertEqual(verification["settings"]["HARNESS_REVIEW"], {"value": "on", "environment": False})
+        self.assertEqual(verification["settings"]["HARNESS_TESTER"], {"value": "off", "environment": False})
+        self.assertEqual(verification["settings"]["HARNESS_ALLOW_PARALLEL_WIP"], {"value": "0", "environment": False})
+        self.assertEqual(verification["settings"]["HARNESS_VERIFY"], {"value": "off", "environment": True})
+        self.assertTrue(all(key.startswith("HARNESS_") for key in verification["settings"]))
 
     def test_a_finished_task_carries_its_spec_class_and_verdicts(self):
         grill = self.project.verdicts("1.1", "grill")[-1]
@@ -334,14 +347,29 @@ class Refusals(unittest.TestCase):
 
         self.assert_refused_as_verify_refuses(self.project.adopted)
 
-    def test_the_harness_change_label_lets_a_user_only_change_through_and_is_recorded(self):
-        self.project.append("backbone/harness.conf", '\nHARNESS_REVIEW="off"\n')
+    def test_the_allow_flag_lets_a_user_only_change_through_and_is_recorded(self):
+        self.project.append("backbone/harness.conf", '\nHARNESS_REVIEW="off"\nHARNESS_JUDGE_MAX_ROUNDS="3"\n')
         self.project.commit("chore: switch the reviews off")
 
         made = self.project.statement(self.project.adopted, "--allow-user-changes")
 
+        settings = made["predicate"]["verification"]["settings"]
         self.assertTrue(made["predicate"]["verification"]["allowUserChanges"])
-        self.assertEqual(made["predicate"]["verification"]["gates"]["review"], "off")
+        self.assertEqual(settings["HARNESS_REVIEW"], {"value": "off", "environment": False})
+        self.assertEqual(settings["HARNESS_JUDGE_MAX_ROUNDS"], {"value": "3", "environment": False})
+
+    def test_a_setting_only_the_environment_sets_changes_what_verify_accepts_and_is_recorded_as_overridden(self):
+        self.project.specify("1.1", "Customer search")
+        self.project.specify("1.2", "Sorted results")
+        self.project.set_marker("1.1", " ", "WIP")
+        self.project.set_marker("1.2", " ", "WIP")
+        self.project.commit("chore: start two tasks")
+        self.assert_refused_as_verify_refuses(self.project.adopted)
+
+        made = self.project.statement(self.project.adopted, HARNESS_ALLOW_PARALLEL_WIP="1")
+
+        self.assertEqual(made["predicate"]["verification"]["settings"]["HARNESS_ALLOW_PARALLEL_WIP"],
+                         {"value": "1", "environment": True})
 
     def test_untracked_or_uncommitted_files_get_no_statement(self):
         tip = self.project.finish("1.1", "Customer search", SEARCH)
@@ -453,35 +481,91 @@ class Ranges(unittest.TestCase):
 
 
 class Workflow(unittest.TestCase):
-    """harness-verify's statement step, run as CI runs it: after the step that takes the verifier from the base
-    branch (origin/review-base here), with that engine."""
+    """harness-verify's steps, run as CI runs them in throwaway projects: the take step fetches the verifier from a ref,
+    then the verify step checks a pull request and the statement step writes a pushed range's statement. The rest of the
+    workflow (checkouts, uploads, signing) is checked in its text."""
 
-    def ci_statement(self, project, base, allow="", source=None):
+    def pull_request(self, project, base):
+        """The ref a pull request's base is taken from, with base as origin/review-base."""
         project.git("update-ref", "refs/remotes/origin/review-base", base)
+        return "origin/review-base"
+
+    def take_engine(self, project, ref, take=TAKE_PUSHED, source=None):
+        """(runner's temp dir, the engine the take step leaves for the steps after it)."""
         runner = Path(tempfile.mkdtemp(prefix="runner ", dir=str(project.root.parent)))
-        ci = dict(BASE="review-base", RUNNER_TEMP=str(runner), GITHUB_ENV=str(runner / "github-env"))
-        project.run("bash", "-e", "-o", "pipefail", "-c", step_script("Take the verifier from the base branch", source),
-                    **ci)
-        engine = (runner / "github-env").read_text().strip().split("=", 1)[1]
-        project.run("bash", "-e", "-c", step_script("Write the verdict attestation"), ENGINE_SCRIPT=engine,
-                    HARNESS_ROOT=str(project.root), ALLOW=allow, **ci)
+        ci = dict(BASE_REF=ref, RUNNER_TEMP=str(runner), GITHUB_ENV=str(runner / "github-env"))
+        project.run("bash", "-e", "-o", "pipefail", "-c", step_script(take, source), **ci)
+        return runner, (runner / "github-env").read_text().strip().split("=", 1)[1]
+
+    def verify_pull_request(self, project, engine, allow=""):
+        return project.run("bash", "-e", "-c", step_script("Verify the pull request's commits"), check=False,
+                           ENGINE_SCRIPT=engine, HARNESS_ROOT=str(project.root), BASE="review-base", ALLOW=allow)
+
+    def write_statement(self, project, ref, before, source=None):
+        """Takes the verifier from ref, then writes the statement of before..HEAD: (the step's result, runner's temp dir)."""
+        runner, engine = self.take_engine(project, ref, source=source)
+        result = project.run("bash", "-e", "-c", step_script("Write the verdict attestation"), check=False,
+                             ENGINE_SCRIPT=engine, HARNESS_ROOT=str(project.root), BEFORE=before,
+                             RUNNER_TEMP=str(runner))
+        return result, runner
+
+    def ci_statement(self, project, ref, before, source=None):
+        result, runner = self.write_statement(project, ref, before, source=source)
+        self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads((runner / STATEMENT_FILE).read_text())
 
-    def test_the_base_branch_engine_writes_it_even_when_the_pull_request_changes_the_engine(self):
+    def test_a_pull_request_is_verified_by_the_base_branch_engine_even_when_it_changes_the_engine(self):
+        project = new_project(self)
+        project.finish("1.1", "Customer search", SEARCH)
+        project.write("scripts/harness/lib/harness.py", project.engine.read_text().replace(
+            "def verify_command(argv):\n", "def verify_command(argv):\n    return 0\n", 1))
+        project.commit("chore: make verify pass")
+        self.assertEqual(project.harness("verify", "--range", project.adopted + "..HEAD").returncode, 0)
+        ref = self.pull_request(project, project.adopted)
+        _, base_engine = self.take_engine(project, ref, take=TAKE_BASE)
+
+        refused = self.verify_pull_request(project, base_engine)
+        allowed = self.verify_pull_request(project, base_engine, allow="--allow-user-changes")
+
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("verify: the harness itself changes (scripts/harness/lib/harness.py)", refused.stdout)
+        self.assertEqual((allowed.returncode, allowed.stdout), (0, "verify: ok\n"))
+
+    def test_a_pushed_commit_is_attested_for_its_range_with_the_engine_at_its_tip(self):
+        project = new_project(self)
+        tip = project.finish("1.1", "Customer search", SEARCH)
+
+        made = self.ci_statement(project, tip, project.adopted)
+
+        self.assertEqual(made["subject"][0]["digest"], {"gitCommit": tip})
+        self.assertEqual(made["predicate"]["verification"]["base"], project.adopted)
+        self.assertEqual(made["predicate"]["verifier"]["engineSha256"], sha256(project.engine.read_bytes()))
+        self.assertFalse(made["predicate"]["verification"]["allowUserChanges"])
+        self.assertEqual([task["task"] for task in made["predicate"]["tasks"]], ["1.1"])
+
+    def test_a_pushed_harness_change_gets_no_statement(self):
         project = new_project(self)
         project.finish("1.1", "Customer search", SEARCH)
         project.append("scripts/harness/lib/harness.py", "# a local change\n")
-        tip = project.commit("chore: change the harness")
+        project.commit("chore: change the harness")
 
-        made = self.ci_statement(project, project.adopted, allow="--allow-user-changes")
+        result, runner = self.write_statement(project, project.git("rev-parse", "HEAD"), project.adopted)
 
-        self.assertEqual(made["subject"][0]["digest"], {"gitCommit": tip})
-        self.assertEqual(made["predicate"]["verifier"]["engineSha256"], sha256(ENGINE.read_bytes()))
-        self.assertNotEqual(made["predicate"]["verifier"]["engineSha256"], sha256(project.engine.read_bytes()))
-        self.assertTrue(made["predicate"]["verification"]["allowUserChanges"])
-        self.assertEqual([task["task"] for task in made["predicate"]["tasks"]], ["1.1"])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("the harness itself changes", result.stderr)
+        self.assertFalse((runner / STATEMENT_FILE).exists())
 
-    def test_a_thin_project_is_attested_by_the_engine_its_base_pin_names(self):
+    def test_a_pushed_range_whose_base_is_not_an_ancestor_gets_no_statement(self):
+        project = new_project(self)
+        tip = project.finish("1.1", "Customer search", SEARCH)
+
+        result, runner = self.write_statement(project, tip, "0" * 40)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is not an ancestor", result.stderr)
+        self.assertFalse((runner / STATEMENT_FILE).exists())
+
+    def test_a_thin_project_is_attested_by_the_engine_its_pin_names(self):
         temp = tempfile.TemporaryDirectory(prefix="attest thin ")
         self.addCleanup(temp.cleanup)
         work = Path(temp.name).resolve()
@@ -503,28 +587,60 @@ class Workflow(unittest.TestCase):
         project = Project(work / "project", lambda p: p.run("python3", "-B", LAUNCHER, "init", "--thin", "--name",
                                                              "demo"), **thin)
         project.write("docs/guide.md", "# Guide\n")
-        project.commit("docs: a guide")
+        tip = project.commit("docs: a guide")
 
-        made = self.ci_statement(project, project.adopted, source=source)
+        made = self.ci_statement(project, tip, project.adopted, source=source)
 
         self.assertEqual(made["predicate"]["verifier"]["baseLock"], {"mode": "thin", "version": VERSION,
                                                                      "commit": pinned})
         self.assertEqual(made["predicate"]["verifier"]["engineSha256"], sha256(ENGINE.read_bytes()))
         self.assertEqual(made["predicate"]["tasks"], [])
 
-    def test_the_attestation_steps_are_opt_in_and_can_only_follow_a_passing_verify(self):
-        workflow = WORKFLOW.read_text()
-        steps = workflow.split("\n      - name: ")
-        after_verify = steps[[s.splitlines()[0] for s in steps].index("Verify the pull request's commits") + 1:]
+    def jobs(self):
+        """The workflow's jobs, by name, as text."""
+        parts = re.split(r"\n(?=  [a-z-]+:\n)", WORKFLOW.read_text().split("\njobs:\n", 1)[1])
+        return {part.split(":", 1)[0].strip(): part for part in parts}
 
-        self.assertEqual([s.splitlines()[0] for s in after_verify], ["Write the verdict attestation",
-                                                                     "Sign the verdict attestation",
-                                                                     "Upload the verdict attestation"])
-        for step in after_verify:
-            self.assertIn("if: env.HARNESS_ATTEST_SIGN == 'true'\n", step)
-        for word in ("continue-on-error", "always()", "failure()", "cancelled()"):
+    def test_the_pull_request_run_has_no_secret_no_environment_and_no_signing(self):
+        verify = self.jobs()["verify"]
+
+        self.assertIn("if: github.event_name == 'pull_request'\n", verify)
+        for word in ("secrets.", "environment:", "cosign", "HARNESS_ATTEST", "upload-artifact", "attest"):
+            self.assertNotIn(word, verify)
+
+    def test_the_signing_job_runs_only_for_a_push_to_the_default_branch_in_its_protected_environment(self):
+        workflow, attest = WORKFLOW.read_text(), self.jobs()["attest"]
+
+        self.assertIn("\non:\n  pull_request:\n", workflow)
+        self.assertIn("\n  push:\n    branches: [main]\n", workflow)
+        self.assertIn("if: github.event_name == 'push'\n", attest)
+        self.assertIn("environment: harness-attest\n", attest)
+        self.assertIn("\npermissions:\n  contents: read\n", workflow)
+        self.assertNotIn("pull_request_target", workflow)
+        self.assertIn("HARNESS_ATTEST_SIGN: ${{ secrets.HARNESS_ATTEST_KEY != '' }}\n", attest)
+        for word in ("continue-on-error", "always()", "failure()", "cancelled()", "needs:"):
             self.assertNotIn(word, workflow)
-        self.assertIn("HARNESS_ATTEST_SIGN: ${{ secrets.HARNESS_ATTEST_KEY != '' }}\n", workflow)
+
+    def test_every_attestation_step_is_opt_in_and_the_statement_is_written_for_the_pushed_range_only(self):
+        attest = self.jobs()["attest"]
+        steps = attest.split("\n      - name: ")[1:]
+
+        self.assertEqual([s.splitlines()[0] for s in steps], [
+            "Take the verifier from the pushed commit", "Write the verdict attestation",
+            "Sign the verdict attestation", "Upload the verdict attestation"])
+        for step in steps:
+            self.assertIn("if: env.HARNESS_ATTEST_SIGN == 'true'\n", step)
+        self.assertIn('--range "$BEFORE..HEAD"', steps[1])
+        self.assertNotIn("ALLOW", steps[1])
+
+    def test_secrets_and_untrusted_event_data_reach_no_run_block(self):
+        for job in self.jobs().values():
+            for run in re.findall(r"^        run: \|\n((?:(?: {10}.*)?\n)*)", job, re.M):
+                self.assertNotIn("${{", run)
+                self.assertNotIn("secrets.", run)
+
+    def test_both_jobs_take_the_engine_the_same_way(self):
+        self.assertEqual(step_script(TAKE_BASE), step_script(TAKE_PUSHED))
 
 
 if given is not None:
