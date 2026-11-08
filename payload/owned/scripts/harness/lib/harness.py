@@ -177,11 +177,39 @@ EARS_PASSIVE = re.compile(r"(?i)\bshall\s+(not\s+)?be\s+(\w+ed|\w+en|sent|shown|
 BLOCKED_NOTE = re.compile(r"\s+[-\u2014]+\s+BLOCKED:\s*(.*)$")
 LIGHT_MARK = re.compile(r"\(light\)", re.I)
 POLICY_APPROVAL = re.compile(r"^\s*Approved-by:\s*policy:(\S+)\s*\((.*)\)", re.M)
-APPROVAL_HEADING = re.compile(r"^##\s+Approval\s*$", re.M | re.I)
+
+
+def heading_pattern(title):
+    """A '## <title>' Markdown heading at column 0, with an optional closing run of #s. Case-insensitive."""
+    return re.compile(r"^##[ \t]+%s(?:[ \t]+#+)?[ \t]*\r?$" % re.escape(title), re.M | re.I)
+
+
+APPROVAL_HEADING = heading_pattern("Approval")
+# A section runs to the next heading of level 1 or 2, as a reader sees it.
+SECTION_END = re.compile(r"^#{1,2}(?:[ \t\r]|$)", re.M)
+
 # The kind of work a spec declares (the harness's ADR-002). A spec without the line counts as feature.
 CHANGE_CLASSES = ("docs", "refactor", "feature", "schema")
 CHANGE_CLASS_LINE = re.compile(r"^[ \t]*Change-Class:(.*)$", re.M | re.I)
-FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
+# Markdown's fences. A fence opens at column 0 and closes at 0-3 spaces with nothing after its marker. A fence or heading
+# a list item, a quote or an HTML block could hold is refused, not guessed at: see scan_lines.
+FENCE_OPEN = re.compile(r"^(`{3,}|~{3,})(.*)$")
+FENCE_CLOSE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
+WIDE_FENCE = re.compile(r"^(?:[ \t]*\t| {4,})[ \t]*(`{3,}|~{3,})")
+FENCE_RUN = re.compile(r"`{3,}|~{3,}")
+ATX_HEADING = re.compile(r"#{1,6}(?:[ \t]|$)")
+SETEXT_UNDERLINE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
+CONTAINER = re.compile(r"(?:>|(?:[-*+]|\d{1,9}[.)])(?=[ \t]|$))[ \t]*")
+HTML_START = re.compile(r"<(?!!--)[A-Za-z/!?]")
+HTML_PRE = re.compile(r"<(?:pre|script|style|textarea)(?=[\s>]|$)", re.I)
+HTML_PRE_END = re.compile(r"</(?:pre|script|style|textarea)>", re.I)
+FENCE_REASON = ("the spec has a code fence indented 4 or more columns, or with a tab: keep fences at column 0, so every "
+                "reader ends them where the gates do")
+STRUCTURE_REASON = ("the spec has a heading or code fence that is indented, follows a list or quote marker, or sits in an "
+                    "HTML block: keep headings and fences at column 0, outside HTML blocks")
+SETEXT_REASON = "the spec has a setext heading (text over a line of = or -): write headings as '## Title'"
+COMMENT_REASON = ("the spec has an HTML comment a reader may not end where the gates do: a comment that starts after text, "
+                  "or 4 or more columns in, must close on its own line")
 USER_APPROVED_CLASSES = ("feature", "schema")
 CLASS_GATES = {
     "docs": "policy may approve it when nothing is risky; a change to anything but documentation is a risk",
@@ -422,23 +450,145 @@ def slug(text):
     return re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-.")[:60] or "task"
 
 
-def strip_comments(text):
-    return re.sub(r"<!--.*?-->", "", text, flags=re.S)
+def blank(text):
+    """text with every character but its line breaks replaced by a space, so an offset in it is one in text."""
+    return re.sub(r"[^\n]", " ", text)
 
 
-def blank_comments(text):
-    """text with every HTML comment replaced by as many spaces, so an offset in it is an offset in text."""
-    return re.sub(r"<!--.*?-->", lambda m: " " * len(m.group(0)), text, flags=re.S)
+def blank_comments_in_line(line, inside):
+    """(line with its HTML comment text blanked, whether a comment is still open at its end, whether a comment on the
+    line is one a reader may not end where the gates do). A comment that starts a line at 0-3 spaces runs to its '-->',
+    across lines, as a Markdown HTML block does. One that starts after text, or 4 or more columns in, must close on its
+    line: a reader would take it for an inline comment that ends with its paragraph, or for code. A '<!--' inside a
+    comment opens nothing."""
+    pieces, pos, ambiguous, must_close = [], 0, False, False
+    for m in re.finditer(r"<!--|-->", line):
+        if inside and m.group(0) == "-->":
+            pieces.append(blank(line[pos:m.end()]))
+            pos, inside, must_close = m.end(), False, False
+        elif not inside and m.group(0) == "<!--":
+            lead = line[:m.start()]
+            pieces.append(lead)
+            pos, inside = m.start(), True
+            ambiguous = ambiguous or (lead.strip() == "" and not re.fullmatch(r" {0,3}", lead))
+            must_close = not re.fullmatch(r" {0,3}", lead)
+    pieces.append(blank(line[pos:]) if inside else line[pos:])
+    return "".join(pieces), inside, ambiguous or (inside and must_close)
+
+
+def closes_fence(run, fence):
+    return run[0] == fence[0] and len(run) >= len(fence)
+
+
+def block_start(body):
+    """(what a line holds once its list and quote markers are stripped, whether it had any)."""
+    rest, nested = body.lstrip(" \t"), False
+    while True:
+        m = CONTAINER.match(rest)
+        if not m:
+            return rest, nested
+        rest, nested = rest[m.end():], True
+
+
+def scan_lines(text):
+    """(line, fenced, commentless, reason) for each line of text, read the way Markdown reads its blocks. A fence opens
+    at column 0 and closes with a run of its character, at least as long, at 0-3 spaces with nothing after it. A comment
+    doesn't open inside a fence, and a fence marker inside a comment opens nothing. fenced: the line is a fence or in one.
+    commentless: the line with its comment text blanked, code kept. reason: why a reader could read the line differently
+    from the gates, or ''. Only column-0 headings and fences are read: an indented one, one after a list or quote marker,
+    one in an HTML block and a setext heading are refused, since Markdown may read them as text or code. An HTML block
+    runs to a blank line, or to its closing tag for pre, script, style and textarea."""
+    fence, comment, html, prev_text = None, False, None, False
+    for line in re.findall(r"[^\n]*\n|[^\n]+\Z", text or ""):
+        body = line.rstrip("\r\n")
+        if fence is not None:
+            wide = WIDE_FENCE.match(body)
+            close = FENCE_CLOSE.match(body)
+            yield line, True, line, FENCE_REASON if wide and closes_fence(wide.group(1), fence) else ""
+            if close and closes_fence(close.group(1), fence):
+                fence = None
+            prev_text = False
+            continue
+        if html == "blank" and not body.strip():
+            html = None
+        rest, nested = block_start(body)
+        off_column = nested or body[:1] in (" ", "\t") or html is not None
+        reason = ""
+        if not comment and off_column and (FENCE_RUN.match(rest) or ATX_HEADING.match(rest)):
+            reason = STRUCTURE_REASON
+        elif not comment and prev_text and SETEXT_UNDERLINE.match(body):
+            reason = SETEXT_REASON
+        opening = None if comment or reason or off_column else FENCE_OPEN.match(body)
+        if opening and not ("`" in opening.group(2) and opening.group(1)[0] == "`"):
+            fence = opening.group(1)
+            yield line, True, line, ""
+            prev_text = False
+            continue
+        if not comment and not reason and html is None and HTML_START.match(rest):
+            html = "pre" if HTML_PRE.match(rest) else "blank"
+        commentless, comment, ambiguous = blank_comments_in_line(line, comment)
+        if html == "pre" and HTML_PRE_END.search(body):
+            html = None
+        yield line, False, commentless, COMMENT_REASON if ambiguous else reason
+        prev_text = bool(body.strip()) and not ATX_HEADING.match(body)
+
+
+def comment_free(text):
+    """text with its HTML comments blanked out and its code blocks kept, offsets kept: what the gates read a spec's
+    words from, examples included."""
+    return "".join(commentless for _, _, commentless, _ in scan_lines(text))
+
+
+def outline(text):
+    """text with its HTML comments and fenced code blocks blanked out, offsets kept: the spec's structure as Markdown
+    shows it. Headings, sections and Approved-by: lines are read from here only."""
+    return "".join(blank(line) if fenced else commentless for line, fenced, commentless, _ in scan_lines(text))
+
+
+def section_bounds(view, title):
+    """(heading start, body start, body end) of the '## <title>' section of view (an outline), or None."""
+    m = heading_pattern(title).search(view)
+    if not m:
+        return None
+    nxt = SECTION_END.search(view, m.end())
+    return m.start(), m.end(), nxt.start() if nxt else len(view)
 
 
 def md_section(text, title):
-    """Body of the '## <title>' section (case-insensitive), or None if absent."""
-    m = re.search(r"^##\s+%s\s*$" % re.escape(title), text, re.M | re.I)
-    if not m:
-        return None
-    rest = text[m.end():]
-    nxt = re.search(r"^##\s", rest, re.M)
-    return rest[:nxt.start()] if nxt else rest
+    """Body of the '## <title>' section as outline() shows it (no comments, no code blocks), or None if absent."""
+    view = outline(text)
+    bounds = section_bounds(view, title)
+    return None if bounds is None else view[bounds[1]:bounds[2]]
+
+
+def without_section(text, title, view=None):
+    """text without its '## <title>' section, the section found in text as the gates find it. view, when given, is a
+    version of text with the same offsets (comments kept, say) that the section is cut from."""
+    bounds = section_bounds(outline(text), title)
+    base = text if view is None else view
+    return base if bounds is None else base[:bounds[0]] + base[bounds[2]:]
+
+
+def approval_start(text):
+    """Where the spec's Approval section starts (its heading), or the end of text."""
+    m = APPROVAL_HEADING.search(outline(text))
+    return m.start() if m else len(text)
+
+
+def without_approval(text):
+    """text outside its Approval section: what the grill fingerprint covers and approval freezes."""
+    return without_section(text, "Approval")
+
+
+def frozen_text(text):
+    """What the grill fingerprint covers and the freeze keeps: the spec outside its Approval section, or all of it when a
+    reader could read its sections differently, since then no section can be trusted."""
+    return text if spec_reading_problem(text) else without_approval(text)
+
+
+def approval_section(text):
+    """The Approval section as approved() and policy approval read it: from its heading to the next '## ' heading."""
+    return md_section(text, "Approval")
 
 
 def bullets(section):
@@ -471,13 +621,8 @@ def stubs(path, text=None):
 
 # --------------------------------------------------------------------------- tasks
 
-def mask_comments(text):
-    """text with HTML comments blanked out but line breaks kept, so line indexes still match the file."""
-    return re.sub(r"<!--.*?-->", lambda m: "\n" * m.group(0).count("\n"), text or "", flags=re.S)
-
-
 def wip_tasks(text=None):
-    text = mask_comments(read(TASKS) if text is None else text)
+    text = outline(read(TASKS) if text is None else text)
     return [(n, line.strip()) for n, line in enumerate(text.splitlines(), 1) if WIP_LINE.match(line)]
 
 
@@ -497,7 +642,7 @@ def task_id_at(lines, index):
 
 
 def wip_task_ids(text=None):
-    text = mask_comments(read(TASKS) if text is None else text)
+    text = outline(read(TASKS) if text is None else text)
     lines = text.splitlines()
     return [task_id_at(lines, i) for i, line in enumerate(lines) if WIP_LINE.match(line)]
 
@@ -505,9 +650,9 @@ def wip_task_ids(text=None):
 def finished_tasks(before, after):
     """Ids of [WIP] tasks this edit takes out of progress, other than by reverting them to
     '- [ ]' (abandoning). Marking [x], rewording or deleting all count as finishing."""
-    after_lines = mask_comments(after).splitlines()
+    after_lines = outline(after).splitlines()
     pending = {PENDING_LINE.sub("", line).strip() for line in after_lines if PENDING_LINE.match(line)}
-    lines = mask_comments(before).splitlines()
+    lines = outline(before).splitlines()
     finished = []
     for i, line in enumerate(lines):
         if WIP_LINE.match(line) and line not in after_lines:
@@ -537,12 +682,12 @@ def spec_items(text, kind, task):
 
 
 def spec_adrs(text):
-    return sorted(set(ADR_ID.findall(md_section(strip_comments(text), "Architecture") or "")))
+    return sorted(set(ADR_ID.findall(md_section(text, "Architecture") or "")))
 
 
 def spec_skills(text):
     names = []
-    for item in bullets(md_section(strip_comments(text), "Skills")):
+    for item in bullets(md_section(text, "Skills")):
         m = re.match(r"`?([a-z0-9][a-z0-9-]*)`?", item)
         if m:
             names.append(m.group(1))
@@ -555,68 +700,47 @@ def adr_file(adr_id):
 
 
 def adr_status(text):
-    lines = [line.strip() for line in (md_section(strip_comments(text), "Status") or "").splitlines() if line.strip()]
+    lines = [line.strip() for line in (md_section(text, "Status") or "").splitlines() if line.strip()]
     return lines[0] if lines else ""
 
 
 def validate_adr(text, name):
-    body = strip_comments(text)
     problems = ["%s: section '## %s' is missing or empty" % (name, title)
-                for title in ADR_SECTIONS if not (md_section(body, title) or "").strip()]
-    return problems + stubs(name, body)
-
-
-def blank_fences(text):
-    """text with its fenced code blocks blanked out but line breaks kept, so an offset in it is an offset in text."""
-    return "".join(re.sub(r"[^\n]", " ", line) if fenced else line for line, fenced in fence_lines(text))
-
-
-def spec_outline(text):
-    """text with its HTML comments and fenced code blocks blanked out, offsets kept: where the spec's own headings are.
-    Fences are found once the comments are blanked, so a fence marker inside a comment opens nothing."""
-    return blank_fences(blank_comments(text or ""))
-
-
-def without_approval(text):
-    """text above its Approval section. A heading inside an HTML comment or a fenced code block doesn't start the
-    section: approved() doesn't see it either, and cutting there would leave the rest of the spec out of the grill
-    fingerprint, the freeze and what is read from the spec (the class, the risk checks)."""
-    m = APPROVAL_HEADING.search(spec_outline(text))
-    return text[:m.start()] if m else text
-
-
-def approval_section(text):
-    """The Approval section as approved() and policy approval read it: from the heading without_approval() cuts at,
-    without comments, and without code blocks, where an Approved-by: line is an example."""
-    return md_section(spec_outline(text), "Approval")
-
-
-def spec_body(text):
-    """The spec as the griller and the user passed it, without comments: everything the grill fingerprint and the
-    freeze on approval cover."""
-    return strip_comments(without_approval(text or ""))
+                for title in ADR_SECTIONS if not (md_section(text, title) or "").strip()]
+    return problems + stubs(name, comment_free(text))
 
 
 def approval_heading_problem(text):
-    """Why the spec's '## Approval' heading is ambiguous, or None: one inside a comment or a fenced code block, or one
-    that only reads as a heading once a comment on its line is removed. The gates skip those, but a reader that
-    doesn't (a Markdown section parser, an agent, the user's editor) would start the Approval section there, where
-    the grill fingerprint and the freeze don't end."""
-    stripped = strip_comments(text)
-    heading = APPROVAL_HEADING.search(blank_fences(stripped))
-    if (strip_comments(without_approval(text)) != stripped[:heading.start() if heading else len(stripped)]
-            or any(APPROVAL_HEADING.search(c) for c in re.findall(r"<!--.*?-->", text, re.S))):
+    """Why the spec's '## Approval' heading is ambiguous, or None: one inside a code block, or one inside or next to an
+    HTML comment. A reader that doesn't skip those would start the Approval section there, where the grill fingerprint
+    and the freeze don't end."""
+    for line, fenced, commentless, _ in scan_lines(text):
+        body = line.rstrip("\r\n")
+        if not (APPROVAL_HEADING.match(body) or APPROVAL_HEADING.match(re.sub(r"<!--.*?-->", "", body))):
+            continue
+        if not fenced and APPROVAL_HEADING.match(commentless.rstrip("\r\n")):
+            continue
+        if fenced:
+            return ("the spec has an '## Approval' heading inside a fenced code block: keep one '## Approval' heading, "
+                    "on a line of its own, outside code blocks (indent an example's heading)")
         return ("the spec has an '## Approval' heading inside or next to an HTML comment: keep one '## Approval' "
                 "heading, on a line of its own, outside comments")
-    if any(fenced and APPROVAL_HEADING.match(line) for line, fenced in fence_lines(blank_comments(text))):
-        return ("the spec has an '## Approval' heading inside a fenced code block: keep one '## Approval' heading, "
-                "on a line of its own, outside code blocks (indent an example's heading)")
     return None
 
 
-def without_section(text, title):
-    """text without any '## <title>' section."""
-    return re.sub(r"^##\s+%s\s*\n(?:(?!##\s).*\n?)*" % re.escape(title), "", text, flags=re.M | re.I)
+def reading_problem(text):
+    """Why a reader could read the spec's code, comments or headings differently from the gates, or None (scan_lines)."""
+    return next((reason for *_, reason in scan_lines(text) if reason), None)
+
+
+def spec_reading_problems(text):
+    """Why the spec is refused for how a reader would read it, one reason each: see scan_lines and approval_heading_problem."""
+    return [p for p in (approval_heading_problem(text), reading_problem(text)) if p]
+
+
+def spec_reading_problem(text):
+    problems = spec_reading_problems(text)
+    return problems[0] if problems else None
 
 
 def knowledge_root():
@@ -653,7 +777,7 @@ def knowledge_citation_problems(text):
     """Assumptions without a source, or citing vault:<path> notes that don't exist or aren't allowed."""
     problems = []
     root = knowledge_root()
-    for n, item in enumerate(top_level_items(md_section(strip_comments(text), "Assumptions")), 1):
+    for n, item in enumerate(top_level_items(md_section(text, "Assumptions")), 1):
         if item.lower().rstrip(".") in ("none", "n/a"):
             continue
         label = (re.match(r"^(A\d+)", item) or [None, "assumption %d" % n])[1]
@@ -713,7 +837,7 @@ def knowledge_guard(tool, tool_input):
 
 
 def approval_lines(text):
-    return sorted(line.strip() for line in text.splitlines() if APPROVAL_LINE.match(line))
+    return sorted(line.strip() for line in text.split("\n") if APPROVAL_LINE.match(line))
 
 
 def approved(text):
@@ -755,10 +879,12 @@ def ears_problems(req, text):
 def change_class(text):
     """(class, declared, problem) from the spec's Change-Class: line. Without one the spec counts as feature;
     a value that isn't exactly one class, or two different values, is a problem and counts as feature too."""
-    # Not from the Approval section, where agents may still write once the spec is approved, nor from a code block,
-    # where the line is an example.
-    values = [v.strip() for v in CHANGE_CLASS_LINE.findall(without_fences(spec_body(text)))]
+    # Not from the Approval section, where agents may still write once the spec is approved, nor from a code block or
+    # comment, where the line is an example.
+    values = [v.strip() for v in CHANGE_CLASS_LINE.findall(without_section(text, "Approval", view=outline(text)))]
     distinct = sorted({v.lower() for v in values})
+    if reading_problem(text):   # a reader may take a line for code or a heading, so no class in it can be trusted
+        return "feature", bool(values), None
     if not values:
         return "feature", False, None
     if len(distinct) > 1:
@@ -766,29 +892,6 @@ def change_class(text):
     if distinct[0] not in CHANGE_CLASSES:
         return "feature", True, "Change-Class '%s' is not one of %s" % (values[0], ", ".join(CHANGE_CLASSES))
     return distinct[0], True, None
-
-
-def fence_lines(text):
-    """(line, whether it belongs to a fenced code block) for each line of text: ``` or ~~~, closed as in Markdown; one
-    left open runs to the end."""
-    fence = None
-    # Lines end at \n only, as for the ^ and $ of the regexes that read the spec: splitlines() would also end one at
-    # \x1c or  , so a fence could open inside what those regexes read as a heading line.
-    for line in re.findall(r"[^\n]*\n|[^\n]+\Z", text):
-        m = FENCE.match(line.rstrip("\r\n"))
-        if fence is None:
-            # A backtick in the rest of the line makes it inline code (```x```), not a fence.
-            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
-                fence = m.group(1)
-            yield line, fence is not None
-        else:
-            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
-                fence = None
-            yield line, True
-
-
-def without_fences(text):
-    return "".join(line for line, fenced in fence_lines(text) if not fenced)
 
 
 def class_label(text):
@@ -801,13 +904,13 @@ def validate_spec(task, text=None):
     text = read(spec_path(task)) if text is None else text
     if not text.strip():
         return ["no spec at %s (the analyst agent writes it)" % spec_rel(task)]
-    body = strip_comments(text)
+    body = comment_free(text)
     problems = []
     reqs = spec_items(body, "REQ", task)
     acs = spec_items(body, "AC", task)
     req_ids = {req for req, _ in reqs}
     ears = conf()["HARNESS_REQ_STYLE"] == "ears"
-    nfr_ids = {nfr for nfr, _ in spec_items(md_section(body, "Non-functional requirements") or "", "NFR", task)}
+    nfr_ids = {nfr for nfr, _ in spec_items(md_section(text, "Non-functional requirements") or "", "NFR", task)}
     if ears:
         for req, rest in reqs:
             problems.extend(ears_problems(req, rest))
@@ -831,7 +934,7 @@ def validate_spec(task, text=None):
         if not all(re.search(r"\b%s\b" % word, rest, re.I) for word in ("given", "when", "then")):
             problems.append("%s is not written as Given ..., when ..., then ..." % ac)
     problems.extend("%s has no acceptance criterion" % req for req in sorted(req_ids - covered))
-    problems.extend(p for p in (change_class(text)[2], approval_heading_problem(text)) if p)
+    problems.extend(p for p in [change_class(text)[2]] + spec_reading_problems(text) if p)
     problems.extend(knowledge_citation_problems(text))
     adrs = spec_adrs(text)
     if not adrs:
@@ -851,7 +954,7 @@ def validate_spec(task, text=None):
         problems.append("the Skills section must list the skills the implementation needs")
     available = available_skills()
     problems.extend("skill '%s' does not exist in .claude/skills/" % s for s in skills if s not in available)
-    open_items = [q for q in bullets(md_section(body, "Open questions"))
+    open_items = [q for q in bullets(md_section(text, "Open questions"))
                   if q.lower().rstrip(".") not in ("none", "n/a")]
     if open_items:
         problems.append("open questions remain: %s" % "; ".join(open_items)[:300])
@@ -863,7 +966,7 @@ def validate_spec(task, text=None):
 def spec_fingerprint(task, text=None):
     """Hash of the spec (without its Approval section) and of every ADR it references."""
     text = read(spec_path(task)) if text is None else text
-    digest = hashlib.sha256(without_approval(text).encode("utf-8"))
+    digest = hashlib.sha256(frozen_text(text).encode("utf-8"))
     for adr in spec_adrs(text):
         path = adr_file(adr)
         digest.update(adr.encode("utf-8"))
@@ -1609,7 +1712,7 @@ def effective_judge(task, report):
     if str(report.get("verdict", "")).lower() != "pass":
         reasons.append("judge verdict: %s" % report.get("verdict"))
     spec_text = read(spec_path(task))
-    acs = [ac for ac, _ in spec_items(strip_comments(spec_text), "AC", task)]
+    acs = [ac for ac, _ in spec_items(comment_free(spec_text), "AC", task)]
     if not acs:
         reasons.append("no acceptance criteria found in %s" % spec_rel(task))
     by_id = {}
@@ -1773,7 +1876,7 @@ def halt_file():
 
 def task_line(task, text=None):
     """(index, line) of task's line in 3-TASKS.md (outside comments), or (None, None)."""
-    lines = mask_comments(read(TASKS) if text is None else text).splitlines()
+    lines = outline(read(TASKS) if text is None else text).splitlines()
     for i, line in enumerate(lines):
         if re.match(r"^\s*[-*]\s+\[[^\]]*\]", line) and task_id_at(lines, i) == task:
             return i, line
@@ -1781,7 +1884,7 @@ def task_line(task, text=None):
 
 
 def blocked_tasks(text):
-    lines = mask_comments(text).splitlines()
+    lines = outline(text).splitlines()
     return {task_id_at(lines, i) for i, line in enumerate(lines)
             if re.match(r"^\s*[-*]\s+\[[^\]]*\]", line) and BLOCKED_NOTE.search(line)}
 
@@ -1846,8 +1949,12 @@ def content_risks(text, changed=None):
     values = conf()
     # Skills only says which skills the agents load, and explaining why `security` isn't needed ("no auth or
     # personal data") would read as risk. What the work does is in the other sections and in the diff.
-    body = without_section(spec_body(text), "Skills")
+    outside = without_approval(text)
+    body = without_section(outside, "Skills", view=comment_free(outside))
     reasons = []
+    unread = spec_reading_problem(text)
+    if unread:
+        reasons.append("the spec can't be read the way Markdown renders it: %s" % unread)
     terms = re.compile(values["HARNESS_RISK_TERMS"])
     paths = re.compile(values["HARNESS_RISK_PATHS"])
     hits = sorted({m.group(0).lower() for m in terms.finditer(body)})
@@ -2039,7 +2146,7 @@ def approve_command(task):
         print("approve: the spec must be valid and have a current griller pass first (spec-check %s)" % task)
         return 1
     asked = sum(len(entry.get("questions") or []) for entry in history)
-    assumptions = [a for a in top_level_items(md_section(strip_comments(text), "Assumptions"))
+    assumptions = [a for a in top_level_items(md_section(text, "Assumptions"))
                    if a.lower().rstrip(".") not in ("none", "n/a")]
     if asked and not assumptions:
         print("approve: the griller asked %d question(s); record how each was settled under '## Assumptions' "
@@ -2056,8 +2163,8 @@ def approve_command(task):
     base = git("rev-parse", "--verify", "-q", "HEAD").strip()[:12] or "none"
     line = "Approved-by: policy:low-risk (%s; base %s; %s)" % (
         time.strftime("%Y-%m-%d"), base, "light lane" if light else "grill %s" % last.get("fingerprint", "")[:12])
-    m = APPROVAL_HEADING.search(spec_outline(text))
-    text = (text.rstrip("\n") + "\n\n## Approval\n" if not m else text.rstrip("\n")) + "\n" + line + "\n"
+    has_heading = approval_start(text) < len(text)
+    text = (text.rstrip("\n") + "\n\n## Approval\n" if not has_heading else text.rstrip("\n")) + "\n" + line + "\n"
     spec_path(task).write_text(text, encoding="utf-8")
     log_event("approval", task=task, rule="low-risk", base=base)
     snapshot_refresh()
@@ -2284,7 +2391,7 @@ def wip_collision(before, after):
 # refuses a light task whose change grew past HARNESS_LIGHT_MAX_FILES files.
 
 def light_tasks(text):
-    lines = mask_comments(text or "").splitlines()
+    lines = outline(text or "").splitlines()
     return {task_id_at(lines, i) for i, line in enumerate(lines)
             if re.match(r"^\s*[-*]\s+\[[^\]]*\]", line) and LIGHT_MARK.search(BLOCKED_NOTE.sub("", line))}
 
@@ -2302,7 +2409,7 @@ def light_reasons(task):
     """Why a task marked (light) still needs the full pipeline; empty when the light lane applies. The user's mark
     is enough for feature work, which the user approves anyway; schema work never takes the lane."""
     text = read(spec_path(task))
-    body = strip_comments(text)
+    body = comment_free(text)
     cls, _, problem = change_class(text)
     if problem:
         reasons = [problem]
@@ -2502,7 +2609,7 @@ def acceptance_problem(task):
     if not history:
         return ("Task %s has no acceptance tests from the tester (HARNESS_TESTER is on). Ask the tester to write "
                 "them; the implementer may not." % task)
-    acs = [ac for ac, _ in spec_items(strip_comments(read(spec_path(task))), "AC", task)]
+    acs = [ac for ac, _ in spec_items(comment_free(read(spec_path(task))), "AC", task)]
     missing = [ac for ac in acs if ac not in acceptance_files(task)]
     if missing:
         return "No acceptance test covers %s of task %s. Ask the tester to add them." % (", ".join(missing), task)
@@ -2531,10 +2638,11 @@ def judge_gate(before, after):
 
 
 def spec_guard(before, after):
-    """Approval lines are the user's alone, and an approved spec is frozen."""
-    if approval_lines(before) != approval_lines(after):
+    """Approval lines are the user's alone, and an approved spec is frozen. Approval lines are read from outline(), the
+    text approved() reads, so a line that only a comment hides is no way round it."""
+    if approval_lines(outline(before)) != approval_lines(outline(after)) or approved(before) != approved(after):
         return "  - Only the user may add, change or remove 'Approved-by:' lines."
-    if approved(before) and without_approval(before) != without_approval(after):
+    if approved(before) and frozen_text(before) != frozen_text(after):
         return ("  - This spec is approved and therefore frozen. If it must change, ask the user to remove their "
                 "approval first; it will need grilling and approval again.")
     return None
@@ -2556,9 +2664,7 @@ def adr_guard(before, after):
         return ("  - Only the user may set an ADR's status to Accepted. Leave it Proposed and ask the user "
                 "to review and accept it.")
     if old.lower().startswith("accepted") and new.lower().startswith("accepted"):
-        def body(text):
-            return re.sub(r"^##\s+Status\s*$.*?(?=^##\s)", "", strip_comments(text), flags=re.M | re.S | re.I)
-        if body(before) != body(after):
+        if without_section(before, "Status") != without_section(after, "Status"):
             return ("  - This ADR is Accepted and therefore frozen. Record a change as a new ADR that supersedes it "
                     "(and set this one's status to 'Superseded by ADR-NNN').")
     return None
@@ -2618,7 +2724,7 @@ def tree_fingerprint(commit=None):
 
 
 def task_states(text):
-    lines = mask_comments(text).splitlines()
+    lines = outline(text).splitlines()
     wip = {task_id_at(lines, i) for i, line in enumerate(lines) if WIP_LINE.match(line)}
     done = {task_id_at(lines, i) for i, line in enumerate(lines) if DONE_LINE.match(line)}
     return wip, done
@@ -2800,7 +2906,7 @@ def attested_task(task, commits, tip):
         "finishedIn": finished_in,
         "spec": {"path": spec_rel(task),
                  "fingerprint": spec_fingerprint(task, spec_text) if spec_text.strip() else None,
-                 "approval": approval_lines(md_section(strip_comments(spec_text), "Approval") or "")},
+                 "approval": approval_lines(md_section(spec_text, "Approval") or "")},
         "changeClass": {"class": cls, "declared": declared, "problem": problem},
         "grill": verdict_brief(verdict_history(task, "grill")),
         "judge": judge,
@@ -4544,7 +4650,7 @@ DESIGN_TOPICS = re.compile(r"(?i)\b(ADR|architecture|design|skills?|tech(nical)?
 
 
 def task_ids():
-    lines = mask_comments(read(TASKS)).splitlines()
+    lines = outline(read(TASKS)).splitlines()
     found = []
     for i, line in enumerate(lines):
         if re.match(r"^\s*[-*]\s+\[[^\]]*\]", line) and TASK_REF.search(line):
@@ -4601,7 +4707,7 @@ TECH_PLACEHOLDER = re.compile(r"(?i)^<.*>$|\b(to be (added|filled|decided|define
 
 def architecture_pending(text):
     """The architect hasn't filled in the spec yet: no tech requirement beyond the template's placeholders."""
-    section = md_section(strip_comments(text), "Architecture") or ""
+    section = md_section(text, "Architecture") or ""
     tech = section.split("Tech requirements:", 1)[1] if "Tech requirements:" in section else ""
     items = [b for b in bullets(tech) if b]
     return not items or all(TECH_PLACEHOLDER.search(b) for b in items)
@@ -4991,7 +5097,7 @@ AFTER_NOTE = re.compile(r"\(after(?::\s*|\s+)([^)]+)\)", re.I)   # "(after: 1.1,
 
 def task_dependencies():
     """{task: [tasks it waits for]} from "(after: 1.1, 1.2)" or "(after 1.1)" on its line in 3-TASKS.md."""
-    lines = mask_comments(read(TASKS)).splitlines()
+    lines = outline(read(TASKS)).splitlines()
     deps = {}
     for i, line in enumerate(lines):
         m = AFTER_NOTE.search(line)
@@ -5166,7 +5272,7 @@ def retry_brief(task, attempt, attempts, cause, step, started_at):
 
 def ready_tasks(text=None):
     """[(id, title, state)] the runner may work on: a [WIP] task first, then pending ones, never BLOCKED."""
-    lines = mask_comments(read(TASKS) if text is None else text).splitlines()
+    lines = outline(read(TASKS) if text is None else text).splitlines()
     found = []
     for i, line in enumerate(lines):
         if BLOCKED_NOTE.search(line) or not (WIP_LINE.match(line) or PENDING_LINE.match(line)):
@@ -6086,7 +6192,7 @@ def trace_task(task, current, by_code, incomplete, settings):
     commits that carry the judged code, and the gaps the harness can see. incomplete: why the history may lack the
     judged code, or None."""
     text = read(spec_path(task))
-    body = strip_comments(text)
+    body = comment_free(text)
     nfr_section = md_section(body, "Non-functional requirements") or ""
     ears = settings["HARNESS_REQ_STYLE"] == "ears"
     requirements = []
@@ -6325,7 +6431,7 @@ def receipt_data(task, base=None, code=None):
         return None, "no spec at %s" % spec_rel(task)
     if passed.get("fingerprint") != (code or code_fingerprint()):
         return None, "the code changed after the judge passed task %s; judge it again first" % task
-    body = strip_comments(spec_text)
+    body = comment_free(spec_text)
     title = re.match(r"^#\s+Spec\s+\S+:\s*(.+)$", body.strip().splitlines()[0]) if body.strip() else None
     base = receipt_base(task, spec_text, base)
     changes = changed_since(base)
@@ -6350,7 +6456,7 @@ def receipt_data(task, base=None, code=None):
         verified.append("acceptance tests written by the tester before the code, unchanged since: %s"
                         % ", ".join(sorted({f for files in (tests[-1].get("files") or {}).values()
                                             for f in (files if isinstance(files, list) else [files])})) or "-")
-    nfrs = [n for n in top_level_items(md_section(body, "Non-functional requirements"))
+    nfrs = [n for n in top_level_items(md_section(spec_text, "Non-functional requirements"))
             if n.lower().rstrip(".") not in ("none", "n/a")]
     not_verified.extend("NFR not covered by any acceptance criterion: %s" % n for n in nfrs)
     for f in passed.get("findings") or []:
@@ -6368,7 +6474,7 @@ def receipt_data(task, base=None, code=None):
                 approval_needed.append("accept or reject %s (%s)" % (m.group(1), name))
     governing = ["%s (%s)" % (adr, adr_status(read(adr_file(adr))) if adr_file(adr) else "missing")
                  for adr in spec_adrs(spec_text)]
-    assumptions = [a for a in top_level_items(md_section(body, "Assumptions")) if a.lower().rstrip(".") not in
+    assumptions = [a for a in top_level_items(md_section(spec_text, "Assumptions")) if a.lower().rstrip(".") not in
                    ("none", "n/a")]
     escalations = [e for e in open_escalations() if re.search(r"\bTask %s:" % re.escape(task), e)]
     approval_needed.extend("resolve the open escalation: %s" % e for e in escalations)
@@ -6376,7 +6482,7 @@ def receipt_data(task, base=None, code=None):
     data = {
         "task": task,
         "title": title.group(1).strip() if title else task_title(task),
-        "objective": " ".join((md_section(body, "Context") or "").split()),
+        "objective": " ".join((md_section(spec_text, "Context") or "").split()),
         "base": base,
         "changed": [{"path": n, "status": s} for n, s in changes if not n.startswith("backbone/")],
         "backbone_changed": [{"path": n, "status": s} for n, s in changes if n.startswith("backbone/")],
@@ -6455,7 +6561,7 @@ def linear_import(issue, task, light, dry_run):
     tasks_text = read(TASKS)
     if path.exists():
         raise HarnessError("%s exists already; import into a new task id" % spec_rel(task))
-    if re.search(r"\bTask\s+%s\b" % re.escape(task), mask_comments(tasks_text)):
+    if re.search(r"\bTask\s+%s\b" % re.escape(task), outline(tasks_text)):
         raise HarnessError("task %s is already in backbone/3-TASKS.md" % task)
     if re.search(r"\blinear:\s*%s\b" % re.escape(identifier), tasks_text):
         raise HarnessError("%s is imported already (backbone/3-TASKS.md)" % identifier)
@@ -6474,8 +6580,8 @@ def linear_import(issue, task, light, dry_run):
                                                                                quoted), 1)
     line = "- [ ] **Task %s: %s** (spec: %s; linear: %s)%s" % (task, title, spec_rel(task), identifier,
                                                               " (light)" if light else "")
-    marker = re.search(r"(?m)^## Status markers", tasks_text)
-    new_tasks = (tasks_text[:marker.start()].rstrip("\n") + "\n" + line + "\n\n" + tasks_text[marker.start():]
+    marker = section_bounds(outline(tasks_text), "Status markers")
+    new_tasks = (tasks_text[:marker[0]].rstrip("\n") + "\n" + line + "\n\n" + tasks_text[marker[0]:]
                  if marker else tasks_text.rstrip("\n") + "\n" + line + "\n")
     print("%s %s as task %s:\n  spec  %s (the analyst writes its requirements)\n  task  %s"
           % ("Would import" if dry_run else "Imported", identifier, task, spec_rel(task), line))
@@ -6877,7 +6983,7 @@ def record_tests(data):
         if retry:
             deny("Set \"task\" in the JSON to the [WIP] task you wrote tests for.")
         return
-    acs = [ac for ac, _ in spec_items(strip_comments(read(spec_path(task))), "AC", task)]
+    acs = [ac for ac, _ in spec_items(comment_free(read(spec_path(task))), "AC", task)]
     covered = acceptance_files(task)
     missing = [ac for ac in acs if ac not in covered]
     if missing and retry:
