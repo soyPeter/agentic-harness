@@ -102,6 +102,18 @@
   Switching there and back without moving the pin gives back the install, except that an edited file outside
   `backbone/` becomes the release's copy with the edit kept in `<file>.harness-bak`. The README has a Thin mode
   section: the plugin for each CLI, `init --thin`, `pin`, switching, CI, the plugin/pin rule and the limits.
+- **Packs in a thin project work from the hashes the pin keeps.** `harness.py adopt` and `adopt --remove` read a
+  file's hash from the lock's `"kept"` when its `"files"` doesn't list it. So in a project switched with
+  `update.sh --to-thin`, a pack can be adopted again after the pin moved, adopting it again without an option deletes
+  that option's unedited files, and removing it deletes the files nobody edited and keeps the edited ones. In a thin
+  lock, `adopt` records a pack's hashes under `"kept"` instead of `"files"`, and a removed pack's files leave both
+  tables: `verify` takes a lock with `"files"` for a full install's and refuses every change to
+  `.claude/settings.json`, and CI runs the base branch's engine, perhaps an older release. 0.30.0's `adopt` gave a thin
+  lock `"files"`; adopting such a pack again, or removing it, takes its files out. Like the backbone documents a thin
+  lock keeps, `doctor` doesn't report these files as edited.
+- **`update.sh --to-thin --version V` takes the installed release's permission rules out of `.claude/settings.json`,
+  not those of `V`.** Otherwise a rule only the installed release had would stay, and a rule of yours that only `V`
+  adds would go. It fetches the installed release to read them, and refuses when it can't.
 - **The machine guard knows thin projects, and the plugin gives its check.** The guard took a thin project (a
   `"mode": "thin"` pin in `backbone/.harness-lock.json`, no `scripts/harness/`) for one that isn't enrolled: it
   reminded the agent and, in block mode, refused its edits. A thin pin now counts, and so does a lock that can't be

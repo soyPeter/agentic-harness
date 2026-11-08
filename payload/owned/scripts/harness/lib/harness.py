@@ -3027,10 +3027,30 @@ def write_lock(data):
     LOCK_FILE.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def recorded_hash(info, rel_path):
+    """The hash the lock records for a harness file: under "files", or under "kept" in a thin project."""
+    for table in ("files", "kept"):
+        if rel_path in (info.get(table) or {}):
+            return info[table][rel_path]
+    return None
+
+
+def record_hash(info, rel_path, digest):
+    forget_hash(info, rel_path)
+    # verify takes a lock with "files" for a full install's and refuses every change to .claude/settings.json; CI runs
+    # the base branch's engine, perhaps an older release, so a thin lock keeps its hashes under "kept", as
+    # update.sh --to-thin and init --thin do.
+    info.setdefault("kept" if info.get("mode") == "thin" else "files", {})[rel_path] = digest
+
+
+def forget_hash(info, rel_path):
+    for table in ("files", "kept"):
+        (info.get(table) or {}).pop(rel_path, None)
+
+
 def adopt(names, adr, chosen, declined, dry_run):
     info = lock()
     adopted = info.setdefault("adopted", {})
-    tracked = info.setdefault("files", {})
     for name in names:
         for required in pack_meta(name).get("requires", []):
             if required not in names and required not in adopted:
@@ -3058,15 +3078,15 @@ def adopt(names, adr, chosen, declined, dry_run):
         previous = set((adopted.get(name) or {}).get("files", []))
         for rel_path, src in sorted(files.items()):
             dest = ROOT / rel_path
-            if dest.exists() and rel_path not in tracked and sha256(dest) != sha256(src):
+            if dest.exists() and recorded_hash(info, rel_path) is None and sha256(dest) != sha256(src):
                 raise HarnessError("%s already exists as a project file; rename it or remove it before adopting %s"
                                    % (rel_path, name))
         for rel_path in sorted(previous - set(files)):
-            if sha256(ROOT / rel_path) == tracked.get(rel_path):
+            if sha256(ROOT / rel_path) == recorded_hash(info, rel_path):
                 report.append("remove  %s" % rel_path)
                 if not dry_run:
                     (ROOT / rel_path).unlink()
-                    tracked.pop(rel_path, None)
+                    forget_hash(info, rel_path)
         for rel_path, src in sorted(files.items()):
             report.append("install %s" % rel_path)
             if not dry_run:
@@ -3074,7 +3094,7 @@ def adopt(names, adr, chosen, declined, dry_run):
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(str(src), str(dest))
                 shutil.copymode(str(src), str(dest))
-                tracked[rel_path] = sha256(dest)
+                record_hash(info, rel_path, sha256(dest))
         header = "(%s, %s; options: %s)" % (adr, today, ", ".join(options) or "none")
         guardrails = replace_block(guardrails, name, rules or ["# (no rules)"], header)
         routing = replace_block(routing, name, routes or ["# (no routes)"], header)
@@ -3098,7 +3118,6 @@ def adopt(names, adr, chosen, declined, dry_run):
 def unadopt(names, dry_run):
     info = lock()
     adopted = info.get("adopted", {})
-    tracked = info.get("files", {})
     for name in names:
         if name not in adopted:
             raise HarnessError("%s is not adopted" % name)
@@ -3109,13 +3128,13 @@ def unadopt(names, dry_run):
     report = []
     for name in names:
         for rel_path in adopted[name].get("files", []):
-            if sha256(ROOT / rel_path) == tracked.get(rel_path):
+            if sha256(ROOT / rel_path) == recorded_hash(info, rel_path):
                 report.append("remove  %s" % rel_path)
                 if not dry_run:
                     (ROOT / rel_path).unlink()
             else:
                 report.append("kept    %s (edited locally; delete it yourself if unwanted)" % rel_path)
-            tracked.pop(rel_path, None)
+            forget_hash(info, rel_path)
         guardrails = replace_block(guardrails, name, None)
         routing = replace_block(routing, name, None)
         del adopted[name]
