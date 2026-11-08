@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Traceability export (ADR-004).** `harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]`
+  writes the chain requirement → acceptance criterion → test file → judge verdict → commit for every task with a spec,
+  or one task: as ReqIF 1.2 (written with `xml.etree`), as a Sphinx-Needs `needs.json` in format 1, or as a
+  self-contained HTML matrix to attach to a pull request. It is derived from `backbone/` and git and one-way: no
+  network, no new dependency, and no gate reads it. Ids are the spec's own; each task says whether its latest judge
+  pass is on the current code, lists every commit whose code is the judged code and the test files that mention each
+  criterion in it, and lists the gaps (requirements without a criterion, criteria without a test file, undefined
+  references, NFRs without an id, open findings). Under `HARNESS_REQ_STYLE=ears` each requirement carries its EARS
+  pattern. `--out` inside the repository is refused unless git ignores the file. The same repository state gives the
+  same bytes. `docs/adr/ADR-004-traceability-export.md` records the decision, including what a regulated team can and
+  can't claim from it (it isn't signed, validated or PCI DSS evidence). `tests/test-trace-export.py` checks the ReqIF
+  output against a minimal subset of the OMG schema vendored in `tests/reqif_check.py`, offline, plus the
+  `needs.json` shape and the HTML matrix, with property checks.
+
 - **Signed verdict attestations (ADR-005, Proposed).** `docs/adr/ADR-005-verdict-attestations.md` decides how
   `harness-verify` turns its verdict into evidence others can check: an in-toto Statement, a custom predicate type
   (`https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1`, no SLSA level claimed), cosign with a
