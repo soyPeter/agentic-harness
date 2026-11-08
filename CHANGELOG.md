@@ -9,6 +9,30 @@
   the default branch. `gh pr comment`, which delivery doesn't use, is refused. Gh text in quoted arguments and heredoc
   bodies is no longer read as a command.
 
+- **Sandbox backends and sandbox evidence (ADR-003, Proposed).** `docs/adr/ADR-003-sandbox-backends.md` decides a
+  sandbox backend interface for unattended runs (create, exec, copy in and out, egress policy, teardown, identity),
+  with the local devcontainer as the default and the only backend the CI floor may use, and lists E2B, Freestyle and
+  Coder as later candidates with the research's risks. This release ships its v1:
+  - `harness.py run` starts each agent session through the backend `HARNESS_SANDBOX_BACKEND` names (new, user-only,
+    default `devcontainer`). `devcontainer` runs it where the runner runs, as before. Any other value is a doctor
+    error, so `run` and `orca` refuse to start; `verify` never reads it.
+  - Each judge verdict records the sandbox it was recorded in, and `receipt` shows it (a SANDBOX section; `sandbox`
+    in `--json`): `backend`, `isolation_class`, `image_digest`, `allowlist_hash`, `region`, `control_plane`,
+    `credential_mode`. Outside the harness-agent container it says `isolation_class: none`; a judge pass recorded
+    before this release says "not recorded". The evidence never holds a credential, and refuses nothing.
+  - `.devcontainer/harness-agent/` builds from `node:22-bookworm` pinned by digest, and bakes the reference into
+    the image (`HARNESS_SANDBOX_IMAGE`).
+  - The egress allowlist moved out of the agent's container: a second container (`egress`, `docker-compose.yml`)
+    applies `init-firewall.sh` in the network namespace the agent's container joins, and publishes the host list the
+    evidence hashes. The agent's container drops NET_ADMIN and NET_RAW, runs with `no-new-privileges` and has no
+    sudo, so the agent can no longer re-run the firewall script as root. Outbound IPv6 is dropped. DNS is still open
+    to any resolver.
+  - `tests/test-sandbox-evidence.py` (in the self-test) and `tests/test-sandbox-egress.py` (a real container, with
+    `HARNESS_E2E=1`, docker and the devcontainer CLI).
+  - **Upgrading:** the sandbox is now two containers. Move an edited `HARNESS_FIREWALL_ALLOW` or knowledge mount from
+    `devcontainer.json` to `docker-compose.yml`, and rebuild the container; an image built before this release
+    records `isolation_class: none`.
+
 - **Change-Class ladder (ADR-002).** Spec template and `requirements-writing` skill declare `Change-Class`
   (`docs` | `refactor` | `feature` | `schema`) plus optional `Parent-CHNG` / `Parent-RFC` / `Parent-ADR` links.
   Policy: PR merge stays human; policy `approve` must not be treated as merge. Runtime enforcement in
