@@ -228,6 +228,9 @@ def pin(version):
     commit, release = release_checkout(version)
     settings = settings_for(root, version)
     lock.update(version=version, commit=commit)
+    # An earlier engine's adopt recorded a thin project's hashes under "files", which verify reads as a full install's.
+    for rel, digest in (lock.pop("files", None) or {}).items():
+        lock.setdefault("kept", {})[rel] = digest
     updated = []
     for rel, source in RELEASE_FILES:
         content = (release / source).read_bytes()
