@@ -5,6 +5,10 @@
 #
 # Changes to the harness itself or to user-only settings fail the check unless a maintainer adds the
 # `harness-change-approved` label (restrict who may label pull requests accordingly).
+#
+# Optional (ADR-005): with the secret HARNESS_ATTEST_KEY (a cosign private key) and HARNESS_ATTEST_PASSWORD, a passing
+# run also writes an in-toto statement of the verdicts with the same engine, signs it with that key, and keeps the
+# statement and its Sigstore bundle as the `harness-attestation` artifact.
 name: harness-verify
 
 on:
@@ -17,6 +21,8 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    env:
+      HARNESS_ATTEST_SIGN: ${{ secrets.HARNESS_ATTEST_KEY != '' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -106,3 +112,41 @@ jobs:
           HARNESS_ROOT: ${{ github.workspace }}
           ALLOW: ${{ contains(github.event.pull_request.labels.*.name, 'harness-change-approved') && '--allow-user-changes' || '' }}
         run: python3 "$ENGINE_SCRIPT" verify --range "origin/$BASE..HEAD" $ALLOW
+
+      - name: Write the verdict attestation
+        if: env.HARNESS_ATTEST_SIGN == 'true'
+        shell: bash
+        env:
+          BASE: ${{ github.base_ref }}
+          HARNESS_ROOT: ${{ github.workspace }}
+          ALLOW: ${{ contains(github.event.pull_request.labels.*.name, 'harness-change-approved') && '--allow-user-changes' || '' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/harness-attestation"
+          python3 "$ENGINE_SCRIPT" attest --range "origin/$BASE..HEAD" $ALLOW \
+            > "$RUNNER_TEMP/harness-attestation/harness-verdicts.intoto.json"
+
+      - name: Sign the verdict attestation
+        if: env.HARNESS_ATTEST_SIGN == 'true'
+        shell: bash
+        env:
+          HARNESS_ATTEST_KEY: ${{ secrets.HARNESS_ATTEST_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.HARNESS_ATTEST_PASSWORD }}
+        run: |
+          cosign="$RUNNER_TEMP/cosign"
+          curl -fsSL --retry 3 -o "$cosign" \
+            https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign-linux-amd64
+          echo "424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa  $cosign" | sha256sum -c -
+          chmod +x "$cosign"
+          # No services in the signing config: nothing goes to a transparency log or timestamp authority.
+          "$cosign" signing-config create --out "$RUNNER_TEMP/signing-config.json"
+          dir="$RUNNER_TEMP/harness-attestation"
+          "$cosign" attest-blob --yes --key env://HARNESS_ATTEST_KEY --signing-config "$RUNNER_TEMP/signing-config.json" \
+            --statement "$dir/harness-verdicts.intoto.json" --bundle "$dir/harness-verdicts.sigstore.json" < /dev/null
+
+      - name: Upload the verdict attestation
+        if: env.HARNESS_ATTEST_SIGN == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: harness-attestation
+          path: ${{ runner.temp }}/harness-attestation/
+          if-no-files-found: error

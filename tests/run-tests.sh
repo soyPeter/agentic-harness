@@ -2599,6 +2599,7 @@ out=$($CH receipt 7.1 --json)
 expect 0 "receipt --json parses" python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["task"]=="7.1" and d["not_verified"] and d["verified"]' "$out"
 expect 0 "receipt --json lists the suggested labels" python3 -c 'import json,sys; assert json.loads(sys.argv[1])["suggested_labels"] == ["risk:elevated"]' "$out"
 expect 0 "receipt: suggested labels for each Change-Class and risk (ADR-002)" python3 -B "$HARNESS/tests/test-triage-labels.py"
+expect 0 "attest: the verdict statement harness-verify signs, and its bytes (ADR-005)" python3 -B "$HARNESS/tests/test-attest.py"
 expect 0 "receipt: the sandbox each judge pass ran in, and the runner's sandbox backend (ADR-003)" \
   python3 -B "$HARNESS/tests/test-sandbox-evidence.py"
 

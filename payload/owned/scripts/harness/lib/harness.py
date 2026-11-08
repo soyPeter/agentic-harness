@@ -17,6 +17,7 @@ Usage:
   harness.py adopt <pack>[,<pack>] --adr ADR-NNN --with <opts> --without <opts> [--dry-run]
   harness.py adopt --remove <pack>[,<pack>] [--dry-run]
   harness.py verify [--range <base>..<tip>] [--allow-user-changes]   (gates on the staged change, or a CI range)
+  harness.py attest --range <base>..<tip> [--allow-user-changes]     (in-toto statement of a verified range, ADR-005)
   harness.py approve <task-id>                                    (autonomous mode: policy approval of a low-risk spec)
   harness.py escalate <task-id> --reason <text> [--kind <k>] [--class <failure class>] [--needed <text>]
   harness.py escalations                                          (open escalations for the user)
@@ -2580,7 +2581,9 @@ def tree_fingerprint(commit=None):
             run("read-tree", commit)
         elif os.path.isfile(os.path.join(git_dir, "index")):
             shutil.copyfile(os.path.join(git_dir, "index"), index)
-        run("rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", "backbone")
+        # Without -f, git keeps an entry that differs from both HEAD and the checkout, as backbone/ files of an
+        # older commit do, and the fingerprint would include them.
+        run("rm", "-r", "--cached", "-q", "-f", "--ignore-unmatch", "--", "backbone")
         result = run("write-tree")
         return result.stdout.strip() if result.returncode == 0 else None
     finally:
@@ -2691,15 +2694,14 @@ def verify_range(spec, allow_user_changes=False):
     tip = tip or "HEAD"
     commits = [c for c in git("rev-list", "--reverse", "%s..%s" % (base, tip)).split() if c]
     changed = diff_names(base, tip)
+    return verify_changes(base, tip, changed, lambda task: tree_fingerprint(done_commit(task, commits, tip)),
+                          allow_user_changes)
+
+
+def done_commit(task, commits, tip):
+    """The first of commits (oldest first) whose task list marks task done, else tip."""
     tasks_rel = TASKS.relative_to(ROOT).as_posix()
-
-    def done_fingerprint(task):
-        for commit in commits:
-            if task in task_states(show(commit, tasks_rel))[1]:
-                return tree_fingerprint(commit)
-        return tree_fingerprint(tip)
-
-    return verify_changes(base, tip, changed, done_fingerprint, allow_user_changes)
+    return next((c for c in commits if task in task_states(show(c, tasks_rel))[1]), tip)
 
 
 def verify_command(argv):
@@ -2717,6 +2719,125 @@ def verify_command(argv):
     if not problems:
         print("verify: ok")
     return 1 if problems else 0
+
+
+# --------------------------------------------------------------------------- attestation (ADR-005)
+
+STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
+VERDICTS_PREDICATE = "https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1"
+VERIFIER_ID = "https://github.com/soyPeter/agentic-harness"
+ATTEST_USAGE = "usage: harness.py attest --range <base>..<tip> [--allow-user-changes]\n"
+
+
+def verdict_brief(history):
+    """The latest of a verdict history as the statement states it, or None."""
+    if not history:
+        return None
+    last = history[-1]
+    return {"verdict": last.get("verdict"), "fingerprint": last.get("fingerprint"), "at": last.get("at"),
+            "rounds": len(history)}
+
+
+def base_lock(base):
+    """The release base's backbone/.harness-lock.json names: what CI runs as the verifier. None without a lock."""
+    try:
+        data = json.loads(show(base, LOCK_FILE.relative_to(ROOT).as_posix()) or "null")
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("mode") == "thin":
+        return {"mode": "thin", "version": data.get("version"), "commit": data.get("commit")}
+    return {"mode": "full", "version": data.get("harness_version")}
+
+
+def attested_task(task, commits, tip):
+    """A finished task's verdict chain. The receipt is matched against the code of the commit that finished the task,
+    which verify has checked, so an earlier task keeps its receipt when a later commit in the range changes code."""
+    spec_text = read(spec_path(task))
+    finished_in = done_commit(task, commits, tip)
+    base = receipt_base(task, spec_text)
+    risks = risk_reasons(task, base)
+    cls, declared, problem = change_class(spec_text)
+    receipt, _ = receipt_data(task, base, code=tree_fingerprint(finished_in))
+    judges = verdict_history(task, "judge")
+    judge = verdict_brief(judges)
+    if judge:
+        run = judges[-1].get("test_run")
+        judge["testRun"] = {"command": run.get("command"), "exit": run.get("exit"),
+                            "outputSha256": run.get("output_sha256")} if isinstance(run, dict) else None
+    reviews = verdict_history(task, "review")
+    return {
+        "task": task,
+        "title": task_title(task),
+        "finishedIn": finished_in,
+        "spec": {"path": spec_rel(task),
+                 "fingerprint": spec_fingerprint(task, spec_text) if spec_text.strip() else None,
+                 "approval": approval_lines(md_section(strip_comments(spec_text), "Approval") or "")},
+        "changeClass": {"class": cls, "declared": declared, "problem": problem},
+        "grill": verdict_brief(verdict_history(task, "grill")),
+        "judge": judge,
+        "reviews": {lens: verdict_brief([e for e in reviews if e.get("lens") == lens]) for lens in REVIEW_LENSES},
+        "risk": {"reasons": risks, "labels": suggested_labels(spec_text, risks)},
+        "receipt": {"verified": receipt["verified"], "notVerified": receipt["not_verified"],
+                    "approvalNeeded": receipt["approval_needed"]} if receipt else None,
+    }
+
+
+def attest_statement(base_ref, tip_ref, allow_user_changes=False):
+    """(in-toto Statement, []) for a range that passes verify, checked out at its tip; else (None, problems)."""
+    commits_of = {}
+    for ref in (base_ref, tip_ref):
+        commits_of[ref] = git("rev-parse", "-q", "--verify", ref + "^{commit}").strip()
+        if not commits_of[ref]:
+            return None, ["%s is not a commit" % ref]
+    base, tip = commits_of[base_ref], commits_of[tip_ref]
+    head = git("rev-parse", "-q", "--verify", "HEAD").strip()
+    if head != tip:
+        return None, ["the checkout is at %s, not %s: check out the commit the statement is about"
+                      % (head[:12], tip[:12])]
+    # Receipts, risks and fingerprints read the checkout, so it has to be exactly the commit.
+    dirty = [line[3:] for line in git("status", "--porcelain", "--untracked-files=all").splitlines() if line.strip()]
+    if dirty:
+        return None, ["the checkout has uncommitted or untracked files (%s); the statement is about commit %s, so "
+                      "commit or remove them first" % (", ".join(dirty[:5]), tip[:12])]
+    problems = verify_range("%s..%s" % (base, tip), allow_user_changes)
+    if problems:
+        return None, problems
+    commits = [c for c in git("rev-list", "--reverse", "%s..%s" % (base, tip)).split() if c]
+    tasks_rel = TASKS.relative_to(ROOT).as_posix()
+    finished = sorted(task_states(show(tip, tasks_rel))[1] - task_states(show(base, tasks_rel))[1])
+    values = conf()
+    return {
+        "_type": STATEMENT_TYPE,
+        "subject": [{"name": "commit", "digest": {"gitCommit": tip}},
+                    {"name": "code", "digest": {"gitTree": tree_fingerprint(tip)}}],
+        "predicateType": VERDICTS_PREDICATE,
+        "predicate": {
+            "verifier": {"id": VERIFIER_ID, "engineSha256": sha256(__file__), "baseLock": base_lock(base)},
+            "verification": {"base": base, "tip": tip, "result": "PASSED", "allowUserChanges": allow_user_changes,
+                             "gates": {"spec": values["HARNESS_SPEC_GATE"], "judge": values["HARNESS_JUDGE_GATE"],
+                                       "review": values["HARNESS_REVIEW"], "tester": values["HARNESS_TESTER"]}},
+            "tasks": [attested_task(task, commits, tip) for task in finished],
+        },
+    }, []
+
+
+def attest_command(argv):
+    """Print the in-toto Statement of a verified range; nothing on stdout when the range doesn't verify."""
+    allow = "--allow-user-changes" in argv
+    args = [a for a in argv if a != "--allow-user-changes"]
+    if args[:1] != ["--range"] or len(args) != 2 or ".." not in args[1] or args[1].startswith(".."):
+        sys.stderr.write(ATTEST_USAGE)
+        return 64
+    base, _, tip = args[1].partition("..")
+    statement, problems = attest_statement(base, tip or "HEAD", allow)
+    for problem in problems:
+        sys.stderr.write("attest: %s\n" % problem)
+    if problems:
+        return 1
+    sys.stdout.write(json.dumps(statement, indent=2, sort_keys=True) + "\n")
+    return 0
 
 
 # --------------------------------------------------------------------------- health
@@ -5694,8 +5815,9 @@ def suggested_labels(spec_text, risks):
     return [RISK_LABELS[step]] + (["class:" + cls] if declared else [])
 
 
-def receipt_data(task, base=None):
-    """(receipt dict, None) for a task with a judge pass on the current code, else (None, why not)."""
+def receipt_data(task, base=None, code=None):
+    """(receipt dict, None) for a task with a judge pass on the current code (or on code, a code fingerprint), else
+    (None, why not)."""
     spec_text = read(spec_path(task))
     judge = verdict_history(task, "judge")
     passed = judge[-1] if judge and judge[-1].get("verdict") == "pass" else None
@@ -5703,7 +5825,7 @@ def receipt_data(task, base=None):
         return None, "task %s has no judge pass on record; a receipt states only what the judge proved" % task
     if not spec_text.strip():
         return None, "no spec at %s" % spec_rel(task)
-    if passed.get("fingerprint") != code_fingerprint():
+    if passed.get("fingerprint") != (code or code_fingerprint()):
         return None, "the code changed after the judge passed task %s; judge it again first" % task
     body = strip_comments(spec_text)
     title = re.match(r"^#\s+Spec\s+\S+:\s*(.+)$", body.strip().splitlines()[0]) if body.strip() else None
@@ -6483,6 +6605,8 @@ def main(argv):
         return adopt_command(argv[2:])
     if argv[1:2] == ["verify"]:
         return verify_command(argv[2:])
+    if argv[1:2] == ["attest"]:
+        return attest_command(argv[2:])
     if len(argv) == 3 and argv[1] == "approve":
         return approve_command(argv[2])
     if argv[1:2] == ["escalate"]:
