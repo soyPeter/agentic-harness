@@ -3753,7 +3753,7 @@ EXPANSION = re.compile(r"\$\S|`")
 # bash's and zsh's alias tables: setting an entry defines an alias, as the alias builtin does.
 ALIAS_TABLE = re.compile(r"^(BASH_ALIASES|aliases)(\[[^\]]*\])?\+?=")
 # The gh commands delivery needs (ADR-002), with gh's own aliases for them. gh api, held to reads, is checked apart.
-DELIVERY_GH = {"pr": ("create", "new", "edit", "view", "checks", "list", "ls", "comment"),
+DELIVERY_GH = {"pr": ("create", "new", "edit", "view", "checks", "list", "ls"),
                "run": ("view", "list", "ls", "watch"), "label": ("create", "list", "ls"), "repo": ("view",)}
 # The flags that take a value (gh pr|issue create|new|edit, gh api, gh label create). Every other flag is a switch.
 ITEM_VALUE_FLAGS = ("-a", "-B", "-b", "-F", "-H", "-l", "-m", "-p", "-r", "-R", "-T", "-t", "--add-assignee",
@@ -3769,9 +3769,36 @@ LABEL_VALUE_FLAGS = ("-c", "-d", "-R", "--color", "--description", "--repo")
 MERGE_REFUSAL = "it opens and updates the PR; merging is the user's call, like closing or approving it."
 EXPANSION_REFUSAL = ("write the gh command out: an expansion ($... or `...`) outside a flag's value can add flags or "
                      "commands the harness can't read.")
-DELIVERY_GH_REFUSAL = ("it runs only the gh commands delivery needs: gh pr create, edit, view, checks, list and comment, "
+DELIVERY_GH_REFUSAL = ("it runs only the gh commands delivery needs: gh pr create, edit, view, checks and list, "
                        "gh run view, list and watch, gh label list and create, gh repo view, and gh api reads. %s is "
                        "the user's call.")
+# The shell expands these unquoted into other words: a brace expansion names another command or flag, and a glob adds
+# the names of files the harness doesn't see. A comma expands only inside braces, which are refused already.
+GLOB_CHARS = "{}*?[]"
+ENV_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=")
+# A browser, pager or editor runs the command it's set to; ssh and askpass commands run for git's network calls; the
+# rest point gh or git at another program or configuration.
+RISKY_ENV = ("BROWSER", "PAGER", "EDITOR", "VISUAL", "PATH", "HOME", "ENV", "BASH_ENV", "IFS", "SHELLOPTS", "BASHOPTS",
+             "LESSOPEN", "LESSCLOSE", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "NODE_OPTIONS", "PYTHONPATH",
+             "XDG_CONFIG_HOME")
+RISKY_ENV_PREFIXES = ("GH_", "GIT_", "DYLD_", "LD_", "BASH_FUNC_")
+GIT_OPTIONS_REFUSED = ("-c", "--config-env", "--exec-path", "--git-dir", "--work-tree")
+GIT_CONFIG_READS = ("--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list")
+GIT_CONFIG_WRITES = ("--add", "--replace-all", "--unset", "--unset-all", "--rename-section", "--remove-section",
+                     "--edit", "-e")
+GLOB_REFUSAL = ("the shell expands an unquoted {, }, *, ?, [ or ] into words the harness doesn't read: quote it, as "
+                "written.")
+ENV_REFUSAL = ("it sets %s for the command: a browser, pager or editor runs the command it names, and PATH, HOME, "
+               "GH_ and GIT_ settings change what gh and git run or read; that's the user's call.")
+WEB_REFUSAL = ("--web hands a URL to a browser, which runs whatever BROWSER names; the deliverer doesn't open pages.")
+GIT_OPTION_REFUSAL = ("it runs git with its own configuration (-c, --config-env, --exec-path, --git-dir, --work-tree): "
+                      "an alias or ssh command set there runs a command the harness doesn't read.")
+GIT_CONFIG_REFUSAL = ("it doesn't change git's configuration: an alias that starts with ! or an ssh command runs a "
+                      "command the harness doesn't read. Reading it (git config --get, --list) is fine.")
+GIT_EXEC_REFUSAL = "--exec, --upload-pack and --receive-pack run a command the harness doesn't read."
+PUSH_ALL_REFUSAL = "--all and --mirror push every branch, the default one included: push the branch by name."
+PUSH_DEFAULT_REFUSAL = ("it pushes only its own branch; the default branch changes through the PR, when the user "
+                        "merges it.")
 ALIAS_REFUSAL = ("it defines no shell aliases: the shell can expand one on a later line into a gh command the harness "
                  "doesn't see.")
 SHELL_INPUT_REFUSAL = ("a shell that reads its commands from a pipe or a file runs commands the harness can't read; run "
@@ -3837,7 +3864,12 @@ def closing_paren(text, start):
 def shell_split(text):
     """The words of a segment as the shell splits them, quotes removed. A $(...) or `...` stays whole inside its word,
     whatever quotes it holds: shlex reads it as plain text, and a quote in it can fold the next arguments into one."""
-    words, word, quote, i = [], None, None, 0
+    return [word for word, _ in shell_split_marked(text)]
+
+
+def shell_split_marked(text):
+    """shell_split's words, each with the unquoted brace and glob characters (GLOB_CHARS) it holds."""
+    words, word, marks, quote, i = [], None, "", None, 0
     while i < len(text):
         ch = text[i]
         if quote == "'":
@@ -3856,14 +3888,15 @@ def shell_split(text):
             quote, word = ch, word or ""
         elif ch.isspace():
             if word is not None:
-                words.append(word)
-            word = None
+                words.append((word, marks))
+            word, marks = None, ""
         elif ch == "#" and word is None:
             break
         else:
             word = (word or "") + ch
+            marks += ch if ch in GLOB_CHARS else ""
         i += 1
-    return words + ([word] if word is not None else [])
+    return words + ([(word, marks)] if word is not None else [])
 
 
 def run_words(words):
@@ -3952,13 +3985,17 @@ def gh_calls(command, depth=0):
 
 
 def segment_calls(segment, piped, depth):
-    written = shell_split(segment)
+    marked = shell_split_marked(segment)
+    written = [word for word, _ in marked]
     words, why = run_words(written)
     prog = program(words)
-    if why or prog == "gh":
+    if why:
         return [(segment, words, why)]
     if prog == "alias" or any(ALIAS_TABLE.match(word) for word in written):
         return [(segment, words, ALIAS_REFUSAL)]
+    problem = command_problem(marked, words)
+    if problem or prog == "gh":
+        return [(segment, words, problem)]
     if prog in ("source", "."):
         return [(segment, words, SHELL_INPUT_REFUSAL)]
     if prog == "eval":
@@ -3976,7 +4013,20 @@ def segment_calls(segment, piped, depth):
     if prog in RUNNERS or prog.startswith("-"):
         # watch 'gh ...', script -c 'gh ...': the command is one word
         return [call for w in words[1:] if re.search(r"\s", w.strip()) for call in gh_calls(w, depth + 1)]
-    return []
+    return [(segment, words, "")]
+
+
+def command_problem(marked, words):
+    """Why the deliverer may not run a command the shell changes before it runs, or "": a variable that runs a command
+    or redirects gh and git, and an unquoted brace or glob, which the shell expands into words the harness doesn't read.
+    marked and words are shell_split_marked's words and the words of the command they run."""
+    for word, _ in marked:
+        name = ENV_ASSIGNMENT.match(word)
+        if name and (name.group(1) in RISKY_ENV or name.group(1).startswith(RISKY_ENV_PREFIXES)):
+            return ENV_REFUSAL % name.group(1)
+    if any(c in marks for _, marks in marked[len(marked) - len(words):] for c in GLOB_CHARS):
+        return GLOB_REFUSAL
+    return ""
 
 
 def gh_parts(words):
@@ -4046,6 +4096,8 @@ def hidden_arguments(segment, flags, positional):
 def gh_refusal(segment, words, cwd, risk_added):
     """Why the deliverer may not run this gh call, or None. risk_added holds the risk labels that the command's
     other gh calls add."""
+    if program(words) != "gh":
+        return None
     command, sub, args = gh_parts(words)
     if command is None:
         return None
@@ -4053,6 +4105,9 @@ def gh_refusal(segment, words, cwd, risk_added):
         return EXPANSION_REFUSAL
     if command == "pr" and sub in ("merge", "close", "review", "ready"):
         return MERGE_REFUSAL
+    flags, _ = gh_flags(args, ITEM_VALUE_FLAGS + API_VALUE_FLAGS + LABEL_VALUE_FLAGS)
+    if any(name in ("--web", "-w") for name, _ in flags):
+        return WEB_REFUSAL
     if command == "api":
         return api_refusal(segment, args)
     if sub not in DELIVERY_GH.get(command, ()):
@@ -4159,22 +4214,51 @@ def pr_labels(target, repo, cwd):
     return None, (result.stderr.strip().splitlines() or ["exit %d" % result.returncode])[-1]
 
 
+def git_refusal(words, targets, on_default):
+    """Why the deliverer may not run this git call, or None. git runs the commands its configuration names, and a push
+    may not reach the default branch."""
+    if program(words) != "git":
+        return None
+    args = words[1:]
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        if args[i].split("=", 1)[0] in GIT_OPTIONS_REFUSED:
+            return GIT_OPTION_REFUSAL
+        i += 2 if args[i] == "-C" else 1
+    if i >= len(args):
+        return None
+    sub, rest = args[i], args[i + 1:]
+    if any(w.split("=", 1)[0] in ("--exec", "--upload-pack", "--receive-pack") for w in rest):
+        return GIT_EXEC_REFUSAL
+    if sub == "config":
+        names = {w.split("=", 1)[0] for w in rest}
+        values = [w for w in rest if not w.startswith("-")]
+        if names & set(GIT_CONFIG_WRITES) or (len(values) > 1 and not names & set(GIT_CONFIG_READS)):
+            return GIT_CONFIG_REFUSAL
+    if sub == "push":
+        if on_default:
+            return PUSH_DEFAULT_REFUSAL
+        if any(w in ("--all", "--mirror") for w in rest):
+            return PUSH_ALL_REFUSAL
+        for refspec in [w for w in rest if not w.startswith("-")][1:]:
+            dst = refspec.lstrip("+").rsplit(":", 1)[-1]
+            dst = dst[len("refs/heads/"):] if dst.startswith("refs/heads/") else dst
+            if "*" in dst or dst in targets:
+                return PUSH_DEFAULT_REFUSAL
+    return None
+
+
 def role_command_refusal(agent, command, cwd=None):
     """Why agent may not run command, or None. The deliverer reaches GitHub, but the decisions there stay the user's."""
     if agent != "deliverer":
         return None
-    if re.search(r"\bgh\s+pr\s+(merge|close|review|ready)\b|\bgh\s+api\b[^;&|\n]*/merge\b", command):
-        return MERGE_REFUSAL
     risk_added = set()
+    targets = {b for b in ("main", "master", default_branch()) if b}
+    on_default = git("rev-parse", "--abbrev-ref", "HEAD").strip() in targets
     for segment, words, why in gh_calls(command):
-        refusal = why or gh_refusal(segment, words, cwd, risk_added)
+        refusal = why or gh_refusal(segment, words, cwd, risk_added) or git_refusal(words, targets, on_default)
         if refusal:
             return refusal
-    targets = {b for b in ("main", "master", default_branch()) if b}
-    push = re.search(r"\bgit\s+push\b([^;&|\n]*)", command)
-    on_default = git("rev-parse", "--abbrev-ref", "HEAD").strip() in targets
-    if push and (on_default or any(re.search(r"(^|[\s:+])%s(\s|$)" % re.escape(b), push.group(1)) for b in targets)):
-        return "it pushes only its own branch; the default branch changes through the PR, when the user merges it."
     return None
 
 

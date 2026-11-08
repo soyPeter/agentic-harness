@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **The deliverer's gh and git calls are read as the shell runs them (ADR-002).** Six bypasses of its gh allowlist are
+  closed: unquoted brace and glob expansions in any word of a command (`{gh,repo} edit`); `--web`; a
+  variable that runs a command (`GH_BROWSER=`, `BROWSER=`, `GIT_SSH_COMMAND=`, `PATH=`, ...) set as a prefix or
+  exported; `git -c`, `git config` writes, `--exec`, `--upload-pack` and `--receive-pack`; `git push --all` and refspecs to
+  the default branch. `gh pr comment`, which delivery doesn't use, is refused. Gh text in quoted arguments and heredoc
+  bodies is no longer read as a command.
+
 - **Change-Class ladder (ADR-002).** Spec template and `requirements-writing` skill declare `Change-Class`
   (`docs` | `refactor` | `feature` | `schema`) plus optional `Parent-CHNG` / `Parent-RFC` / `Parent-ADR` links.
   Policy: PR merge stays human; policy `approve` must not be treated as merge. Runtime enforcement in

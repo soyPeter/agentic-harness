@@ -1467,11 +1467,20 @@ contains "the refusal says an alias can hide a gh command" "defines no shell ali
 out=$(hook "$DL" pre-tool-use "$(dbash 'gh repo edit --enable-auto-merge')" 2>&1; echo "exit=$?")
 contains "the deliverer may not change the repository's settings" "exit=2" "$out"
 contains "the refusal names the command, which is the user's" "gh repo edit is the user's call" "$out"
-contains "and the gh commands the deliverer may run" "gh pr create, edit, view, checks, list and comment" "$out"
+contains "and the gh commands the deliverer may run" "gh pr create, edit, view, checks and list" "$out"
 dl_refuses "nor run a workflow" 'gh workflow run deploy.yml'
 dl_refuses "nor set a secret" 'gh secret set TOKEN --body x'
 dl_allows "the deliverer may read which branch is the default" 'gh repo view --json defaultBranchRef'
-dl_allows "and comment on its PR" 'gh pr comment 7 --body "CI is green"'
+dl_refuses "nor comment on its PR, which delivery doesn't use: a comment can trigger a merge bot" 'gh pr comment 7 --body "/merge"'
+dl_refuses "nor expand a brace into the gh command it names" '{gh,repo} edit --enable-auto-merge'
+dl_refuses "nor expand a glob into it" '/opt/homebrew/bin/g? workflow run deploy.yml'
+dl_refuses "nor open a browser with --web" 'gh repo view --web'
+dl_refuses "nor run a command set as GH_BROWSER for a gh call" "GH_BROWSER='gh repo edit --enable-auto-merge' gh repo view"
+dl_refuses "nor run one through git's ssh command" "GIT_SSH_COMMAND='gh repo edit --enable-auto-merge; ssh' git push -u origin HEAD"
+dl_refuses "nor through an alias git -c defines" "git -c alias.x='!gh repo edit --enable-auto-merge' x"
+dl_refuses "nor push every branch, the default one included" 'git push --all origin'
+dl_refuses "nor push to the default branch by a full refspec" "git push origin 'refs/heads/*:refs/heads/main'"
+dl_allows "a gh command quoted in a PR body is text" 'gh pr create --title t --body "run gh pr merge 7 later" --label risk:low'
 dl_allows "and watch a run" 'gh run watch 123'
 pr_labels risk:high class:feature
 out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:low,class:docs')" 2>&1; echo "exit=$?")

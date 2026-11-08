@@ -43,13 +43,14 @@ UNREADABLE = ("echo 7 | xargs {c}", "echo 7 | timeout 60 xargs {c}", "parallel {
 # The gh commands delivery needs, as the deliverer's instructions use them, and gh's own aliases for them.
 DELIVERY_GH = ("gh pr create --base main --title t --body b", "gh pr new --title t --body b", "gh pr edit 7 --body b",
                "gh pr view --json labels", "gh pr checks --watch --fail-fast", "gh pr list --head feat/x", "gh pr ls",
-               "gh pr comment 7 --body b", "gh run view 123 --log-failed", "gh run list --branch feat/x", "gh run ls",
+               "gh run view 123 --log-failed", "gh run list --branch feat/x", "gh run ls",
                "gh run watch 123", "gh label list --search risk: --json name", "gh label ls",
                "gh label create risk:low --color 0E8A16", "gh repo view --json defaultBranchRef",
                "gh api repos/o/r/pulls/7")
 # The rest of what gh can do: repository settings (auto-merge, the default branch), workflows, secrets, variables,
 # issues, releases, rulesets, re-runs, labels other than the triage ones, aliases and extensions.
 OTHER_GH = ("gh repo edit --enable-auto-merge", "gh repo edit --default-branch x", "gh workflow run deploy.yml",
+            "gh pr comment 7 --body b", "gh pr comment 7 --body /merge",
             "gh secret set TOKEN --body x", "gh variable set X --body y", "gh issue close 7",
             "gh issue edit 7 --add-label risk:low", "gh pr reopen 7", "gh pr update-branch 7", "gh pr -R o/r reopen 7",
             "gh release create v1", "gh ruleset list", "gh ruleset view 1", "gh run rerun 123", "gh run download 123",
@@ -233,6 +234,133 @@ class DelivererGate(GateProject):
                 self.assertEqual(code, 0, message)
 
 
+
+# The shell expands an unquoted brace or glob before gh runs, so the word it runs can name another command or flag.
+EXPANDED_NAMES = ("{gh,repo} edit --enable-auto-merge", "{gh,pr} merge --auto --squash 7",
+                  "/opt/homebrew/bin/g? workflow run deploy.yml", "[g]h repo edit --enable-auto-merge",
+                  "gh {repo,pr} edit --enable-auto-merge", "gh p? merge --auto 7",
+                  "gh repo edit --{enable-auto-merge,x}",
+                  "gh pr view 7 --{web,json}", "gh pr edit 7 --title {a,--enable-auto-merge}",
+                  "timeout 60 {gh,repo} edit --enable-auto-merge", "gh pr edit 7 --add-label risk:low,class:docs *")
+# Variables the shell hands to gh or git, or to a program they run: a browser or pager runs any command, an ssh or
+# askpass command runs for git's network calls, and PATH or HOME can point gh at another program or configuration.
+RISKY_ENV = ("GH_BROWSER", "BROWSER", "GH_PAGER", "PAGER", "EDITOR", "VISUAL", "GH_EDITOR", "GIT_SSH_COMMAND",
+             "GIT_ASKPASS", "GIT_CONFIG_COUNT", "PATH", "HOME", "GH_CONFIG_DIR", "GH_TOKEN", "BASH_ENV")
+ENV_FORMS = ("{n}='gh repo edit --enable-auto-merge' gh pr view 7", "{n}=x gh repo view --web",
+             "export {n}='gh repo edit --enable-auto-merge'\ngh repo view", "env {n}=x gh pr view 7",
+             "{n}='gh pr merge 7' git push -u origin HEAD", "{n}=x git fetch origin")
+WEB_COMMANDS = ("gh pr view 7 --web", "gh pr view -w 7", "gh repo view --web", "gh run view 123 -w",
+                "gh pr create --title t --body b --web", "gh pr checks 7 --web")
+GIT_BYPASSES = ("git -c alias.x='!gh repo edit --enable-auto-merge' x",
+                "git -c core.sshCommand='gh repo edit --enable-auto-merge; ssh' push -u origin HEAD",
+                "git --exec-path=/tmp/x push -u origin HEAD", "git --git-dir=/tmp/x/.git fetch origin",
+                "git config alias.x '!gh repo edit --enable-auto-merge'",
+                "git config --global alias.x '!gh repo edit --enable-auto-merge'",
+                "git config --add alias.x '!gh repo edit --enable-auto-merge'",
+                "git config --unset core.pager", "git config --file cfg alias.x '!gh repo edit'",
+                "git push --receive-pack='gh repo edit --enable-auto-merge; true' origin HEAD",
+                "git fetch --upload-pack='gh repo edit --enable-auto-merge; true' origin",
+                "git rebase --exec 'gh repo edit --enable-auto-merge' main")
+GIT_READS = ("git config --get alias.x", "git config user.name", "git config -l", "git config --get-regexp alias")
+PUSH_TO_DEFAULT = ("git push --all origin", "git push --mirror origin", "git push origin HEAD:refs/heads/main",
+                   "git push origin 'refs/heads/*:refs/heads/main'", "git push origin 'feat/x:refs/heads/main'",
+                   "git push origin 'refs/heads/*:refs/heads/*'", "git push origin feat/x:main")
+PUSHES_OWN_BRANCH = ("git push -u origin HEAD", "git push origin feat/x", "git push origin HEAD:refs/heads/feat/x")
+# Text that names a gh or git command is text: a quoted argument, a heredoc body or a log search runs nothing.
+TEXT_MENTIONS = ('gh pr create --title t --body "run gh pr merge 7 later" --label risk:low',
+                 "gh pr create --title t --body \"$(cat <<'EOF'\nrun gh pr merge 7 later\nEOF\n)\"",
+                 "git log --grep 'gh pr merge'", 'echo "gh pr merge 7"', "git commit -m 'gh pr merge 7'")
+
+
+class DelivererBypasses(GateProject):
+    def test_an_expansion_that_names_another_command_is_refused(self):
+        self.pr_has()
+        for command in EXPANDED_NAMES:
+            with self.subTest(command=command):
+                code, message = self.decision(command)
+
+                self.assertEqual(code, 2, message)
+                self.assertIn("quote", message)
+
+    def test_a_quoted_name_is_text_for_the_shell(self):
+        self.pr_has()
+        for command in ("'{gh,repo}' edit --enable-auto-merge", "'gh' pr view '--json' labels",
+                        "gh pr view 7 '--json,labels'", "gh pr view 7 '--json{labels'"):
+            with self.subTest(command=command):
+                code, message = self.decision(command)
+
+                self.assertEqual(code, 0, message)
+
+    def test_a_variable_that_runs_a_command_is_refused_however_it_is_set(self):
+        self.pr_has()
+        for name in RISKY_ENV:
+            for form in ENV_FORMS:
+                command = form.format(n=name)
+                with self.subTest(command=command):
+                    code, message = self.decision(command)
+
+                    self.assertEqual(code, 2, message)
+
+    def test_a_bare_comma_expands_to_nothing(self):
+        self.pr_has()
+        for command in ("gh pr create --title t --body b --label=risk:low,class:docs",
+                        "gh pr edit 7 --add-label risk:elevated,class:feature"):
+            with self.subTest(command=command):
+                code, message = self.decision(command)
+
+                self.assertEqual(code, 0, message)
+
+    def test_a_variable_the_gh_calls_do_not_read_is_allowed(self):
+        self.pr_has()
+        for command in ("MY_VAR=1 gh pr view 7", "LANG=C gh pr view 7 --json labels"):
+            with self.subTest(command=command):
+                code, message = self.decision(command)
+
+                self.assertEqual(code, 0, message)
+
+    def test_web_opens_a_browser_and_is_refused(self):
+        self.pr_has()
+        for command in WEB_COMMANDS:
+            with self.subTest(command=command):
+                code, message = self.decision(command)
+
+                self.assertEqual(code, 2, message)
+
+    def test_git_runs_no_configured_command(self):
+        self.pr_has()
+        for command in GIT_BYPASSES:
+            with self.subTest(command=command):
+                code, message = self.decision(command)
+
+                self.assertEqual(code, 2, message)
+        for command in GIT_READS:
+            with self.subTest(command=command):
+                code, message = self.decision(command)
+
+                self.assertEqual(code, 0, message)
+
+    def test_the_deliverer_pushes_no_branch_to_the_default_branch(self):
+        self.pr_has()
+        for command in PUSH_TO_DEFAULT:
+            with self.subTest(command=command):
+                code, message = self.decision(command)
+
+                self.assertEqual(code, 2, message)
+        for command in PUSHES_OWN_BRANCH:
+            with self.subTest(command=command):
+                code, message = self.decision(command)
+
+                self.assertEqual(code, 0, message)
+
+    def test_a_command_named_only_in_text_is_not_run(self):
+        self.pr_has()
+        for command in TEXT_MENTIONS:
+            with self.subTest(command=command):
+                code, message = self.decision(command)
+
+                self.assertEqual(code, 0, message)
+
+
 if given is not None:
     other_labels = (st.sampled_from(("harness-change-approved", "automerge", "do-not-merge", "risk:none",
                                      "class:chore", "Risk:High", "bug"))
@@ -341,6 +469,31 @@ if given is not None:
             code, message = self.decision(command, agent)
 
             self.assertEqual(code, 0 if reads else 2, message)
+        @settings(max_examples=30, deadline=None)
+        @given(agent=deliverers, name=st.sampled_from(RISKY_ENV), form=st.sampled_from(ENV_FORMS))
+        def test_a_variable_that_runs_a_command_is_refused_in_every_form(self, agent, name, form):
+            code, message = self.decision(form.format(n=name), agent)
+
+            self.assertEqual(code, 2, message)
+
+        @settings(max_examples=40, deadline=None)
+        @given(agent=deliverers, char=st.sampled_from("{}*?[]"),
+               position=st.sampled_from(("name", "subcommand", "flag")))
+        def test_an_unquoted_brace_or_glob_in_a_name_or_flag_is_refused(self, agent, char, position):
+            command = {"name": "gh%s pr view 7", "subcommand": "gh pr vie%sw 7",
+                       "flag": "gh pr view 7 --json%slabels"}[position] % char
+
+            code, message = self.decision(command, agent)
+
+            self.assertEqual(code, 2, message)
+
+        @settings(max_examples=40, deadline=None)
+        @given(agent=deliverers, char=st.sampled_from("{},*?[]"))
+        def test_a_quoted_brace_or_glob_is_text(self, agent, char):
+            code, message = self.decision("gh pr view 7 " + shlex.quote("--json" + char + "labels"), agent)
+
+            self.assertEqual(code, 0, message)
+
 else:
     print("skipped the property checks: hypothesis is not installed (pip install -r tests/requirements.txt)")
 
