@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Adopting a pack again keeps your edits.** `harness.py adopt` compared a pack file only with the release's copy, so
+  a file edited after the last adoption was replaced by the release's copy with no backup, after a pin move or a
+  `--to-thin`. An edited file is now kept. When the release changed it too, its copy goes to `<file>.harness-new` and
+  `adopt` exits 1, as `update.sh` does. The lock then records the release's copy, as `update.sh` does, so once you have
+  merged `<file>.harness-new` and deleted it, the next `adopt` is clean. An existing `<file>.harness-new` is never
+  overwritten: `adopt` refuses before it writes anything and names the file (`update.sh` still overwrites one).
+  `adopt --remove` lists a `<file>.harness-new` it leaves in place. A file that a removed option leaves behind no longer
+  has a hash, so `doctor` stops warning about it. A thin lock's hashes that an earlier engine recorded under `"files"`
+  move to `"kept"` when a pack is adopted again, removed, or the pin moves (`harness.py adopt`, `adopt --remove`,
+  `pin`), so `verify` no longer reads the project as a full install and refuses the next `.claude/settings.json`
+  commit.
+
 - **Traceability export (ADR-004).** `harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]`
   writes the chain requirement → acceptance criterion → test file → judge verdict → commit for every task with a spec,
   or one task: as ReqIF 1.2 (written with `xml.etree`), as a Sphinx-Needs `needs.json` in format 1, or as a
