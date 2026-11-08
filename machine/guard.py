@@ -9,7 +9,8 @@ by the agentic-harness plugin); there it does nothing, because the repository's 
 the gates.
 
 Config: ~/.agentic-harness/machine.json (or HARNESS_MACHINE_CONFIG): {"roots": [...], "mode": "warn"|"block",
-"exempt": [...]}. A guard error never blocks: the repository's own hooks are the enforcement; this only enrolls.
+"exempt": [...]}, where roots and exempt are lists of folders; settings that aren't count as none. A guard error never
+blocks: the repository's own hooks are the enforcement; this only enrolls.
 """
 import json
 import os
@@ -32,7 +33,19 @@ def config():
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    return data if problem(data) is None else None
+
+
+def problem(settings):
+    """Why these settings can't be used, or None. A string in place of a list of folders would be read character by
+    character, and "/" holds every path."""
+    if not isinstance(settings, dict):
+        return "the settings are not a JSON object"
+    for name in ("roots", "exempt"):
+        value = settings.get(name, [])
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            return '"%s" must be a list of folders' % name
+    return None
 
 
 def repo_root(start):
@@ -148,16 +161,19 @@ def shell_paths(command, base):
 
 
 def warned_once(root, session):
-    """True if this session was already reminded about root (one reminder per session and repository)."""
+    """True if this session was already reminded about root (one reminder per session and repository). The CLIs run
+    hooks, and a session's tool calls, at the same time, so only the hook that creates the marker reminds."""
     marker = Path(os.path.expanduser("~/.agentic-harness/warned")) / ("%s-%s" % (session or "session",
                                                                              str(root).strip("/").replace("/", "_")))
-    if marker.exists():
-        return True
     try:
         marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"), encoding="utf-8")
+        descriptor = os.open(str(marker), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        return True
     except OSError:
-        pass
+        return False
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(time.strftime("%Y-%m-%dT%H:%M:%S"))
     return False
 
 

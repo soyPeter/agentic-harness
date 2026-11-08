@@ -129,6 +129,23 @@
   sessions (after `remove` it finds no settings and lets every call through); restart them. `install`, `remove`,
   `status` and the plugin's check look for the hooks in `$CLAUDE_CONFIG_DIR` and `$CODEX_HOME` when they are set, as
   the CLIs do; `install` used to write them to `~/.claude` and `~/.codex`, where those CLIs didn't load them.
+- **The plugin no longer waits for a Codex guard hook that Codex skips.** Codex runs a new user hook only once the
+  user trusts it in `/hooks`, but the plugin left the check to any guard hook listed in Codex's `hooks.json`: after
+  `./machine.sh install` without that step, nothing checked in Codex. The plugin now reads the trust Codex records in
+  its `config.toml` (a hash of the hook under its file and position, and the on/off switch) and leaves the check to
+  the guard hook only while Codex runs it: trusted as it is now, and switched on. Otherwise it answers itself, also
+  when it can't read that file, and in sessions started with `--dangerously-bypass-hook-trust`, which it can't see
+  (there a refusal can come twice). `machine.sh status` says when the Codex guard hook isn't trusted, changed since it
+  was trusted, or is turned off. `install --plugin` takes out an untrusted guard hook too. A live check
+  (`tests/test-machine-guard.py`, needs `codex` on the PATH, no model calls) compares this with what `codex
+  app-server` itself lists and records.
+- **One reminder per session, also for hooks and tool calls run at once.** Claude Code and Codex run a call's hooks,
+  and a session's tool calls, in parallel, and two guard checks could both find no reminder recorded yet and both
+  remind. The record is now created atomically, so only one of them reminds. Run `./machine.sh install` again for the
+  installed guard copy.
+- **Machine settings with `roots` or `exempt` that aren't lists of folders count as none.** A string in place of the
+  list of roots put every repository on the machine in scope (the guard read it character by character, and `/` holds
+  every path). Such settings now check nothing, never block, and `machine.sh status` names the field to fix.
 - Tests go through the harness's public commands and hooks only: the checks that grepped agent files for hook names
   now run those hooks, and the ones that imported `harness.py` to call its functions now use `approve`,
   `orca --dry-run`, `orca-digest`, `orca-nightly` and a real, held `orca` run.
