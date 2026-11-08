@@ -2,12 +2,17 @@
 
 ## Unreleased
 
-- **The deliverer's gh and git calls are read as the shell runs them (ADR-002).** Six bypasses of its gh allowlist are
-  closed: unquoted brace and glob expansions in any word of a command (`{gh,repo} edit`); `--web`; a
-  variable that runs a command (`GH_BROWSER=`, `BROWSER=`, `GIT_SSH_COMMAND=`, `PATH=`, ...) set as a prefix or
-  exported; `git -c`, `git config` writes, `--exec`, `--upload-pack` and `--receive-pack`; `git push --all` and refspecs to
-  the default branch. `gh pr comment`, which delivery doesn't use, is refused. Gh text in quoted arguments and heredoc
-  bodies is no longer read as a command.
+- **The deliverer's gh and git calls are read as the shell runs them (ADR-002).** Its gh allowlist can't be reached
+  by other means. Refused: a merge, close, review or auto-merge named in a command outside a PR's title and body, `--web`,
+  and `gh pr comment`, which delivery doesn't use; programs that run code or commands from their arguments or stdin
+  (`python3 -c`, `perl -e`, `node -e`, `awk`, `sed`, `osascript`, `fish`, `csh`, `tcsh`, a heredoc fed to an interpreter),
+  `coproc`, `trap` and `hash`; copies and links (`ln`, `cp`, `mv`, `install`); a program run by a path outside the system
+  directories, or a gh or git binary under another name. A variable that runs a command (`GH_BROWSER=`, `GIT_SSH_COMMAND=`,
+  `PATH=`) set as a prefix or exported; `git -c`, `git config` writes, `--exec`, `--upload-pack` and `--receive-pack`.
+  gh acts on this repository only: `-R`, URLs and `gh api --hostname` are refused when they name another one. A git ref
+  command that names the default branch in any spelling (`git checkout main`, `git push origin HEAD:heads/main`), or uses
+  an expansion, is refused, and so is `git push --all` and `--mirror`. Unquoted globs and braces are refused in gh and
+  git calls and in command names; `ls tests/*.py`, `git rev-parse @{u}` and `gh api` placeholders are allowed.
 
 - **Adopting a pack again keeps your edits.** `harness.py adopt` compared a pack file only with the release's copy, so
   a file edited after the last adoption was replaced by the release's copy with no backup, after a pin move or a

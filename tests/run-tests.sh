@@ -1502,7 +1502,8 @@ dl_refuses "nor when gh's answer isn't the PR's labels" 'gh pr edit 7 --add-labe
 pr_labels
 expect 2 "nor when gh can't start" hook "$DL" pre-tool-use "$(dbash_in "$WORK/no-such-folder" 'gh pr edit 7 --add-label risk:low')"
 out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 -R o/r --add-label risk:low')" 2>&1; echo "exit=$?")
-contains "the harness reads the labels of the PR in the repository the call names" "already has risk:high" "$out"
+contains "the deliverer's gh calls act on this repository only: another repository's PR is refused" "acts on this repository" "$out"
+contains "and the refusal is exit 2" "exit=2" "$out"
 out=$(hook "$DL" pre-tool-use "$(dbash 'gh issue edit 7 --add-label risk:low')" 2>&1; echo "exit=$?")
 contains "the deliverer labels its PR through gh pr only" "gh issue edit is the user's call" "$out"
 expect 0 "the deliverer's gate: every way of running a command, and its properties (with hypothesis)" python3 -B "$HARNESS/tests/test-deliverer-gate.py"

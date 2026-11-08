@@ -3989,7 +3989,8 @@ DELIVERY_GH = {"pr": ("create", "new", "edit", "view", "checks", "list", "ls"),
 ITEM_VALUE_FLAGS = ("-a", "-B", "-b", "-F", "-H", "-l", "-m", "-p", "-r", "-R", "-T", "-t", "--add-assignee",
                     "--add-blocked-by", "--add-blocking", "--add-label", "--add-project", "--add-reviewer",
                     "--add-sub-issue", "--assignee", "--attach", "--base", "--blocked-by", "--blocking", "--body",
-                    "--body-file", "--head", "--label", "--milestone", "--parent", "--project", "--recover", "--repo",
+                    "--body-file", "--head", "--json", "--label", "--milestone", "--parent", "--project", "--recover",
+                    "--repo",
                     "--remove-assignee", "--remove-blocked-by", "--remove-blocking", "--remove-label",
                     "--remove-project", "--remove-reviewer", "--remove-sub-issue", "--reviewer", "--template",
                     "--title", "--type")
@@ -4029,6 +4030,42 @@ GIT_EXEC_REFUSAL = "--exec, --upload-pack and --receive-pack run a command the h
 PUSH_ALL_REFUSAL = "--all and --mirror push every branch, the default one included: push the branch by name."
 PUSH_DEFAULT_REFUSAL = ("it pushes only its own branch; the default branch changes through the PR, when the user "
                         "merges it.")
+COPY_PROGRAMS = ("ln", "link", "cp", "mv", "install", "rsync", "ditto", "hash")
+CODE_PROGRAMS = ("awk", "gawk", "mawk", "nawk", "sed", "osascript", "fish", "csh", "tcsh", "tclsh", "pwsh", "lua", "php",
+                 "expect", "busybox")
+LATER_PROGRAMS = ("coproc", "trap")
+INLINE_CODE = re.compile(r"^-(?!-)[A-Za-z]*[cepEmi]|^--(eval|print|command|interactive)$")
+SYSTEM_PREFIXES = ("/usr/", "/bin/", "/sbin/", "/opt/", "/Library/", "/System/", "/Applications/", "/nix/")
+GITHUB_REPO = re.compile(r"github\.com[/:]([^/\s]+/[^/\s#?]+?)(?:\.git)?(?:[/#?\s]|$)")
+REF_COMMANDS = ("checkout", "switch", "merge", "rebase", "reset", "branch", "fetch", "pull", "update-ref",
+                "symbolic-ref", "restore", "cherry-pick", "revert", "am", "worktree", "push")
+# Matched on command_view, the command without a PR's title and body. Heredoc bodies stay in the text, so a merge named
+# in one is refused too; the parser reads only the calls it can see, and this catches a merge it can't.
+FORBIDDEN_TEXT = re.compile(
+    r"\bgh\b[^;&|\n]*?\b(?:pr\s+(?:merge|close|review|ready)\b|api\b[^;&|\n]*?/merge\b|repo\s+(?:edit|delete)\b"
+    r"|--enable-auto-merge\b|workflow\s+run\b|(?:secret|variable)\s+set\b|run\s+rerun\b)"
+    r"|\bgit\b[^;&|\n]*?(?:\s-c\b|--exec\b|--upload-pack\b|--receive-pack\b|--config-env\b|--git-dir\b"
+    r"|--work-tree\b|\bpush\b[^;&|\n]*?--(?:all|mirror)\b)")
+PR_TEXT_VALUE = re.compile(r"""(?<!\S)(?:--body|--title|-b|-t)(?:=|\s+)("(?:[^"\\]|\\.)*"|'[^']*'|\S+)""")
+COPY_REFUSAL = ("it copies or links a program, which can run gh or git under another name; the deliverer runs gh and git "
+                "by name.")
+CODE_REFUSAL = ("%s runs the code or commands its arguments name, which the harness doesn't read; the deliverer runs no "
+                "%s.")
+LATER_REFUSAL = "%s runs a command later, which the harness doesn't read; run the command where it's written."
+INLINE_REFUSAL = "%s runs code from its arguments (-c, -e, -p, -m, -i), which the harness doesn't read: run a script file."
+STDIN_REFUSAL = "%s reads its code from stdin, which the harness doesn't read: run a script file."
+PATH_REFUSAL = ("it runs %s by path: the deliverer runs gh, git and the shell by name, and a program from a system "
+                "directory; a file it wrote itself can be another program.")
+NAME_REFUSAL = "it runs a gh or git binary under another name, which the harness reads by the name it's given."
+REPO_REFUSAL = ("gh acts on this repository (origin, %s) only: %s is another repository or host, where the call would "
+                "go.")
+NO_ORIGIN_REFUSAL = "gh acts on this repository only, and the harness can't read its origin: %s is refused."
+DEFAULT_BRANCH_REFUSAL = ("it moves no git ref onto the default branch or from it: the default branch changes through "
+                          "the PR, when the user merges it.")
+GIT_EXPANSION_REFUSAL = ("a git call with $ or a backtick can name the default branch in a way the harness doesn't read: "
+                         "write the ref out.")
+FORBIDDEN_TEXT_REFUSAL = ("the command names a merge, a repository change or a git option the deliverer doesn't run, as "
+                          "text or as a call; that's the user's call.")
 ALIAS_REFUSAL = ("it defines no shell aliases: the shell can expand one on a later line into a gh command the harness "
                  "doesn't see.")
 SHELL_INPUT_REFUSAL = ("a shell that reads its commands from a pipe or a file runs commands the harness can't read; run "
@@ -4224,7 +4261,7 @@ def segment_calls(segment, piped, depth):
     if prog == "alias" or any(ALIAS_TABLE.match(word) for word in written):
         return [(segment, words, ALIAS_REFUSAL)]
     problem = command_problem(marked, words)
-    if problem or prog == "gh":
+    if problem or prog in ("gh", "git"):
         return [(segment, words, problem)]
     if prog in ("source", "."):
         return [(segment, words, SHELL_INPUT_REFUSAL)]
@@ -4242,21 +4279,97 @@ def segment_calls(segment, piped, depth):
         return []
     if prog in RUNNERS or prog.startswith("-"):
         # watch 'gh ...', script -c 'gh ...': the command is one word
-        return [call for w in words[1:] if re.search(r"\s", w.strip()) for call in gh_calls(w, depth + 1)]
+        return ([call for w in words[1:] if re.search(r"\s", w.strip()) for call in gh_calls(w, depth + 1)]
+                or [(segment, words, problem)])
     return [(segment, words, "")]
 
 
 def command_problem(marked, words):
     """Why the deliverer may not run a command the shell changes before it runs, or "": a variable that runs a command
-    or redirects gh and git, and an unquoted brace or glob, which the shell expands into words the harness doesn't read.
-    marked and words are shell_split_marked's words and the words of the command they run."""
+    or redirects gh and git, and an unquoted glob or brace that expands into words the harness doesn't read. A glob
+    in a command's arguments is read by the command, so only gh and git calls are checked there. marked and words are
+    shell_split_marked's words and the words of the command they run."""
     for word, _ in marked:
         name = ENV_ASSIGNMENT.match(word)
         if name and (name.group(1) in RISKY_ENV or name.group(1).startswith(RISKY_ENV_PREFIXES)):
             return ENV_REFUSAL % name.group(1)
-    if any(c in marks for _, marks in marked[len(marked) - len(words):] for c in GLOB_CHARS):
-        return GLOB_REFUSAL
+    offset, at = len(marked) - len(words), program_index(words)
+    command = program(words[at:])
+    api = command == "gh" and words[at + 1:at + 2] == ["api"]
+    for index, (word, marks) in enumerate(marked[offset:]):
+        if word in ("[", "[[", "]", "]]"):
+            continue
+        if "{" in marks and "}" in marks and ("," in word or ".." in word):
+            return GLOB_REFUSAL
+        if index == at:
+            checked = marks
+        elif command == "gh" and api:
+            checked = marks.replace("?", "").replace("{", "").replace("}", "")
+        elif command == "git":
+            checked = marks.replace("{", "").replace("}", "") if re.search(r"@\{[^}]*\}", word) else marks
+        elif command == "gh":
+            checked = marks
+        else:
+            continue
+        if checked:
+            return GLOB_REFUSAL
     return ""
+
+
+def program_index(words):
+    """The index of the word a command runs: past the options and times of a runner such as timeout 60 or nice -n 5."""
+    if not words or program(words) not in RUNNERS:
+        return 0
+    for i in range(1, len(words)):
+        if not (words[i].startswith("-") or re.match(r"^\d+[smhd]?$", words[i]) or ASSIGNMENT.match(words[i])):
+            return i
+    return len(words)
+
+
+def real_name(prog):
+    """The name of the program prog runs once symlinks are followed, as the hook sees the PATH, or ""."""
+    path = prog if "/" in prog else shutil.which(prog)
+    return os.path.basename(os.path.realpath(path)) if path else ""
+
+
+def program_refusal(words):
+    """Why the deliverer may not run the program a segment runs, or "": a program that copies or links another, runs
+    code or commands from its arguments or stdin, runs a command later, or runs gh or git by a path or name that isn't
+    theirs."""
+    at = program_index(words)
+    if at >= len(words):
+        return ""
+    prog = words[at]
+    base = prog.rsplit("/", 1)[-1]
+    if base in COPY_PROGRAMS:
+        return COPY_REFUSAL
+    if base in CODE_PROGRAMS:
+        return CODE_REFUSAL % (base, base)
+    if base in LATER_PROGRAMS:
+        return LATER_REFUSAL % base
+    if base in INTERPRETERS:
+        rest = words[at + 1:]
+        k = 0
+        while k < len(rest) and rest[k].startswith("-") and rest[k] != "-":
+            if INLINE_CODE.match(rest[k]):
+                return INLINE_REFUSAL % base
+            k += 1
+        if k >= len(rest) or rest[k] == "-" or REDIRECTION.match(rest[k]):
+            return STDIN_REFUSAL % base
+    if "/" in prog and (base not in ("gh", "git") + SHELLS + INTERPRETERS
+                        or not os.path.realpath(prog).startswith(SYSTEM_PREFIXES)):
+        return PATH_REFUSAL % prog
+    real = real_name(prog)
+    if real in ("gh", "git") and real != base:
+        return NAME_REFUSAL
+    return ""
+
+
+def command_view(command):
+    """The command with a PR's title and body taken out: the text of gh pr create and edit is text, not a call."""
+    if not re.search(r"\bgh\s+(?:-\S+\s+)*pr\s+(?:create|new|edit)\b", command):
+        return command
+    return PR_TEXT_VALUE.sub("", command)
 
 
 def gh_parts(words):
@@ -4335,13 +4448,16 @@ def gh_refusal(segment, words, cwd, risk_added):
         return EXPANSION_REFUSAL
     if command == "pr" and sub in ("merge", "close", "review", "ready"):
         return MERGE_REFUSAL
-    flags, _ = gh_flags(args, ITEM_VALUE_FLAGS + API_VALUE_FLAGS + LABEL_VALUE_FLAGS)
+    flags, positional = gh_flags(args, ITEM_VALUE_FLAGS + API_VALUE_FLAGS + LABEL_VALUE_FLAGS)
     if any(name in ("--web", "-w") for name, _ in flags):
         return WEB_REFUSAL
     if command == "api":
         return api_refusal(segment, args)
     if sub not in DELIVERY_GH.get(command, ()):
         return DELIVERY_GH_REFUSAL % " ".join(w for w in ("gh", command, sub) if w)
+    repo_why = repository_refusal(cwd, flags, positional, command == "repo")
+    if repo_why:
+        return repo_why
     if command == "label" and sub == "create":
         return label_create_refusal(segment, args)
     if command == "pr" and sub in ("create", "new", "edit"):
@@ -4362,12 +4478,47 @@ def label_create_refusal(segment, args):
     return None
 
 
+def origin_repository(cwd):
+    """owner/repo of the origin remote, lowercased, or None."""
+    try:
+        url = subprocess.run(["git", "remote", "get-url", "origin"], cwd=cwd or str(ROOT), capture_output=True,
+                             text=True, timeout=GIT_TIMEOUT).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    match = re.search(r"[:/]([^/:\s]+/[^/\s]+?)(?:\.git)?/?$", url)
+    return match.group(1).lower() if match else None
+
+
+def repository_refusal(cwd, flags, positional, names_repo):
+    """Why a gh call names a repository other than this one (-R, a PR or issue URL, or gh repo view's argument), or
+    None. The call would act on, and send the token to, that repository."""
+    named = [value for name, value in flags if name in ("-R", "--repo")]
+    named += [m.group(1) for word in positional for m in [GITHUB_REPO.search(word)] if m]
+    if names_repo and positional:
+        named.append(positional[0])
+    if not named:
+        return None
+    origin = origin_repository(cwd)
+    if origin is None:
+        return NO_ORIGIN_REFUSAL % named[0]
+    for value in named:
+        match = GITHUB_REPO.search(value)
+        name = match.group(1) if match else value
+        if name.lower().strip("/") != origin:
+            return REPO_REFUSAL % (origin, value)
+    return None
+
+
 def api_refusal(segment, args):
     """Why a gh api call could change something, or None. GraphQL can label, merge and enable auto-merge, and a
     REST write can do the same through a body the harness may not see."""
     flags, positional = gh_flags(args, API_VALUE_FLAGS)
     if hidden_arguments(segment, flags, positional):
         return EXPANSION_REFUSAL
+    if any(name == "--hostname" for name, _ in flags):
+        return "--hostname sends the request, and the token, to the host it names: the deliverer calls github.com only."
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", (positional or [""])[0]):
+        return "gh api takes a path on this repository's host, not a URL: the request would go to the host the URL names."
     endpoint = (positional or [""])[0].split("?")[0]
     method = next((value for name, value in reversed(flags) if name in ("-X", "--method")), None)
     sends = any(name in ("-f", "-F", "--raw-field", "--field", "--input") for name, _ in flags)
@@ -4444,9 +4595,22 @@ def pr_labels(target, repo, cwd):
     return None, (result.stderr.strip().splitlines() or ["exit %d" % result.returncode])[-1]
 
 
-def git_refusal(words, targets, on_default):
-    """Why the deliverer may not run this git call, or None. git runs the commands its configuration names, and a push
-    may not reach the default branch."""
+def names_default(word, targets):
+    """Whether a ref word (src:dst, heads/main, refs/heads/main, origin/main) names a default branch in targets."""
+    for part in word.lstrip("+").split(":"):
+        name = part
+        for prefix in ("refs/heads/", "heads/", "refs/remotes/origin/", "origin/"):
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+                break
+        if name in targets:
+            return True
+    return False
+
+
+def git_refusal(segment, words, targets, on_default):
+    """Why the deliverer may not run this git call, or None. git runs the commands its configuration names, and a ref
+    command may move the default branch, by name or by the branch it's on."""
     if program(words) != "git":
         return None
     args = words[1:]
@@ -4465,16 +4629,21 @@ def git_refusal(words, targets, on_default):
         values = [w for w in rest if not w.startswith("-")]
         if names & set(GIT_CONFIG_WRITES) or (len(values) > 1 and not names & set(GIT_CONFIG_READS)):
             return GIT_CONFIG_REFUSAL
+    if sub in REF_COMMANDS:
+        if "$" in segment or "`" in segment:
+            return GIT_EXPANSION_REFUSAL
+        for word in rest:
+            if word == "-" or "@{-" in word:
+                return DEFAULT_BRANCH_REFUSAL
+            if not word.startswith("-") and names_default(word, targets):
+                return DEFAULT_BRANCH_REFUSAL
     if sub == "push":
         if on_default:
             return PUSH_DEFAULT_REFUSAL
         if any(w in ("--all", "--mirror") for w in rest):
             return PUSH_ALL_REFUSAL
-        for refspec in [w for w in rest if not w.startswith("-")][1:]:
-            dst = refspec.lstrip("+").rsplit(":", 1)[-1]
-            dst = dst[len("refs/heads/"):] if dst.startswith("refs/heads/") else dst
-            if "*" in dst or dst in targets:
-                return PUSH_DEFAULT_REFUSAL
+        if any("*" in w for w in rest):
+            return PUSH_DEFAULT_REFUSAL
     return None
 
 
@@ -4486,9 +4655,12 @@ def role_command_refusal(agent, command, cwd=None):
     targets = {b for b in ("main", "master", default_branch()) if b}
     on_default = git("rev-parse", "--abbrev-ref", "HEAD").strip() in targets
     for segment, words, why in gh_calls(command):
-        refusal = why or gh_refusal(segment, words, cwd, risk_added) or git_refusal(words, targets, on_default)
+        refusal = (why or program_refusal(words) or gh_refusal(segment, words, cwd, risk_added)
+                   or git_refusal(segment, words, targets, on_default))
         if refusal:
             return refusal
+    if FORBIDDEN_TEXT.search(command_view(command)):
+        return FORBIDDEN_TEXT_REFUSAL
     return None
 
 
