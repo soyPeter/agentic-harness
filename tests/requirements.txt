@@ -2,3 +2,5 @@
 # Hypothesis needs Python 3.11 from 6.169; the CI matrix still runs 3.10.
 hypothesis==6.170.15; python_version >= "3.11"
 hypothesis==6.168.5; python_version < "3.11"
+# The CommonMark reference for test-spec-structure.py's property checks; the engine never imports it.
+markdown-it-py==4.2.0

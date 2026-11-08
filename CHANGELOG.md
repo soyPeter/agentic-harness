@@ -3,17 +3,18 @@
 ## Unreleased
 
 - **Spec parsing reads Markdown the way it renders (ADR-002, follow-up).** The gates now share one reading of a spec's
-  code blocks, comments and sections. A fence closes only at a run of its own character at least as long, at 0-3
-  spaces, so an indented closer no longer ends a block early and hides the requirements below it from the freeze. An
-  `Approved-by:` line that a comment hides is read as `approved()` reads it, so an agent can't write one behind a
-  comment, and an approved spec's example line can't be moved into the Approval section. A fenced `## Skills` or
-  `## Open questions` example no longer hides the spec's own section, a comment opened in a code block no longer
-  hides what follows, and the user's approval under `  ## Approval` or `## Approval ##` is honoured. A fence marker
-  indented 4 or more columns, or with a tab, makes the spec invalid: a list item could read it differently, and so
-  does a comment that starts after text or 4 or more columns in and runs past its line. An accepted ADR's comments
-  are frozen with the rest of it. **Upgrading:** a spec with such a fence marker or comment, or with a section a
-  fenced example used to hide, is invalid until it is fixed.
-
+  headings, code blocks, comments and sections. A fence closes only at a run of its own character at least as long, at
+  0-3 spaces, so an indented closer no longer ends a block early and hides the requirements below it from the freeze.
+  An `Approved-by:` line that a comment hides is read as `approved()` reads it, so an agent can't write one behind a
+  comment. A fenced `## Skills` or `## Open questions` example no longer hides the spec's own section, and a comment
+  opened in a code block no longer hides what follows. Headings and fences are read at column 0 only: one that is
+  indented, follows a list or quote marker, or sits in an HTML block makes the spec invalid, as does a setext heading
+  (text over `=` or `-`); write `## Title`. A section runs to the next `#` or `##` heading, and an approved spec is
+  frozen outside its Approval section, whichever section follows it. Only `## Approval` at column 0 is the Approval
+  section: `# Approval` and a setext heading are ordinary text, and an `Approved-by:` line under them doesn't approve.
+  **Upgrading:** a spec with an indented heading or fence, a fence or heading in a list item, quote or HTML block, or a
+  setext heading is invalid until it is rewritten. The user's approval under an indented `  ## Approval` no longer
+  counts. A section that a fenced example or an HTML block used to hide is now read, so it may need fixing too.
 - **Traceability export (ADR-004).** `harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]`
   writes the chain requirement → acceptance criterion → test file → judge verdict → commit for every task with a spec,
   or one task: as ReqIF 1.2 (written with `xml.etree`), as a Sphinx-Needs `needs.json` in format 1, or as a

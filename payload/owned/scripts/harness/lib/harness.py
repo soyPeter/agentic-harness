@@ -177,23 +177,34 @@ POLICY_APPROVAL = re.compile(r"^\s*Approved-by:\s*policy:(\S+)\s*\((.*)\)", re.M
 
 
 def heading_pattern(title):
-    """A '## <title>' Markdown heading: 0-3 spaces in, then an optional closing run of #s. Case-insensitive."""
-    return re.compile(r"^ {0,3}##[ \t]+%s(?:[ \t]+#+)?[ \t]*\r?$" % re.escape(title), re.M | re.I)
+    """A '## <title>' Markdown heading at column 0, with an optional closing run of #s. Case-insensitive."""
+    return re.compile(r"^##[ \t]+%s(?:[ \t]+#+)?[ \t]*\r?$" % re.escape(title), re.M | re.I)
 
 
 APPROVAL_HEADING = heading_pattern("Approval")
-SECTION_END = re.compile(r"^ {0,3}##(?:[ \t\r]|$)", re.M)
+# A section runs to the next heading of level 1 or 2, as a reader sees it.
+SECTION_END = re.compile(r"^#{1,2}(?:[ \t\r]|$)", re.M)
 
 # The kind of work a spec declares (the harness's ADR-002). A spec without the line counts as feature.
 CHANGE_CLASSES = ("docs", "refactor", "feature", "schema")
 CHANGE_CLASS_LINE = re.compile(r"^[ \t]*Change-Class:(.*)$", re.M | re.I)
-# Markdown's fences: a fence opens at 0-3 spaces, and closes at 0-3 spaces with nothing after its marker. A marker a
-# list item could read as a fence at 4+ columns (or after a tab) is refused, not guessed at: see reading_problem.
-FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+# Markdown's fences. A fence opens at column 0 and closes at 0-3 spaces with nothing after its marker. A fence or heading
+# a list item, a quote or an HTML block could hold is refused, not guessed at: see scan_lines.
+FENCE_OPEN = re.compile(r"^(`{3,}|~{3,})(.*)$")
 FENCE_CLOSE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
 WIDE_FENCE = re.compile(r"^(?:[ \t]*\t| {4,})[ \t]*(`{3,}|~{3,})")
-FENCE_REASON = ("the spec has a code fence indented 4 or more columns, or with a tab: keep fences at 0-3 spaces, so every "
+FENCE_RUN = re.compile(r"`{3,}|~{3,}")
+ATX_HEADING = re.compile(r"#{1,6}(?:[ \t]|$)")
+SETEXT_UNDERLINE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
+CONTAINER = re.compile(r"(?:>|(?:[-*+]|\d{1,9}[.)])(?=[ \t]|$))[ \t]*")
+HTML_START = re.compile(r"<(?!!--)[A-Za-z/!?]")
+HTML_PRE = re.compile(r"<(?:pre|script|style|textarea)(?=[\s>]|$)", re.I)
+HTML_PRE_END = re.compile(r"</(?:pre|script|style|textarea)>", re.I)
+FENCE_REASON = ("the spec has a code fence indented 4 or more columns, or with a tab: keep fences at column 0, so every "
                 "reader ends them where the gates do")
+STRUCTURE_REASON = ("the spec has a heading or code fence that is indented, follows a list or quote marker, or sits in an "
+                    "HTML block: keep headings and fences at column 0, outside HTML blocks")
+SETEXT_REASON = "the spec has a setext heading (text over a line of = or -): write headings as '## Title'"
 COMMENT_REASON = ("the spec has an HTML comment a reader may not end where the gates do: a comment that starts after text, "
                   "or 4 or more columns in, must close on its own line")
 USER_APPROVED_CLASSES = ("feature", "schema")
@@ -458,13 +469,25 @@ def closes_fence(run, fence):
     return run[0] == fence[0] and len(run) >= len(fence)
 
 
+def block_start(body):
+    """(what a line holds once its list and quote markers are stripped, whether it had any)."""
+    rest, nested = body.lstrip(" \t"), False
+    while True:
+        m = CONTAINER.match(rest)
+        if not m:
+            return rest, nested
+        rest, nested = rest[m.end():], True
+
+
 def scan_lines(text):
     """(line, fenced, commentless, reason) for each line of text, read the way Markdown reads its blocks. A fence opens
-    at 0-3 spaces, and only a run of its character, at least as long, at 0-3 spaces with nothing after it, closes it. A
-    comment doesn't open inside a fence, and a fence marker inside a comment opens nothing. fenced: the line is a fence
-    or in one. commentless: the line with its comment text blanked, code kept. reason: why a reader could read the line
-    differently from the gates, or ''."""
-    fence, comment = None, False
+    at column 0 and closes with a run of its character, at least as long, at 0-3 spaces with nothing after it. A comment
+    doesn't open inside a fence, and a fence marker inside a comment opens nothing. fenced: the line is a fence or in one.
+    commentless: the line with its comment text blanked, code kept. reason: why a reader could read the line differently
+    from the gates, or ''. Only column-0 headings and fences are read: an indented one, one after a list or quote marker,
+    one in an HTML block and a setext heading are refused, since Markdown may read them as text or code. An HTML block
+    runs to a blank line, or to its closing tag for pre, script, style and textarea."""
+    fence, comment, html, prev_text = None, False, None, False
     for line in re.findall(r"[^\n]*\n|[^\n]+\Z", text or ""):
         body = line.rstrip("\r\n")
         if fence is not None:
@@ -473,15 +496,30 @@ def scan_lines(text):
             yield line, True, line, FENCE_REASON if wide and closes_fence(wide.group(1), fence) else ""
             if close and closes_fence(close.group(1), fence):
                 fence = None
+            prev_text = False
             continue
-        opening = None if comment else FENCE_OPEN.match(body)
+        if html == "blank" and not body.strip():
+            html = None
+        rest, nested = block_start(body)
+        off_column = nested or body[:1] in (" ", "\t") or html is not None
+        reason = ""
+        if not comment and off_column and (FENCE_RUN.match(rest) or ATX_HEADING.match(rest)):
+            reason = STRUCTURE_REASON
+        elif not comment and prev_text and SETEXT_UNDERLINE.match(body):
+            reason = SETEXT_REASON
+        opening = None if comment or reason or off_column else FENCE_OPEN.match(body)
         if opening and not ("`" in opening.group(2) and opening.group(1)[0] == "`"):
             fence = opening.group(1)
             yield line, True, line, ""
+            prev_text = False
             continue
-        fence_reason = FENCE_REASON if not comment and WIDE_FENCE.match(body) else ""
+        if not comment and not reason and html is None and HTML_START.match(rest):
+            html = "pre" if HTML_PRE.match(rest) else "blank"
         commentless, comment, ambiguous = blank_comments_in_line(line, comment)
-        yield line, False, commentless, COMMENT_REASON if ambiguous else fence_reason
+        if html == "pre" and HTML_PRE_END.search(body):
+            html = None
+        yield line, False, commentless, COMMENT_REASON if ambiguous else reason
+        prev_text = bool(body.strip()) and not ATX_HEADING.match(body)
 
 
 def comment_free(text):
@@ -527,8 +565,14 @@ def approval_start(text):
 
 
 def without_approval(text):
-    """text above its Approval section: where the grill fingerprint and the freeze end."""
-    return text[:approval_start(text)]
+    """text outside its Approval section: what the grill fingerprint covers and approval freezes."""
+    return without_section(text, "Approval")
+
+
+def frozen_text(text):
+    """What the grill fingerprint covers and the freeze keeps: the spec outside its Approval section, or all of it when a
+    reader could read its sections differently, since then no section can be trusted."""
+    return text if spec_reading_problem(text) else without_approval(text)
 
 
 def approval_section(text):
@@ -674,8 +718,18 @@ def approval_heading_problem(text):
 
 
 def reading_problem(text):
-    """Why a reader could read the spec's code or comments differently from the gates, or None (see scan_lines)."""
+    """Why a reader could read the spec's code, comments or headings differently from the gates, or None (scan_lines)."""
     return next((reason for *_, reason in scan_lines(text) if reason), None)
+
+
+def spec_reading_problems(text):
+    """Why the spec is refused for how a reader would read it, one reason each: see scan_lines and approval_heading_problem."""
+    return [p for p in (approval_heading_problem(text), reading_problem(text)) if p]
+
+
+def spec_reading_problem(text):
+    problems = spec_reading_problems(text)
+    return problems[0] if problems else None
 
 
 def knowledge_root():
@@ -814,10 +868,12 @@ def ears_problems(req, text):
 def change_class(text):
     """(class, declared, problem) from the spec's Change-Class: line. Without one the spec counts as feature;
     a value that isn't exactly one class, or two different values, is a problem and counts as feature too."""
-    # Not from the Approval section, where agents may still write once the spec is approved, nor from a code block,
-    # where the line is an example.
-    values = [v.strip() for v in CHANGE_CLASS_LINE.findall(outline(text)[:approval_start(text)])]
+    # Not from the Approval section, where agents may still write once the spec is approved, nor from a code block or
+    # comment, where the line is an example.
+    values = [v.strip() for v in CHANGE_CLASS_LINE.findall(without_section(text, "Approval", view=outline(text)))]
     distinct = sorted({v.lower() for v in values})
+    if reading_problem(text):   # a reader may take a line for code or a heading, so no class in it can be trusted
+        return "feature", bool(values), None
     if not values:
         return "feature", False, None
     if len(distinct) > 1:
@@ -867,8 +923,7 @@ def validate_spec(task, text=None):
         if not all(re.search(r"\b%s\b" % word, rest, re.I) for word in ("given", "when", "then")):
             problems.append("%s is not written as Given ..., when ..., then ..." % ac)
     problems.extend("%s has no acceptance criterion" % req for req in sorted(req_ids - covered))
-    problems.extend(p for p in (change_class(text)[2], approval_heading_problem(text), reading_problem(text))
-                    if p)
+    problems.extend(p for p in [change_class(text)[2]] + spec_reading_problems(text) if p)
     problems.extend(knowledge_citation_problems(text))
     adrs = spec_adrs(text)
     if not adrs:
@@ -900,7 +955,7 @@ def validate_spec(task, text=None):
 def spec_fingerprint(task, text=None):
     """Hash of the spec (without its Approval section) and of every ADR it references."""
     text = read(spec_path(task)) if text is None else text
-    digest = hashlib.sha256(without_approval(text).encode("utf-8"))
+    digest = hashlib.sha256(frozen_text(text).encode("utf-8"))
     for adr in spec_adrs(text):
         path = adr_file(adr)
         digest.update(adr.encode("utf-8"))
@@ -1871,9 +1926,12 @@ def content_risks(text, changed=None):
     values = conf()
     # Skills only says which skills the agents load, and explaining why `security` isn't needed ("no auth or
     # personal data") would read as risk. What the work does is in the other sections and in the diff.
-    cut = approval_start(text)
-    body = without_section(text[:cut], "Skills", view=comment_free(text)[:cut])
+    outside = without_approval(text)
+    body = without_section(outside, "Skills", view=comment_free(outside))
     reasons = []
+    unread = spec_reading_problem(text)
+    if unread:
+        reasons.append("the spec can't be read the way Markdown renders it: %s" % unread)
     terms = re.compile(values["HARNESS_RISK_TERMS"])
     paths = re.compile(values["HARNESS_RISK_PATHS"])
     hits = sorted({m.group(0).lower() for m in terms.finditer(body)})
@@ -2561,7 +2619,7 @@ def spec_guard(before, after):
     text approved() reads, so a line that only a comment hides is no way round it."""
     if approval_lines(outline(before)) != approval_lines(outline(after)) or approved(before) != approved(after):
         return "  - Only the user may add, change or remove 'Approved-by:' lines."
-    if approved(before) and without_approval(before) != without_approval(after):
+    if approved(before) and frozen_text(before) != frozen_text(after):
         return ("  - This spec is approved and therefore frozen. If it must change, ask the user to remove their "
                 "approval first; it will need grilling and approval again.")
     return None
@@ -2825,7 +2883,7 @@ def attested_task(task, commits, tip):
         "finishedIn": finished_in,
         "spec": {"path": spec_rel(task),
                  "fingerprint": spec_fingerprint(task, spec_text) if spec_text.strip() else None,
-                 "approval": approval_lines(md_section(strip_comments(spec_text), "Approval") or "")},
+                 "approval": approval_lines(md_section(spec_text, "Approval") or "")},
         "changeClass": {"class": cls, "declared": declared, "problem": problem},
         "grill": verdict_brief(verdict_history(task, "grill")),
         "judge": judge,
@@ -5896,7 +5954,7 @@ def trace_task(task, current, by_code):
     """One task's part of the export: its requirements, criteria and test files, the latest verdicts on them, the
     commits that carry the judged code, and the gaps the harness can see."""
     text = read(spec_path(task))
-    body = strip_comments(text)
+    body = comment_free(text)
     nfr_section = md_section(body, "Non-functional requirements") or ""
     ears = conf()["HARNESS_REQ_STYLE"] == "ears"
     requirements = []
