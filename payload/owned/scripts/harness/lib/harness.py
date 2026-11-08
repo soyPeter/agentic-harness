@@ -49,6 +49,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True   # no __pycache__ in the project
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import decisions  # noqa: E402  (sibling module)
+import sandbox  # noqa: E402  (sibling module)
 
 # The engine is the folder holding scripts/harness/: the project itself in a full install, or a pinned release outside
 # it in thin mode (ADR-001). Engine-owned files (core rules and routes, core skills, agents, catalog) come from here.
@@ -125,7 +126,8 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
                   "HARNESS_KNOWLEDGE_ROOT", "HARNESS_KNOWLEDGE_TOOLS", "HARNESS_KNOWLEDGE_PATHS",
                   "HARNESS_TESTER", "HARNESS_ACCEPTANCE_PATHS", "HARNESS_ORCA_AGENTS", "HARNESS_ORCA_LAUNCH",
                   "HARNESS_SPEC_MAX_ITEMS", "HARNESS_LIGHT_LANE", "HARNESS_LIGHT_MAX_ITEMS", "HARNESS_LIGHT_MAX_FILES",
-                  "HARNESS_REVIEW", "HARNESS_DELIVER", "HARNESS_PROFILE", "HARNESS_REQ_STYLE")
+                  "HARNESS_REVIEW", "HARNESS_DELIVER", "HARNESS_PROFILE", "HARNESS_REQ_STYLE",
+                  "HARNESS_SANDBOX_BACKEND")
 # Organisation profiles (HARNESS_PROFILE, user-only). "triple": a supervised pilot where only a human merges, so the
 # coordinator's --merge and --trust and the scheduled backlog run are refused.
 PROFILES = ("", "triple")
@@ -269,6 +271,7 @@ DEFAULTS = {
     "HARNESS_RUN_TASK_TIMEOUT": "3600",
     "HARNESS_RUN_ATTEMPTS": "2",
     "HARNESS_RUN_MAX_COST": "",
+    "HARNESS_SANDBOX_BACKEND": "devcontainer",
     "HARNESS_CI_JUDGE_CMD": "claude -p --agent judge --dangerously-skip-permissions --output-format json",
     "HARNESS_SKILL_MAX_AGE": "180",
     "HARNESS_HOOK_SLOW": "5",
@@ -1672,7 +1675,7 @@ def record_verdict(data, kind):
             if report["test_run"] is not None:
                 verdict, reasons = effective_judge(task, report)
         details = {"criteria": report.get("criteria"), "findings": report.get("findings"), "tests": report.get("tests"),
-                   "test_run": report.get("test_run")}
+                   "test_run": report.get("test_run"), "sandbox": sandbox.evidence(conf()["HARNESS_SANDBOX_BACKEND"])}
     history = verdict_history(task, kind)
     entry = {"verdict": verdict, "claimed": report.get("verdict"), "reasons": reasons, "fingerprint": fingerprint,
              "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "summary": report.get("summary")}
@@ -2812,6 +2815,9 @@ def health():
         issues.append(("error", "HARNESS_REQ_STYLE must be one of %s" % "|".join(REQ_STYLES)))
     if values["HARNESS_PROFILE"] not in PROFILES:
         issues.append(("error", "HARNESS_PROFILE must be empty or one of %s" % "|".join(p for p in PROFILES if p)))
+    unusable = sandbox.problem(values["HARNESS_SANDBOX_BACKEND"])
+    if unusable:
+        issues.append(("error", unusable))
     if values["HARNESS_AUTONOMY"] not in AUTONOMY_MODES:
         issues.append(("error", "HARNESS_AUTONOMY must be one of %s" % "|".join(AUTONOMY_MODES)))
     elif values["HARNESS_AUTONOMY"] == "autonomous":
@@ -5107,16 +5113,16 @@ def trust_problem(command=None):
 
 
 def run_agent(prompt, log_path, timeout):
-    command = conf()["HARNESS_AGENT_CMD"]
+    values = conf()
+    backend = sandbox.backend(values["HARNESS_SANDBOX_BACKEND"])
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.time()
-    with log_path.open("w", encoding="utf-8") as log:
-        try:
-            result = subprocess.run(command, shell=True, cwd=str(ROOT), input=prompt, stdout=log,
-                                    stderr=subprocess.STDOUT, text=True, timeout=timeout)
-            code = result.returncode
-        except subprocess.TimeoutExpired:
-            code = None
+    box = backend.create(ROOT)
+    try:
+        with log_path.open("w", encoding="utf-8") as log:
+            code = backend.exec(box, values["HARNESS_AGENT_CMD"], stdin=prompt, log=log, timeout=timeout)
+    finally:
+        backend.teardown(box)
     return code, round(time.time() - started, 1)
 
 
@@ -5763,11 +5769,21 @@ def receipt_data(task, base=None):
         "risks": risk_reasons(task, base),
         "rounds": {"grill": len(grills), "judge": len(judge), "debug": len(verdict_history(task, "debug"))},
         "judged_at": passed.get("at"),
+        "sandbox": passed.get("sandbox"),
         "approval": approval_lines(approval_section(spec_text) or ""),
         "approval_needed": approval_needed,
     }
     data["suggested_labels"] = suggested_labels(spec_text, data["risks"])
     return data, None
+
+
+def sandbox_lines(evidence):
+    if not evidence:
+        return ["not recorded: the judge pass predates sandbox evidence (ADR-003); judge the task again to record it"]
+    lines = ["%s: %s" % (field, evidence.get(field, "unknown")) for field in sandbox.EVIDENCE_FIELDS]
+    if evidence.get("isolation_class") == "none":
+        lines.append("nothing isolated the session from the host: it ran outside the harness-agent container")
+    return lines
 
 
 def receipt_text(d):
@@ -5779,6 +5795,7 @@ def receipt_text(d):
         lines.append("  backbone: %s" % ", ".join(c["path"] for c in d["backbone_changed"]))
     sections = (("VERIFIED (judge pass %s, re-checked by the harness)" % d["judged_at"], d["verified"]),
                 ("NOT VERIFIED", d["not_verified"] or ["nothing outside the acceptance criteria"]),
+                ("SANDBOX (where the judge pass was recorded)", sandbox_lines(d["sandbox"])),
                 ("DECISIONS", ["follows %s" % a for a in d["decisions"]["governing_adrs"]] +
                  ["ADR changed: %s" % a for a in d["decisions"]["adrs_changed"]] +
                  ["assumption %s" % a for a in d["decisions"]["assumptions"]]),
