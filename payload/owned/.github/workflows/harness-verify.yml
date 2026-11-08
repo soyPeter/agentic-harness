@@ -5,17 +5,26 @@
 #
 # Changes to the harness itself or to user-only settings fail the check unless a maintainer adds the
 # `harness-change-approved` label (restrict who may label pull requests accordingly).
+#
+# Optional (ADR-005): the `attest` job runs on a push to the default branch (`main` below: change it to yours). It
+# verifies the pushed range, writes an in-toto statement of its verdicts and signs it with the key in the
+# `harness-attest` environment, which only the default branch may use. Pull requests never run it, so they never see the
+# key. Set the environment up as ADR-005 describes before adding the secrets HARNESS_ATTEST_KEY and
+# HARNESS_ATTEST_PASSWORD. Without the key the job does nothing.
 name: harness-verify
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  push:
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
   verify:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -26,21 +35,21 @@ jobs:
       - name: Take the verifier from the base branch
         shell: bash
         env:
-          BASE: ${{ github.base_ref }}
+          BASE_REF: origin/${{ github.base_ref }}
         run: |
           set -o pipefail
           assets=(scripts/harness/lib scripts/harness/guardrails.core.conf
                   scripts/harness/routing.core.conf scripts/harness/decisions.json)
-          if ! git rev-parse --verify "origin/$BASE^{commit}" >/dev/null; then
-            echo "::error::Cannot resolve the base branch origin/$BASE."
+          if ! git rev-parse --verify "$BASE_REF^{commit}" >/dev/null; then
+            echo "::error::Cannot resolve $BASE_REF."
             exit 1
           fi
           mkdir -p "$RUNNER_TEMP/trusted"
           mode=full
           commit=
-          pin_source="origin/$BASE"
-          if git cat-file -e "origin/$BASE:backbone/.harness-lock.json" 2>/dev/null; then
-            pin=$(git show "origin/$BASE:backbone/.harness-lock.json" | python3 -c '
+          pin_source="$BASE_REF"
+          if git cat-file -e "$BASE_REF:backbone/.harness-lock.json" 2>/dev/null; then
+            pin=$(git show "$BASE_REF:backbone/.harness-lock.json" | python3 -c '
           import json, re, sys
           try:
               lock = json.load(sys.stdin)
@@ -58,7 +67,7 @@ jobs:
             ')
             read -r mode commit <<< "$pin"
           fi
-          if [[ "$mode" == full ]] && ! git cat-file -e "origin/$BASE:scripts/harness/lib" 2>/dev/null \
+          if [[ "$mode" == full ]] && ! git cat-file -e "$BASE_REF:scripts/harness/lib" 2>/dev/null \
             && [[ ! -f scripts/harness/lib/harness.py ]] && [[ -f backbone/.harness-lock.json ]]; then
             commit=$(python3 -c 'import json, re, sys; lock=json.load(open("backbone/.harness-lock.json"));
           assert lock.get("mode") == "thin" and re.fullmatch(r"[0-9a-f]{40}", lock.get("commit", "")), "invalid initial thin pin";
@@ -84,15 +93,15 @@ jobs:
               exit 1
             fi
             echo "Using pinned engine $commit from $pin_source."
-          elif git cat-file -e "origin/$BASE:scripts/harness/lib" 2>/dev/null; then
-            if ! git archive "origin/$BASE" "${assets[@]}" | tar -x -C "$RUNNER_TEMP/trusted"; then
+          elif git cat-file -e "$BASE_REF:scripts/harness/lib" 2>/dev/null; then
+            if ! git archive "$BASE_REF" "${assets[@]}" | tar -x -C "$RUNNER_TEMP/trusted"; then
               echo "::error::Cannot extract the base branch's verifier and required engine configuration."
               exit 1
             fi
-            echo "Using the harness from origin/$BASE."
+            echo "Using the harness from $BASE_REF."
             engine="$RUNNER_TEMP/trusted/scripts/harness/lib/harness.py"
           else
-            echo "::warning::origin/$BASE has no harness yet; using the pull request's copy."
+            echo "::warning::$BASE_REF has no harness yet; using the checked-out copy."
             rm -rf "$RUNNER_TEMP/trusted"
             mkdir -p "$RUNNER_TEMP/trusted/scripts/harness"
             cp -R "${assets[@]}" "$RUNNER_TEMP/trusted/scripts/harness/"
@@ -101,8 +110,144 @@ jobs:
           echo "ENGINE_SCRIPT=$engine" >> "$GITHUB_ENV"
 
       - name: Verify the pull request's commits
+        shell: bash
         env:
           BASE: ${{ github.base_ref }}
           HARNESS_ROOT: ${{ github.workspace }}
           ALLOW: ${{ contains(github.event.pull_request.labels.*.name, 'harness-change-approved') && '--allow-user-changes' || '' }}
-        run: python3 "$ENGINE_SCRIPT" verify --range "origin/$BASE..HEAD" $ALLOW
+        run: |
+          python3 "$ENGINE_SCRIPT" verify --range "origin/$BASE..HEAD" $ALLOW
+
+  attest:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: harness-attest
+    env:
+      HARNESS_ATTEST_SIGN: ${{ secrets.HARNESS_ATTEST_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Take the verifier from the pushed commit
+        if: env.HARNESS_ATTEST_SIGN == 'true'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.sha }}
+        run: |
+          set -o pipefail
+          assets=(scripts/harness/lib scripts/harness/guardrails.core.conf
+                  scripts/harness/routing.core.conf scripts/harness/decisions.json)
+          if ! git rev-parse --verify "$BASE_REF^{commit}" >/dev/null; then
+            echo "::error::Cannot resolve $BASE_REF."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/trusted"
+          mode=full
+          commit=
+          pin_source="$BASE_REF"
+          if git cat-file -e "$BASE_REF:backbone/.harness-lock.json" 2>/dev/null; then
+            pin=$(git show "$BASE_REF:backbone/.harness-lock.json" | python3 -c '
+          import json, re, sys
+          try:
+              lock = json.load(sys.stdin)
+              mode = lock.get("mode", "full")
+              if mode not in ("full", "thin"):
+                  raise ValueError("unknown install mode")
+              if mode == "thin":
+                  if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._-]*", lock.get("version", "")):
+                      raise ValueError("invalid thin engine version")
+                  if not re.fullmatch(r"[0-9a-f]{40}", lock.get("commit", "")):
+                      raise ValueError("invalid thin engine commit")
+              print(mode, lock.get("commit", ""))
+          except (ValueError, TypeError) as exc:
+              sys.exit("Invalid base branch harness lock: %s" % exc)
+            ')
+            read -r mode commit <<< "$pin"
+          fi
+          if [[ "$mode" == full ]] && ! git cat-file -e "$BASE_REF:scripts/harness/lib" 2>/dev/null \
+            && [[ ! -f scripts/harness/lib/harness.py ]] && [[ -f backbone/.harness-lock.json ]]; then
+            commit=$(python3 -c 'import json, re, sys; lock=json.load(open("backbone/.harness-lock.json"));
+          assert lock.get("mode") == "thin" and re.fullmatch(r"[0-9a-f]{40}", lock.get("commit", "")), "invalid initial thin pin";
+          print(lock["commit"])')
+            mode=thin
+            pin_source=HEAD
+          fi
+          if [[ "$mode" == thin ]]; then
+            git -C "$RUNNER_TEMP/trusted" init -q
+            if ! git -C "$RUNNER_TEMP/trusted" fetch -q --depth 1 \
+              "https://github.com/soyPeter/agentic-harness.git" "$commit"; then
+              echo "::error::Cannot fetch the base branch's pinned engine $commit."
+              exit 1
+            fi
+            if [[ "$(git -C "$RUNNER_TEMP/trusted" rev-parse FETCH_HEAD)" != "$commit" ]]; then
+              echo "::error::Fetched engine does not match the base branch's pin."
+              exit 1
+            fi
+            git -C "$RUNNER_TEMP/trusted" checkout -q --detach FETCH_HEAD
+            engine="$RUNNER_TEMP/trusted/payload/owned/scripts/harness/lib/harness.py"
+            if [[ ! -f "$engine" ]]; then
+              echo "::error::The pinned engine has no verifier."
+              exit 1
+            fi
+            echo "Using pinned engine $commit from $pin_source."
+          elif git cat-file -e "$BASE_REF:scripts/harness/lib" 2>/dev/null; then
+            if ! git archive "$BASE_REF" "${assets[@]}" | tar -x -C "$RUNNER_TEMP/trusted"; then
+              echo "::error::Cannot extract the base branch's verifier and required engine configuration."
+              exit 1
+            fi
+            echo "Using the harness from $BASE_REF."
+            engine="$RUNNER_TEMP/trusted/scripts/harness/lib/harness.py"
+          else
+            echo "::warning::$BASE_REF has no harness yet; using the checked-out copy."
+            rm -rf "$RUNNER_TEMP/trusted"
+            mkdir -p "$RUNNER_TEMP/trusted/scripts/harness"
+            cp -R "${assets[@]}" "$RUNNER_TEMP/trusted/scripts/harness/"
+            engine="$RUNNER_TEMP/trusted/scripts/harness/lib/harness.py"
+          fi
+          echo "ENGINE_SCRIPT=$engine" >> "$GITHUB_ENV"
+
+      - name: Write the verdict attestation
+        if: env.HARNESS_ATTEST_SIGN == 'true'
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+          HARNESS_ROOT: ${{ github.workspace }}
+        run: |
+          if ! git merge-base --is-ancestor "$BEFORE" HEAD 2>/dev/null; then
+            echo "::error::The pushed range's base $BEFORE is not an ancestor of $GITHUB_SHA (a first or forced push): no statement." >&2
+            exit 1
+          fi
+          out="$RUNNER_TEMP/harness-attestation/harness-verdicts.intoto.json"
+          mkdir -p "$RUNNER_TEMP/harness-attestation"
+          if ! python3 "$ENGINE_SCRIPT" attest --range "$BEFORE..HEAD" > "$out"; then
+            rm -f "$out"
+            exit 1
+          fi
+
+      - name: Sign the verdict attestation
+        if: env.HARNESS_ATTEST_SIGN == 'true'
+        shell: bash
+        env:
+          HARNESS_ATTEST_KEY: ${{ secrets.HARNESS_ATTEST_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.HARNESS_ATTEST_PASSWORD }}
+        run: |
+          cosign="$RUNNER_TEMP/cosign"
+          curl -fsSL --retry 3 -o "$cosign" \
+            https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign-linux-amd64
+          echo "424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa  $cosign" | sha256sum -c -
+          chmod +x "$cosign"
+          # No services in the signing config: nothing goes to a transparency log or timestamp authority.
+          "$cosign" signing-config create --out "$RUNNER_TEMP/signing-config.json"
+          dir="$RUNNER_TEMP/harness-attestation"
+          "$cosign" attest-blob --yes --key env://HARNESS_ATTEST_KEY --signing-config "$RUNNER_TEMP/signing-config.json" \
+            --statement "$dir/harness-verdicts.intoto.json" --bundle "$dir/harness-verdicts.sigstore.json" < /dev/null
+
+      - name: Upload the verdict attestation
+        if: env.HARNESS_ATTEST_SIGN == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: harness-attestation
+          path: ${{ runner.temp }}/harness-attestation/
+          if-no-files-found: error

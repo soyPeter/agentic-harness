@@ -38,6 +38,7 @@ VERSION = (HARNESS_ROOT / "VERSION").read_text().strip()
 
 LOCK_REL = "backbone/.harness-lock.json"
 SETTINGS_REL = ".claude/settings.json"
+SANDBOX_CONFIG_REL = ".devcontainer/harness-agent/devcontainer.json"
 HOOKS_PATH = "scripts/harness/git-hooks"
 HOOK_MARK = "scripts/harness/"
 IGNORED = {".DS_Store"}
@@ -364,6 +365,10 @@ def sync(target, args, installing):
         "HARNESS_VERSION": VERSION,
     }
     files = sync_owned(plan, owned_sources(adopted), (previous or {}).get("files", {}), args.force)
+    if any(action == "CONFLICT" and path == SANDBOX_CONFIG_REL for action, path, _ in plan.report):
+        plan.note("WARN", SANDBOX_CONFIG_REL, "the sandbox is two containers now (ADR-003): take dockerComposeFile and "
+                                              "runServices from the .harness-new file, and move HARNESS_FIREWALL_ALLOW "
+                                              "into docker-compose.yml")
     seed_project(plan, context, report_existing=installing)
     if not installing:
         migrate_conf(plan, context)

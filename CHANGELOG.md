@@ -2,6 +2,97 @@
 
 ## Unreleased
 
+- **Adopting a pack again keeps your edits.** `harness.py adopt` compared a pack file only with the release's copy, so
+  a file edited after the last adoption was replaced by the release's copy with no backup, after a pin move or a
+  `--to-thin`. An edited file is now kept. When the release changed it too, its copy goes to `<file>.harness-new` and
+  `adopt` exits 1, as `update.sh` does. The lock then records the release's copy, as `update.sh` does, so once you have
+  merged `<file>.harness-new` and deleted it, the next `adopt` is clean. An existing `<file>.harness-new` is never
+  overwritten: `adopt` refuses before it writes anything and names the file (`update.sh` still overwrites one).
+  `adopt --remove` lists a `<file>.harness-new` it leaves in place. A file that a removed option leaves behind no longer
+  has a hash, so `doctor` stops warning about it. A thin lock's hashes that an earlier engine recorded under `"files"`
+  move to `"kept"` when a pack is adopted again, removed, or the pin moves (`harness.py adopt`, `adopt --remove`,
+  `pin`), so `verify` no longer reads the project as a full install and refuses the next `.claude/settings.json`
+  commit.
+
+- **Traceability export (ADR-004).** `harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]`
+  writes the chain requirement → acceptance criterion → test file → judge verdict → commit for every task with a spec,
+  or one task: as ReqIF 1.2 (written with `xml.etree`), as a Sphinx-Needs `needs.json` in format 1, or as a
+  self-contained HTML matrix to attach to a pull request. It is derived from `backbone/` and git and one-way: no
+  network, no new dependency, and no gate reads it. Ids are the spec's own; each task says whether its latest judge
+  pass is on the current code, lists every commit whose code is the judged code and the test files that mention each
+  criterion in it, and lists the gaps (requirements without a criterion, criteria without a test file, undefined
+  references, NFRs without an id, open findings). Under `HARNESS_REQ_STYLE=ears` each requirement carries its EARS
+  pattern. `--out`, and stdout redirected into the repository, are refused unless git ignores the file. A shallow
+  clone or a failed git read reports `history incomplete` instead of a missing commit. The export reads the committed
+  `backbone/harness.conf`, not environment overrides, so the same repository state gives the same bytes on any
+  machine. `docs/adr/ADR-004-traceability-export.md` records the decision, including what a regulated team can and
+  can't claim from it (it isn't signed, validated or PCI DSS evidence). `tests/test-trace-export.py` checks the ReqIF
+  output against a minimal subset of the OMG schema vendored in `tests/reqif_check.py`, offline, plus the
+  `needs.json` shape and the HTML matrix, with property checks.
+
+- **`state` and `next` hash the working tree once per command.** Each judged task used to hash the whole working
+  tree again, about 0.6 s per hash on 5,000 files; now one command shares one hash across its tasks.
+
+- **Signed verdict attestations (ADR-005, Proposed).** `docs/adr/ADR-005-verdict-attestations.md` decides how
+  `harness-verify` turns its verdict into evidence others can check: an in-toto Statement, a custom predicate type
+  (`https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1`, no SLSA level claimed), cosign with a
+  self-managed key first, a KMS next and keyless only as an explicit opt-in. This release ships its first slice:
+  - `harness.py attest --range <base>..<tip> [--allow-user-changes]` prints the unsigned Statement. Its subjects are
+    the tip commit (`gitCommit`) and its code tree without `backbone/` (`gitTree`, the judge's fingerprint). The
+    predicate names the engine (its SHA-256) and the release the base commit's lock pins, the range, the flag and every
+    harness setting it resolved (its value, and whether the environment set it), and for each task finished in the
+    range: the commit that finished it, the spec's fingerprint and approval lines, the Change-Class, the latest grill,
+    judge and review verdicts, and the receipt's risks, suggested labels and verified / not-verified lists. It runs the checks of `verify --range` and prints nothing (exit 1,
+    verify's problems on stderr) when they fail, and refuses a checkout that isn't the tip with a clean working tree.
+    Standard library only; the same commits, settings and engine give the same bytes.
+  - `harness-verify.yml`: the pull request check is unchanged and has no secrets. On a push to the default branch, the
+    `attest` job writes the Statement for the pushed range with the engine at the pushed commit and, with the secret
+    `HARNESS_ATTEST_KEY` (a cosign private key) and `HARNESS_ATTEST_PASSWORD` in the environment `harness-attest`
+    (restricted to the default branch), signs it with cosign 3.1.4 (checked against its SHA-256) and a signing config
+    without services, so nothing goes to a transparency log, and uploads the Statement and its Sigstore bundle as the
+    `harness-attestation` artifact. Without the key the job does nothing; with it, a failure fails the job, and no
+    step can change the pull request's check. A harness change never gets a CI statement in v1. Set the environment
+    and the secrets once the base branch runs a release with `attest` (see the ADR).
+  - `tests/test-attest.py` checks the Statement's content, refusals and bytes through the command and the workflow's
+    statement step, in full and thin projects, with property checks; no cosign needed.
+
+- **verify --range no longer fails a range whose later commit changes `backbone/`.** The code fingerprint of a
+  commit kept the `backbone/` files that differ from both HEAD and the checkout, so a task marked done in one commit
+  looked changed once a later commit in the range touched `backbone/` (another task's spec, a memory note), and CI
+  failed the pull request.
+- **Sandbox backends and sandbox evidence (ADR-003, Proposed).** `docs/adr/ADR-003-sandbox-backends.md` decides a
+  sandbox backend interface for unattended runs (create, exec, copy in and out, egress policy, teardown, identity),
+  with the local devcontainer as the default and the only backend the CI floor may use, and lists E2B, Freestyle and
+  Coder as later candidates with the research's risks. This release ships its v1:
+  - `harness.py run` starts each agent session through the backend `HARNESS_SANDBOX_BACKEND` names (new, user-only,
+    default `devcontainer`). `devcontainer` runs it where the runner runs, as before. Any other value is a doctor
+    error, so `run` and `orca` refuse to start; `verify` never reads it.
+  - Each judge verdict records the sandbox it was recorded in, and `receipt` shows it (a SANDBOX section; `sandbox`
+    in `--json`): `backend`, `isolation_class`, `base_image_digest`, `allowlist_hash`, `region`, `control_plane`,
+    `credential_mode`, and `isolation_reason`. `isolation_class` is `container` only when the process is a Linux
+    container with NoNewPrivs set, no NET_ADMIN, NET_RAW or SYS_ADMIN in its effective or bounding set, and the egress
+    allowlist published at `/run/harness-egress/allowlist`; otherwise `none`, with the reason. A judge
+    pass recorded before this release says "not recorded". The evidence never holds a credential, and refuses nothing.
+    A receipt flags a container with no published allowlist, and notes that `allowlist_hash` covers host names only.
+  - `.devcontainer/harness-agent/` builds from `node:22-bookworm` pinned by digest, and bakes the reference into
+    the image (`HARNESS_SANDBOX_IMAGE`).
+  - Inside the harness-agent image, an egress allowlist that isn't published at `/run/harness-egress/allowlist`
+    (named by `HARNESS_EGRESS_ALLOWLIST`) is a doctor error, so `run` and `orca` refuse to start. `doctor` warns about
+    a `devcontainer.json` that names no `dockerComposeFile` (read as JSONC, with comments and trailing commas), or that
+    can't be parsed, and `update` warns when it keeps a conflicting local `devcontainer.json`.
+  - The egress allowlist moved out of the agent's container: a second container (`egress`, `docker-compose.yml`)
+    applies `init-firewall.sh` in the network namespace the agent's container joins, and publishes the host list the
+    evidence hashes. The agent's container drops NET_ADMIN and NET_RAW, runs with `no-new-privileges` and has no
+    sudo, so the agent can no longer re-run the firewall script as root. Outbound IPv6 is dropped. DNS is still open
+    to any resolver.
+  - `tests/test-sandbox-evidence.py` (in the self-test) and `tests/test-sandbox-egress.py` (real containers, with
+    `HARNESS_E2E=1`: the Compose sandbox needs docker and the devcontainer CLI; the restriction checks need only docker).
+  - **Upgrading:** the sandbox is now two containers. Move an edited `HARNESS_FIREWALL_ALLOW` or knowledge mount from
+    `devcontainer.json` to `docker-compose.yml`, and rebuild the container; an image built before this release
+    records `isolation_class: none`. If `update` reports a conflict on `devcontainer.json`, merge the new file's
+    `dockerComposeFile` and `runServices` from the `.harness-new` file first: until you do, `doctor` warns, and the
+    harness-agent image refuses to run `run` or `orca`.
+
 - **Change-Class ladder (ADR-002).** Spec template and `requirements-writing` skill declare `Change-Class`
   (`docs` | `refactor` | `feature` | `schema`) plus optional `Parent-CHNG` / `Parent-RFC` / `Parent-ADR` links.
   Policy: PR merge stays human; policy `approve` must not be treated as merge. Runtime enforcement in
@@ -34,6 +125,20 @@
   commands, with property checks. **Upgrading:** a `docs` task that touches images, stylesheets or other files without
   a documentation extension now waits for the user (add them to `HARNESS_DOC_PATHS` if your docs need them), and a
   move counts as two files against `HARNESS_RISK_MAX_FILES` and `HARNESS_LIGHT_MAX_FILES`.
+
+- **An `## Approval` heading in a code block no longer ends the spec (ADR-002).** A fenced example showing a spec's
+  `## Approval` heading ended the grill fingerprint, the freeze on an approved spec and what is read from the spec at
+  the example: the risk checks missed every requirement below it, so policy could approve a `docs` spec that stores
+  passwords in plain text, and everything below it could change after approval. `approved()` started the section at
+  the example too, so an example with an `Approved-by:` line counted as the user's approval, and the user's own
+  approval below it didn't count. The Approval section now starts at the first `## Approval` heading outside comments
+  and fenced code blocks for the fingerprint, the freeze, `Change-Class`, the risk checks, `approve`, `approved` and
+  the receipt alike; an `Approved-by:` line in a code block is an example; and a spec with such a heading inside a
+  code block is invalid (indent the heading in an example). `tests/test-change-class.py` reproduces it through the
+  public commands, with property checks that any edit below a fenced heading makes the grill pass stale or the spec
+  invalid, and is refused as frozen or leaves the spec invalid. **Upgrading:** a spec with an `## Approval` heading
+  in a code block fails `spec-check` until the example's heading is indented.
+
 - **Suggested triage labels (ADR-002, follow-up b).** `harness.py receipt` suggests pull request labels for whoever
   triages the PR, in the text receipt and as `suggested_labels` in `--json`: `risk:low`, `risk:elevated` or
   `risk:high` from the spec's `Change-Class` and the receipt's other risks, plus `class:<class>` when the spec has a
@@ -57,6 +162,18 @@
   after a here-string such as `<<<EOF` as commands, not as a heredoc body, and a quote inside `"$(...)"` as part of
   the substitution, so it no longer ends the string around it. The gate stays best-effort: it doesn't see gh run from
   a script or another program, nor other HTTP clients. GitHub permissions remain the boundary.
+
+- **The deliverer's gh access is an allowlist (ADR-002).** The gate refused some gh commands and let the rest through,
+  so the deliverer could turn on auto-merge or change the default branch (`gh repo edit`), run a workflow, set a
+  secret or variable, close an issue, reopen a PR or publish a release. It now runs only what delivery needs:
+  `gh pr create`, `edit`, `view`, `checks`, `list` and `comment`, `gh run view`, `list` and `watch`, `gh label list`
+  and `create`, `gh repo view`, and `gh api` reads. Every other gh command is refused as the user's call, `gh issue`
+  included: the deliverer labels its PR with `gh pr`. Also refused now: `gh label create --force`, which rewrites a
+  label someone else defined; shell alias definitions, since a shell that expands aliases (Claude Code's often does)
+  ran `g pr merge 7` as `gh pr merge 7` after `alias g=gh` on the line before; `source` and `.`, which read commands
+  the harness can't see; and a command whose gh calls add different `risk:*` labels, which each passed against the
+  PR's labels as they were before the command ran. gh behind `builtin`, `noglob` or `nocorrect` is read like gh
+  behind `command`.
 
 - **Plugin and pin must match (thin mode).** When the installed plugin isn't the release the project pins, its agents
   and skills don't match the pinned gates. Session start says so, with both versions and the fix. In autonomous mode
@@ -90,6 +207,18 @@
   Switching there and back without moving the pin gives back the install, except that an edited file outside
   `backbone/` becomes the release's copy with the edit kept in `<file>.harness-bak`. The README has a Thin mode
   section: the plugin for each CLI, `init --thin`, `pin`, switching, CI, the plugin/pin rule and the limits.
+- **Packs in a thin project work from the hashes the pin keeps.** `harness.py adopt` and `adopt --remove` read a
+  file's hash from the lock's `"kept"` when its `"files"` doesn't list it. So in a project switched with
+  `update.sh --to-thin`, a pack can be adopted again after the pin moved, adopting it again without an option deletes
+  that option's unedited files, and removing it deletes the files nobody edited and keeps the edited ones. In a thin
+  lock, `adopt` records a pack's hashes under `"kept"` instead of `"files"`, and a removed pack's files leave both
+  tables: `verify` takes a lock with `"files"` for a full install's and refuses every change to
+  `.claude/settings.json`, and CI runs the base branch's engine, perhaps an older release. 0.30.0's `adopt` gave a thin
+  lock `"files"`; adopting such a pack again, or removing it, takes its files out. Like the backbone documents a thin
+  lock keeps, `doctor` doesn't report these files as edited.
+- **`update.sh --to-thin --version V` takes the installed release's permission rules out of `.claude/settings.json`,
+  not those of `V`.** Otherwise a rule only the installed release had would stay, and a rule of yours that only `V`
+  adds would go. It fetches the installed release to read them, and refuses when it can't.
 - **The machine guard knows thin projects, and the plugin gives its check.** The guard took a thin project (a
   `"mode": "thin"` pin in `backbone/.harness-lock.json`, no `scripts/harness/`) for one that isn't enrolled: it
   reminded the agent and, in block mode, refused its edits. A thin pin now counts, and so does a lock that can't be
@@ -136,6 +265,17 @@
   observes; Testcontainers for integration tests and Playwright (through its MCP server) for end-to-end flows where
   the stack has them; reproduce a bug in a failing test before fixing it; find missing tests with mutation and
   property-based testing. The judge checklist checks that tests go through public APIs.
+- **The code fingerprint comes from the files' content.** The fingerprint that judge, review and debug verdicts
+  record, and that `finish`, the receipt, `next` and `state` compare with the code now, trusted git's index for every
+  file whose size and timestamps hadn't changed. It read a copy of the index dated when the copy was made, so a
+  same-size edit made within the second of the last index write hashed as the old content from the next second on. A
+  judge pass could then name code the judge never saw (restoring the staged version after the judge passed got
+  through `finish`), and committing the judged code could make the receipt refuse it: "the code changed after the
+  judge passed", the intermittent failure in `tests/test-change-class.py`. Every file is now hashed, so a same-size
+  edit that keeps the file's mtime (`cp -p`, `touch -r`) counts too where git doesn't trust ctime
+  (`core.trustctime=false`). Files marked assume-unchanged or skip-worktree keep their index content, as in a commit.
+  It costs more on large checkouts: about 0.4 s for 5,000 files, up from 0.06 s. `tests/test-code-fingerprint.py`
+  covers it.
 
 ## 0.30.0 (2026-11-06)
 
