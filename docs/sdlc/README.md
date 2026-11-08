@@ -70,9 +70,10 @@ it. The bottom row holds the three proposed ADRs. Each ships a first slice; none
 ## Sources
 
 - [README](../../README.md), and in `payload/owned/`: `AGENTS.md`, `backbone/8-WORKFLOW.md`, `backbone/HOOKS.md`
-- [ADR-001](../adr/ADR-001-thin-mode-plugin.md) and [ADR-002](../adr/ADR-002-change-class-ladder.md). ADR-003
-  (sandbox backends), ADR-004 (traceability export) and ADR-005 (verdict attestations) are drafts on their own branches,
-  not on `main` yet; diagram 4 shows them as proposed.
+- [ADR-001](../adr/ADR-001-thin-mode-plugin.md) and [ADR-002](../adr/ADR-002-change-class-ladder.md) are accepted.
+  [ADR-003](../adr/ADR-003-sandbox-backends.md), [ADR-004](../adr/ADR-004-traceability-export.md) and
+  [ADR-005](../adr/ADR-005-verdict-attestations.md) are on `main` as Proposed: each ships a first slice, none is
+  accepted yet; diagram 4 shows them as proposed.
 - [Agent-SDLC landscape research](../research/2026-11-agent-sdlc-landscape.md)
 
 The SVGs are plain text and carry their own background, so they read the same in GitHub's light and dark themes.
