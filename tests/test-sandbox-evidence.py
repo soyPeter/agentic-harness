@@ -1,22 +1,25 @@
 """Sandbox evidence in the change receipt, and the sandbox backend the runner starts its sessions with (ADR-003).
 
 The judge-stop hook records, with each judge verdict, the sandbox it ran in: where the judge's evidence, the harness's
-own test run included, was produced. `receipt` shows the evidence of the judge pass it relies on. Inside the
-harness-agent container the environment says so: the image bakes the base image it was built from
-(HARNESS_SANDBOX_IMAGE) and HARNESS_EGRESS_ALLOWLIST names the allowlist the egress container publishes. These checks
-give the hooks that environment; tests/test-sandbox-egress.py brings up the real container (HARNESS_E2E=1).
+own test run included, was produced. `receipt` shows the evidence of the judge pass it relies on. A process counts as
+inside the harness-agent container only when its own status shows the container's restrictions, which a host run never
+has: so these checks cover what a host can see, and the container itself is checked by tests/test-sandbox-egress.py
+(HARNESS_E2E=1).
 """
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+DEVCONTAINER_REL = ".devcontainer/harness-agent/devcontainer.json"
 SANDBOX_ENVIRONMENT = ("HARNESS_SANDBOX_IMAGE", "HARNESS_EGRESS_ALLOWLIST", "HARNESS_SANDBOX_BACKEND",
                        "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
 # The allowlist init-firewall.sh enforces with an empty HARNESS_FIREWALL_ALLOW, as the egress container may write it:
@@ -25,8 +28,20 @@ PUBLISHED_ALLOWLIST = ("statsig.anthropic.com\nGitHub.com\napi.anthropic.com\ngi
                        "codeload.github.com\nobjects.githubusercontent.com\n")
 # sha256 of the sorted, deduplicated, lower-case host names, one per line.
 DEFAULT_ALLOWLIST_HASH = "sha256:0e8bb6fbde0f567902ea181ebaaabe69c10a830267e395f64a2c4d0e649d5f41"
-ON_THE_HOST = {"backend": "devcontainer", "isolation_class": "none", "image_digest": "none", "allowlist_hash": "none",
-               "region": "local", "control_plane": "none", "credential_mode": "host"}
+ON_THE_HOST = {"backend": "devcontainer", "isolation_class": "none", "base_image_digest": "none",
+               "allowlist_hash": "none", "region": "local", "control_plane": "none", "credential_mode": "host"}
+RECORDED_IN_CONTAINER = {"backend": "devcontainer", "isolation_class": "container", "allowlist_hash": DEFAULT_ALLOWLIST_HASH,
+                         "region": "local", "control_plane": "local", "credential_mode": "login"}
+# A devcontainer.json as installed before the egress container: one container that runs its own firewall.
+STALE_DEVCONTAINER = """// An earlier harness release: one container, the firewall inside it.
+{
+  "name": "harness-agent",
+  "build": {"dockerfile": "Dockerfile"},
+  "runArgs": ["--cap-add=NET_ADMIN", "--cap-add=NET_RAW"],
+  "remoteUser": "agent",
+  "postStartCommand": "sudo /usr/local/bin/init-firewall.sh"
+}
+"""
 
 SPEC = """# Spec 7.1: Customer search
 
@@ -146,6 +161,15 @@ class Project(unittest.TestCase):
         self.hook("judge-stop", "judge", JUDGE_PASS, **environment)
         return self.harness("receipt", "7.1").stdout, json.loads(self.harness("receipt", "7.1", "--json").stdout)
 
+    def recorded(self, sandbox):
+        """The receipt (text, JSON) after the latest judge pass's sandbox is replaced by the given record."""
+        self.judged()
+        verdicts = self.project / "backbone/.verdicts/7.1.judge.json"
+        record = json.loads(verdicts.read_text())
+        record["history"][-1]["sandbox"] = sandbox
+        verdicts.write_text(json.dumps(record, indent=2) + "\n")
+        return self.harness("receipt", "7.1").stdout, json.loads(self.harness("receipt", "7.1", "--json").stdout)
+
     def harness_agent_image(self):
         """The image reference the installed Dockerfile builds from, as the image bakes it into its environment."""
         found = re.findall(r"(?m)^ARG HARNESS_SANDBOX_IMAGE=(\S+)$",
@@ -164,61 +188,35 @@ class Evidence(Project):
     def test_a_judge_pass_on_the_host_records_that_nothing_isolated_it(self):
         text, data = self.judged()
 
-        self.assertEqual(data["sandbox"], ON_THE_HOST)
+        self.assertEqual({key: data["sandbox"][key] for key in ON_THE_HOST}, ON_THE_HOST)
+        self.assertTrue(data["sandbox"]["isolation_reason"])
         self.assertIn("SANDBOX (where the judge pass was recorded)", text)
         for key, value in ON_THE_HOST.items():
             self.assertIn("  - %s: %s" % (key, value), text)
-        self.assertIn("outside the harness-agent container", text)
+        self.assertIn("nothing isolated the session from the host", text)
 
-    def test_a_judge_pass_in_the_harness_agent_container_records_its_image_and_allowlist(self):
-        image = self.harness_agent_image()
-
-        text, data = self.judged(HARNESS_SANDBOX_IMAGE=image, HARNESS_EGRESS_ALLOWLIST=self.published_allowlist(),
+    def test_the_harness_image_variable_and_an_allowlist_alone_do_not_make_a_container(self):
+        text, data = self.judged(HARNESS_SANDBOX_IMAGE=self.harness_agent_image(),
+                                 HARNESS_EGRESS_ALLOWLIST=self.published_allowlist(),
                                  CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-test-token")
 
-        self.assertEqual(data["sandbox"], {
-            "backend": "devcontainer", "isolation_class": "container", "image_digest": image.split("@", 1)[1],
-            "allowlist_hash": DEFAULT_ALLOWLIST_HASH, "region": "local", "control_plane": "local",
-            "credential_mode": "env"})
-        self.assertIn("  - isolation_class: container", text)
-        self.assertIn("  - allowlist_hash: %s" % DEFAULT_ALLOWLIST_HASH, text)
-        self.assertNotIn("outside the harness-agent container", text)
+        self.assertEqual({key: data["sandbox"][key] for key in ON_THE_HOST}, ON_THE_HOST)
+        expected = "not Linux" if sys.platform != "linux" else "not in a container"
+        self.assertIn(expected, data["sandbox"]["isolation_reason"])
+        self.assertIn("nothing isolated the session from the host", text)
 
-    def test_the_evidence_names_how_credentials_arrive_never_the_credential(self):
+    def test_the_evidence_never_holds_a_credential(self):
         self.judged(HARNESS_SANDBOX_IMAGE=self.harness_agent_image(), ANTHROPIC_API_KEY="sk-ant-api03-secret-key")
 
         verdicts = (self.project / "backbone/.verdicts/7.1.judge.json").read_text()
 
-        self.assertEqual(json.loads(verdicts)["history"][-1]["sandbox"]["credential_mode"], "env")
         self.assertNotIn("sk-ant-api03-secret-key", verdicts)
-
-    def test_without_a_credential_in_its_environment_the_agent_uses_the_login_stored_in_the_container(self):
-        _, data = self.judged(HARNESS_SANDBOX_IMAGE=self.harness_agent_image(), CLAUDE_CODE_OAUTH_TOKEN="",
-                              ANTHROPIC_API_KEY="")
-
-        self.assertEqual(data["sandbox"]["credential_mode"], "login")
-
-    def test_an_image_built_from_a_tag_is_not_pinned(self):
-        _, data = self.judged(HARNESS_SANDBOX_IMAGE="node:22-bookworm")
-
-        self.assertEqual(data["sandbox"]["isolation_class"], "container")
-        self.assertEqual(data["sandbox"]["image_digest"], "unpinned")
 
     def test_an_allowlist_the_egress_side_has_not_published_is_not_vouched_for(self):
         _, data = self.judged(HARNESS_SANDBOX_IMAGE=self.harness_agent_image(),
                               HARNESS_EGRESS_ALLOWLIST=str(self.work / "never-written"))
 
         self.assertEqual(data["sandbox"]["allowlist_hash"], "none")
-
-    def test_the_hash_follows_the_hosts_not_how_they_are_written(self):
-        _, wider = self.judged(HARNESS_SANDBOX_IMAGE=self.harness_agent_image(),
-                               HARNESS_EGRESS_ALLOWLIST=self.published_allowlist(PUBLISHED_ALLOWLIST + "pypi.org\n"))
-        _, reordered = self.judged(HARNESS_SANDBOX_IMAGE=self.harness_agent_image(),
-                                   HARNESS_EGRESS_ALLOWLIST=self.published_allowlist(
-                                       "\n".join(reversed(PUBLISHED_ALLOWLIST.upper().split())) + "\n"))
-
-        self.assertNotEqual(wider["sandbox"]["allowlist_hash"], DEFAULT_ALLOWLIST_HASH)
-        self.assertEqual(reordered["sandbox"]["allowlist_hash"], DEFAULT_ALLOWLIST_HASH)
 
     def test_a_judge_pass_recorded_before_sandbox_evidence_says_so(self):
         self.judged()
@@ -232,6 +230,24 @@ class Evidence(Project):
 
         self.assertIsNone(data["sandbox"])
         self.assertIn("not recorded: the judge pass predates sandbox evidence (ADR-003)", text)
+
+    def test_a_judge_pass_recorded_under_the_old_image_digest_name_shows_it_as_the_base_image_digest(self):
+        digest = "sha256:" + "a" * 64
+        text, data = self.recorded(dict(RECORDED_IN_CONTAINER, image_digest=digest))
+
+        self.assertEqual(data["sandbox"]["base_image_digest"], digest)
+        self.assertNotIn("image_digest", data["sandbox"])
+        self.assertIn("  - base_image_digest: %s" % digest, text)
+
+    def test_a_container_without_an_allowlist_is_flagged(self):
+        text, _ = self.recorded(dict(RECORDED_IN_CONTAINER, allowlist_hash="none", base_image_digest="unpinned"))
+
+        self.assertIn("container without an allowlist", text)
+
+    def test_the_allowlist_hash_is_said_to_cover_host_names_only(self):
+        text, _ = self.recorded(dict(RECORDED_IN_CONTAINER, base_image_digest="unpinned"))
+
+        self.assertIn("allowlist_hash covers host names only", text)
 
 
 class Backend(Project):
@@ -259,11 +275,55 @@ class Backend(Project):
         self.assertIn("HARNESS_SANDBOX_BACKEND is e2b", self.harness("doctor", check=False,
                                                                      HARNESS_SANDBOX_BACKEND="e2b").stdout)
 
+    def test_a_harness_image_without_its_egress_allowlist_stops_doctor_run_and_orca(self):
+        image = self.harness_agent_image()
+        for command in (("doctor",), ("run", "--dry-run"), ("orca", "--dry-run")):
+            with self.subTest(command=command[0]):
+                result = self.autonomous(*command, HARNESS_SANDBOX_IMAGE=image, HARNESS_EGRESS_ALLOWLIST="")
+
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("HARNESS_EGRESS_ALLOWLIST", result.stdout)
+
+    def test_a_harness_image_with_its_published_allowlist_passes_doctor(self):
+        result = self.harness("doctor", check=False, HARNESS_SANDBOX_IMAGE=self.harness_agent_image(),
+                              HARNESS_EGRESS_ALLOWLIST=self.published_allowlist())
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("ERROR", result.stdout)
+
     def test_the_ci_floor_never_consults_the_backend(self):
         verify = self.harness("verify", check=False, HARNESS_VERIFY="block", HARNESS_SANDBOX_BACKEND="e2b")
 
         self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
         self.assertIn("verify: ok", verify.stdout)
+
+
+class Upgrade(Project):
+    def keep_stale_devcontainer(self):
+        (self.project / DEVCONTAINER_REL).write_text(STALE_DEVCONTAINER)
+
+    def test_doctor_warns_about_a_devcontainer_json_that_predates_the_egress_container(self):
+        self.keep_stale_devcontainer()
+
+        result = self.harness("doctor", check=False)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("predates the two-container sandbox", result.stdout)
+
+    def test_update_says_what_to_merge_when_it_keeps_an_edited_devcontainer_json_from_before_the_egress_container(self):
+        self.keep_stale_devcontainer()
+        lock = self.project / "backbone/.harness-lock.json"
+        record = json.loads(lock.read_text())
+        # Installed from an earlier release, then edited: the upstream file has changed since.
+        record["files"][DEVCONTAINER_REL] = hashlib.sha256((STALE_DEVCONTAINER + "// older\n").encode()).hexdigest()
+        lock.write_text(json.dumps(record, indent=2) + "\n")
+
+        result = self.command(str(ROOT / "update.sh"), str(self.project), check=False)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue((self.project / (DEVCONTAINER_REL + ".harness-new")).is_file())
+        self.assertIn("WARN", result.stdout)
+        self.assertIn("dockerComposeFile", result.stdout)
 
 
 class SandboxFiles(Project):

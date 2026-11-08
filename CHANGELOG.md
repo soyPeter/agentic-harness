@@ -10,11 +10,16 @@
     default `devcontainer`). `devcontainer` runs it where the runner runs, as before. Any other value is a doctor
     error, so `run` and `orca` refuse to start; `verify` never reads it.
   - Each judge verdict records the sandbox it was recorded in, and `receipt` shows it (a SANDBOX section; `sandbox`
-    in `--json`): `backend`, `isolation_class`, `image_digest`, `allowlist_hash`, `region`, `control_plane`,
-    `credential_mode`. Outside the harness-agent container it says `isolation_class: none`; a judge pass recorded
-    before this release says "not recorded". The evidence never holds a credential, and refuses nothing.
+    in `--json`): `backend`, `isolation_class`, `base_image_digest`, `allowlist_hash`, `region`, `control_plane`,
+    `credential_mode`, and `isolation_reason`. `isolation_class` is `container` only when the process is a Linux
+    container with NoNewPrivs set and no NET_ADMIN, NET_RAW or SYS_ADMIN; otherwise `none`, with the reason. A judge
+    pass recorded before this release says "not recorded". The evidence never holds a credential, and refuses nothing.
+    A receipt flags a container with no published allowlist, and notes that `allowlist_hash` covers host names only.
   - `.devcontainer/harness-agent/` builds from `node:22-bookworm` pinned by digest, and bakes the reference into
     the image (`HARNESS_SANDBOX_IMAGE`).
+  - Inside the harness-agent image, an egress allowlist (`HARNESS_EGRESS_ALLOWLIST`) that can't be read is a doctor
+    error, so `run` and `orca` refuse to start. `doctor` warns about a `devcontainer.json` that names no
+    `dockerComposeFile`, and `update` warns when it keeps a conflicting local `devcontainer.json`.
   - The egress allowlist moved out of the agent's container: a second container (`egress`, `docker-compose.yml`)
     applies `init-firewall.sh` in the network namespace the agent's container joins, and publishes the host list the
     evidence hashes. The agent's container drops NET_ADMIN and NET_RAW, runs with `no-new-privileges` and has no
@@ -24,7 +29,9 @@
     `HARNESS_E2E=1`, docker and the devcontainer CLI).
   - **Upgrading:** the sandbox is now two containers. Move an edited `HARNESS_FIREWALL_ALLOW` or knowledge mount from
     `devcontainer.json` to `docker-compose.yml`, and rebuild the container; an image built before this release
-    records `isolation_class: none`.
+    records `isolation_class: none`. If `update` reports a conflict on `devcontainer.json`, merge the new file's
+    `dockerComposeFile` and `runServices` from the `.harness-new` file first: until you do, `doctor` warns, and the
+    harness-agent image refuses to run `run` or `orca`.
 
 - **Change-Class ladder (ADR-002).** Spec template and `requirements-writing` skill declare `Change-Class`
   (`docs` | `refactor` | `feature` | `schema`) plus optional `Parent-CHNG` / `Parent-RFC` / `Parent-ADR` links.

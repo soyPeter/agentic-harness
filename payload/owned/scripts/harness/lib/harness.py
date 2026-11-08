@@ -2818,6 +2818,12 @@ def health():
     unusable = sandbox.problem(values["HARNESS_SANDBOX_BACKEND"])
     if unusable:
         issues.append(("error", unusable))
+    unpublished = sandbox.unpublished_allowlist()
+    if unpublished:
+        issues.append(("error", unpublished))
+    stale = stale_sandbox_config()
+    if stale:
+        issues.append(("warn", stale))
     if values["HARNESS_AUTONOMY"] not in AUTONOMY_MODES:
         issues.append(("error", "HARNESS_AUTONOMY must be one of %s" % "|".join(AUTONOMY_MODES)))
     elif values["HARNESS_AUTONOMY"] == "autonomous":
@@ -2912,6 +2918,21 @@ def adopted_summary(info):
         return "none adopted (the stack is decided in the design phase; see harness.py catalog)"
     return ", ".join("%s via %s (%s)" % (name, entry.get("adr"), ", ".join(entry.get("options") or []) or "no options")
                      for name, entry in sorted(adopted.items()))
+
+
+def stale_sandbox_config():
+    """A warning when the project's devcontainer.json starts one container and no egress container: an edited copy that
+    an update kept (ADR-003)."""
+    try:
+        text = (ROOT / ".devcontainer/harness-agent/devcontainer.json").read_text(encoding="utf-8")
+        config = json.loads("\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//")))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(config, dict) or config.get("dockerComposeFile"):
+        return None
+    return ("devcontainer.json predates the two-container sandbox (ADR-003): it names no dockerComposeFile, so the egress "
+            "container never starts. Take the upstream file (devcontainer.json.harness-new, if update wrote one) and move "
+            "HARNESS_FIREWALL_ALLOW into docker-compose.yml")
 
 
 def doctor():
@@ -5769,7 +5790,7 @@ def receipt_data(task, base=None):
         "risks": risk_reasons(task, base),
         "rounds": {"grill": len(grills), "judge": len(judge), "debug": len(verdict_history(task, "debug"))},
         "judged_at": passed.get("at"),
-        "sandbox": passed.get("sandbox"),
+        "sandbox": sandbox.normalized(passed.get("sandbox")),
         "approval": approval_lines(approval_section(spec_text) or ""),
         "approval_needed": approval_needed,
     }
@@ -5780,9 +5801,17 @@ def receipt_data(task, base=None):
 def sandbox_lines(evidence):
     if not evidence:
         return ["not recorded: the judge pass predates sandbox evidence (ADR-003); judge the task again to record it"]
+    evidence = sandbox.normalized(evidence)
     lines = ["%s: %s" % (field, evidence.get(field, "unknown")) for field in sandbox.EVIDENCE_FIELDS]
     if evidence.get("isolation_class") == "none":
-        lines.append("nothing isolated the session from the host: it ran outside the harness-agent container")
+        reason = evidence.get("isolation_reason")
+        lines.append("nothing isolated the session from the host" + (": %s" % reason if reason else ""))
+    elif evidence.get("allowlist_hash") == "none":
+        lines.append("container without an allowlist: no egress allowlist was published, so its outbound traffic is "
+                     "not limited")
+    if str(evidence.get("allowlist_hash", "")).startswith("sha256:"):
+        lines.append("allowlist_hash covers host names only, not the addresses they resolve to or the GitHub ranges "
+                     "init-firewall.sh adds")
     return lines
 
 

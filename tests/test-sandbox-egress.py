@@ -24,7 +24,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 DEVCONTAINER = shutil.which("devcontainer")
 SHARED_VOLUME = "harness-agent-claude-config"
-CAPABILITIES = {"NET_ADMIN": 12, "NET_RAW": 13}   # linux/capability.h
+CAPABILITIES = {"NET_ADMIN": 12, "NET_RAW": 13, "SYS_ADMIN": 21}   # linux/capability.h
 DEFAULT_HOSTS = ["api.anthropic.com", "api.github.com", "codeload.github.com", "github.com",
                  "objects.githubusercontent.com", "statsig.anthropic.com"]
 DEFAULT_ALLOWLIST_HASH = "sha256:0e8bb6fbde0f567902ea181ebaaabe69c10a830267e395f64a2c4d0e649d5f41"
@@ -166,6 +166,18 @@ class Allowlist(Sandbox):
             with self.subTest(capability=name):
                 self.assertFalse(bounding >> bit & 1, "CAP_%s is in the agent's bounding set" % name)
 
+    def test_the_agent_process_runs_with_no_new_privileges_and_no_network_or_system_capability(self):
+        status = self.inside("cat /proc/self/status").stdout
+        fields = {key.strip(): value.strip() for key, value in
+                  (line.split(":", 1) for line in status.splitlines() if ":" in line)}
+        effective = int(fields["CapEff"], 16)
+
+        self.assertEqual(fields["NoNewPrivs"], "1")
+        for name, bit in CAPABILITIES.items():
+            with self.subTest(capability=name):
+                self.assertFalse(effective >> bit & 1, "CAP_%s is in the agent's effective set" % name)
+        self.assertEqual(self.inside("test -e /.dockerenv && echo yes").stdout.strip(), "yes")
+
     def test_a_judge_pass_inside_records_the_sandbox_and_the_receipt_on_the_host_shows_it(self):
         (self.project / "backbone/specs").mkdir(parents=True, exist_ok=True)
         spec = self.project / "backbone/specs/7.1.md"
@@ -194,10 +206,13 @@ class Allowlist(Sandbox):
 
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
         self.assertTrue(pinned, "the Dockerfile pins its base image by digest")
-        self.assertEqual(receipt["sandbox"], {
-            "backend": "devcontainer", "isolation_class": "container", "image_digest": pinned.group(1),
+        self.assertEqual({key: receipt["sandbox"][key] for key in ("backend", "isolation_class", "base_image_digest",
+                                                                   "allowlist_hash", "region", "control_plane",
+                                                                   "credential_mode")}, {
+            "backend": "devcontainer", "isolation_class": "container", "base_image_digest": pinned.group(1),
             "allowlist_hash": DEFAULT_ALLOWLIST_HASH, "region": "local", "control_plane": "local",
             "credential_mode": "login"})
+        self.assertIn("in a container", receipt["sandbox"]["isolation_reason"])
 
 
 class Tamper(Sandbox):

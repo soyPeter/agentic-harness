@@ -90,8 +90,8 @@ A backend provides six operations:
 | Field | Meaning | Inside the harness-agent container | Anywhere else |
 |---|---|---|---|
 | `backend` | the backend that ran the session | `devcontainer` | `devcontainer` |
-| `isolation_class` | the boundary between the agent and the host: `none` < `container` < `userspace-kernel` (gVisor) < `microVM` (Firecracker, Cloud Hypervisor, Kata) < `dedicated-VM` | `container` | `none` |
-| `image_digest` | the digest of the image the sandbox runs; `unpinned` when built from a tag | the base image's digest | `none` |
+| `isolation_class` | the boundary between the agent and the host: `none` < `container` < `userspace-kernel` (gVisor) < `microVM` (Firecracker, Cloud Hypervisor, Kata) < `dedicated-VM` | `container`, once the process shows the container's restrictions (below) | `none` |
+| `base_image_digest` | the digest of the base image the Dockerfile builds from; `unpinned` when that base is named by a tag. It does not cover the packages or the agent CLI installed on top | the base's digest, as baked into the image's environment | `none` |
 | `allowlist_hash` | `sha256:` over the allowlisted host names, lower-cased, deduplicated, sorted, one per line | of the list the egress container publishes | `none` |
 | `region` | where the sandbox runs: a hosted backend's region or jurisdiction | `local` | `local` |
 | `control_plane` | who creates and holds the sandbox | `local` (the machine's container engine) | `none` |
@@ -104,11 +104,18 @@ A backend provides six operations:
 - **Where it is shown.** `receipt` shows the evidence of the judge pass it relies on: a SANDBOX section in the text and
   `sandbox` in `--json`. A judge pass recorded before this ADR shows `null` (text: "not recorded"). The pull requests
   `run --worktree --pr` and `orca` open carry it inside the receipt, and so does `linear receipt`.
-- **The local backend vouches only for what it can see.** It reports `container` inside an image built from the
-  harness-agent Dockerfile, which bakes `HARNESS_SANDBOX_IMAGE` into the image's environment. Anywhere else it reports
-  `none`, other containers included. It understates rather than overstates.
-- `allowlist_hash` identifies the policy, not the addresses the names resolved to. Anyone can recompute it from the
-  list.
+- **The local backend vouches only for what it can see.** `HARNESS_SANDBOX_IMAGE` is baked into the harness-agent
+  image, but a host can export it, and `docker run --cap-add NET_ADMIN` or `--privileged` gives a container the same
+  variable. So the backend reports `container` only when the process itself shows the container's restrictions: Linux,
+  a container marker (`/.dockerenv` or `/run/.containerenv`), `NoNewPrivs` set in `/proc/self/status`, and no NET_ADMIN,
+  NET_RAW or SYS_ADMIN in its effective capabilities. Anything else reports `none`, with `isolation_reason` saying which
+  check failed, other containers included. It understates rather than overstates.
+- The evidence also carries `isolation_reason`, beside the fields above: why the class is what it is.
+- `allowlist_hash` identifies the policy as published, not the addresses the names resolved to, and not the GitHub
+  address ranges `init-firewall.sh` adds from `api.github.com/meta`, which change. Anyone can recompute it from the
+  list. A receipt says so.
+- A container with no published allowlist is flagged in the receipt ("container without an allowlist"): its outbound
+  traffic isn't limited by the egress container, whatever its class.
 - The evidence names how credentials arrive, never a credential.
 - It is a record, not a gate: v1 refuses nothing because of it.
 
@@ -117,7 +124,9 @@ A backend provides six operations:
   index of 2026-11-05), builds `FROM ${HARNESS_SANDBOX_IMAGE}`, and bakes the same value into the image's environment.
   The evidence names the base the image was really built from: a build-arg override shows up as given, and one
   without a digest is `unpinned`.
-- The digest covers the base. The packages and the agent CLI the Dockerfile installs on top aren't pinned by it.
+- The digest covers the base. The packages and the agent CLI the Dockerfile installs on top aren't pinned by it. The
+  evidence field is `base_image_digest`; a receipt recorded before the rename says `image_digest`, which it reads as the
+  same thing.
 - Moving the base is a reviewed change to one line.
 
 ### Egress is enforced outside the agent's container
@@ -137,6 +146,14 @@ The agent can't reach the rules: it has no capability to change them and no sudo
 processes and files are in namespaces it doesn't share. If `egress` stops, the shared namespace loses its network
 interface and the agent loses its network, so it fails closed. `HARNESS_FIREWALL_ALLOW` moves from `devcontainer.json`
 to the `egress` service in the Compose file.
+
+An installed sandbox from before the Compose file has the single-container shape, and that shape must not pass
+silently:
+
+- Inside the harness-agent image (`HARNESS_SANDBOX_IMAGE` set), an egress allowlist that can't be read is a doctor
+  error, so `run` and `orca` refuse to start.
+- `doctor` warns when `devcontainer.json` names no `dockerComposeFile`. `update` warns when it keeps a locally edited
+  `devcontainer.json` that conflicts with the new one, and says what to merge from the `.harness-new` file.
 
 Still open after v1:
 
@@ -205,9 +222,10 @@ Still open after v1:
 - **Harder**:
   - The sandbox is two containers and a Compose file. A project that edited `devcontainer.json`, for example to set
     `HARNESS_FIREWALL_ALLOW`, gets the new version as `devcontainer.json.harness-new` and moves its edits into the
-    Compose file.
+    Compose file. Until it does, `doctor` warns, and inside the image `run` and `orca` refuse to start.
   - An image built before this ADR has no `HARNESS_SANDBOX_IMAGE`, so its judge passes record `isolation_class: none`
-    until it is rebuilt.
+    until it is rebuilt. A sandbox whose agent still holds NET_ADMIN, or runs without `no-new-privileges`, records
+    `none` too, with the reason.
   - Moving the base means updating the digest by hand.
 - **Unchanged**:
   - `run` starts sessions where it runs, with the same command, budgets, retries and logs.
