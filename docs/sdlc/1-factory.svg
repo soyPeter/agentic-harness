@@ -30,17 +30,17 @@
 <circle cx="101" cy="74" r="6.5" fill="none" stroke="#262523" stroke-width="2"/><path d="M90,93 C91,82 111,82 112,93" fill="none" stroke="#262523" stroke-width="2"/>
 <circle cx="125" cy="74" r="6.5" fill="none" stroke="#262523" stroke-width="2"/><path d="M114,93 C115,82 135,82 136,93" fill="none" stroke="#262523" stroke-width="2"/>
 <text x="156" y="91" class="h1">People set the rules</text>
-<text x="1836" y="86" class="tiny" text-anchor="end">GOVERNANCE · USER-ONLY FILES AND SETTINGS</text>
+<text x="1836" y="86" class="tiny" text-anchor="end">GOVERNANCE · DECIDED BY PEOPLE, ENFORCED BY HOOKS</text>
 <rect x="60" y="114" width="214" height="46" rx="3" fill="#EFEDE8" stroke="#A9A49B" stroke-width="1.5"/>
 <text x="167.0" y="143" class="gov" text-anchor="middle">Sources and the vault</text>
 <line x1="167.0" y1="160" x2="167.0" y2="214" stroke="#8C8880" stroke-width="1.4" stroke-dasharray="2 5"/>
 <circle cx="167.0" cy="216" r="3.2" fill="#8C8880"/>
 <rect x="350" y="114" width="290" height="46" rx="3" fill="#EFEDE8" stroke="#A9A49B" stroke-width="1.5"/>
-<text x="495.0" y="143" class="gov" text-anchor="middle">Accepted ADRs, Change-Class</text>
+<text x="495.0" y="143" class="gov" text-anchor="middle">Accepted ADRs, class ladder</text>
 <line x1="495.0" y1="160" x2="495.0" y2="214" stroke="#8C8880" stroke-width="1.4" stroke-dasharray="2 5"/>
 <circle cx="495.0" cy="216" r="3.2" fill="#8C8880"/>
 <rect x="746" y="114" width="330" height="46" rx="3" fill="#EFEDE8" stroke="#A9A49B" stroke-width="1.5"/>
-<text x="911.0" y="143" class="gov" text-anchor="middle">Skills, routes, guardrails, tools</text>
+<text x="911.0" y="143" class="gov" text-anchor="middle">Tool contracts, skills, rules</text>
 <line x1="911.0" y1="160" x2="911.0" y2="214" stroke="#8C8880" stroke-width="1.4" stroke-dasharray="2 5"/>
 <circle cx="911.0" cy="216" r="3.2" fill="#8C8880"/>
 <rect x="1192" y="114" width="266" height="46" rx="3" fill="#EFEDE8" stroke="#A9A49B" stroke-width="1.5"/>
@@ -120,7 +120,7 @@
 <text x="336" y="842" class="body"><tspan x="336" dy="0">harness.py run: a fresh session</tspan><tspan x="336" dy="26">per task. harness.py orca: a</tspan><tspan x="336" dy="26">worker per step and a worktree</tspan><tspan x="336" dy="26">per task, in parallel. Questions</tspan><tspan x="336" dy="26">are answered from backbone/ and</tspan><tspan x="336" dy="26">the vault, with sources.</tspan></text>
 <rect x="730" y="766" width="356" height="232" rx="3" fill="#EFEDE8" stroke="#A9A49B" stroke-width="1.5"/>
 <text x="754" y="806" class="title"><tspan x="754" dy="0">Workers build it</tspan></text>
-<text x="754" y="842" class="body"><tspan x="754" dy="0">The same role agents and the</tspan><tspan x="754" dy="26">same hooks, in a task worktree</tspan><tspan x="754" dy="26">or the harness-agent sandbox,</tspan><tspan x="754" dy="26">within time, attempt and cost</tspan><tspan x="754" dy="26">budgets.</tspan></text>
+<text x="754" y="842" class="body"><tspan x="754" dy="0">The same role agents and the</tspan><tspan x="754" dy="26">same hooks, in a task worktree</tspan><tspan x="754" dy="26">or the harness-agent sandbox,</tspan><tspan x="754" dy="26">within run's time, attempt and</tspan><tspan x="754" dy="26">cost budgets; orca retries a</tspan><tspan x="754" dy="26">step, then escalates.</tspan></text>
 <line x1="672" y1="882" x2="728" y2="882" stroke="#46443F" stroke-width="1.6" marker-end="url(#arrow)"/>
 <g><rect x="692" y="865" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="692" y1="877.24" x2="710" y2="877.24" stroke="#E2602A" stroke-width="2"/><line x1="692" y1="886.76" x2="710" y2="886.76" stroke="#E2602A" stroke-width="2"/></g>
 <g><rect x="317" y="1002" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="317" y1="1014.24" x2="335" y2="1014.24" stroke="#E2602A" stroke-width="2"/><line x1="317" y1="1023.76" x2="335" y2="1023.76" stroke="#E2602A" stroke-width="2"/></g>
@@ -134,25 +134,25 @@
 <text x="1184" y="372" class="label">SAME CHECKS, EVERY TASK</text>
 <g><rect x="1186" y="423.5" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="1186" y1="435.74" x2="1204" y2="435.74" stroke="#E2602A" stroke-width="2"/><line x1="1186" y1="445.26" x2="1204" y2="445.26" stroke="#E2602A" stroke-width="2"/></g>
 <text x="1226" y="434" class="item"><tspan x="1226" dy="0">Judge, with the tests</tspan><tspan x="1226" dy="25">re-run by the harness</tspan></text>
-<g><rect x="1186" y="531.0" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="1186" y1="543.24" x2="1204" y2="543.24" stroke="#E2602A" stroke-width="2"/><line x1="1186" y1="552.76" x2="1204" y2="552.76" stroke="#E2602A" stroke-width="2"/></g>
-<text x="1226" y="529" class="item"><tspan x="1226" dy="0">Three review lenses:</tspan><tspan x="1226" dy="25">correctness, structure,</tspan><tspan x="1226" dy="25">lean</tspan></text>
-<g><rect x="1186" y="638.5" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="1186" y1="650.74" x2="1204" y2="650.74" stroke="#E2602A" stroke-width="2"/><line x1="1186" y1="660.26" x2="1204" y2="660.26" stroke="#E2602A" stroke-width="2"/></g>
-<text x="1226" y="649" class="item"><tspan x="1226" dy="0">Finish and commit only</tspan><tspan x="1226" dy="25">on current passes</tspan></text>
-<g><rect x="1186" y="733.5" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="1186" y1="745.74" x2="1204" y2="745.74" stroke="#E2602A" stroke-width="2"/><line x1="1186" y1="755.26" x2="1204" y2="755.26" stroke="#E2602A" stroke-width="2"/></g>
-<text x="1226" y="744" class="item"><tspan x="1226" dy="0">PR opened with the</tspan><tspan x="1226" dy="25">receipt and risk labels</tspan></text>
-<g><rect x="1186" y="828.5" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="1186" y1="840.74" x2="1204" y2="840.74" stroke="#E2602A" stroke-width="2"/><line x1="1186" y1="850.26" x2="1204" y2="850.26" stroke="#E2602A" stroke-width="2"/></g>
-<text x="1226" y="839" class="item"><tspan x="1226" dy="0">CI verify with the base</tspan><tspan x="1226" dy="25">branch's verifier</tspan></text>
-<g><circle cx="1195" cy="928.0" r="16" fill="#FAF9F6" stroke="#E2602A" stroke-width="2.2"/><circle cx="1195" cy="923.8" r="4.4" fill="none" stroke="#E2602A" stroke-width="1.9"/><path d="M1186.8,937.5 C1187.5,930.2 1202.5,930.2 1203.2,937.5" fill="none" stroke="#E2602A" stroke-width="1.9"/></g>
-<text x="1226" y="934" class="item"><tspan x="1226" dy="0">A person merges</tspan></text>
-<text x="1186" y="978" class="note"><tspan x="1186" dy="0">A fail goes to the debugger, then</tspan><tspan x="1186" dy="22">to the implementer. Verdicts are</tspan><tspan x="1186" dy="22">fingerprinted: a later change</tspan><tspan x="1186" dy="22">makes them stale.</tspan></text>
+<g><rect x="1186" y="523.0" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="1186" y1="535.24" x2="1204" y2="535.24" stroke="#E2602A" stroke-width="2"/><line x1="1186" y1="544.76" x2="1204" y2="544.76" stroke="#E2602A" stroke-width="2"/></g>
+<text x="1226" y="521" class="item"><tspan x="1226" dy="0">Three review lenses:</tspan><tspan x="1226" dy="25">correctness, structure,</tspan><tspan x="1226" dy="25">lean</tspan></text>
+<g><rect x="1186" y="622.5" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="1186" y1="634.74" x2="1204" y2="634.74" stroke="#E2602A" stroke-width="2"/><line x1="1186" y1="644.26" x2="1204" y2="644.26" stroke="#E2602A" stroke-width="2"/></g>
+<text x="1226" y="633" class="item"><tspan x="1226" dy="0">Finish and commit only</tspan><tspan x="1226" dy="25">on current passes</tspan></text>
+<g><rect x="1186" y="709.5" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="1186" y1="721.74" x2="1204" y2="721.74" stroke="#E2602A" stroke-width="2"/><line x1="1186" y1="731.26" x2="1204" y2="731.26" stroke="#E2602A" stroke-width="2"/></g>
+<text x="1226" y="720" class="item"><tspan x="1226" dy="0">PR opened with the</tspan><tspan x="1226" dy="25">receipt and risk labels</tspan></text>
+<g><rect x="1186" y="809.0" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="1186" y1="821.24" x2="1204" y2="821.24" stroke="#E2602A" stroke-width="2"/><line x1="1186" y1="830.76" x2="1204" y2="830.76" stroke="#E2602A" stroke-width="2"/></g>
+<text x="1226" y="807" class="item"><tspan x="1226" dy="0">CI verify with the base</tspan><tspan x="1226" dy="25">branch's verifier, once</tspan><tspan x="1226" dy="25">required</tspan></text>
+<g><circle cx="1195" cy="913.0" r="16" fill="#FAF9F6" stroke="#E2602A" stroke-width="2.2"/><circle cx="1195" cy="908.8" r="4.4" fill="none" stroke="#E2602A" stroke-width="1.9"/><path d="M1186.8,922.5 C1187.5,915.2 1202.5,915.2 1203.2,922.5" fill="none" stroke="#E2602A" stroke-width="1.9"/></g>
+<text x="1226" y="919" class="item"><tspan x="1226" dy="0">A person merges</tspan></text>
+<text x="1186" y="978" class="note"><tspan x="1186" dy="0">A fail goes to the debugger, then to</tspan><tspan x="1186" dy="22">the implementer. Verdicts are</tspan><tspan x="1186" dy="22">fingerprinted: a later change makes</tspan><tspan x="1186" dy="22">them stale.</tspan></text>
 <!-- 05: merge; release is outside the harness; incident attribution is proposed -->
-<line x1="1490" y1="928.0" x2="1514" y2="928.0" stroke="#46443F" stroke-width="1.6"/>
-<line x1="1514" y1="928.0" x2="1514" y2="380" stroke="#46443F" stroke-width="1.6"/>
+<line x1="1490" y1="913.0" x2="1514" y2="913.0" stroke="#46443F" stroke-width="1.6"/>
+<line x1="1514" y1="913.0" x2="1514" y2="380" stroke="#46443F" stroke-width="1.6"/>
 <line x1="1514" y1="380" x2="1542" y2="380" stroke="#46443F" stroke-width="1.6" marker-end="url(#arrow)"/>
-<circle cx="1514" cy="928.0" r="4.5" fill="#46443F"/>
+<circle cx="1514" cy="913.0" r="4.5" fill="#46443F"/>
 <g><path d="M1564,363 L1581,380 L1564,397 L1547,380 z" fill="#FAF9F6" stroke="#262523" stroke-width="1.8"/><path d="M1564,374 L1570,380 L1564,386 L1558,380 z" fill="#E2602A"/></g>
 <text x="1594" y="389" class="title-s">Merged by a person</text>
-<text x="1594" y="418" class="tiny">PR MERGE STAYS HUMAN</text>
+<text x="1594" y="418" class="tiny">ADR-002 POLICY</text>
 <line x1="1564" y1="398" x2="1564" y2="478" stroke="#46443F" stroke-width="1.6" marker-end="url(#arrow)"/>
 <rect x="1540" y="482" width="320" height="140" rx="3" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5" stroke-dasharray="7 6"/>
 <text x="1564" y="522" class="title-s"><tspan x="1564" dy="0">Release and production</tspan></text>

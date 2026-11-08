@@ -79,12 +79,12 @@
 <rect x="400" y="684" width="326" height="216" rx="3" fill="#FAF9F6" stroke="#A9A49B" stroke-width="1.5"/>
 <text x="420" y="714" class="tiny">GIT HOOK · FULL INSTALL</text>
 <text x="420" y="748" class="title-s"><tspan x="420" dy="0">pre-push verify</tspan></text>
-<text x="420" y="780" class="body"><tspan x="420" dy="0">Every commit being pushed, by</tspan><tspan x="420" dy="24">the deliverer or anyone else.</tspan></text>
+<text x="420" y="780" class="body"><tspan x="420" dy="0">Every commit being pushed, in</tspan><tspan x="420" dy="24">clones with the harness hooks.</tspan></text>
 <line x1="728" y1="792.0" x2="748" y2="792.0" stroke="#46443F" stroke-width="1.6" marker-end="url(#arrow)"/>
 <rect x="752" y="684" width="326" height="216" rx="3" fill="#FAF9F6" stroke="#A9A49B" stroke-width="1.5"/>
 <text x="772" y="714" class="tiny">CI · HARNESS-VERIFY</text>
 <text x="772" y="748" class="title-s"><tspan x="772" dy="0">The base branch's</tspan><tspan x="772" dy="27">verifier</tspan></text>
-<text x="772" y="807" class="body"><tspan x="772" dy="0">verify --range with the base</tspan><tspan x="772" dy="24">branch's engine, so a PR can't</tspan><tspan x="772" dy="24">weaken the check that gates it.</tspan></text>
+<text x="772" y="807" class="body"><tspan x="772" dy="0">verify --range with the base</tspan><tspan x="772" dy="24">branch's engine, so a PR can't</tspan><tspan x="772" dy="24">weaken the check that gates it,</tspan><tspan x="772" dy="24">once it is required.</tspan></text>
 <line x1="1080" y1="792.0" x2="1100" y2="792.0" stroke="#46443F" stroke-width="1.6" marker-end="url(#arrow)"/>
 <rect x="1104" y="684" width="326" height="216" rx="3" fill="#FAF9F6" stroke="#A9A49B" stroke-width="1.5"/>
 <text x="1124" y="714" class="tiny">CI · HARNESS-JUDGE · OPTIONAL</text>
@@ -97,23 +97,23 @@
 <text x="1460" y="848.0" class="tiny">HARNESS EDITS NEED THE</text>
 <text x="1460" y="868.0" class="tiny">HARNESS-CHANGE-APPROVED</text>
 <text x="1460" y="888.0" class="tiny">LABEL</text>
-<text x="48" y="980" class="label">PROPOSED · EACH ADR SHIPS A V1 SLICE; NONE IS ACCEPTED YET</text>
+<text x="48" y="980" class="label">PROPOSED ADRS · THEIR V1 IS ON MAIN; NONE IS ACCEPTED YET</text>
 <rect x="48" y="1004" width="540" height="178" rx="3" fill="#FAF9F6" stroke="#E2602A" stroke-width="1.5" stroke-dasharray="7 6"/>
 <text x="68" y="1034" class="tiny" fill="#E2602A">ADR-003 · IN THE JUDGE PASS AND RECEIPT</text>
 <text x="68" y="1066" class="title-s">Sandbox evidence</text>
-<text x="68" y="1096" class="body"><tspan x="68" dy="0">Each judge pass records where it ran: backend, isolation</tspan><tspan x="68" dy="23">class, image digest, egress allowlist hash, region,</tspan><tspan x="68" dy="23">control plane, credential mode.</tspan></text>
+<text x="68" y="1096" class="body"><tspan x="68" dy="0">Each judge pass records where it ran: backend, isolation</tspan><tspan x="68" dy="23">class, base image digest, egress allowlist hash, region,</tspan><tspan x="68" dy="23">control plane, credential mode.</tspan></text>
 <rect x="612" y="1004" width="540" height="178" rx="3" fill="#FAF9F6" stroke="#E2602A" stroke-width="1.5" stroke-dasharray="7 6"/>
 <text x="632" y="1034" class="tiny" fill="#E2602A">ADR-004 · READ FROM BACKBONE/ AND GIT</text>
 <text x="632" y="1066" class="title-s">Traceability export</text>
-<text x="632" y="1096" class="body"><tspan x="632" dy="0">trace export --format reqif | needs | html: requirement →</tspan><tspan x="632" dy="23">AC → test → verdict → commit. Derived and one-way; never</tspan><tspan x="632" dy="23">committed.</tspan></text>
+<text x="632" y="1096" class="body"><tspan x="632" dy="0">trace export --format reqif | needs | html: requirement →</tspan><tspan x="632" dy="23">AC → test → verdict → commit. Derived and one-way; no gate</tspan><tspan x="632" dy="23">reads it back.</tspan></text>
 <rect x="1176" y="1004" width="540" height="178" rx="3" fill="#FAF9F6" stroke="#E2602A" stroke-width="1.5" stroke-dasharray="7 6"/>
-<text x="1196" y="1034" class="tiny" fill="#E2602A">ADR-005 · IN HARNESS-VERIFY</text>
+<text x="1196" y="1034" class="tiny" fill="#E2602A">ADR-005 · HARNESS-VERIFY, AFTER THE MERGE</text>
 <text x="1196" y="1066" class="title-s">Signed verdict attestation</text>
-<text x="1196" y="1096" class="body"><tspan x="1196" dy="0">attest --range: an in-toto statement about the head commit</tspan><tspan x="1196" dy="23">and code tree, only for a range that verifies. CI signs it</tspan><tspan x="1196" dy="23">with cosign when a key is set.</tspan></text>
+<text x="1196" y="1096" class="body"><tspan x="1196" dy="0">attest --range: an in-toto statement about a commit and</tspan><tspan x="1196" dy="23">its code tree, only for a range that verifies. On a push</tspan><tspan x="1196" dy="23">to the default branch, CI signs it with cosign if a key is</tspan><tspan x="1196" dy="23">set.</tspan></text>
 <g><rect x="48" y="1215" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="48" y1="1227.24" x2="66" y2="1227.24" stroke="#E2602A" stroke-width="2"/><line x1="48" y1="1236.76" x2="66" y2="1236.76" stroke="#E2602A" stroke-width="2"/></g>
 <text x="78" y="1238" class="tiny">CHECKED BY THE HARNESS</text>
 <g><path d="M372,1219 L385,1232 L372,1245 L359,1232 z" fill="#FAF9F6" stroke="#262523" stroke-width="1.8"/><path d="M372,1226 L378,1232 L372,1238 L366,1232 z" fill="#E2602A"/></g>
 <text x="394" y="1238" class="tiny">A PERSON DECIDES</text>
 <rect x="640" y="1218" width="40" height="26" rx="3" fill="#FAF9F6" stroke="#E2602A" stroke-width="1.5" stroke-dasharray="6 5"/>
-<text x="694" y="1238" class="tiny">PROPOSED: AN ADR AND ITS V1 SLICE, NOT YET ACCEPTED</text>
+<text x="694" y="1238" class="tiny">PROPOSED: AN ADR WITH ITS V1 SHIPPED, NOT YET ACCEPTED</text>
 </svg>

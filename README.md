@@ -1,41 +1,146 @@
 # Agentic Harness
 
-A stack-agnostic harness for AI coding agents such as Claude Code. Install it into any git repository and every task goes through a **defined, gated pipeline**:
+A stack-agnostic harness for AI coding agents such as Claude Code, Codex and OpenCode. Install it into any git
+repository and every change goes through **one defined, gated pipeline**, whoever or whatever starts it, while people
+set the rules. The four diagrams below are explained in [docs/sdlc](docs/sdlc/README.md). Solid shapes are built and
+enforced; dashed ones are proposed or outside the harness; the orange person marks each point where the harness waits
+for a human.
 
-```
- DEFINE                                   BUILD                 JUDGE                  RECORD
- analyst ─> architect ─> griller ⇄ user   implementer           judge                  scribe
- spec:      ADRs +       questions,       code + tests          requirements, ACs,     memory +
- REQ, AC    tech reqs,   verdict          (skills loaded        tests -> verdict       emergent ADRs
- (G/W/T)    skills                        per path)
-        └──── start gate ────┘      └─ skill gate ─┘   └── judge gate ──┘
-   valid spec + griller pass on      routed + spec      pass on current code,
-   current spec/ADRs + USER          skills loaded      every AC traced to a
-   approval  ->  [WIP]               before any edit    passing test  ->  [x]
-```
+The harness never generates application code. On the first session, the agent interviews you to fill in the project's
+knowledge, stack ADR, language skill and routes. Requirements: `git` and `python3` (3.8 or later, standard library
+only).
 
-- **Definition first**: one spec per task (`backbone/specs/<id>.md`) holds numbered requirements, Given/When/Then acceptance criteria, NFRs, the ADRs it follows and the skills it needs. A PRD is optional; ADRs are mandatory.
-- **Grilling**: an adversarial `griller` agent questions the spec and its ADRs. Its questions go to the user, the spec is revised, and grilling repeats until it passes. Then the **user** approves the spec. Only the user can write the approval line, and an approved spec is frozen. For small fixes, the user can switch on a **light lane** and mark a task `(light)`: a small, low-risk spec then skips the architect and the griller, while the approval, the judge and verify still apply.
-- **Skill routing**: `routing.conf` maps paths to skills. ADRs need `adr-writing`, `architecture` and the language skill; controllers need `api-design` and `openapi`; and so on. The spec adds what the task needs. An agent can't edit a file until it has loaded every required skill in its session.
-- **Judging**: an independent `judge` checks every requirement and acceptance criterion against the code and tests. The verdict is recorded by a hook, which re-derives it from the evidence: an AC without a test that mentions its id, unmet criteria or failing tests all turn a claimed pass into a fail. The recorder runs the test command itself rather than trusting the judge's report. Verdicts are tied to a fingerprint of the code, so any later change makes them stale.
-- **Review and delivery**: after the judge, three `reviewer`s check the change in parallel, one lens each: correctness (bugs, security, blast radius proven by running code), structure and lean. A must-fix finding sends the task back to the implementer. Once the task is committed, the `deliverer` pushes the branch, opens the PR and watches CI; it never merges. Finishing, committing and pushing (pre-push hook) all refuse a task without its review passes. Both are on by default (`HARNESS_REVIEW`, `HARNESS_DELIVER`, user-only).
-- **Change receipt**: `harness.py receipt <id>` states what the harness can prove about a judged task: what changed, each acceptance criterion with its tests, what is *not* verified, the decisions and risks, and what still needs the user. It is built from the spec, the verdicts and the diff, and goes into the pull requests the runner and the Orca coordinator open. It records the sandbox the judge pass ran in (backend, isolation class, image digest, allowlist hash, region, control plane, credential mode; [ADR-003](docs/adr/ADR-003-sandbox-backends.md)), so a run that wasn't isolated shows it. It also suggests pull request labels for triage: `risk:low`, `risk:elevated` or `risk:high` from the spec's Change-Class and the risks, and `class:<class>`. The deliverer applies them; a label never approves or merges.
-- **Traceability export** ([ADR-004](docs/adr/ADR-004-traceability-export.md)): `harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]` writes the chain requirement → acceptance criterion → test file → judge verdict → commit as ReqIF 1.2, a Sphinx-Needs `needs.json` (format 1) or a self-contained HTML matrix for a pull request. It is derived from `backbone/` and git, which stay the record: one-way, no network, nothing reads it back. Each task says whether its judge pass is on the current code, which commits carry the judged code, and the gaps it can see. It is not signed, validated or PCI DSS evidence; the ADR lists what it can and can't support.
-- **Tool contracts**: every tool that can change something goes through the gate. A user-owned `backbone/tools.conf` says what each MCP or other tool does (read, write with its path field, exec, network, agent, and whether it needs the user); a write tool's paths get the same gates as Write and Edit. In supervised mode a tool with no contract runs with a warning; in autonomous mode it is refused.
-- **Guardrails** throughout: destructive commands, secrets and project rules are blocked. Each agent can only write its own files, and the main session only orchestrates. Shell commands can't write harness state or switch off checks, and a script that does is caught: reported in supervised mode, escalated in autonomous mode. One task is `[WIP]` at a time. Commits follow Conventional Commits. The gates are on by default and only the user can switch them off.
-- **Autonomous mode** (opt-in, user-only): no human in the loop. The harness approves low-risk specs by policy, from the spec and later the diff; only a spec whose `Change-Class` is `docs` or `refactor` can be low-risk, so `feature` and `schema` work always waits for the user's approval ([ADR-002](docs/adr/ADR-002-change-class-ladder.md)). Everything else, including repeated griller or judge failures, is escalated: the task is parked as BLOCKED, an entry goes into `backbone/escalations.md` (optionally a GitHub issue), and work continues. A kill switch halts everything.
-- **Agent CLIs**: the same gates for Claude Code, Codex and OpenCode. Each CLI's hooks (`.claude/settings.json`, `.codex/hooks.json`, `.opencode/plugins/harness.js`) call one normalising entry point, and the Codex and OpenCode role agents are generated from the Claude Code ones.
-- **Orca coordinator** (`harness.py orca`): drives tasks in parallel with Orca supervised workers, one per step and one worktree per task. Questions between agents are answered from the sources into the spec, and the agent can differ per role.
-- **Coordinator API**: `state`, `next`, `questions`, `start` and `finish` let a coordinator (Orca, a script) drive tasks without knowing the workflow.
-- **Knowledge source** (opt-in, user-only): in autonomous mode, griller questions `backbone/` can't answer are looked up in a read-only notes vault behind an MCP server (`knowledge`). Clear answers are recorded with a `vault:<path>` citation the harness checks; the rest are escalated.
-- **Runner and CI**: `harness.py run` drives ready tasks unattended (optionally one worktree, branch and PR per task, with a cost budget), one fresh agent session per task, with time and attempt budgets, escalating stalls. Sessions start through a sandbox backend (`HARNESS_SANDBOX_BACKEND`); the only one, `devcontainer`, runs them where the runner runs, ideally inside `.devcontainer/harness-agent/`. The installed `harness-verify` workflow re-checks every pull request with the **base branch's** verifier, so a pull request can't weaken the check that gates it. `harness.py report` summarises the event log, and `harness.py trace <id>` shows one task's history: the context and skills its agents loaded, the files they edited, what the hooks refused, test runs and verdicts.
-- **Signed verdict attestations** (optional, [ADR-005](docs/adr/ADR-005-verdict-attestations.md), Proposed): `harness.py attest --range <base>..<tip>` prints an in-toto Statement about the tip commit with each finished task's verdict chain (spec fingerprint, grill, judge and review verdicts, Change-Class, risk and receipt), only for a range that passes `verify --range`, and the same bytes for the same commits. With a cosign key in the secrets `HARNESS_ATTEST_KEY` and `HARNESS_ATTEST_PASSWORD` of the `harness-attest` environment (restricted to the default branch), the `attest` job of `harness-verify` writes the statement for each push to the default branch, signs it without a transparency log, and keeps it as the `harness-attestation` artifact. Pull requests never see the key. It claims no SLSA level. Details and limits in `backbone/HOOKS.md`.
-- **Verify**: the pre-commit hook re-checks the gates on the staged state, and CI runs the same check on a pull request's commits (`harness.py verify --range`), so a change made any other way is still caught.
+## The factory
+
+![The factory: signals, define, build, judge and deliver, merge and observe, with people setting the rules above](docs/sdlc/1-factory.svg)
+
+- **People set the rules.** Only the user accepts an ADR, writes the tool contracts in `tools.conf`, or changes the
+  user-only keys of `harness.conf`: the gate switches, risk rules, autonomy mode and profile. Hooks refuse agents'
+  edits to them, and verify refuses commits that change the user-only settings or contracts. Skill routes and
+  guardrails come from the packs an accepted ADR adopts and the rules agreed at setup.
+- **Signals.** Work starts from a person, a Linear ticket (`harness.py linear import`) or the task list. The harness's
+  own feedback adds more: escalations, red CI, failure-class proposals and `harness.py report` candidates. Production
+  incidents are not a signal yet.
+- **Two lanes, one standard.** In a supervised session (the default) a person answers the griller and signs
+  `Approved-by`. In an autonomous run (`harness.py run`, `harness.py orca`), questions are answered from `backbone/`
+  and the knowledge vault, with sources; policy approves only low-risk `docs` and `refactor` specs, and everything else
+  is escalated to a person.
+- **Same checks, every task.** Whichever lane a task came from, it passes the judge (the harness re-runs the tests
+  itself), the three review lenses, the judge gate at finish, verify on every commit, and `harness-verify` in CI with
+  the base branch's verifier. Then a person merges the pull request (ADR-002): the deliverer can't merge, and under
+  the `triple` profile no agent can. `harness-verify` blocks a merge only once it is a required check in branch
+  protection (`harness.py ci-protect` or `enroll.sh --protect`).
+- **What fails becomes the next task.** Red CI becomes a fix task on the same pull request, escalations wait for a
+  person, a failure class seen twice opens a proposal, and the report points at missing rules or skills. Tracing a
+  production incident back to its pull request and spec is proposed, not built.
+
+## One task, request by request
+
+![A sequence diagram of one task, from the request to the merged pull request](docs/sdlc/2-task-flow.svg)
+
+- **Definition first**: one spec per task (`backbone/specs/<id>.md`) holds numbered requirements, Given/When/Then
+  acceptance criteria, NFRs, the `Change-Class`, the ADRs it follows and the skills it needs. A PRD is optional; ADRs
+  are mandatory.
+- **Grilling**: an adversarial `griller` agent questions the spec and its ADRs. Its questions go to the user, the spec
+  is revised, and grilling repeats until it passes. Then the **user** approves the spec. Only the user can write the
+  approval line, and an approved spec is frozen. For small fixes, the user can switch on a **light lane** and mark a
+  task `(light)`: a small, low-risk spec then skips the architect and the griller, while the approval, the judge and
+  verify still apply.
+- **Skill routing**: `routing.conf` maps paths to skills. ADRs need `adr-writing`, `architecture` and the language
+  skill; controllers need `api-design` and `openapi`; and so on. The spec adds what the task needs. An agent can't edit
+  a file until it has loaded every required skill in its session.
+- **Tool contracts**: every tool that can change something goes through the gate. A user-owned `backbone/tools.conf`
+  says what each MCP or other tool does (read, write with its path field, exec, network, agent, and whether it needs
+  the user); a write tool's paths get the same gates as Write and Edit. In supervised mode a tool with no contract runs
+  with a warning; in autonomous mode it is refused.
+- **Guardrails** throughout: destructive commands, secrets and project rules are blocked. Each agent can only write
+  its own files, and the main session only orchestrates. Shell commands can't write harness state or switch off
+  checks, and a script that does is caught: reported in supervised mode, escalated in autonomous mode. One task is
+  `[WIP]` at a time. Commits follow Conventional Commits. The gates are on by default and only the user can switch them
+  off.
+- **Judging**: an independent `judge` checks every requirement and acceptance criterion against the code and tests.
+  The verdict is recorded by a hook, which re-derives it from the evidence: an AC without a test that mentions its id,
+  unmet criteria or failing tests all turn a claimed pass into a fail. The recorder runs the test command itself rather
+  than trusting the judge's report. After a fail, the `debugger` writes a fix brief for whoever owns the cause.
+- **Review and delivery**: after the judge, three `reviewer`s check the change in parallel, one lens each: correctness
+  (bugs, security, blast radius proven by running code), structure and lean. A must-fix finding sends the task back to
+  the implementer. Once the task is committed, the `deliverer` pushes the branch, opens the PR with each task's receipt
+  and labels, and watches CI; it runs only the gh commands delivery needs and never merges. Finishing, committing and
+  pushing (pre-push hook) all refuse a task without its review passes. Both are on by default (`HARNESS_REVIEW`,
+  `HARNESS_DELIVER`, user-only).
+
+## Who decides, by Change-Class
+
+![Change-Class ladder: light lane, spec approval in supervised and autonomous mode, receipt labels and merge, per class](docs/sdlc/3-change-class.svg)
+
+- **The ladder** ([ADR-002](docs/adr/ADR-002-change-class-ladder.md)). The spec declares its `Change-Class`: `docs`,
+  `refactor`, `feature` or `schema`; a spec without the line counts as `feature`. The class changes three things:
+  whether the light lane applies, whether autonomous mode may approve the spec by policy, and which risk label the
+  receipt suggests: `risk:low` (`docs`, `refactor`), `risk:elevated` (`feature`, or `docs`/`refactor` with other risks)
+  or `risk:high` (`schema`, or `feature` with other risks). Whatever the class, a person approves every spec in
+  supervised mode and merges the pull request.
+- **Autonomous mode** (opt-in, user-only): no human in the loop. The harness approves low-risk specs by policy, from
+  the spec and later the diff; only a `docs` or `refactor` spec can be low-risk, so `feature` and `schema` work always
+  waits for the user's approval. Everything else, including repeated griller or judge failures, is escalated: the task
+  is parked as BLOCKED, an entry goes into `backbone/escalations.md` (optionally a GitHub issue), and work continues. A
+  kill switch halts everything.
+
+## What the harness can prove
+
+![The evidence chain from spec to receipt, where it is checked again, and the proposed ADRs that extend it](docs/sdlc/4-evidence.svg)
+
+The receipt is built from evidence, not from what the agents said. Two fingerprints tie each verdict to what it judged
+(the spec and its ADRs for the grill pass, the code tree for the judge and review passes), so a later edit makes the
+pass stale.
+
+- **Change receipt**: `harness.py receipt <id>` states what the harness can prove about a judged task: what changed,
+  each acceptance criterion with its tests, what is *not* verified, the decisions and risks, and what still needs the
+  user. It is built from the spec, the verdicts and the diff, and goes into the pull requests the runner and the Orca
+  coordinator open. It shows the sandbox the judge pass was recorded in (backend, isolation class, base image digest,
+  allowlist hash, region, control plane, credential mode; [ADR-003](docs/adr/ADR-003-sandbox-backends.md), Proposed),
+  so a run that wasn't isolated shows it. It also suggests pull request labels for triage: one `risk:*` label and
+  `class:<class>`. The deliverer applies them; a label never approves or merges.
+- **Verify**: the pre-commit hook re-checks the gates on the staged state, the pre-push hook (full installs) the
+  commits being pushed, and CI the pull request's commits (`harness.py verify --range`) with the **base branch's**
+  verifier, so a pull request can't weaken the check that gates it, and a change made any other way is still caught.
+- **Traceability export** ([ADR-004](docs/adr/ADR-004-traceability-export.md), Proposed): `harness.py trace export
+  --format reqif|needs|html [--out DIR] [--task ID]` writes the chain requirement → acceptance criterion → test file →
+  judge verdict → commit as ReqIF 1.2, a Sphinx-Needs `needs.json` (format 1) or a self-contained HTML matrix for a pull
+  request. It is derived from `backbone/` and git, which stay the record: one-way, no network, nothing reads it back.
+  Each task says whether its judge pass is on the current code, which commits carry the judged code, and the gaps it can
+  see. It is not signed, validated or PCI DSS evidence; the ADR lists what it can and can't support.
+- **Signed verdict attestations** (optional, [ADR-005](docs/adr/ADR-005-verdict-attestations.md), Proposed):
+  `harness.py attest --range <base>..<tip>` prints an in-toto Statement about the tip commit with each finished task's
+  verdict chain (spec fingerprint, grill, judge and review verdicts, Change-Class, risk and receipt), only for a range
+  that passes `verify --range`, and the same bytes for the same commits. With a cosign key in the secrets
+  `HARNESS_ATTEST_KEY` and `HARNESS_ATTEST_PASSWORD` of the `harness-attest` environment (restricted to the default
+  branch), the `attest` job of `harness-verify` writes the statement for each push to the default branch, signs it
+  without a transparency log, and keeps it as the `harness-attestation` artifact. Pull requests never see the key. It
+  claims no SLSA level. Details and limits in `backbone/HOOKS.md`.
+- **What binds whom**: the hooks and gates bind agents. The user can still switch a gate off in `harness.conf` or
+  commit with `HARNESS_VERIFY=off`; CI's `harness-verify` is what binds everyone, once it is required.
 - **Safe updates**: harness files are tracked by hash. Local edits are detected and never overwritten silently.
 
-The harness never generates application code. On the first session, the agent interviews you to fill in the project's knowledge, stack ADR, language skill and routes.
+## Driving it
 
-Requirements: `git` and `python3` (3.8 or later, standard library only).
+- **Agent CLIs**: the same gates for Claude Code, Codex and OpenCode. Each CLI's hooks (`.claude/settings.json`,
+  `.codex/hooks.json`, `.opencode/plugins/harness.js`) call one normalising entry point, and the Codex and OpenCode role
+  agents are generated from the Claude Code ones.
+- **Orca coordinator** (`harness.py orca`): drives tasks in parallel with Orca supervised workers, one per step and one
+  worktree per task. Questions between agents are answered from the sources into the spec, and the agent can differ per
+  role.
+- **Coordinator API**: `state`, `next`, `questions`, `start` and `finish` let a coordinator (Orca, a script) drive
+  tasks without knowing the workflow.
+- **Knowledge source** (opt-in, user-only): in autonomous mode, griller questions `backbone/` can't answer are looked up
+  in a read-only notes vault behind an MCP server (`knowledge`). Clear answers are recorded with a `vault:<path>`
+  citation the harness checks; the rest are escalated.
+- **Runner**: `harness.py run` drives ready tasks unattended (optionally one worktree, branch and PR per task, with a
+  cost budget), one fresh agent session per task, with time and attempt budgets, escalating stalls. Sessions start
+  through a sandbox backend (`HARNESS_SANDBOX_BACKEND`); the only one, `devcontainer`, runs them where the runner runs,
+  ideally inside `.devcontainer/harness-agent/`, whose outbound allowlist is enforced from a second container.
+- **Observability**: `harness.py report` summarises the event log, and `harness.py trace <id>` shows one task's
+  history: the context and skills its agents loaded, the files they edited, what the hooks refused, test runs and
+  verdicts.
 
 ## Stack-neutral by design
 
