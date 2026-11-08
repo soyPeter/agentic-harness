@@ -5,6 +5,7 @@ the sandbox it ran in. The engine stays standard-library only: a backend for a h
 CLI or its REST API, never through a vendor SDK.
 """
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -23,6 +24,11 @@ CONTAINER_MARKERS = ("/.dockerenv", "/run/.containerenv")
 PROC_STATUS = "/proc/self/status"
 # linux/capability.h. The agent's container drops NET_ADMIN and NET_RAW and has no sudo.
 CAPABILITY_BITS = {"NET_ADMIN": 12, "NET_RAW": 13, "SYS_ADMIN": 21}
+# devcontainer.json is JSON with comments and trailing commas. A string's contents are never read as either.
+JSONC_TOKEN = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.DOTALL)
+JSONC_COMMA = re.compile(r'"(?:\\.|[^"\\])*"|,(?=\s*[}\]])')
+# The egress container's published list, in the agent's container (docker-compose.yml). Only this path counts.
+ALLOWLIST_PATH = "/run/harness-egress/allowlist"
 
 
 class Sandbox(object):
@@ -68,8 +74,7 @@ class Devcontainer(SandboxBackend):
     """The local .devcontainer/harness-agent/ sandbox. The runner runs where its sessions run: inside the container when
     the user started it there, otherwise on the host. So this backend starts and destroys nothing. HARNESS_SANDBOX_IMAGE
     is set by the image's environment, which a host can set too, so the container is claimed only when the process
-    shows the container's restrictions (isolation). HARNESS_EGRESS_ALLOWLIST names the host list the egress container
-    publishes."""
+    shows the container's restrictions and the egress container's list (isolation)."""
     name = "devcontainer"
 
     def create(self, workspace):
@@ -91,8 +96,7 @@ class Devcontainer(SandboxBackend):
     def egress_policy(self):
         if isolation()[0] != "container":
             return None
-        published = os.environ.get("HARNESS_EGRESS_ALLOWLIST")
-        return published_hosts(published) if published else None
+        return published_hosts(ALLOWLIST_PATH)
 
     def teardown(self, sandbox):
         pass
@@ -116,8 +120,9 @@ BACKENDS = {Devcontainer.name: Devcontainer}
 
 def isolation():
     """(isolation_class, reason): the boundary this process runs behind. Only a Linux process in a container, with the
-    restrictions the agent's container is started with (no-new-privileges, no network or system capabilities), is a
-    container. Anything else is none, and the reason says which check failed."""
+    restrictions the agent's container is started with (no-new-privileges, no network or system capabilities), and
+    with the egress container's allowlist published at ALLOWLIST_PATH, is a container. Anything else is none, and the
+    reason says which check failed."""
     if not os.environ.get("HARNESS_SANDBOX_IMAGE"):
         return "none", "not in the harness-agent image (HARNESS_SANDBOX_IMAGE is unset)"
     unverified = "HARNESS_SANDBOX_IMAGE is set, but "
@@ -126,15 +131,24 @@ def isolation():
     if not any(os.path.exists(marker) for marker in CONTAINER_MARKERS):
         return "none", unverified + "this process is not in a container (no /.dockerenv or /run/.containerenv)"
     fields = proc_status()
-    if fields is None or "CapEff" not in fields:
-        return "none", unverified + "CapEff can't be read from /proc/self/status"
+    if fields is None or "CapEff" not in fields or "CapBnd" not in fields:
+        return "none", unverified + "CapEff and CapBnd can't be read from /proc/self/status"
     if fields.get("NoNewPrivs") != "1":
         return "none", unverified + "NoNewPrivs is not set, so the process could gain privileges"
-    effective = int(fields["CapEff"], 16)
-    held = sorted(name for name, bit in CAPABILITY_BITS.items() if effective >> bit & 1)
+    # CapEff is empty for a non-root user even when a capability was added, so the bounding set counts too.
+    reachable = int(fields["CapEff"], 16) | int(fields["CapBnd"], 16)
+    held = sorted(name for name, bit in CAPABILITY_BITS.items() if reachable >> bit & 1)
     if held:
-        return "none", unverified + "the process holds %s, which the agent's container must drop" % ", ".join(held)
-    return "container", "in a container with NoNewPrivs set and no NET_ADMIN, NET_RAW or SYS_ADMIN"
+        return "none", unverified + "the process has %s in its effective or bounding set, which the agent's container " \
+            "must drop" % ", ".join(held)
+    if os.environ.get("HARNESS_EGRESS_ALLOWLIST") != ALLOWLIST_PATH:
+        return "none", unverified + "HARNESS_EGRESS_ALLOWLIST is not %s, so no egress container is known to limit " \
+            "this process" % ALLOWLIST_PATH
+    if published_hosts(ALLOWLIST_PATH) is None:
+        return "none", unverified + "%s can't be read, so no egress container is known to limit this process" \
+            % ALLOWLIST_PATH
+    return "container", "in a container with NoNewPrivs set, no NET_ADMIN, NET_RAW or SYS_ADMIN, and the egress " \
+        "allowlist published at %s" % ALLOWLIST_PATH
 
 
 def proc_status():
@@ -156,15 +170,22 @@ def published_hosts(path):
 
 
 def unpublished_allowlist():
-    """Why the harness-agent image has no readable egress allowlist, or None. The image is the one the Dockerfile builds
-    when HARNESS_SANDBOX_IMAGE is set, and then the egress container must have published the list."""
+    """Why the harness-agent image has no readable egress allowlist at ALLOWLIST_PATH, or None. The image is the one the
+    Dockerfile builds when HARNESS_SANDBOX_IMAGE is set, and then the egress container must have published the list."""
     if not os.environ.get("HARNESS_SANDBOX_IMAGE"):
         return None
-    if published_hosts(os.environ.get("HARNESS_EGRESS_ALLOWLIST", "")) is not None:
+    if os.environ.get("HARNESS_EGRESS_ALLOWLIST") == ALLOWLIST_PATH and published_hosts(ALLOWLIST_PATH) is not None:
         return None
-    return ("HARNESS_SANDBOX_IMAGE is set (the harness-agent image), but its egress allowlist HARNESS_EGRESS_ALLOWLIST "
-            "can't be read, so the egress container isn't limiting this sandbox's network. Start the sandbox from "
-            ".devcontainer/harness-agent/ (docker-compose.yml), or unset HARNESS_SANDBOX_IMAGE (ADR-003)")
+    return ("HARNESS_SANDBOX_IMAGE is set (the harness-agent image), but the egress allowlist isn't published at %s with "
+            "HARNESS_EGRESS_ALLOWLIST naming it, so the egress container isn't limiting this sandbox's network. Start the "
+            "sandbox from .devcontainer/harness-agent/ (docker-compose.yml), or unset HARNESS_SANDBOX_IMAGE (ADR-003)"
+            % ALLOWLIST_PATH)
+
+
+def jsonc_loads(text):
+    """The JSON value of devcontainer.json's text. Raises ValueError when it isn't one."""
+    without_comments = JSONC_TOKEN.sub(lambda m: m.group(0) if m.group(0)[0] == '"' else "", text)
+    return json.loads(JSONC_COMMA.sub(lambda m: m.group(0) if m.group(0)[0] == '"' else "", without_comments))
 
 
 def allowlist_hash(hosts):

@@ -52,21 +52,23 @@
   - Each judge verdict records the sandbox it was recorded in, and `receipt` shows it (a SANDBOX section; `sandbox`
     in `--json`): `backend`, `isolation_class`, `base_image_digest`, `allowlist_hash`, `region`, `control_plane`,
     `credential_mode`, and `isolation_reason`. `isolation_class` is `container` only when the process is a Linux
-    container with NoNewPrivs set and no NET_ADMIN, NET_RAW or SYS_ADMIN; otherwise `none`, with the reason. A judge
+    container with NoNewPrivs set, no NET_ADMIN, NET_RAW or SYS_ADMIN in its effective or bounding set, and the egress
+    allowlist published at `/run/harness-egress/allowlist`; otherwise `none`, with the reason. A judge
     pass recorded before this release says "not recorded". The evidence never holds a credential, and refuses nothing.
     A receipt flags a container with no published allowlist, and notes that `allowlist_hash` covers host names only.
   - `.devcontainer/harness-agent/` builds from `node:22-bookworm` pinned by digest, and bakes the reference into
     the image (`HARNESS_SANDBOX_IMAGE`).
-  - Inside the harness-agent image, an egress allowlist (`HARNESS_EGRESS_ALLOWLIST`) that can't be read is a doctor
-    error, so `run` and `orca` refuse to start. `doctor` warns about a `devcontainer.json` that names no
-    `dockerComposeFile`, and `update` warns when it keeps a conflicting local `devcontainer.json`.
+  - Inside the harness-agent image, an egress allowlist that isn't published at `/run/harness-egress/allowlist`
+    (named by `HARNESS_EGRESS_ALLOWLIST`) is a doctor error, so `run` and `orca` refuse to start. `doctor` warns about
+    a `devcontainer.json` that names no `dockerComposeFile` (read as JSONC, with comments and trailing commas), or that
+    can't be parsed, and `update` warns when it keeps a conflicting local `devcontainer.json`.
   - The egress allowlist moved out of the agent's container: a second container (`egress`, `docker-compose.yml`)
     applies `init-firewall.sh` in the network namespace the agent's container joins, and publishes the host list the
     evidence hashes. The agent's container drops NET_ADMIN and NET_RAW, runs with `no-new-privileges` and has no
     sudo, so the agent can no longer re-run the firewall script as root. Outbound IPv6 is dropped. DNS is still open
     to any resolver.
-  - `tests/test-sandbox-evidence.py` (in the self-test) and `tests/test-sandbox-egress.py` (a real container, with
-    `HARNESS_E2E=1`, docker and the devcontainer CLI).
+  - `tests/test-sandbox-evidence.py` (in the self-test) and `tests/test-sandbox-egress.py` (real containers, with
+    `HARNESS_E2E=1`: the Compose sandbox needs docker and the devcontainer CLI; the restriction checks need only docker).
   - **Upgrading:** the sandbox is now two containers. Move an edited `HARNESS_FIREWALL_ALLOW` or knowledge mount from
     `devcontainer.json` to `docker-compose.yml`, and rebuild the container; an image built before this release
     records `isolation_class: none`. If `update` reports a conflict on `devcontainer.json`, merge the new file's

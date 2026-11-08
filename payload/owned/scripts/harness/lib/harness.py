@@ -3050,9 +3050,13 @@ def stale_sandbox_config():
     an update kept (ADR-003)."""
     try:
         text = (ROOT / ".devcontainer/harness-agent/devcontainer.json").read_text(encoding="utf-8")
-        config = json.loads("\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//")))
-    except (OSError, UnicodeDecodeError, ValueError):
+    except (OSError, UnicodeDecodeError):
         return None
+    try:
+        config = sandbox.jsonc_loads(text)
+    except ValueError:
+        return ("devcontainer.json can't be parsed, so doctor can't tell whether it predates the two-container sandbox "
+                "(ADR-003): check it against devcontainer.json.harness-new (if update wrote one)")
     if not isinstance(config, dict) or config.get("dockerComposeFile"):
         return None
     return ("devcontainer.json predates the two-container sandbox (ADR-003): it names no dockerComposeFile, so the egress "

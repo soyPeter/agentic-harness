@@ -92,7 +92,7 @@ A backend provides six operations:
 | `backend` | the backend that ran the session | `devcontainer` | `devcontainer` |
 | `isolation_class` | the boundary between the agent and the host: `none` < `container` < `userspace-kernel` (gVisor) < `microVM` (Firecracker, Cloud Hypervisor, Kata) < `dedicated-VM` | `container`, once the process shows the container's restrictions (below) | `none` |
 | `base_image_digest` | the digest of the base image the Dockerfile builds from; `unpinned` when that base is named by a tag. It does not cover the packages or the agent CLI installed on top | the base's digest, as baked into the image's environment | `none` |
-| `allowlist_hash` | `sha256:` over the allowlisted host names, lower-cased, deduplicated, sorted, one per line | of the list the egress container publishes | `none` |
+| `allowlist_hash` | `sha256:` over the allowlisted host names, lower-cased, deduplicated, sorted, one per line | of `/run/harness-egress/allowlist`, the list the egress container publishes | `none` |
 | `region` | where the sandbox runs: a hosted backend's region or jurisdiction | `local` | `local` |
 | `control_plane` | who creates and holds the sandbox | `local` (the machine's container engine) | `none` |
 | `credential_mode` | how the agent's credentials reach it: `host`, `env`, `login`, later `brokered` | `env` with `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` set, else `login` (the login stored in the container) | `host` |
@@ -107,9 +107,13 @@ A backend provides six operations:
 - **The local backend vouches only for what it can see.** `HARNESS_SANDBOX_IMAGE` is baked into the harness-agent
   image, but a host can export it, and `docker run --cap-add NET_ADMIN` or `--privileged` gives a container the same
   variable. So the backend reports `container` only when the process itself shows the container's restrictions: Linux,
-  a container marker (`/.dockerenv` or `/run/.containerenv`), `NoNewPrivs` set in `/proc/self/status`, and no NET_ADMIN,
-  NET_RAW or SYS_ADMIN in its effective capabilities. Anything else reports `none`, with `isolation_reason` saying which
-  check failed, other containers included. It understates rather than overstates.
+  a container marker (`/.dockerenv` or `/run/.containerenv`), `NoNewPrivs` set in `/proc/self/status`, no NET_ADMIN,
+  NET_RAW or SYS_ADMIN in its effective or its bounding set (`CapEff` and `CapBnd`: a non-root process's effective set
+  is empty even when `--cap-add` gave it a capability, so the bounding set is what shows it), and the egress
+  container's allowlist readable at `/run/harness-egress/allowlist` with `HARNESS_EGRESS_ALLOWLIST` naming that path.
+  Anything else reports `none`, with `isolation_reason` saying which check failed, other containers included. It
+  understates rather than overstates. These are checks on what the process shows, not proof of how the container was
+  started: a container with the same restrictions and the same published list passes them.
 - The evidence also carries `isolation_reason`, beside the fields above: why the class is what it is.
 - `allowlist_hash` identifies the policy as published, not the addresses the names resolved to, and not the GitHub
   address ranges `init-firewall.sh` adds from `api.github.com/meta`, which change. Anyone can recompute it from the
@@ -139,7 +143,8 @@ A backend provides six operations:
   - Its health check passes once the OUTPUT policy is DROP and the list is written.
 - `agent` joins that namespace (`network_mode: service:egress`), so its traffic meets the same rules.
   - It drops NET_ADMIN and NET_RAW, runs with `no-new-privileges`, and has no sudo.
-  - It mounts the published list read-only and finds it through `HARNESS_EGRESS_ALLOWLIST`.
+  - It mounts the published list read-only at `/run/harness-egress/allowlist`, the one path the evidence reads
+    (`HARNESS_EGRESS_ALLOWLIST` names it).
   - It starts only once `egress` is healthy.
 
 The agent can't reach the rules: it has no capability to change them and no sudo, and the egress container's
@@ -150,9 +155,9 @@ to the `egress` service in the Compose file.
 An installed sandbox from before the Compose file has the single-container shape, and that shape must not pass
 silently:
 
-- Inside the harness-agent image (`HARNESS_SANDBOX_IMAGE` set), an egress allowlist that can't be read is a doctor
-  error, so `run` and `orca` refuse to start.
-- `doctor` warns when `devcontainer.json` names no `dockerComposeFile`. `update` warns when it keeps a locally edited
+- Inside the harness-agent image (`HARNESS_SANDBOX_IMAGE` set), an egress allowlist that isn't published at
+  `/run/harness-egress/allowlist` is a doctor error, so `run` and `orca` refuse to start.
+- `doctor` warns when `devcontainer.json` names no `dockerComposeFile`, or can't be parsed (it is read as JSONC). `update` warns when it keeps a locally edited
   `devcontainer.json` that conflicts with the new one, and says what to merge from the `.harness-new` file.
 
 Still open after v1:

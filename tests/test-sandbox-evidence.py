@@ -20,6 +20,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 DEVCONTAINER_REL = ".devcontainer/harness-agent/devcontainer.json"
+# Where the egress container publishes its allowlist, read-only, in the agent's container (docker-compose.yml).
+EGRESS_ALLOWLIST = "/run/harness-egress/allowlist"
 SANDBOX_ENVIRONMENT = ("HARNESS_SANDBOX_IMAGE", "HARNESS_EGRESS_ALLOWLIST", "HARNESS_SANDBOX_BACKEND",
                        "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
 # The allowlist init-firewall.sh enforces with an empty HARNESS_FIREWALL_ALLOW, as the egress container may write it:
@@ -40,6 +42,16 @@ STALE_DEVCONTAINER = """// An earlier harness release: one container, the firewa
   "runArgs": ["--cap-add=NET_ADMIN", "--cap-add=NET_RAW"],
   "remoteUser": "agent",
   "postStartCommand": "sudo /usr/local/bin/init-firewall.sh"
+}
+"""
+# The same file as edited by hand: JSONC comments, trailing commas, and a string that holds a comment marker.
+JSONC_STALE_DEVCONTAINER = """// An earlier harness release, edited by hand.
+{
+  "name": "harness-agent", // the container's name
+  "build": {"dockerfile": "Dockerfile", "args": {"NOTE": "see https://example.com/a,}"},},
+  "runArgs": ["--cap-add=NET_ADMIN", "--cap-add=NET_RAW",], /* before the firewall */
+  "remoteUser": "agent",
+  "postStartCommand": "sudo /usr/local/bin/init-firewall.sh",
 }
 """
 
@@ -197,13 +209,21 @@ class Evidence(Project):
 
     def test_the_harness_image_variable_and_an_allowlist_alone_do_not_make_a_container(self):
         text, data = self.judged(HARNESS_SANDBOX_IMAGE=self.harness_agent_image(),
-                                 HARNESS_EGRESS_ALLOWLIST=self.published_allowlist(),
+                                 HARNESS_EGRESS_ALLOWLIST="/etc/hosts",
                                  CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-test-token")
 
         self.assertEqual({key: data["sandbox"][key] for key in ON_THE_HOST}, ON_THE_HOST)
-        expected = "not Linux" if sys.platform != "linux" else "not in a container"
-        self.assertIn(expected, data["sandbox"]["isolation_reason"])
         self.assertIn("nothing isolated the session from the host", text)
+
+    @unittest.skipUnless(os.environ.get("HARNESS_SANDBOX_IMAGE") and os.path.isfile(EGRESS_ALLOWLIST),
+                         "runs inside the harness-agent sandbox, where the egress container publishes its allowlist")
+    def test_inside_the_harness_agent_sandbox_a_judge_pass_is_a_container(self):
+        _, data = self.judged(HARNESS_SANDBOX_IMAGE=self.harness_agent_image(),
+                              HARNESS_EGRESS_ALLOWLIST=EGRESS_ALLOWLIST)
+
+        self.assertEqual(data["sandbox"]["isolation_class"], "container", data["sandbox"]["isolation_reason"])
+        self.assertEqual(data["sandbox"]["allowlist_hash"], DEFAULT_ALLOWLIST_HASH)
+        self.assertIn("in a container", data["sandbox"]["isolation_reason"])
 
     def test_the_evidence_never_holds_a_credential(self):
         self.judged(HARNESS_SANDBOX_IMAGE=self.harness_agent_image(), ANTHROPIC_API_KEY="sk-ant-api03-secret-key")
@@ -284,12 +304,12 @@ class Backend(Project):
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn("HARNESS_EGRESS_ALLOWLIST", result.stdout)
 
-    def test_a_harness_image_with_its_published_allowlist_passes_doctor(self):
+    def test_a_harness_image_whose_allowlist_is_not_the_egress_volumes_is_a_doctor_error(self):
         result = self.harness("doctor", check=False, HARNESS_SANDBOX_IMAGE=self.harness_agent_image(),
                               HARNESS_EGRESS_ALLOWLIST=self.published_allowlist())
 
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn("ERROR", result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(EGRESS_ALLOWLIST, result.stdout)
 
     def test_the_ci_floor_never_consults_the_backend(self):
         verify = self.harness("verify", check=False, HARNESS_VERIFY="block", HARNESS_SANDBOX_BACKEND="e2b")
@@ -299,8 +319,8 @@ class Backend(Project):
 
 
 class Upgrade(Project):
-    def keep_stale_devcontainer(self):
-        (self.project / DEVCONTAINER_REL).write_text(STALE_DEVCONTAINER)
+    def keep_stale_devcontainer(self, text=STALE_DEVCONTAINER):
+        (self.project / DEVCONTAINER_REL).write_text(text)
 
     def test_doctor_warns_about_a_devcontainer_json_that_predates_the_egress_container(self):
         self.keep_stale_devcontainer()
@@ -309,6 +329,21 @@ class Upgrade(Project):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("predates the two-container sandbox", result.stdout)
+
+    def test_doctor_reads_a_stale_devcontainer_json_with_inline_comments_and_trailing_commas(self):
+        self.keep_stale_devcontainer(JSONC_STALE_DEVCONTAINER)
+
+        result = self.harness("doctor", check=False)
+
+        self.assertIn("predates the two-container sandbox", result.stdout)
+
+    def test_doctor_says_when_devcontainer_json_cannot_be_parsed(self):
+        self.keep_stale_devcontainer('{\n  "name": "harness-agent",\n  "runArgs": [\n}\n')
+
+        result = self.harness("doctor", check=False)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("devcontainer.json can't be parsed", result.stdout)
 
     def test_update_says_what_to_merge_when_it_keeps_an_edited_devcontainer_json_from_before_the_egress_container(self):
         self.keep_stale_devcontainer()
@@ -331,6 +366,12 @@ class SandboxFiles(Project):
         self.assertRegex(self.harness_agent_image(), r"^[a-z0-9./_-]+(:[\w.-]+)?@sha256:[0-9a-f]{64}$")
         self.assertIn("FROM ${HARNESS_SANDBOX_IMAGE}",
                       (self.project / ".devcontainer/harness-agent/Dockerfile").read_text())
+
+    def test_doctor_does_not_call_the_installed_devcontainer_json_stale_or_unreadable(self):
+        result = self.harness("doctor", check=False)
+
+        self.assertNotIn("predates the two-container sandbox", result.stdout)
+        self.assertNotIn("can't be parsed", result.stdout)
 
     def test_the_agent_container_gets_no_network_admin_capability(self):
         config = devcontainer_config(self.project)
