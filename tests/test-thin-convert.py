@@ -3,6 +3,7 @@
 Every test works in throwaway repositories. A local repository tagged like the harness's releases stands in for the
 harness repository (HARNESS_ENGINE_SOURCE), so the conversions fetch and check a release as they do online.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -649,6 +650,37 @@ class Packs(Fixture):
             self.assertFalse((self.project / name).exists(), name)
             self.assertNotIn(name, self.lock()["kept"])
 
+    def test_removing_a_pack_moves_the_hashes_an_earlier_engine_recorded_under_files(self):
+        """An earlier engine recorded a thin project's pack hashes under "files". Removing one pack must move the
+        hashes of the packs that stay to "kept", or the next settings commit is refused as a full install's."""
+        (self.project / "backbone/adr/ADR-003-java.md").write_text(JAVA_ADR)
+        self.harness("adopt", "java", "--adr", "ADR-003", "--with", "gradle,junit5-assertj,no-lombok")
+        self.adopt_container()
+        self.env = dict(self.env, SKIP_BUILD="1")
+        self.switch_to_thin()
+        lock = self.lock()
+        names =self.lock()["adopted"]["container"]["files"] + self.lock()["adopted"]["java"]["files"]
+        lock["files"] = {name: lock["kept"].pop(name) for name in names}
+        (self.project / LOCK).write_text(json.dumps(lock, indent=2) + "\n")
+        self.commit("chore: the lock an earlier engine's adopt left", hooks=False)
+        self.harness("adopt", "--remove", "container")
+        self.assertNotIn("files", self.lock())
+        self.change_the_settings()
+
+    def test_pinning_moves_the_hashes_an_earlier_engine_recorded_under_files(self):
+        self.adopt_container()
+        self.switch_to_thin()
+        lock = self.lock()
+        packed = self.lock()["adopted"]["container"]["files"]
+        lock["files"] = {name: lock["kept"].pop(name) for name in packed}
+        (self.project / LOCK).write_text(json.dumps(lock, indent=2) + "\n")
+        self.commit("chore: the lock an earlier engine's adopt left", hooks=False)
+        self.harness("pin", "99.0.0")
+        self.commit("chore: pin the agentic harness to 99.0.0")
+        self.assertNotIn("files", self.lock())
+        self.assertEqual(sorted(name for name in packed if name in self.lock()["kept"]), sorted(packed))
+        self.change_the_settings()
+
     def test_adopting_a_pack_again_moves_the_hashes_an_earlier_engine_recorded_under_files(self):
         """An earlier engine's adopt recorded a thin project's pack files under "files"."""
         self.adopt_container()
@@ -667,28 +699,29 @@ class Packs(Fixture):
 
     def test_adopting_a_pack_again_after_the_pin_moved_keeps_an_edited_file(self):
         """Release 99.0.0 changes SKILL.md, which the user edited: adopt keeps the edit, writes the release's copy
-        beside it and exits 1, as update.sh does. The recorded hash stays the one the release installed."""
+        beside it and exits 1, as update.sh does. The lock records the release's copy, as update.sh does, so the
+        next adoption is clean once the user has merged."""
         self.adopt_container()
         edited = self.edit(PACK_FILE)
         self.commit("chore: a local edit to a pack file", hooks=False)
         self.switch_to_thin()
         self.harness("pin", "99.0.0")
         self.commit("chore: pin the agentic harness to 99.0.0")
-        recorded = self.lock()["kept"][PACK_FILE]
+        release = self.release("catalog/container/install/" + PACK_FILE, "99.0.0")
         result = self.harness("adopt", "container", "--adr", "ADR-002", "--with", "podman", check=False)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("CONFLICT %s" % PACK_FILE, result.stdout)
         self.assertEqual(content(self.project / PACK_FILE), edited[PACK_FILE])
-        self.assertEqual(content(self.project / (PACK_FILE + ".harness-new")),
-                         self.release("catalog/container/install/" + PACK_FILE, "99.0.0"))
-        self.assertEqual(self.lock()["kept"][PACK_FILE], recorded)
+        self.assertEqual(content(self.project / (PACK_FILE + ".harness-new")), release)
+        self.assertEqual(self.lock()["kept"][PACK_FILE], hashlib.sha256(release).hexdigest())
         self.assertEqual(content(self.project / PACK_DOC),
                          self.release("catalog/container/install/" + PACK_DOC, "99.0.0"))
         self.assertFalse((self.project / (PACK_DOC + ".harness-new")).exists())
 
     def test_adopting_a_pack_again_moves_an_edited_option_file_s_hash_out_of_files(self):
         """An earlier engine recorded a thin project's pack files under "files", and verify reads a non-empty "files"
-        as a full install. The edited option file dropped by the re-adoption keeps its hash, now under "kept"."""
+        as a full install. The edited option file the re-adoption drops is no longer a harness file, so the lock
+        keeps no hash for it under either table."""
         (self.project / "backbone/adr/ADR-003-java.md").write_text(JAVA_ADR)
         self.harness("adopt", "java", "--adr", "ADR-003", "--with", "gradle,junit5-assertj,no-lombok")
         self.commit("chore: adopt the java pack", hooks=False)
@@ -706,7 +739,8 @@ class Packs(Fixture):
         self.assertEqual(content(self.project / JAVA_TEST_FILES[1]), edited[JAVA_TEST_FILES[1]])
         lock = self.lock()
         self.assertFalse(lock.get("files"))
-        self.assertEqual(lock["kept"].get(JAVA_TEST_FILES[1]), recorded)
+        self.assertNotIn(JAVA_TEST_FILES[1], lock["kept"])
+        self.assertTrue(recorded)
         self.commit("chore: adopt the java pack without junit5-assertj", hooks=False)
         self.env = dict(self.env, SKIP_BUILD="1")
         self.change_the_settings()
@@ -768,6 +802,55 @@ class AdoptEdits(Fixture):
         self.assertEqual(content(self.project / PACK_FILE), edited[PACK_FILE])
         self.assertFalse((self.project / (PACK_FILE + ".harness-new")).exists())
 
+    def conflict_then_release_again(self):
+        """The user edited a pack file and release 1 changed it too, so adopt wrote the release's copy beside it;
+        release 2 then changes the file again."""
+        self.adopt_container()
+        self.edit(PACK_FILE)
+        self.commit("chore: a local edit to a pack file", hooks=False)
+        self.release_changes(self.project, PACK_FILE)
+        self.assertEqual(self.harness("adopt", "container", "--adr", "ADR-002", "--with", "podman", check=False)
+                         .returncode, 1)
+        self.release_changes(self.project, PACK_FILE)
+
+    def test_once_the_conflict_is_merged_adopting_again_is_clean(self):
+        """update.sh records the release's copy on a conflict, so after the user merges and deletes .harness-new, the
+        next adoption (here with the same options) reports no conflict and writes nothing."""
+        self.adopt_container()
+        self.edit(PACK_FILE)
+        self.commit("chore: a local edit to a pack file", hooks=False)
+        self.release_changes(self.project, PACK_FILE)
+        self.harness("adopt", "container", "--adr", "ADR-002", "--with", "podman", check=False)
+        merged = (self.project / PACK_FILE).read_bytes() + b"# merged by hand\n"
+        (self.project / PACK_FILE).write_bytes(merged)
+        (self.project / (PACK_FILE + ".harness-new")).unlink()
+        self.commit("chore: merge the new version of a pack file", hooks=False)
+        result = self.harness("adopt", "container", "--adr", "ADR-002", "--with", "podman", check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("CONFLICT", result.stdout)
+        self.assertEqual(content(self.project / PACK_FILE), merged)
+        self.assertFalse((self.project / (PACK_FILE + ".harness-new")).exists())
+
+    def test_adopting_again_refuses_to_overwrite_a_harness_new_from_an_earlier_adoption(self):
+        """A half-merged .harness-new holds the user's work: a later conflict on the same file is refused before
+        anything is written, and the file is left as it is."""
+        self.conflict_then_release_again()
+        half_merged = b"half merged, not yet copied back\n"
+        (self.project / (PACK_FILE + ".harness-new")).write_bytes(half_merged)
+        self.commit("chore: half-merge the new version of a pack file", hooks=False)
+        before = self.snapshot()
+        result = self.harness("adopt", "container", "--adr", "ADR-002", "--with", "podman", check=False)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(PACK_FILE + ".harness-new already exists", result.stderr)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(content(self.project / (PACK_FILE + ".harness-new")), half_merged)
+
+    def test_removing_a_pack_reports_a_harness_new_it_leaves_behind(self):
+        self.conflict_then_release_again()
+        result = self.harness("adopt", "--remove", "container")
+        self.assertIn("left    %s.harness-new" % PACK_FILE, result.stdout)
+        self.assertTrue((self.project / (PACK_FILE + ".harness-new")).is_file())
+
     if given is None:
         def test_adopting_again_keeps_every_edited_file_and_writes_the_release_copy_beside_it(self):
             self.skipTest("needs hypothesis (pip install -r tests/requirements.txt)")
@@ -797,7 +880,31 @@ class AdoptEdits(Fixture):
             self.assertEqual(content(project / name), edited.get(name, release), name)
             self.assertEqual(content(project / (name + ".harness-new")), release if name in conflicts else None, name)
             if name in edits:
-                self.assertEqual((lock.get("files") or {}).get(name) or lock["kept"].get(name), recorded[name], name)
+                expected = hashlib.sha256(release).hexdigest() if name in conflicts else recorded[name]
+                self.assertEqual((lock.get("files") or {}).get(name) or lock["kept"].get(name), expected, name)
+
+
+class OptionRemoval(Fixture):
+    """harness.py adopt in a full install drops an option whose file the user edited. The file stays, and since it is
+    no longer a harness file the lock records no hash for it, so doctor doesn't warn about it on every run."""
+
+    def harness(self, *args, check=True):
+        return self.run_at(self.project, "python3", "-B", LAUNCHER, *args, check=check)
+
+    def test_an_edited_option_file_the_pack_drops_is_no_longer_a_harness_file(self):
+        (self.project / "backbone/adr/ADR-003-java.md").write_text(JAVA_ADR)
+        self.harness("adopt", "java", "--adr", "ADR-003", "--with", "gradle,junit5-assertj,no-lombok")
+        self.commit("chore: adopt the java pack", hooks=False)
+        edited = self.edit(JAVA_TEST_FILES[1])
+        self.commit("chore: a local edit to an option file", hooks=False)
+        result = self.harness("adopt", "java", "--adr", "ADR-003", "--with", "gradle,no-lombok",
+                              "--without", "junit5-assertj", check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("kept    %s (edited locally" % JAVA_TEST_FILES[1], result.stdout)
+        self.assertEqual(content(self.project / JAVA_TEST_FILES[1]), edited[JAVA_TEST_FILES[1]])
+        self.assertNotIn(JAVA_TEST_FILES[1], self.lock()["files"])
+        doctor = self.harness("doctor", check=False)
+        self.assertNotIn(JAVA_TEST_FILES[1], doctor.stdout)
 
 
 class PackProperties(Fixture):

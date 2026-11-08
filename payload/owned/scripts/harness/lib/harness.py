@@ -3214,7 +3214,31 @@ def thin_hashes_under_kept(info):
     as a full install: it would refuse every change to .claude/settings.json."""
     if info.get("mode") == "thin" and "files" in info:
         for rel_path, digest in info.pop("files").items():
-            info.setdefault("kept", {}).setdefault(rel_path, digest)
+            info.setdefault("kept", {})[rel_path] = digest
+
+
+def conflict_with_edit(info, rel_path, src):
+    """The user edited the pack file and the release changed it too, so adopt keeps the edit."""
+    current, recorded, release_digest = sha256(ROOT / rel_path), recorded_hash(info, rel_path), sha256(src)
+    return current not in (None, recorded, release_digest) and recorded != release_digest
+
+
+def check_pack_files(info, name, files):
+    """Refuses before anything is written: a project file the lock doesn't know, or a <file>.harness-new that a
+    conflict would overwrite (it may hold a half-merged version)."""
+    for rel_path, src in sorted(files.items()):
+        dest = ROOT / rel_path
+        if dest.exists() and recorded_hash(info, rel_path) is None and sha256(dest) != sha256(src):
+            raise HarnessError("%s already exists as a project file; rename it or remove it before adopting %s"
+                               % (rel_path, name))
+        if (ROOT / (rel_path + ".harness-new")).exists() and conflict_with_edit(info, rel_path, src):
+            raise HarnessError("%s.harness-new already exists; merge it into %s and delete it, then adopt again"
+                               % (rel_path, rel_path))
+
+
+def report_new_copy(report, rel_path):
+    if (ROOT / (rel_path + ".harness-new")).exists():
+        report.append("left    %s.harness-new (not removed; merge it or delete it yourself)" % rel_path)
 
 
 def adopt(names, adr, chosen, declined, dry_run):
@@ -3240,45 +3264,42 @@ def adopt(names, adr, chosen, declined, dry_run):
     if unknown:
         raise HarnessError("unknown option(s) for %s: %s (see: harness.py catalog)" % (", ".join(names), ", ".join(unknown)))
     plans = [(name, decide_options(name, chosen, declined)) for name in names]
+    payloads = [(name, options, pack_payload(name, options)) for name, options in plans]
+    for name, _, (files, _, _, _) in payloads:
+        check_pack_files(info, name, files)
     today = time.strftime("%Y-%m-%d")
     guardrails, routing, conf_text = read(BACKBONE / "guardrails.conf"), read(BACKBONE / "routing.conf"), read(CONF_FILE)
     report, conflicts = [], []
-    for name, options in plans:
-        files, rules, routes, values = pack_payload(name, options)
+    for name, options, (files, rules, routes, values) in payloads:
         previous = set((adopted.get(name) or {}).get("files", []))
-        for rel_path, src in sorted(files.items()):
-            dest = ROOT / rel_path
-            if dest.exists() and recorded_hash(info, rel_path) is None and sha256(dest) != sha256(src):
-                raise HarnessError("%s already exists as a project file; rename it or remove it before adopting %s"
-                                   % (rel_path, name))
         for rel_path in sorted(previous - set(files)):
             if sha256(ROOT / rel_path) == recorded_hash(info, rel_path):
                 report.append("remove  %s" % rel_path)
                 if not dry_run:
                     (ROOT / rel_path).unlink()
-                    forget_hash(info, rel_path)
             elif (ROOT / rel_path).exists():
                 report.append("kept    %s (edited locally; no longer part of the pack)" % rel_path)
+            forget_hash(info, rel_path)
+            report_new_copy(report, rel_path)
         for rel_path, src in sorted(files.items()):
             dest, release_digest = ROOT / rel_path, sha256(src)
             current, recorded = sha256(dest), recorded_hash(info, rel_path)
-            if current not in (None, recorded, release_digest):
-                # The lock holds the release's copy as last installed, so this file differs from it by an edit.
-                if recorded == release_digest:
-                    report.append("kept    %s (edited locally; the release has not changed it)" % rel_path)
-                else:
-                    report.append("CONFLICT %s (edited locally, and the release changed it too: the new version is in "
-                                  "%s.harness-new)" % (rel_path, rel_path))
-                    conflicts.append(rel_path)
-                    if not dry_run:
-                        shutil.copyfile(str(src), str(dest) + ".harness-new")
-                continue
-            report.append("install %s" % rel_path)
-            if not dry_run:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(str(src), str(dest))
-                shutil.copymode(str(src), str(dest))
-                record_hash(info, rel_path, release_digest)
+            if conflict_with_edit(info, rel_path, src):
+                report.append("CONFLICT %s (edited locally, and the release changed it too: the new version is in "
+                              "%s.harness-new)" % (rel_path, rel_path))
+                conflicts.append(rel_path)
+                if not dry_run:
+                    shutil.copyfile(str(src), str(dest) + ".harness-new")
+                    record_hash(info, rel_path, release_digest)
+            elif current not in (None, recorded, release_digest):
+                report.append("kept    %s (edited locally; the release has not changed it)" % rel_path)
+            else:
+                report.append("install %s" % rel_path)
+                if not dry_run:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(str(src), str(dest))
+                    shutil.copymode(str(src), str(dest))
+                    record_hash(info, rel_path, release_digest)
         header = "(%s, %s; options: %s)" % (adr, today, ", ".join(options) or "none")
         guardrails = replace_block(guardrails, name, rules or ["# (no rules)"], header)
         routing = replace_block(routing, name, routes or ["# (no routes)"], header)
@@ -3303,6 +3324,7 @@ def adopt(names, adr, chosen, declined, dry_run):
 
 def unadopt(names, dry_run):
     info = lock()
+    thin_hashes_under_kept(info)
     adopted = info.get("adopted", {})
     for name in names:
         if name not in adopted:
@@ -3321,6 +3343,7 @@ def unadopt(names, dry_run):
             else:
                 report.append("kept    %s (edited locally; delete it yourself if unwanted)" % rel_path)
             forget_hash(info, rel_path)
+            report_new_copy(report, rel_path)
         guardrails = replace_block(guardrails, name, None)
         routing = replace_block(routing, name, None)
         del adopted[name]
