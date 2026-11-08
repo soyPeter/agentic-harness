@@ -2,7 +2,7 @@
 # Add your stack's toolchain (JDK, Gradle, ...) in a project Dockerfile FROM this one, or extend below and
 # accept that harness updates will flag the edit.
 # The base is pinned by digest and baked into the image's environment: every judge verdict made in here records it
-# as the sandbox's image_digest (ADR-003). Move the digest to update the base.
+# as the sandbox's base_image_digest (ADR-003), which covers the base only. Move the digest to update the base.
 ARG HARNESS_SANDBOX_IMAGE=node:22-bookworm@sha256:7702d8aa4d5910871692af4480eb3ba86f23047a6417a44d857d06c95d060d3f
 FROM ${HARNESS_SANDBOX_IMAGE}
 ARG HARNESS_SANDBOX_IMAGE
