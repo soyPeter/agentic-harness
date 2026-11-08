@@ -922,6 +922,10 @@ out=$(hook "$F" pre-tool-use "$FINISH" 2>&1)
 contains "a hand-written pass verdict does not hold up" "does not hold up" "$out"
 cp "$WORK/judge.json.bak" "$JV"
 
+section "the code fingerprint comes from the files' content, not git's timestamps"
+expect 0 "same-size edits within an index write's second or keeping the mtime; untracked, ignored, force-added files" \
+  python3 -B "$HARNESS/tests/test-code-fingerprint.py"
+
 section "verify: at commit time and in CI"
 git -C "$F" add -A
 expect 0 "verify passes a [WIP] task that went through the start gate" git -C "$F" commit -qm "feat(api): start customer search"
@@ -1348,8 +1352,8 @@ DGB="$WORK/deliver-gh-bin"; mkdir -p "$DGB"
 cat > "$DGB/gh" <<'EOF'
 #!/bin/sh
 case "$*" in
-  "pr view 7 --repo o/r --json labels"|"issue view 8 --json labels") echo '{"labels": [{"name": "risk:high"}]}' ;;
-  "pr view"*"--json labels"*|"issue view"*"--json labels"*) cat "$DL_LABELS" ;;
+  "pr view 7 --repo o/r --json labels") echo '{"labels": [{"name": "risk:high"}]}' ;;
+  "pr view"*"--json labels"*) cat "$DL_LABELS" ;;
   *) echo "fake gh: no answer for: gh $*" >&2; exit 1 ;;
 esac
 EOF
@@ -1450,6 +1454,25 @@ dl_refuses "nor run a command an expansion names, behind a runner" 'timeout 60 $
 dl_refuses "nor give a shell a file on stdin" 'bash < ./label.sh'
 dl_refuses "nor nest commands deeper than the harness reads" 'echo $(echo $(echo $(echo $(echo $(gh pr view)))))'
 dl_refuses "a PR keeps one risk label: the deliverer may not add two" 'gh pr create --title t --body b --label risk:low,risk:high'
+out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:low; gh pr edit 7 --add-label risk:high')" 2>&1; echo "exit=$?")
+contains "nor add two in separate gh calls of one command" "exit=2" "$out"
+contains "the refusal names the other call's label and the one to add" "another gh call in this command adds risk:low: add only the highest the receipts suggest, risk:high" "$out"
+out=$(hook "$DL" pre-tool-use "$(dbash 'gh label create risk:low --force')" 2>&1; echo "exit=$?")
+contains "the deliverer may not create a label with --force" "exit=2" "$out"
+contains "the refusal says --force rewrites a label someone else defined" "rewrites a label someone else defined" "$out"
+out=$(hook "$DL" pre-tool-use "$(dbash 'alias g=gh
+g pr merge 7')" 2>&1; echo "exit=$?")
+contains "the deliverer may not define a shell alias" "exit=2" "$out"
+contains "the refusal says an alias can hide a gh command" "defines no shell aliases" "$out"
+out=$(hook "$DL" pre-tool-use "$(dbash 'gh repo edit --enable-auto-merge')" 2>&1; echo "exit=$?")
+contains "the deliverer may not change the repository's settings" "exit=2" "$out"
+contains "the refusal names the command, which is the user's" "gh repo edit is the user's call" "$out"
+contains "and the gh commands the deliverer may run" "gh pr create, edit, view, checks, list and comment" "$out"
+dl_refuses "nor run a workflow" 'gh workflow run deploy.yml'
+dl_refuses "nor set a secret" 'gh secret set TOKEN --body x'
+dl_allows "the deliverer may read which branch is the default" 'gh repo view --json defaultBranchRef'
+dl_allows "and comment on its PR" 'gh pr comment 7 --body "CI is green"'
+dl_allows "and watch a run" 'gh run watch 123'
 pr_labels risk:high class:feature
 out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:low,class:docs')" 2>&1; echo "exit=$?")
 contains "nor add a lower one next to a higher one on the PR" "exit=2" "$out"
@@ -1471,8 +1494,8 @@ pr_labels
 expect 2 "nor when gh can't start" hook "$DL" pre-tool-use "$(dbash_in "$WORK/no-such-folder" 'gh pr edit 7 --add-label risk:low')"
 out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 -R o/r --add-label risk:low')" 2>&1; echo "exit=$?")
 contains "the harness reads the labels of the PR in the repository the call names" "already has risk:high" "$out"
-out=$(hook "$DL" pre-tool-use "$(dbash 'gh issue edit 7 8 --add-label risk:low')" 2>&1; echo "exit=$?")
-contains "and of each issue or PR the call edits" "already has risk:high" "$out"
+out=$(hook "$DL" pre-tool-use "$(dbash 'gh issue edit 7 --add-label risk:low')" 2>&1; echo "exit=$?")
+contains "the deliverer labels its PR through gh pr only" "gh issue edit is the user's call" "$out"
 expect 0 "the deliverer's gate: every way of running a command, and its properties (with hypothesis)" python3 -B "$HARNESS/tests/test-deliverer-gate.py"
 export PATH=$DL_PATH
 git -C "$DL" checkout -q main
@@ -2476,7 +2499,7 @@ out=$(HARNESS_SKILL_MAX_AGE=1 "$M/scripts/harness/doctor.sh")
 contains "doctor warns about skills not verified recently" "was last verified" "$out"
 mkdir -p "$M/.claude/skills/undated"; printf -- '---\nname: undated\ndescription: x\n---\n# x\n' > "$M/.claude/skills/undated/SKILL.md"
 contains "doctor warns about skills without a date" "skill undated has no last-verified date" "$("$M/scripts/harness/doctor.sh")"
-for f in devcontainer.json Dockerfile init-firewall.sh trust-workspace.py; do
+for f in devcontainer.json docker-compose.yml Dockerfile init-firewall.sh trust-workspace.py; do
   [ -f "$M/.devcontainer/harness-agent/$f" ] && ok "sandbox file installed: $f" || bad "sandbox file installed: $f"
 done
 contains "the spec template has an Assumptions section" "## Assumptions" "$(cat "$M/backbone/templates/spec.md")"
@@ -2577,6 +2600,8 @@ expect 0 "receipt --json parses" python3 -c 'import json,sys; d=json.loads(sys.a
 expect 0 "receipt --json lists the suggested labels" python3 -c 'import json,sys; assert json.loads(sys.argv[1])["suggested_labels"] == ["risk:elevated"]' "$out"
 expect 0 "receipt: suggested labels for each Change-Class and risk (ADR-002)" python3 -B "$HARNESS/tests/test-triage-labels.py"
 expect 0 "attest: the verdict statement harness-verify signs, and its bytes (ADR-005)" python3 -B "$HARNESS/tests/test-attest.py"
+expect 0 "receipt: the sandbox each judge pass ran in, and the runner's sandbox backend (ADR-003)" \
+  python3 -B "$HARNESS/tests/test-sandbox-evidence.py"
 
 section "Linear as the system of record: ticket -> spec -> receipt"
 FX="$HARNESS/tests/fixtures/linear"
@@ -3030,6 +3055,8 @@ expect 0 "properties: a plugin agent gets its role's decisions (needs hypothesis
 expect 0 "thin init, pin and pre-commit shim (ADR-001)" python3 -B "$HARNESS/tests/test-thin-install.py"
 expect 0 "update.sh --to-thin and --to-full, there and back (ADR-001)" python3 -B "$HARNESS/tests/test-thin-convert.py"
 expect 0 "live: a plugin judge verdict is recorded (runs with HARNESS_E2E=1)" python3 -B "$HARNESS/tests/test-live-plugin.py"
+expect 0 "live: the sandbox's allowlist, capabilities and evidence in a real container (runs with HARNESS_E2E=1)" \
+  python3 -B "$HARNESS/tests/test-sandbox-egress.py"
 L="$HARNESS/plugin/launcher.py"
 SRC="$WORK/engine-src"   # stands in for the harness repository: this checkout, committed and tagged
 mkdir -p "$SRC"
