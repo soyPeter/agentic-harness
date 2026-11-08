@@ -112,16 +112,21 @@
   the guard hook only while Codex runs it: trusted as it is now, and switched on. Otherwise it answers itself, also
   when it can't read that file, and in sessions started with `--dangerously-bypass-hook-trust`, which it can't see
   (there a refusal can come twice). `machine.sh status` says when the Codex guard hook isn't trusted, changed since it
-  was trusted, or is turned off. `install --plugin` takes out an untrusted guard hook too. A live check
+  was trusted, or is turned off. The plugin also answers when the guard copy in `~/.agentic-harness/guard.py` isn't this
+  release's (a plugin upgrade without `./machine.sh install`), since that copy may check other settings; status says to
+  install again. On Python 3.10, which has no `tomllib`, trust written as an inline table or dotted keys can't be read:
+  status says so, and the plugin answers too. `install --plugin` takes out an untrusted guard hook too. A live check
   (`tests/test-machine-guard.py`, needs `codex` on the PATH, no model calls) compares this with what `codex
   app-server` itself lists and records.
 - **One reminder per session, also for hooks and tool calls run at once.** Claude Code and Codex run a call's hooks,
   and a session's tool calls, in parallel, and two guard checks could both find no reminder recorded yet and both
   remind. The record is now created atomically, so only one of them reminds. Run `./machine.sh install` again for the
   installed guard copy.
-- **Machine settings with `roots` or `exempt` that aren't lists of folders count as none.** A string in place of the
-  list of roots put every repository on the machine in scope (the guard read it character by character, and `/` holds
-  every path). Such settings now check nothing, never block, and `machine.sh status` names the field to fix.
+- **Machine settings that aren't usable count as none.** A string in place of the list of roots put every repository on
+  the machine in scope (the guard read it character by character, and `/` holds every path). Such settings now check
+  nothing, never block, and `machine.sh status` names the field to fix. So do a blank or relative folder in `roots` or
+  `exempt` (it resolves against each session's working directory), and an `enroll` that isn't an absolute path, which
+  used to let shell commands in unenrolled repositories through silently. `install --roots` writes absolute paths.
 - Tests go through the harness's public commands and hooks only: the checks that grepped agent files for hook names
   now run those hooks, and the ones that imported `harness.py` to call its functions now use `approve`,
   `orca --dry-run`, `orca-digest`, `orca-nightly` and a real, held `orca` run.
