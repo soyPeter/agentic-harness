@@ -1427,7 +1427,7 @@ def consecutive_fails(history):
 
 
 def code_fingerprint(include_backbone=False):
-    """Git tree hash of the working tree (tracked and untracked, ignores respected),
+    """Git tree hash of the working tree, hashed from the files' content (tracked and untracked, ignores respected),
     excluding backbone/ unless include_backbone. Identical code gives an identical hash, committed or not."""
     git_dir = git("rev-parse", "--absolute-git-dir").strip()
     if not git_dir:
@@ -1437,6 +1437,10 @@ def code_fingerprint(include_backbone=False):
         index = os.path.join(tmp, "index")
         if os.path.isfile(os.path.join(git_dir, "index")):
             shutil.copyfile(os.path.join(git_dir, "index"), index)
+            # Git skips hashing a file whose size and timestamps match its index entry, unless the entry is as new as
+            # the index file. Dated 1970 (not 0, which git reads as no date), the copy is older than every entry, so
+            # git hashes every file: a same-size edit made within the second of an index write is still seen.
+            os.utime(index, (1, 1))
         env = dict(os.environ, GIT_INDEX_FILE=index)
 
         def run(*args):

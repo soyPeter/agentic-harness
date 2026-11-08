@@ -922,6 +922,10 @@ out=$(hook "$F" pre-tool-use "$FINISH" 2>&1)
 contains "a hand-written pass verdict does not hold up" "does not hold up" "$out"
 cp "$WORK/judge.json.bak" "$JV"
 
+section "the code fingerprint comes from the files' content, not git's timestamps"
+expect 0 "same-size edits within an index write's second or keeping the mtime; untracked, ignored, force-added files" \
+  python3 -B "$HARNESS/tests/test-code-fingerprint.py"
+
 section "verify: at commit time and in CI"
 git -C "$F" add -A
 expect 0 "verify passes a [WIP] task that went through the start gate" git -C "$F" commit -qm "feat(api): start customer search"
