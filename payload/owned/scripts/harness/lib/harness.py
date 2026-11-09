@@ -4380,6 +4380,10 @@ PUSH_AFTER_SWITCH_REFUSAL = ("it doesn't push in a command that changes the bran
                              "checks a push against the branch the checkout is on now. Push in a command of its own.")
 REBASE_BRANCH_REFUSAL = ("git rebase with a branch argument checks that branch out first, and fast-forwards it: the "
                          "deliverer rebases only its own branch onto an upstream (git rebase origin/main).")
+INTERACTIVE_REBASE_REFUSAL = ("an interactive rebase (-i, --interactive, --edit-todo, pull --rebase=interactive) waits "
+                              "for an editor the deliverer can't drive: rebase with no -i (git rebase origin/main).")
+# Short flags that take the rest of their cluster as a value, so an i after them is that value, not -i.
+REBASE_VALUE_FLAGS = {"rebase": "sXxCS", "pull": "sXjSo"}
 COPY_PROGRAMS = ("ln", "link", "cp", "mv", "install", "rsync", "ditto", "hash")
 CODE_PROGRAMS = ("awk", "gawk", "mawk", "nawk", "sed", "osascript", "fish", "csh", "tcsh", "tclsh", "pwsh", "lua", "php",
                  "expect", "busybox", "jshell", "jrunscript", "Rscript", "julia", "runghc", "scala", "groovy", "swift",
@@ -5164,6 +5168,8 @@ def git_refusal(segment, words, targets, on_default):
         if sub in ("fetch", "pull", "rebase"):
             if on_default and sub in ("pull", "rebase"):
                 return DEFAULT_BRANCH_REFUSAL
+            if sub in ("pull", "rebase") and interactive_rebase(sub, rest):
+                return INTERACTIVE_REBASE_REFUSAL
             if sub == "rebase" and rebase_branch(rest):
                 return REBASE_BRANCH_REFUSAL
             if any(writes_default(w, targets) for w in rest if not w.startswith("-")):
@@ -5182,6 +5188,29 @@ def git_refusal(segment, words, targets, on_default):
         if any("*" in w for w in rest):
             return PUSH_DEFAULT_REFUSAL
     return None
+
+
+def interactive_rebase(sub, rest):
+    """Whether a git rebase or pull rebases interactively, however git reads the flag: an unambiguous prefix of the long
+    option (--inter), a short flag in a cluster (-ki), or pull's --rebase value (--reb=i, -ri)."""
+    for word in rest:
+        if word == "--":
+            break
+        name, _, value = word.partition("=")
+        if sub == "rebase" and ((name.startswith("--in") and "--interactive".startswith(name))
+                                or (name.startswith("--edi") and "--edit-todo".startswith(name))):
+            return True
+        if sub == "pull" and name.startswith("--reb") and "--rebase".startswith(name) and value in ("i", "interactive"):
+            return True
+        if word.startswith("-") and not word.startswith("--"):
+            for at, letter in enumerate(word[1:], 1):
+                if sub == "rebase" and letter == "i":
+                    return True
+                if sub == "pull" and letter == "r":
+                    return word[at + 1:] in ("i", "interactive")
+                if letter in REBASE_VALUE_FLAGS[sub]:
+                    break
+    return False
 
 
 def rebase_branch(rest):

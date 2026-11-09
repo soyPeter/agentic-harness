@@ -745,6 +745,43 @@ class DelivererRound5(GateProject):
                 self.assertIn("writes", message)
 
 
+# Round 6: an interactive rebase can't move the default branch, but it waits for an editor the deliverer can't drive.
+# git reads a cluster of short flags letter by letter, until a letter that takes the rest as its value.
+INTERACTIVE_REBASES = ("git rebase -i origin/main", "git rebase --interactive origin/main",
+                       "git rebase --interact origin/main", "git rebase --in origin/main",
+                       "git rebase -ki origin/main", "git rebase -ri origin/main", "git rebase -qi origin/main",
+                       "git rebase -i --autosquash origin/main", "git rebase --autosquash -i origin/main",
+                       "git rebase --onto origin/main -i feat/base", "git rebase --edit-todo",
+                       "git rebase origin/main -i", "git pull --rebase=interactive origin main",
+                       "git pull --rebase=i origin main", "git pull -ri origin main", "git pull -rinteractive origin main",
+                       "git pull -vri origin main", "git pull --reb=i origin main")
+NON_INTERACTIVE_REBASES = ("git rebase --autosquash origin/main", "git rebase -q origin/main",
+                           "git rebase --ignore-date origin/main", "git rebase --ignore-whitespace origin/main",
+                           "git rebase -X ours origin/main", "git rebase -Xignore-all-space origin/main",
+                           "git rebase -s ort origin/main", "git rebase --continue", "git rebase --abort",
+                           "git pull --rebase=true origin main", "git pull -r origin main",
+                           "git pull --rebase=merges origin main", "git pull --no-rebase origin main")
+
+
+class DelivererRound6(GateProject):
+    def test_an_interactive_rebase_is_refused_in_every_form(self):
+        self.pr_has()
+        for command in INTERACTIVE_REBASES:
+            with self.subTest(command=command):
+                code, message = self.decision(command)
+
+                self.assertEqual(code, 2, message)
+                self.assertIn("editor", message)
+
+    def test_a_rebase_that_needs_no_editor_runs(self):
+        self.pr_has()
+        for command in NON_INTERACTIVE_REBASES:
+            with self.subTest(command=command):
+                code, message = self.decision(command)
+
+                self.assertEqual(code, 0, message)
+
+
 if given is not None:
     other_labels = (st.sampled_from(("harness-change-approved", "automerge", "do-not-merge", "risk:none",
                                      "class:chore", "Risk:High", "bug"))
