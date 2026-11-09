@@ -3380,12 +3380,13 @@ def conflict_with_edit(info, rel_path, src):
     return current not in (None, recorded, release_digest) and recorded != release_digest
 
 
-def check_pack_files(info, name, files):
+def check_pack_files(info, name, files, dropped):
     """Refuses before anything is written: a project file the lock doesn't know, or a <file>.harness-new that a
-    conflict would overwrite (it may hold a half-merged version)."""
+    conflict would overwrite (it may hold a half-merged version). A file the pack dropped and the user kept is known."""
     for rel_path, src in sorted(files.items()):
         dest = ROOT / rel_path
-        if dest.exists() and recorded_hash(info, rel_path) is None and sha256(dest) != sha256(src):
+        if (dest.exists() and rel_path not in dropped and recorded_hash(info, rel_path) is None
+                and sha256(dest) != sha256(src)):
             raise HarnessError("%s already exists as a project file; rename it or remove it before adopting %s"
                                % (rel_path, name))
         if (ROOT / (rel_path + ".harness-new")).exists() and conflict_with_edit(info, rel_path, src):
@@ -3423,12 +3424,13 @@ def adopt(names, adr, chosen, declined, dry_run):
     plans = [(name, decide_options(name, chosen, declined)) for name in names]
     payloads = [(name, options, pack_payload(name, options)) for name, options in plans]
     for name, _, (files, _, _, _) in payloads:
-        check_pack_files(info, name, files)
+        check_pack_files(info, name, files, set((adopted.get(name) or {}).get("dropped", [])))
     today = time.strftime("%Y-%m-%d")
     guardrails, routing, conf_text = read(BACKBONE / "guardrails.conf"), read(BACKBONE / "routing.conf"), read(CONF_FILE)
     report, conflicts = [], []
     for name, options, (files, rules, routes, values) in payloads:
         previous = set((adopted.get(name) or {}).get("files", []))
+        dropped = set((adopted.get(name) or {}).get("dropped", []))
         for rel_path in sorted(previous - set(files)):
             if sha256(ROOT / rel_path) == recorded_hash(info, rel_path):
                 report.append("remove  %s" % rel_path)
@@ -3436,13 +3438,15 @@ def adopt(names, adr, chosen, declined, dry_run):
                     (ROOT / rel_path).unlink()
             elif (ROOT / rel_path).exists():
                 report.append("kept    %s (edited locally; no longer part of the pack)" % rel_path)
+                dropped.add(rel_path)
             forget_hash(info, rel_path)
             report_new_copy(report, rel_path)
         for rel_path, src in sorted(files.items()):
             dest, release_digest = ROOT / rel_path, sha256(src)
             current, recorded = sha256(dest), recorded_hash(info, rel_path)
+            dropped.discard(rel_path)
             if conflict_with_edit(info, rel_path, src):
-                report.append("CONFLICT %s (edited locally, and the release changed it too: the new version is in "
+                report.append("CONFLICT %s (edited locally, and the release's copy differs: the new version is in "
                               "%s.harness-new)" % (rel_path, rel_path))
                 conflicts.append(rel_path)
                 if not dry_run:
@@ -3457,6 +3461,10 @@ def adopt(names, adr, chosen, declined, dry_run):
                     shutil.copyfile(str(src), str(dest))
                     shutil.copymode(str(src), str(dest))
                     record_hash(info, rel_path, release_digest)
+            if (ROOT / (rel_path + ".harness-new")).exists() and rel_path not in conflicts:
+                report.append("pending %s.harness-new (not merged yet: merge it into %s and delete it)"
+                              % (rel_path, rel_path))
+                conflicts.append(rel_path)
         header = "(%s, %s; options: %s)" % (adr, today, ", ".join(options) or "none")
         guardrails = replace_block(guardrails, name, rules or ["# (no rules)"], header)
         routing = replace_block(routing, name, routes or ["# (no routes)"], header)
@@ -3465,6 +3473,8 @@ def adopt(names, adr, chosen, declined, dry_run):
                       % (len(rules), len(routes)))
         report.extend("conf    %s=\"%s\"" % kv for kv in sorted(values.items()))
         adopted[name] = {"adr": adr, "options": options, "date": today, "files": sorted(files)}
+        if dropped:
+            adopted[name]["dropped"] = sorted(dropped)
     if not dry_run:
         (BACKBONE / "guardrails.conf").write_text(guardrails, encoding="utf-8")
         (BACKBONE / "routing.conf").write_text(routing, encoding="utf-8")

@@ -851,6 +851,18 @@ class AdoptEdits(Fixture):
         self.assertIn("left    %s.harness-new" % PACK_FILE, result.stdout)
         self.assertTrue((self.project / (PACK_FILE + ".harness-new")).is_file())
 
+    def test_adopting_again_without_merging_reports_the_pending_harness_new_and_exits_1(self):
+        self.adopt_container()
+        self.edit(PACK_FILE)
+        self.commit("chore: a local edit to a pack file", hooks=False)
+        self.release_changes(self.project, PACK_FILE)
+        self.assertEqual(self.harness("adopt", "container", "--adr", "ADR-002", "--with", "podman", check=False)
+                         .returncode, 1)
+        result = self.harness("adopt", "container", "--adr", "ADR-002", "--with", "podman", check=False)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("pending %s.harness-new" % PACK_FILE, result.stdout)
+        self.assertTrue((self.project / (PACK_FILE + ".harness-new")).is_file())
+
     if given is None:
         def test_adopting_again_keeps_every_edited_file_and_writes_the_release_copy_beside_it(self):
             self.skipTest("needs hypothesis (pip install -r tests/requirements.txt)")
@@ -905,6 +917,26 @@ class OptionRemoval(Fixture):
         self.assertNotIn(JAVA_TEST_FILES[1], self.lock()["files"])
         doctor = self.harness("doctor", check=False)
         self.assertNotIn(JAVA_TEST_FILES[1], doctor.stdout)
+
+    def test_an_edited_option_file_the_pack_dropped_comes_back_as_an_edited_pack_file(self):
+        """Adding the option back keeps the user's edit and writes the release's copy beside it, as for any edited pack
+        file, rather than refusing the project file the dropped option left behind."""
+        (self.project / "backbone/adr/ADR-003-java.md").write_text(JAVA_ADR)
+        self.harness("adopt", "java", "--adr", "ADR-003", "--with", "gradle,junit5-assertj,no-lombok")
+        self.commit("chore: adopt the java pack", hooks=False)
+        edited = self.edit(JAVA_TEST_FILES[1])
+        self.commit("chore: a local edit to an option file", hooks=False)
+        dropped = self.harness("adopt", "java", "--adr", "ADR-003", "--with", "gradle,no-lombok",
+                               "--without", "junit5-assertj", check=False)
+        self.assertEqual(dropped.returncode, 0, dropped.stdout + dropped.stderr)
+        self.commit("chore: drop the junit5-assertj option", hooks=False)
+        result = self.harness("adopt", "java", "--adr", "ADR-003", "--with", "gradle,junit5-assertj,no-lombok",
+                              check=False)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("CONFLICT %s" % JAVA_TEST_FILES[1], result.stdout)
+        self.assertEqual(content(self.project / JAVA_TEST_FILES[1]), edited[JAVA_TEST_FILES[1]])
+        self.assertTrue((self.project / (JAVA_TEST_FILES[1] + ".harness-new")).is_file())
+        self.assertNotIn("dropped", self.lock()["adopted"]["java"])
 
 
 class PackProperties(Fixture):

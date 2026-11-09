@@ -128,6 +128,22 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def release():
+    """The release of the checkout this runs from."""
+    try:
+        return (HARNESS / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return "unknown"
+
+
+def copy_release():
+    """The release of the guard copy install made, from the marker it left beside the copy."""
+    try:
+        return (home(".agentic-harness", "guard.release").read_text(encoding="utf-8").strip() or "unknown")
+    except OSError:
+        return "unknown"
+
+
 def hooked(source):
     """Whether the CLI runs the guard hook: listed and, in Codex, trusted as it is now and switched on. The plugin's
     launcher leaves the check to it there, so a tool call isn't reminded or refused twice."""
@@ -175,7 +191,10 @@ def codex_hash(group, hook):
 
 TOML_TABLE = re.compile(r"\s*\[(?!\[)(.*)\]\s*(?:#.*)?$")
 TOML_KEY = re.compile(r"""\s*(?:([A-Za-z0-9_-]+)|"((?:[^"\\]|\\.)*)"|'([^']*)')\s*""")
-TOML_STATE = re.compile(r"""\s*(trusted_hash|enabled)\s*=\s*(?:"([^"\\]*)"|'([^']*)'|(true|false))\s*(?:#.*)?$""")
+TOML_KEY_PART = r"""(?:[A-Za-z0-9_-]+|"(?:[^"\\]|\\.)*"|'[^']*')"""
+TOML_ASSIGN = re.compile(r"\s*(%s(?:\s*\.\s*%s)*)\s*=\s*(.*)$" % (TOML_KEY_PART, TOML_KEY_PART))
+TOML_VALUE = re.compile(r"""\s*(?:"([^"\\]*)"|'([^']*)'|(true|false))\s*(?:#.*)?$""")
+HOOK_STATE_SETTINGS = ("enabled", "trusted_hash", "trusted_content_hash")
 
 
 def toml_key(text):
@@ -202,8 +221,8 @@ def toml_key(text):
 
 def codex_states():
     """{key: state} of the user hook states in Codex's config.toml, where /hooks records trust and the on/off switch.
-    Without tomllib (Python 3.10), only the [hooks.state."<key>"] tables Codex writes are read, one setting a line;
-    trust written in any other form makes the states Unreadable."""
+    Without tomllib (Python 3.10), the settings are read from tables and dotted keys; a setting in any other form (an
+    inline table, an enabled that isn't true or false) makes the states Unreadable."""
     path = codex_folder() / "config.toml"
     try:
         text = path.read_text(encoding="utf-8")
@@ -218,21 +237,46 @@ def codex_states():
             raise Unreadable("%s is not valid TOML" % path)
         states = hooks.get("state") if isinstance(hooks, dict) else None
         return {key.strip(): state for key, state in states.items()} if isinstance(states, dict) else {}
-    states, current, read = {}, None, 0
+    states, table = {}, []
     for line in text.splitlines():
-        if line.lstrip().startswith("["):
-            table = TOML_TABLE.match(line)
-            name = toml_key(table.group(1)) if table else None
-            current = (states.setdefault(name[2].strip(), {}) if name and len(name) == 3
-                       and name[:2] == ["hooks", "state"] else None)
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
             continue
-        setting = TOML_STATE.match(line) if current is not None else None
-        if setting:
-            name, basic, literal, flag = setting.groups()
-            current[name] = flag == "true" if flag else basic if basic is not None else literal
-            read += name == "trusted_hash"
-    if read != text.count("trusted_hash"):
-        raise Unreadable("%s sets hook trust in a form Python 3.10 can't read (tomllib needs 3.11)" % path)
+        if stripped.startswith("[["):
+            parts = toml_key(stripped[2:].partition("]]")[0])
+            if parts is None or parts[:1] == ["hooks"]:
+                raise Unreadable("%s has a table Python 3.10 can't read (tomllib needs 3.11)" % path)
+            table = None
+            continue
+        if stripped.startswith("["):
+            header = TOML_TABLE.match(line)
+            table = toml_key(header.group(1)) if header else None
+            if table is None:
+                raise Unreadable("%s has a table Python 3.10 can't read (tomllib needs 3.11)" % path)
+            continue
+        assignment = TOML_ASSIGN.match(line)
+        if assignment is None or table is None:
+            continue
+        key = toml_key(assignment.group(1))
+        if key is None:
+            raise Unreadable("%s has a key Python 3.10 can't read (tomllib needs 3.11)" % path)
+        full = table + key
+        if full[:2] != ["hooks", "state"]:
+            continue
+        if len(full) < 4:
+            raise Unreadable("%s sets hook state in a form Python 3.10 can't read (tomllib needs 3.11)" % path)
+        if len(full) > 4 or full[3] not in HOOK_STATE_SETTINGS:
+            continue
+        value = TOML_VALUE.match(assignment.group(2))
+        flag = value.group(3) if value else None
+        if value is None or (full[3] == "enabled") != (flag is not None):
+            raise Unreadable("%s sets a hook's %s in a form Python 3.10 can't read (tomllib needs 3.11)"
+                             % (path, full[3]))
+        if flag is not None:
+            setting = flag == "true"
+        else:
+            setting = value.group(1) if value.group(1) is not None else value.group(2)
+        states.setdefault(full[2].strip(), {})[full[3]] = setting
     return states
 
 
@@ -311,6 +355,7 @@ def install(argv):
                       % (source, hook_file(source)))
         return 0   # the guard copy stays, as in remove: sessions open now keep calling it
     shutil.copyfile(str(HARNESS / "machine" / "guard.py"), str(guard))
+    (guard.parent / "guard.release").write_text(release() + "\n", encoding="utf-8")
     set_hook(hook_file("claude"), "claude", guard, True)
     print("  install    guard %s (mode %s, roots %s; exempt: %s)" % (guard, mode, ", ".join(roots), HARNESS))
     print("  claude     PreToolUse hook in %s (applies to new sessions)" % hook_file("claude"))
@@ -387,8 +432,11 @@ def status(_argv):
             print("  %-10s guard hook in %s runs a copy of guard.py that is missing or outdated: run ./machine.sh "
                   "install%s" % (source, path, plugin))
             continue
-        print("  %-10s %s" % (source, "guard hook present in %s" % path if state == "runs" else
-                              CODEX_SKIPS[state] % path + plugin))
+        if state == "runs":
+            print("  %-10s guard hook present in %s (guard copy of release %s; the agentic-harness plugin checks "
+                  "as well where its guard.py differs)" % (source, path, copy_release()))
+        else:
+            print("  %-10s %s" % (source, CODEX_SKIPS[state] % path + plugin))
     return 0
 
 

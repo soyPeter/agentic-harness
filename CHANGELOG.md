@@ -22,8 +22,10 @@
   `adopt` exits 1, as `update.sh` does. The lock then records the release's copy, as `update.sh` does, so once you have
   merged `<file>.harness-new` and deleted it, the next `adopt` is clean. An existing `<file>.harness-new` is never
   overwritten: `adopt` refuses before it writes anything and names the file (`update.sh` still overwrites one).
-  `adopt --remove` lists a `<file>.harness-new` it leaves in place. A file that a removed option leaves behind no longer
-  has a hash, so `doctor` stops warning about it. A thin lock's hashes that an earlier engine recorded under `"files"`
+  `adopt --remove` lists a `<file>.harness-new` it leaves in place. Adopting again while a `<file>.harness-new` is still
+  unmerged reports it as `pending` and exits 1, not 0. A file that a removed option leaves behind no longer has a hash,
+  so `doctor` stops warning about it; its pack remembers it, so adding the option back treats it as an edited pack file
+  (the release's copy goes to `<file>.harness-new`) instead of refusing the project file. A thin lock's hashes that an earlier engine recorded under `"files"`
   move to `"kept"` when a pack is adopted again, removed, or the pin moves (`harness.py adopt`, `adopt --remove`,
   `pin`), so `verify` no longer reads the project as a full install and refuses the next `.claude/settings.json`
   commit.
@@ -257,8 +259,11 @@
   (there a refusal can come twice). `machine.sh status` says when the Codex guard hook isn't trusted, changed since it
   was trusted, or is turned off. The plugin also answers when the guard copy in `~/.agentic-harness/guard.py` isn't this
   release's (a plugin upgrade without `./machine.sh install`), since that copy may check other settings; status says to
-  install again. On Python 3.10, which has no `tomllib`, trust written as an inline table or dotted keys can't be read:
-  status says so, and the plugin answers too. `install --plugin` takes out an untrusted guard hook too. A live check
+  install again. Where `status` runs from the checkout that installed the copy, it names the copy's release (`install`
+  leaves it in `~/.agentic-harness/guard.release`) and says the plugin checks too wherever its own `guard.py` differs;
+  the plugin's copy can't be seen from there. On Python 3.10, which has no `tomllib`, the trust and on/off settings
+  are read from tables and dotted keys, quoted or not. A setting in any other form (an inline table, or an `enabled`
+  that isn't true or false) can't be read: status says so, and the plugin answers too. `install --plugin` takes out an untrusted guard hook too. A live check
   (`tests/test-machine-guard.py`, needs `codex` on the PATH, no model calls) compares this with what `codex
   app-server` itself lists and records.
 - **One reminder per session, also for hooks and tool calls run at once.** Claude Code and Codex run a call's hooks,
