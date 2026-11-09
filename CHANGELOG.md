@@ -3,6 +3,19 @@
 ## Unreleased
 
 - **The deliverer's gate reads more runtimes and package runners (ADR-002, follow-up).** Refused: `bun`, `deno`, `tsx` and `ts-node` code (`-e`, `eval`), `npx`, `bunx`, `pnpx` and package runners (`npm exec`, `pnpm dlx`, `yarn dlx`, `create`), `java --source`, `jshell`, `go run` from stdin or with `-exec`, `perl -M` with code, `node --eval=` and data: URLs, `pythonX.Y` and `nodejs` by version name, every Python module run (`python3 -m unittest code.interact` reads Python from stdin) and `pytest` (`-p` loads any module): the deliverer runs no tests. A script read from `/dev/stdin` or a `/dev/fd` path, `uvx`, `uv`, `pipx`, `poetry` and `swift` are refused too. `--version` and `--help` alone are allowed. `make`, `just`, `task` and `ninja` read no file from stdin or an expansion. A command that writes a file and then runs it, or runs `make` or `npm` after writing one, is refused; written files include `dd of=`, `curl -o` and `wget -O`, and are compared by name, whatever directory a run spells (`$PWD/s.py`). `$'...'` escapes are read as the characters they name. A commit message and a `--body-file -` heredoc are text. `git fetch origin main`, `git rebase origin/main` and `git pull --rebase origin main` are allowed on a feature branch; a pull or rebase on the default branch, a refspec that writes it, and a rebase given a branch to check out (`git rebase feat/x main`, which fast-forwards `main`) are refused, as is a push in a command that also runs `git checkout` or `switch`. The residual limits are in HOOKS.md.
+- **The attest key's trust anchor is guarded, and repository copies of the key refuse (ADR-005, follow-up).**
+  `harness-attest.pub`, the public key the `attest` job checks its key against, is now an enforcement file: a pull
+  request that adds or changes it fails `verify --range` without the `harness-change-approved` label, a push that
+  changes it gets no statement, and agents may not write it (the implementer's scope, shell writes and code writes are
+  refused). The `attest` job's live step also lists the repository's secrets and variables with
+  `HARNESS_ATTEST_POLICY_TOKEN` and refuses to sign while a repository-level `HARNESS_ATTEST_KEY` or
+  `HARNESS_ATTEST_PASSWORD` exists, through the new `harness.py repository-check`; when the lists can't be read it
+  refuses unless the recorded-branch opt-in is set, and logs which. `ci-protect --attest` names such secrets and
+  variables, and `--delete-repo-copies` deletes them. `doctor` states the attest mode (live, recorded branch, none or
+  unknown) and warns of repository copies.
+  **Upgrading:** give `HARNESS_ATTEST_POLICY_TOKEN` read access to the repository's Secrets and Variables as well as
+  its Actions, or the live job refuses to sign. Publishing or rotating the public key is now a harness change: a pull
+  request with the label, or the user's own `HARNESS_VERIFY=off git push`.
 
 - **The deliverer's gh and git calls are read as the shell runs them (ADR-002).** Its gh allowlist can't be reached
   by other means. Refused: a merge, close, review or auto-merge named in a command outside a PR's title and body, `--web`,
