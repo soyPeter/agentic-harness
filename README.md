@@ -65,8 +65,9 @@ only).
 - **Review and delivery**: after the judge, three `reviewer`s check the change in parallel, one lens each: correctness
   (bugs, security, blast radius proven by running code), structure and lean. A must-fix finding sends the task back to
   the implementer. Once the task is committed, the `deliverer` pushes the branch, opens the PR with each task's receipt
-  and labels, and watches CI; it runs only the gh commands delivery needs and never merges. Finishing, committing and
-  pushing (pre-push hook) all refuse a task without its review passes. Both are on by default (`HARNESS_REVIEW`,
+  and labels, and watches CI. It runs only the gh commands delivery needs, against this repository only; it can't
+  merge, approve or close, and its git ref commands (checkout, merge, reset, push and the like) may not name the default
+  branch, which changes only through the PR. Finishing, committing and pushing (pre-push hook) all refuse a task without its review passes. Both are on by default (`HARNESS_REVIEW`,
   `HARNESS_DELIVER`, user-only).
 
 ## Who decides, by Change-Class
@@ -141,6 +142,22 @@ pass stale.
 - **Observability**: `harness.py report` summarises the event log, and `harness.py trace <id>` shows one task's
   history: the context and skills its agents loaded, the files they edited, what the hooks refused, test runs and
   verdicts.
+
+## Documentation
+
+| Where | What |
+|---|---|
+| [docs/sdlc](docs/sdlc/README.md) | The four diagrams above, with how to read them |
+| `payload/owned/backbone/HOOKS.md` | Every hook, gate and setting, in full; installed as `backbone/HOOKS.md` |
+| `payload/owned/backbone/8-WORKFLOW.md`, `payload/owned/AGENTS.md` | The orchestration loop, the Definition of Done and the rules every agent follows |
+| [ADR-001](docs/adr/ADR-001-thin-mode-plugin.md) (Accepted) | Thin mode: the engine as an agent plugin, the project keeps its state and a version pin |
+| [ADR-002](docs/adr/ADR-002-change-class-ladder.md) (Accepted) | The Change-Class ladder, and PR merge stays human |
+| [ADR-003](docs/adr/ADR-003-sandbox-backends.md) (Proposed) | Sandbox backends and the sandbox evidence in the receipt |
+| [ADR-004](docs/adr/ADR-004-traceability-export.md) (Proposed) | Traceability export: ReqIF, `needs.json` and an HTML matrix |
+| [ADR-005](docs/adr/ADR-005-verdict-attestations.md) (Proposed) | Signed verdict attestations in CI |
+| [Agent-SDLC landscape](docs/research/2026-11-agent-sdlc-landscape.md) | Research: compliance and traceability tools, agent sandboxes; where ADR-003 to ADR-005 came from |
+| [Design challenge and onboarding plan](docs/research/2026-11-design-challenge-agent-onboarding-plan.md) | A proposed plan, not authorized: qualify the design challenge and agent-readable onboarding |
+| [CHANGELOG.md](CHANGELOG.md) | What each release changed |
 
 ## Stack-neutral by design
 
