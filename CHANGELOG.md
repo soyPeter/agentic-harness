@@ -16,6 +16,14 @@
   setext heading is invalid until it is rewritten. The user's approval under an indented `  ## Approval` no longer
   counts. A section that a fenced example or an HTML block used to hide is now read, so it may need fixing too.
 
+- **HTML blocks follow CommonMark (follow-up to the Markdown reading).** A `<?`, `<!X` or `<![CDATA[` block now ends at
+  its closing mark even after a blank line, so a `## Approval` hidden in one no longer passes as a section. `<pre>`,
+  `<script>`, `<style>` and `<textarea>` blocks interrupt a paragraph. An autolink, or a tag followed by text, at the
+  start of a line is text, so a heading below it no longer makes the spec invalid. A CR or CRLF line end is read as LF
+  in the file and in the text a hook proposes, so a lone CR can't add an unfrozen section to an approved spec.
+  **Upgrading:** a spec with a heading inside one of these blocks is invalid, and so is a tag alone on the line after a
+  list or quote paragraph; rewrite them.
+
 - **Adopting a pack again keeps your edits.** `harness.py adopt` compared a pack file only with the release's copy, so
   a file edited after the last adoption was replaced by the release's copy with no backup, after a pin move or a
   `--to-thin`. An edited file is now kept. When the release changed it too, its copy goes to `<file>.harness-new` and

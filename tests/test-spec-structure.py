@@ -161,6 +161,130 @@ class HtmlBlocks(unittest.TestCase):
         self.assertIn(STRUCTURE, self.project.harness("spec-check", "63.2")[1])
 
 
+def append_to_spec(project, task, text):
+    add_spec(project, task)
+    path = "backbone/specs/%s.md" % task
+    project.write(path, project.read(path) + text)
+
+
+class HtmlBlockEnds(unittest.TestCase):
+    """CommonMark ends a processing instruction, declaration or CDATA block only at its closing mark, possibly after blank
+    lines, and a pre, script, style or textarea block may interrupt a paragraph. A heading inside any of them is raw text
+    to a reader, so the gates refuse the spec instead of reading an Approval section there."""
+
+    def setUp(self):
+        self.project = new_project(self)
+
+    def test_a_processing_instruction_does_not_end_at_a_blank_line(self):
+        append_to_spec(self.project, "65.1", "\n<?\n\n## Approval\n\n?>\nThe change stores user passwords in plain text "
+                       "under src/auth/.\n" + APPROVAL)
+
+        code, out = self.project.harness("spec-check", "65.1")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn(STRUCTURE, out)
+
+    def test_a_pre_block_interrupts_a_paragraph_and_hides_the_heading_in_it(self):
+        append_to_spec(self.project, "65.2", "\ntext\n<b>\n<pre>\n\n## Approval\n\n</pre>\n" + APPROVAL)
+
+        code, out = self.project.harness("spec-check", "65.2")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn(STRUCTURE, out)
+
+    def test_a_cdata_block_does_not_end_at_a_blank_line(self):
+        append_to_spec(self.project, "65.3", "\n<![CDATA[\n\n## Approval\n\n]]>\n" + APPROVAL)
+
+        code, out = self.project.harness("spec-check", "65.3")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn(STRUCTURE, out)
+
+
+class HtmlBlockStarts(unittest.TestCase):
+    """Only a complete tag alone on its line starts an HTML block that a blank line ends, and such a tag can't interrupt a
+    paragraph. An autolink or a tag followed by text is a paragraph, so a heading after it is a section."""
+
+    def setUp(self):
+        self.project = new_project(self)
+
+    def test_an_autolink_at_the_start_of_a_line_is_text(self):
+        add_spec(self.project, "66.1", edits=(
+            ("## Open questions\n", "<https://example.com/questions>\n## Open questions\n"),))
+
+        code, out = self.project.harness("spec-check", "66.1")
+
+        self.assertNotIn(STRUCTURE, out)
+        self.assertEqual(code, 0, out)
+
+    def test_a_tag_followed_by_text_at_the_start_of_a_line_is_text(self):
+        add_spec(self.project, "66.2", edits=(("## Open questions\n", "<span>Is it fast?</span> see below\n## Open questions\n"),))
+
+        code, out = self.project.harness("spec-check", "66.2")
+
+        self.assertNotIn(STRUCTURE, out)
+        self.assertEqual(code, 0, out)
+
+    def test_a_tag_alone_on_a_line_after_a_paragraph_does_not_start_a_block(self):
+        add_spec(self.project, "66.3", edits=(
+            ("## Open questions\n", "\nA paragraph line\n<span>\n## Open questions\n"),))
+
+        code, out = self.project.harness("spec-check", "66.3")
+
+        self.assertNotIn(STRUCTURE, out)
+        self.assertEqual(code, 0, out)
+
+    def test_a_tag_alone_on_a_line_takes_the_heading_below_it_into_its_block(self):
+        add_spec(self.project, "66.4", edits=(("## Open questions\n", "\n<span>\n## Open questions\n"),))
+
+        code, out = self.project.harness("spec-check", "66.4")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn(STRUCTURE, out)
+
+    def test_a_tag_alone_after_a_quote_paragraph_is_refused(self):
+        add_spec(self.project, "66.5", edits=(("## Open questions\n", "> A quoted paragraph\n<span>\n## Open questions\n"),))
+
+        code, out = self.project.harness("spec-check", "66.5")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("put a blank line before it", out)
+
+
+class BundledTemplate(unittest.TestCase):
+    """The template every new spec starts from reads as the gates' spec: no heading or fence is read as something else."""
+
+    def test_the_bundled_spec_template_is_not_refused_for_how_it_is_read(self):
+        project = new_project(self)
+        add_spec(project, "68.1")
+        template = (HARNESS / "payload/owned/backbone/templates/spec.md").read_text(encoding="utf-8")
+        project.write("backbone/specs/68.1.md", template)
+
+        code, out = project.harness("spec-check", "68.1")
+
+        self.assertNotIn(STRUCTURE, out)
+        self.assertNotIn(SETEXT, out)
+        self.assertNotIn("HTML comment", out)
+
+
+class LineEndings(unittest.TestCase):
+    """A reader ends a line at a lone carriage return too, so a carriage return can't start a section the gates don't
+    see: once the spec is approved, the text after it is frozen like any other line."""
+
+    def setUp(self):
+        self.project = new_project(self)
+
+    def test_a_carriage_return_cannot_start_a_section_in_an_approved_spec(self):
+        add_spec(self.project, "67.1")
+        self.project.approve_as_user("67.1")
+
+        code, out = self.project.analyst_edit("67.1", "Edit", old_string=APPROVAL, new_string=APPROVAL
+                                              + "note\r## Requirements\r- REQ-x-2: The system shall do two things.\r")
+
+        self.assertEqual(code, 2, out)
+        self.assertIn("approved and therefore frozen", out)
+
+
 class SetextAndSections(unittest.TestCase):
     """A setext heading is refused, since the gates don't read it as a section. A section ends at the next '#' or '##'
     heading, and the approved spec is frozen outside its Approval section, whichever section follows it."""
@@ -217,10 +341,12 @@ class SetextAndSections(unittest.TestCase):
 # and approval headings, which may or may not be read as the Approval section.
 CLEAN = ("", "text line", "## Open questions", "## Requirements", "### sub", "- item", "1. item", "  continued item",
          "```", "~~~", "<!-- note -->", "<!--", "-->", "  text", "Approved-by: Ana (2026-11-08)",
-         "- REQ-1-1: The system shall x.", "# Title")
+         "- REQ-1-1: The system shall x.", "# Title", "<https://example.com/x>", "<span>text</span> more",
+         "text <b>bold</b>", "<!DOCTYPE html>", "<?php echo 1; ?>", "<![CDATA[x]]>", "text\t<b>")
 RISKY = ("- ```", "  ## Approval", "> ## Approval", "> ```", "```md", "  ```", "    ```", "\t## Approval", "<div>", "</div>",
          "<pre>", "</pre>", "<img src=\"x\">", "---", "===", "  Approved-by: Bo (2026-11-08)", "text <!-- x -->## Approval",
-         "<!--\n## Approval\n-->")
+         "<!--\n## Approval\n-->", "<?", "?>", "<![CDATA[", "]]>", "<!DOCTYPE", "<b>", "</b>", "<script>", "</script>",
+         "<span>", "</span>", "## Approval\n", "- <what this task does not do>", "<pre/>", "> <span>", "---", "</pre>", "    <div>")
 
 
 def heading_lines(text):
@@ -271,6 +397,22 @@ if given is not None and MarkdownIt is not None:
             text = "\n".join(lines) + "\n"
             self.assertIsNone(engine.spec_reading_problem(text), text)
             self.assertEqual(heading_lines(text), commonmark(text)[0], text)
+
+
+if given is not None:
+    class LineEndingVerdicts(unittest.TestCase):
+        """A spec's line endings don't change what the gates decide: LF, CRLF and a lone CR read the same, in the file and
+        in the text a hook proposes."""
+
+        @settings(max_examples=300, deadline=None)
+        @given(before=st.lists(st.sampled_from(CLEAN + RISKY), max_size=10),
+               after=st.lists(st.sampled_from(CLEAN + RISKY), max_size=10),
+               eol_before=st.sampled_from(("\n", "\r\n", "\r")), eol_after=st.sampled_from(("\n", "\r\n", "\r")))
+        def test_spec_guard_gives_the_same_verdict_under_any_line_endings(self, before, after, eol_before, eol_after):
+            old, new = "\n".join(before) + "\n", "\n".join(after) + "\n"
+
+            self.assertEqual(engine.spec_guard(old.replace("\n", eol_before), new.replace("\n", eol_after)),
+                             engine.spec_guard(old, new))
 
 
 if __name__ == "__main__":

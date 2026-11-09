@@ -198,13 +198,32 @@ FENCE_RUN = re.compile(r"`{3,}|~{3,}")
 ATX_HEADING = re.compile(r"#{1,6}(?:[ \t]|$)")
 SETEXT_UNDERLINE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
 CONTAINER = re.compile(r"(?:>|(?:[-*+]|\d{1,9}[.)])(?=[ \t]|$))[ \t]*")
-HTML_START = re.compile(r"<(?!!--)[A-Za-z/!?]")
-HTML_PRE = re.compile(r"<(?:pre|script|style|textarea)(?=[\s>]|$)", re.I)
-HTML_PRE_END = re.compile(r"</(?:pre|script|style|textarea)>", re.I)
+# CommonMark's HTML blocks (types 1, 3, 4, 5: they end at the line holding their end condition, blank lines included;
+# types 6 and 7: they end at a blank line, and only 7 may not interrupt a paragraph). Type 2 is a comment, see
+# blank_comments_in_line.
+HTML_BLOCKS = (
+    (re.compile(r"<(?:pre|script|style|textarea)(?=[ \t>]|$)", re.I),
+     re.compile(r"</(?:pre|script|style|textarea)>", re.I)),
+    (re.compile(r"<\?"), re.compile(r"\?>")),
+    (re.compile(r"<![A-Za-z]"), re.compile(r">")),
+    (re.compile(r"<!\[CDATA\["), re.compile(r"\]\]>")),
+)
+HTML_TAG_BLOCK = re.compile(
+    r"</?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|"
+    r"dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|"
+    r"menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|"
+    r"tr|track|ul)(?=[ \t>]|/>|$)", re.I)
+_ATTRIBUTE = r"[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*(?:[^\"'=<>`\x00-\x20]+|'[^']*'|\"[^\"]*\"))?"
+HTML_TAG_ALONE = re.compile(
+    r"(?:<[A-Za-z][A-Za-z0-9-]*(?:%s)*[ \t]*/?>|</[A-Za-z][A-Za-z0-9-]*[ \t]*>)[ \t]*$" % _ATTRIBUTE, re.I)
+PLAIN_INDENT = re.compile(r" {0,3}\S")
+THEMATIC_BREAK = re.compile(r" {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
 FENCE_REASON = ("the spec has a code fence indented 4 or more columns, or with a tab: keep fences at column 0, so every "
                 "reader ends them where the gates do")
 STRUCTURE_REASON = ("the spec has a heading or code fence that is indented, follows a list or quote marker, or sits in an "
                     "HTML block: keep headings and fences at column 0, outside HTML blocks")
+HTML_REASON = ("the spec has a tag alone on a line right after a list or quote paragraph: a reader may take it for "
+               "text or for an HTML block; put a blank line before it")
 SETEXT_REASON = "the spec has a setext heading (text over a line of = or -): write headings as '## Title'"
 COMMENT_REASON = ("the spec has an HTML comment a reader may not end where the gates do: a comment that starts after text, "
                   "or 4 or more columns in, must close on its own line")
@@ -448,6 +467,12 @@ def slug(text):
     return re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-.")[:60] or "task"
 
 
+def line_endings(text):
+    """text with CRLF and lone CR line ends read as LF, which is how a Markdown reader reads them and how read() loads
+    a file. A hook must compare and parse proposed text in this form too."""
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def blank(text):
     """text with every character but its line breaks replaced by a space, so an offset in it is one in text."""
     return re.sub(r"[^\n]", " ", text)
@@ -488,15 +513,28 @@ def block_start(body):
         rest, nested = rest[m.end():], True
 
 
+def html_block(rest, interrupts):
+    """How a line whose text (after its indentation) is rest opens an HTML block: the pattern its block ends at, 'blank'
+    for a block a blank line ends, or None when it opens none. interrupts: the line directly follows paragraph text."""
+    for start, end in HTML_BLOCKS:
+        if start.match(rest):
+            return end
+    if HTML_TAG_BLOCK.match(rest):
+        return "blank"
+    if not interrupts and HTML_TAG_ALONE.match(rest):
+        return "blank"
+    return None
+
+
 def scan_lines(text):
     """(line, fenced, commentless, reason) for each line of text, read the way Markdown reads its blocks. A fence opens
     at column 0 and closes with a run of its character, at least as long, at 0-3 spaces with nothing after it. A comment
     doesn't open inside a fence, and a fence marker inside a comment opens nothing. fenced: the line is a fence or in one.
     commentless: the line with its comment text blanked, code kept. reason: why a reader could read the line differently
     from the gates, or ''. Only column-0 headings and fences are read: an indented one, one after a list or quote marker,
-    one in an HTML block and a setext heading are refused, since Markdown may read them as text or code. An HTML block
-    runs to a blank line, or to its closing tag for pre, script, style and textarea."""
-    fence, comment, html, prev_text = None, False, None, False
+    one in an HTML block and a setext heading are refused, since Markdown may read them as text or code. HTML blocks
+    start and end as html_block says."""
+    fence, comment, html, prev_text, prev_nested = None, False, None, False, False
     for line in re.findall(r"[^\n]*\n|[^\n]+\Z", text or ""):
         body = line.rstrip("\r\n")
         if fence is not None:
@@ -507,28 +545,42 @@ def scan_lines(text):
                 fence = None
             prev_text = False
             continue
+        in_html = html is not None
         if html == "blank" and not body.strip():
-            html = None
+            html, in_html = None, False
         rest, nested = block_start(body)
-        off_column = nested or body[:1] in (" ", "\t") or html is not None
+        off_column = nested or body[:1] in (" ", "\t") or in_html
         reason = ""
         if not comment and off_column and (FENCE_RUN.match(rest) or ATX_HEADING.match(rest)):
             reason = STRUCTURE_REASON
         elif not comment and prev_text and SETEXT_UNDERLINE.match(body):
             reason = SETEXT_REASON
+        elif not comment and not in_html and prev_text and prev_nested and not nested and HTML_TAG_ALONE.match(rest):
+            reason = HTML_REASON
         opening = None if comment or reason or off_column else FENCE_OPEN.match(body)
         if opening and not ("`" in opening.group(2) and opening.group(1)[0] == "`"):
             fence = opening.group(1)
             yield line, True, line, ""
             prev_text = False
             continue
-        if not comment and not reason and html is None and HTML_START.match(rest):
-            html = "pre" if HTML_PRE.match(rest) else "blank"
-        commentless, comment, ambiguous = blank_comments_in_line(line, comment)
-        if html == "pre" and HTML_PRE_END.search(body):
+        started = None
+        if not comment and not reason and not in_html and (nested or PLAIN_INDENT.match(body)):
+            started = html_block(rest, prev_text or nested)
+        if started is not None:
+            html = started
+        block_comment = comment or bool(PLAIN_INDENT.match(body) and body.lstrip(" ").startswith("<!--"))
+        if (in_html or started is not None) and not comment:
+            commentless, ambiguous = line, False
+        else:
+            commentless, comment, ambiguous = blank_comments_in_line(line, comment)
+        if html not in (None, "blank") and html.search(body):
             html = None
         yield line, False, commentless, COMMENT_REASON if ambiguous else reason
-        prev_text = bool(body.strip()) and not ATX_HEADING.match(body)
+        code = not prev_text and bool(body.strip()) and not PLAIN_INDENT.match(body)
+        thematic = not prev_text and bool(THEMATIC_BREAK.match(body))
+        prev_text = (bool(body.strip()) and not ATX_HEADING.match(body) and not in_html and started is None
+                     and not code and not block_comment and not thematic)
+        prev_nested = prev_text and (nested or prev_nested)
 
 
 def comment_free(text):
@@ -2638,6 +2690,7 @@ def judge_gate(before, after):
 def spec_guard(before, after):
     """Approval lines are the user's alone, and an approved spec is frozen. Approval lines are read from outline(), the
     text approved() reads, so a line that only a comment hides is no way round it."""
+    before, after = line_endings(before), line_endings(after)
     if approval_lines(outline(before)) != approval_lines(outline(after)) or approved(before) != approved(after):
         return "  - Only the user may add, change or remove 'Approved-by:' lines."
     if approved(before) and frozen_text(before) != frozen_text(after):
@@ -3599,20 +3652,20 @@ def deny(reason, kind="block"):
 
 def added_text(tool, tool_input):
     if tool == "Write":
-        return tool_input.get("content") or ""
+        return line_endings(tool_input.get("content"))
     if tool == "Edit":
-        return tool_input.get("new_string") or ""
-    return "\n".join((edit or {}).get("new_string") or "" for edit in tool_input.get("edits") or [])
+        return line_endings(tool_input.get("new_string"))
+    return "\n".join(line_endings((edit or {}).get("new_string")) for edit in tool_input.get("edits") or [])
 
 
 def resulting_text(tool, tool_input, path_str):
     if tool == "Write":
-        return tool_input.get("content") or ""
+        return line_endings(tool_input.get("content"))
     path = Path(path_str)
     current = read(path if path.is_absolute() else ROOT / path)
     edits = [tool_input] if tool == "Edit" else (tool_input.get("edits") or [])
     for edit in edits:
-        old, new = edit.get("old_string") or "", edit.get("new_string") or ""
+        old, new = line_endings(edit.get("old_string")), line_endings(edit.get("new_string"))
         if not old:
             continue
         current = current.replace(old, new) if edit.get("replace_all") else current.replace(old, new, 1)
