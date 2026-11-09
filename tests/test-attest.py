@@ -103,7 +103,11 @@ def sha256(data):
 
 
 TAKE_BASE = "Take the verifier from the base branch"
-TAKE_PUSHED = "Take the verifier from the pushed commit"
+TAKE_PUSHED = "Take the verifier from the commit before the push"
+CHECK_PUSHED = "Check the pushed range"
+CHECK_ENVIRONMENT = "Check the harness-attest environment"
+INSTALL_COSIGN = "Install cosign"
+CHECK_KEY = "Check the attestation key"
 
 
 def step_script(name, source=None):
@@ -490,27 +494,43 @@ class Workflow(unittest.TestCase):
         project.git("update-ref", "refs/remotes/origin/review-base", base)
         return "origin/review-base"
 
-    def take_engine(self, project, ref, take=TAKE_PUSHED, source=None):
-        """(runner's temp dir, the engine the take step leaves for the steps after it)."""
+    def take(self, project, ref, take=TAKE_PUSHED, source=None):
+        """The take step as its job runs it: (the step's result, runner's temp dir). The attest job's take step runs
+        with REFUSE_FIRST_INSTALL on, as the workflow sets it."""
         runner = Path(tempfile.mkdtemp(prefix="runner ", dir=str(project.root.parent)))
         ci = dict(BASE_REF=ref, RUNNER_TEMP=str(runner), GITHUB_ENV=str(runner / "github-env"))
-        project.run("bash", "-e", "-o", "pipefail", "-c", step_script(take, source), **ci)
+        if take == TAKE_PUSHED:
+            ci["REFUSE_FIRST_INSTALL"] = "true"
+        result = project.run("bash", "-e", "-o", "pipefail", "-c", step_script(take, source), check=False, **ci)
+        return result, runner
+
+    def take_engine(self, project, ref, take=TAKE_PUSHED, source=None):
+        """(runner's temp dir, the engine the take step leaves for the steps after it)."""
+        result, runner = self.take(project, ref, take, source)
+        if result.returncode:
+            raise AssertionError(result.stdout + result.stderr)
         return runner, (runner / "github-env").read_text().strip().split("=", 1)[1]
 
     def verify_pull_request(self, project, engine, allow=""):
         return project.run("bash", "-e", "-c", step_script("Verify the pull request's commits"), check=False,
                            ENGINE_SCRIPT=engine, HARNESS_ROOT=str(project.root), BASE="review-base", ALLOW=allow)
 
-    def write_statement(self, project, ref, before, source=None):
-        """Takes the verifier from ref, then writes the statement of before..HEAD: (the step's result, runner's temp dir)."""
-        runner, engine = self.take_engine(project, ref, source=source)
+    def check_pushed_range(self, project, before, tip=None):
+        """The push job's first check on the pushed range, for a push of before to tip (default HEAD)."""
+        return project.run("bash", "-e", "-o", "pipefail", "-c", step_script(CHECK_PUSHED), check=False,
+                           BEFORE=before, GITHUB_SHA=tip or project.git("rev-parse", "HEAD"))
+
+    def write_statement(self, project, before, source=None):
+        """The push job's take step (the engine of before, the commit the push starts from), then its statement step
+        for before..HEAD: (the step's result, runner's temp dir)."""
+        runner, engine = self.take_engine(project, before, take=TAKE_PUSHED, source=source)
         result = project.run("bash", "-e", "-c", step_script("Write the verdict attestation"), check=False,
                              ENGINE_SCRIPT=engine, HARNESS_ROOT=str(project.root), BEFORE=before,
                              RUNNER_TEMP=str(runner))
         return result, runner
 
-    def ci_statement(self, project, ref, before, source=None):
-        result, runner = self.write_statement(project, ref, before, source=source)
+    def ci_statement(self, project, before, source=None):
+        result, runner = self.write_statement(project, before, source=source)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads((runner / STATEMENT_FILE).read_text())
 
@@ -531,15 +551,16 @@ class Workflow(unittest.TestCase):
         self.assertIn("verify: the harness itself changes (scripts/harness/lib/harness.py)", refused.stdout)
         self.assertEqual((allowed.returncode, allowed.stdout), (0, "verify: ok\n"))
 
-    def test_a_pushed_commit_is_attested_for_its_range_with_the_engine_at_its_tip(self):
+    def test_a_pushed_commit_is_attested_for_its_range_by_the_engine_the_push_starts_from(self):
         project = new_project(self)
         tip = project.finish("1.1", "Customer search", SEARCH)
 
-        made = self.ci_statement(project, tip, project.adopted)
+        made = self.ci_statement(project, project.adopted)
 
         self.assertEqual(made["subject"][0]["digest"], {"gitCommit": tip})
         self.assertEqual(made["predicate"]["verification"]["base"], project.adopted)
-        self.assertEqual(made["predicate"]["verifier"]["engineSha256"], sha256(project.engine.read_bytes()))
+        adopted_engine = project.run("git", "show", "%s:scripts/harness/lib/harness.py" % project.adopted).stdout
+        self.assertEqual(made["predicate"]["verifier"]["engineSha256"], sha256(adopted_engine.encode()))
         self.assertFalse(made["predicate"]["verification"]["allowUserChanges"])
         self.assertEqual([task["task"] for task in made["predicate"]["tasks"]], ["1.1"])
 
@@ -549,23 +570,54 @@ class Workflow(unittest.TestCase):
         project.append("scripts/harness/lib/harness.py", "# a local change\n")
         project.commit("chore: change the harness")
 
-        result, runner = self.write_statement(project, project.git("rev-parse", "HEAD"), project.adopted)
+        result, runner = self.write_statement(project, project.adopted)
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("the harness itself changes", result.stderr)
         self.assertFalse((runner / STATEMENT_FILE).exists())
 
-    def test_a_pushed_range_whose_base_is_not_an_ancestor_gets_no_statement(self):
+    def test_a_push_whose_own_engine_passes_everything_gets_no_statement_from_the_engine_before_it(self):
         project = new_project(self)
-        tip = project.finish("1.1", "Customer search", SEARCH)
+        project.finish("1.1", "Customer search", SEARCH)
+        before = project.git("rev-parse", "HEAD")
+        project.write("scripts/harness/lib/harness.py", project.engine.read_text().replace(
+            "def verify_changes(before, after, changed, done_fingerprint, allow_user_changes=False):\n",
+            "def verify_changes(before, after, changed, done_fingerprint, allow_user_changes=False):\n"
+            "    return []\n", 1))
+        project.commit("chore: make every check pass")
+        self.assertEqual(project.attest(before).returncode, 0, "the pushed engine would sign its own change")
 
-        result, runner = self.write_statement(project, tip, "0" * 40)
+        result, runner = self.write_statement(project, before)
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn("is not an ancestor", result.stderr)
+        self.assertIn("the harness itself changes", result.stderr)
         self.assertFalse((runner / STATEMENT_FILE).exists())
 
-    def test_a_thin_project_is_attested_by_the_engine_its_pin_names(self):
+    def test_a_first_push_gets_no_statement(self):
+        project = new_project(self)
+        project.finish("1.1", "Customer search", SEARCH)
+
+        result = self.check_pushed_range(project, "0" * 40)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no previous tip", result.stdout + result.stderr)
+
+    def test_a_forced_push_whose_old_tip_is_not_an_ancestor_gets_no_statement(self):
+        project = new_project(self)
+        old = project.finish("1.1", "Customer search", SEARCH)
+        project.append("notes.md", "an old commit\n")
+        overwritten = project.commit("docs: a commit the force push removes")
+        project.git("reset", "-q", "--hard", old)
+        project.append("notes.md", "the rewritten history\n")
+        new = project.commit("docs: the rewritten commit")
+
+        result = self.check_pushed_range(project, overwritten, new)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is not an ancestor", result.stdout + result.stderr)
+
+    def thin_project(self):
+        """A thin project whose pin names the release v<VERSION> of a throwaway engine source: (project, source, pin)."""
         temp = tempfile.TemporaryDirectory(prefix="attest thin ")
         self.addCleanup(temp.cleanup)
         work = Path(temp.name).resolve()
@@ -587,14 +639,74 @@ class Workflow(unittest.TestCase):
         project = Project(work / "project", lambda p: p.run("python3", "-B", LAUNCHER, "init", "--thin", "--name",
                                                              "demo"), **thin)
         project.write("docs/guide.md", "# Guide\n")
-        tip = project.commit("docs: a guide")
+        project.commit("docs: a guide")
+        return project, source, pinned
 
-        made = self.ci_statement(project, tip, project.adopted, source=source)
+    def test_a_thin_project_is_attested_by_the_engine_its_pin_names(self):
+        project, source, pinned = self.thin_project()
+
+        made = self.ci_statement(project, project.adopted, source=source)
 
         self.assertEqual(made["predicate"]["verifier"]["baseLock"], {"mode": "thin", "version": VERSION,
                                                                      "commit": pinned})
         self.assertEqual(made["predicate"]["verifier"]["engineSha256"], sha256(ENGINE.read_bytes()))
         self.assertEqual(made["predicate"]["tasks"], [])
+
+    def test_a_thin_pin_that_is_not_the_release_it_names_gets_no_engine(self):
+        project, source, _ = self.thin_project()
+        run(source, "git", "commit", "--allow-empty", "-qm", "an unreleased commit")
+        unreleased = run(source, "git", "rev-parse", "HEAD").stdout.strip()
+        lock = json.loads((project.root / "backbone/.harness-lock.json").read_text())
+        lock["commit"] = unreleased
+        project.write("backbone/.harness-lock.json", json.dumps(lock, indent=2) + "\n")
+        project.git("add", "-A")
+        project.git("commit", "-q", "--no-verify", "-m", "chore: pin an engine that is not a release")
+        before = project.git("rev-parse", "HEAD")
+
+        result, runner = self.take(project, before, source=source)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is not the base branch's pinned engine", result.stdout + result.stderr)
+        self.assertFalse((runner / "github-env").exists())
+
+    def test_a_push_whose_previous_tip_has_no_harness_gets_no_engine_to_attest_with(self):
+        """Push 1 deletes the harness: its attest fails and the push stays. Push 2 restores a doctored harness that
+        verifies its own change. The engine comes from the previous tip, which has none, so the job refuses rather
+        than take the engine from the tip."""
+        project = new_project(self)
+        project.finish("1.1", "Customer search", SEARCH)
+        project.git("rm", "-rq", "scripts/harness")
+        removed = project.commit("chore: delete the harness")
+        project.git("checkout", project.adopted, "--", "scripts/harness")
+        project.write("scripts/harness/lib/harness.py", project.engine.read_text().replace(
+            "def verify_changes(before, after, changed, done_fingerprint, allow_user_changes=False):\n",
+            "def verify_changes(before, after, changed, done_fingerprint, allow_user_changes=False):\n"
+            "    return []\n", 1))
+        project.commit("chore: restore a harness that passes everything")
+        self.assertEqual(project.attest(removed).returncode, 0, "the doctored harness verifies its own change")
+
+        result, runner = self.take(project, removed)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("has neither a harness nor a thin pin", result.stdout + result.stderr)
+        self.assertFalse((runner / "github-env").exists())
+
+    def test_a_pull_request_on_a_base_without_a_harness_still_takes_the_checked_out_copy(self):
+        """The first install: the pull request's own harness is the only verifier there is (harness-verify's verify
+        job keeps this fallback; the attest job doesn't)."""
+        temp = tempfile.TemporaryDirectory(prefix="attest ")
+        self.addCleanup(temp.cleanup)
+        project = Project(Path(temp.name).resolve() / "project",
+                          installer=lambda p: p.write("README.md", "# Demo\n"))
+        project.run(HARNESS / "bootstrap.sh", project.root, "--name", "attest")
+        project.commit("chore: install the harness")
+        ref = self.pull_request(project, project.adopted)
+
+        result, runner = self.take(project, ref, take=TAKE_BASE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        engine = (runner / "github-env").read_text().strip().split("=", 1)[1]
+        self.assertTrue(Path(engine).is_file())
 
     def jobs(self):
         """The workflow's jobs, by name, as text."""
@@ -626,18 +738,169 @@ class Workflow(unittest.TestCase):
         steps = attest.split("\n      - name: ")[1:]
 
         self.assertEqual([s.splitlines()[0] for s in steps], [
-            "Take the verifier from the pushed commit", "Write the verdict attestation",
-            "Sign the verdict attestation", "Upload the verdict attestation"])
+            CHECK_PUSHED, TAKE_PUSHED, CHECK_ENVIRONMENT, INSTALL_COSIGN, CHECK_KEY,
+            "Write the verdict attestation", "Sign the verdict attestation", "Upload the verdict attestation"])
         for step in steps:
             self.assertIn("if: env.HARNESS_ATTEST_SIGN == 'true'\n", step)
-        self.assertIn('--range "$BEFORE..HEAD"', steps[1])
-        self.assertNotIn("ALLOW", steps[1])
+        write = steps[5]
+        self.assertIn('--range "$BEFORE..HEAD"', write)
+        self.assertNotIn("ALLOW", write)
+
+    def test_the_push_takes_the_engine_from_the_commit_before_the_push_not_from_the_tip(self):
+        attest = self.jobs()["attest"]
+        take = attest.split("\n      - name: %s\n" % TAKE_PUSHED, 1)[1].split("\n      - name:", 1)[0]
+
+        self.assertIn("        env:\n          BASE_REF: ${{ github.event.before }}\n", take)
+        self.assertIn('          REFUSE_FIRST_INSTALL: "true"\n', take)
+        self.assertNotIn("BASE_REF: ${{ github.sha }}", attest)
+        self.assertIn("ref: ${{ github.sha }}", attest)
+
+    def test_the_attest_key_is_checked_against_the_public_key_on_the_previous_tip_before_anything_is_written(self):
+        attest = self.jobs()["attest"]
+        step = attest.split("\n      - name: %s\n" % CHECK_KEY, 1)[1].split("\n      - name:", 1)[0]
+
+        self.assertIn("        env:\n          BEFORE: ${{ github.event.before }}\n", step)
+        self.assertIn("HARNESS_ATTEST_KEY: ${{ secrets.HARNESS_ATTEST_KEY }}\n", step)
+        self.assertIn("COSIGN_PASSWORD: ${{ secrets.HARNESS_ATTEST_PASSWORD }}\n", step)
+        self.assertIn('"$BEFORE:harness-attest.pub"', step)
+        self.assertIn('env://HARNESS_ATTEST_KEY', step)
+        self.assertNotIn("${{", step.split("        run: |\n", 1)[1])
 
     def test_secrets_and_untrusted_event_data_reach_no_run_block(self):
         for job in self.jobs().values():
             for run in re.findall(r"^        run: \|\n((?:(?: {10}.*)?\n)*)", job, re.M):
                 self.assertNotIn("${{", run)
                 self.assertNotIn("secrets.", run)
+
+    LIMITED = {"deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}
+    ONLY_MAIN = {"total_count": 1, "branch_policies": [{"id": 7, "name": "main", "type": "branch"}]}
+
+    def check_environment(self, project, environment, policies, branch="main"):
+        """environment-check on the two JSON documents the attest job takes from gh api."""
+        folder = Path(tempfile.mkdtemp(prefix="environment ", dir=str(project.root.parent)))
+        (folder / "environment.json").write_text(json.dumps(environment))
+        (folder / "policies.json").write_text(json.dumps(policies))
+        return project.harness("environment-check", str(folder / "environment.json"), str(folder / "policies.json"),
+                               branch)
+
+    def test_the_environment_is_admitted_only_when_it_admits_the_default_branch_and_nothing_else(self):
+        project = new_project(self)
+
+        admitted = self.check_environment(project, self.LIMITED, self.ONLY_MAIN)
+
+        self.assertEqual((admitted.returncode, admitted.stdout),
+                         (0, "environment-check: harness-attest deploys only from main\n"))
+        refused = {
+            "no rule": ({"deployment_branch_policy": None}, self.ONLY_MAIN),
+            "every branch": ({"deployment_branch_policy": {"protected_branches": True,
+                                                           "custom_branch_policies": False}}, self.ONLY_MAIN),
+            "another branch": (self.LIMITED, {"branch_policies": [{"name": "develop", "type": "branch"}]}),
+            "a tag as well": (self.LIMITED, {"branch_policies": [{"name": "main", "type": "branch"},
+                                                                  {"name": "v*", "type": "tag"}]}),
+            "no policy": (self.LIMITED, {"branch_policies": []}),
+            "no policy list": (self.LIMITED, {"message": "Not Found"}),
+        }
+        for case, (environment, policies) in refused.items():
+            with self.subTest(case=case):
+                result = self.check_environment(project, environment, policies)
+
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("environment-check: ", result.stdout)
+
+    def environment_step(self, project, recorded, default="main", policy_token="", opt_in=""):
+        """The attest job's environment step where gh isn't on the PATH, so no policy read can succeed: the step
+        falls back to the recorded branch only when the user opted in."""
+        runner = Path(tempfile.mkdtemp(prefix="runner ", dir=str(project.root.parent)))
+        (runner / "bin").mkdir()
+        os.symlink(shutil.which("mkdir"), str(runner / "bin" / "mkdir"))
+        return project.run("/bin/bash", "-e", "-c", step_script(CHECK_ENVIRONMENT), check=False,
+                           PATH=str(runner / "bin"), RUNNER_TEMP=str(runner), REPOSITORY="owner/attest",
+                           DEFAULT_BRANCH=default, RECORDED_BRANCH=recorded, RECORDED_FALLBACK=opt_in,
+                           POLICY_TOKEN=policy_token, ENGINE_SCRIPT=str(project.engine))
+
+    def test_without_a_readable_policy_the_recorded_default_branch_passes_only_after_an_opt_in(self):
+        project = new_project(self)
+
+        accepted = self.environment_step(project, "main", opt_in="true")
+        self.assertEqual(accepted.returncode, 0, accepted.stdout)
+        self.assertIn("attest mode: recorded branch", accepted.stdout)
+        self.assertEqual(self.environment_step(project, "main", policy_token="t", opt_in="true").returncode, 0)
+        refused = {
+            "no opt-in": dict(recorded="main"),
+            "a policy token that can't be read, no opt-in": dict(recorded="main", policy_token="t"),
+            "opted in with no record": dict(recorded="", opt_in="true"),
+            "opted in with another branch": dict(recorded="develop", opt_in="true"),
+        }
+        for case, options in refused.items():
+            with self.subTest(case=case):
+                result = self.environment_step(project, **options)
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("::error::", result.stdout)
+                self.assertNotIn("attest mode: recorded branch", result.stdout)
+
+    def test_the_environment_is_checked_after_the_engine_is_taken_and_before_anything_is_written_or_signed(self):
+        attest = self.jobs()["attest"]
+        names = [s.splitlines()[0] for s in attest.split("\n      - name: ")[1:]]
+
+        self.assertLess(names.index(TAKE_PUSHED), names.index(CHECK_ENVIRONMENT))
+        self.assertLess(names.index(CHECK_ENVIRONMENT), names.index(CHECK_KEY))
+        self.assertLess(names.index(CHECK_KEY), names.index("Write the verdict attestation"))
+        step = attest.split("\n      - name: %s\n" % CHECK_ENVIRONMENT, 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("        env:\n          POLICY_TOKEN: ${{ secrets.HARNESS_ATTEST_POLICY_TOKEN }}\n", step)
+        self.assertIn("RECORDED_BRANCH: ${{ vars.HARNESS_ATTEST_BRANCH }}", step)
+        self.assertIn("RECORDED_FALLBACK: ${{ vars.HARNESS_ATTEST_RECORDED_FALLBACK }}", step)
+        self.assertNotIn("github.token", step)
+        self.assertIn('environment-check "$dir/environment.json"', step)
+
+    def check_key(self, project, before, runner, key=""):
+        """The attest job's key step, for a push that starts from before, with the key the job received."""
+        return project.run("bash", "-e", "-o", "pipefail", "-c", step_script(CHECK_KEY), check=False, BEFORE=before,
+                           RUNNER_TEMP=str(runner), HARNESS_ATTEST_KEY=key, COSIGN_PASSWORD="pw")
+
+    def test_the_attest_key_step_refuses_when_the_previous_tip_publishes_no_public_key(self):
+        project = new_project(self)
+        runner = Path(tempfile.mkdtemp(prefix="runner ", dir=str(project.root.parent)))
+
+        result = self.check_key(project, project.adopted, runner, key="a key the job received")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("harness-attest.pub", result.stdout + result.stderr)
+
+    def test_the_attest_key_must_be_the_public_key_the_previous_tip_publishes(self):
+        cosign = shutil.which("cosign")
+        if cosign is None:
+            self.skipTest("cosign is not installed (brew install cosign); the key check needs it")
+        project = new_project(self)
+        keys = Path(tempfile.mkdtemp(prefix="keys ", dir=str(project.root.parent)))
+        for name in ("published", "other"):
+            (keys / name).mkdir()
+            run(keys / name, cosign, "generate-key-pair", COSIGN_PASSWORD="pw")
+        project.write("harness-attest.pub", (keys / "published" / "cosign.pub").read_text())
+        before = project.commit("chore: publish the attest public key")
+        runner = Path(tempfile.mkdtemp(prefix="runner ", dir=str(project.root.parent)))
+        (runner / "cosign").symlink_to(cosign)
+
+        refused = self.check_key(project, before, runner, key=(keys / "other" / "cosign.key").read_text())
+        accepted = self.check_key(project, before, runner, key=(keys / "published" / "cosign.key").read_text())
+
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("is not the public key", refused.stdout + refused.stderr)
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+
+    def test_ci_protect_attest_plans_the_environment_its_policy_and_the_recorded_branch(self):
+        project = new_project(self)
+
+        plan = project.harness("ci-protect", "--attest", "--dry-run", check=False)
+
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        for line in ("PUT repos/", "/environments/harness-attest", '"custom_branch_policies": true',
+                     "HARNESS_ATTEST_BRANCH=main", "harness-attest.pub", "attest mode",
+                     "delete the repository variable HARNESS_ATTEST_RECORDED_FALLBACK"):
+            self.assertIn(line, plan.stdout)
+        opted = project.harness("ci-protect", "--attest", "--dry-run", "--recorded-fallback", check=False)
+        self.assertIn("HARNESS_ATTEST_RECORDED_FALLBACK=true", opted.stdout)
+        self.assertIn("recorded branch", opted.stdout)
 
     def test_both_jobs_take_the_engine_the_same_way(self):
         self.assertEqual(step_script(TAKE_BASE), step_script(TAKE_PUSHED))

@@ -96,10 +96,13 @@ harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]
   names.
 - **Commits.** A verdict links to every commit reachable from `HEAD` whose tree, without `backbone/`, hashes to the
   verdict's fingerprint. This is the definition `verify --range` uses (`tree_fingerprint`). With the full history, no
-  commit means the judged code was never committed exactly as judged. A shallow clone (`actions/checkout` fetches
-  depth 1 by default) holds only part of the history, and so does a git call that times out or fails. Then the gap
-  reads `history incomplete` and says how to fetch the rest (`git fetch --unshallow`, or `fetch-depth: 0` in CI, as
-  `harness-verify` already does), and the export doesn't claim the code was never committed.
+  commit means the judged code was never committed exactly as judged, but only when git can read the whole history.
+  A shallow clone (`actions/checkout` fetches depth 1 by default) holds only part of it. So do a git call that times
+  out or fails, and trees git can't read (their objects are missing, as in a partial clone whose remote is gone). When
+  the judged commit isn't found and the history may hold it, the gap reads `history incomplete` and says how to restore
+  the history (`git fetch --unshallow`, or `fetch-depth: 0` in CI, as `harness-verify` already does; the objects of a
+  partial clone from its remote), and the export doesn't claim the code was never committed. A commit found in a
+  shallow clone is no gap.
 - **Test files.** These are the files that match `HARNESS_TEST_PATHS` and mention the criterion's id, in the code the
   latest judge verdict judged: the working tree when that is the current code, otherwise a commit that carries it.
   They are unknown when no commit does. A task without a judge verdict shows the working tree's.

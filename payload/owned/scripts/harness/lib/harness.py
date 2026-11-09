@@ -18,6 +18,7 @@ Usage:
   harness.py adopt --remove <pack>[,<pack>] [--dry-run]
   harness.py verify [--range <base>..<tip>] [--allow-user-changes]   (gates on the staged change, or a CI range)
   harness.py attest --range <base>..<tip> [--allow-user-changes]     (in-toto statement of a verified range, ADR-005)
+  harness.py environment-check <environment.json> <policies.json> <branch>   (CI: the attest environment's rule, ADR-005)
   harness.py approve <task-id>                                    (autonomous mode: policy approval of a low-risk spec)
   harness.py escalate <task-id> --reason <text> [--kind <k>] [--class <failure class>] [--needed <text>]
   harness.py escalations                                          (open escalations for the user)
@@ -32,6 +33,7 @@ Usage:
                                                                   (derived traceability export, ADR-004)
   harness.py ci-judge --range <base>..<tip>                       (CI: independent re-judging of finished tasks)
   harness.py ci-protect [--branch main] [--with-judge] [--dry-run] (require the CI checks; needs gh)
+  harness.py ci-protect --attest [--dry-run] [--recorded-fallback] (the harness-attest environment: default branch only)
   harness.py doctor
 """
 import fnmatch
@@ -3066,6 +3068,154 @@ def attest_command(argv):
     return 0
 
 
+ATTEST_ENVIRONMENT = "harness-attest"
+ATTEST_BRANCH_VARIABLE = "HARNESS_ATTEST_BRANCH"
+ATTEST_RECORDED_VARIABLE = "HARNESS_ATTEST_RECORDED_FALLBACK"
+ATTEST_SECRETS = ("HARNESS_ATTEST_KEY", "HARNESS_ATTEST_PASSWORD")
+ATTEST_POLICY_SECRET = "HARNESS_ATTEST_POLICY_TOKEN"
+ATTEST_PUBLIC_KEY = "harness-attest.pub"
+
+
+def environment_problems(environment, policies, branch):
+    """Why the harness-attest environment doesn't admit only branch, from the JSON of GET repos/<r>/environments/<name>
+    and of its deployment-branch-policies. [] when it does: selected branches only, and exactly one branch policy."""
+    rule = environment.get("deployment_branch_policy") if isinstance(environment, dict) else None
+    found = policies.get("branch_policies") if isinstance(policies, dict) else None
+    problems = []
+    if not isinstance(rule, dict) or rule.get("protected_branches") is not False \
+            or rule.get("custom_branch_policies") is not True:
+        problems.append("the environment doesn't restrict deployments to selected branches")
+    if not isinstance(found, list) or [(p.get("type"), p.get("name")) for p in found if isinstance(p, dict)] != [
+            ("branch", branch)]:
+        problems.append("the environment's deployment branches are not exactly %s" % branch)
+    return problems
+
+
+def environment_check_command(argv):
+    """harness-verify's attest job: the environment's JSON from gh api, judged here (ADR-005)."""
+    if len(argv) != 3:
+        sys.stderr.write("usage: harness.py environment-check <environment.json> <policies.json> <branch>\n")
+        return 64
+    try:
+        environment, policies = json.loads(read(argv[0]) or "null"), json.loads(read(argv[1]) or "null")
+    except ValueError as exc:
+        print("environment-check: the environment's JSON doesn't parse: %s" % exc)
+        return 1
+    problems = environment_problems(environment, policies, argv[2])
+    for problem in problems:
+        print("environment-check: %s" % problem)
+    if not problems:
+        print("environment-check: %s deploys only from %s" % (ATTEST_ENVIRONMENT, argv[2]))
+    return 1 if problems else 0
+
+
+def gh_api(endpoint, method=None, body=None):
+    """(ok, parsed JSON or None) for gh api endpoint; body goes in as JSON."""
+    words = ["gh", "api"] + (["-X", method] if method else []) + [endpoint] + (["--input", "-"] if body else [])
+    try:
+        result = subprocess.run(words, cwd=str(ROOT), capture_output=True, text=True, timeout=GIT_TIMEOUT,
+                                input=json.dumps(body) if body else None)
+    except subprocess.TimeoutExpired:
+        return False, None
+    if result.returncode:
+        return False, None
+    try:
+        return True, json.loads(result.stdout or "null")
+    except ValueError:
+        return True, None
+
+
+def attest_mode(policy_token, recorded):
+    """The mode the attest job runs in, as ci-protect --attest states it. policy_token is True, False or None when
+    the environment's secrets can't be listed."""
+    if policy_token is None:
+        return "unknown: can't list the secrets of %s" % ATTEST_ENVIRONMENT
+    if policy_token:
+        return "live: the job reads the rule with %s, and %s" % (
+            ATTEST_POLICY_SECRET, "accepts the recorded branch when it can't read the rule (opted in)" if recorded
+            else "refuses to sign when it can't read the rule")
+    if recorded:
+        return ("recorded branch: no %s, so the job accepts the branch ci-protect recorded (opted in), and the rule "
+                "is not re-read" % ATTEST_POLICY_SECRET)
+    return "none: no %s and no opt-in, so the job refuses to sign" % ATTEST_POLICY_SECRET
+
+
+def public_key_line(default):
+    """Whether the public key the attest job checks against is committed on the default branch (ADR-005)."""
+    if show(default, ATTEST_PUBLIC_KEY):
+        return "%s is committed on %s" % (ATTEST_PUBLIC_KEY, default)
+    return ("%s is not on %s: the job refuses to sign until it is committed there" % (ATTEST_PUBLIC_KEY, default))
+
+
+def ci_protect_attest(name, default, dry_run, recorded=False):
+    """Set the harness-attest environment up for the attest job (ADR-005): only the default branch may deploy to it,
+    no repository-level secret of the same names may stand in for its own, and the default branch is recorded in the
+    repository variable the job reads only when the user opted in (recorded=True) and the rule can't be read. States
+    the mode the job runs in, and checks the result before it says so."""
+    rule = {"deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}
+    endpoint = "repos/%s/environments/%s" % (name, ATTEST_ENVIRONMENT)
+    if dry_run or name.startswith("<"):
+        print("ci-protect --attest: would refuse while repository secrets %s exist" % ", ".join(ATTEST_SECRETS))
+        print("ci-protect --attest: would PUT %s %s" % (endpoint, json.dumps(rule)))
+        print("ci-protect --attest: would make %s the only deployment branch of %s" % (default, ATTEST_ENVIRONMENT))
+        print("ci-protect --attest: would set the repository variable %s=%s" % (ATTEST_BRANCH_VARIABLE, default))
+        print("ci-protect --attest: would %s" % (
+            "set the repository variable %s=true" % ATTEST_RECORDED_VARIABLE if recorded
+            else "delete the repository variable %s" % ATTEST_RECORDED_VARIABLE))
+        print("ci-protect --attest: attest mode with %s in %s: %s" % (
+            ATTEST_POLICY_SECRET, ATTEST_ENVIRONMENT, attest_mode(True, recorded)))
+        print("ci-protect --attest: attest mode without it: %s" % attest_mode(False, recorded))
+        print("ci-protect --attest: %s" % public_key_line(default))
+        return 0 if dry_run else 1
+    ok, secrets = gh_api("repos/%s/actions/secrets" % name)
+    if not ok or not isinstance(secrets, dict):
+        print("ci-protect --attest: can't list %s's secrets, so nothing was changed" % name)
+        return 1
+    leftover = [s.get("name") for s in secrets.get("secrets") or [] if isinstance(s, dict)
+                and s.get("name") in ATTEST_SECRETS]
+    if leftover:
+        print("ci-protect --attest: repository secrets %s would stand in for the environment's when it has none; "
+              "delete them (gh secret delete NAME) and rerun" % ", ".join(leftover))
+        return 1
+    if not gh_api(endpoint, "PUT", rule)[0]:
+        print("ci-protect --attest: can't set %s, so nothing else was changed" % ATTEST_ENVIRONMENT)
+        return 1
+    policies_endpoint = endpoint + "/deployment-branch-policies"
+    ok, current = gh_api(policies_endpoint)
+    for policy in (current or {}).get("branch_policies") or []:
+        if (policy.get("type"), policy.get("name")) != ("branch", default):
+            gh_api("%s/%s" % (policies_endpoint, policy.get("id")), "DELETE")
+    kept = [(p.get("type"), p.get("name")) for p in (current or {}).get("branch_policies") or []]
+    if ("branch", default) not in kept:
+        gh_api(policies_endpoint, "POST", {"name": default, "type": "branch"})
+    ok_env, environment = gh_api(endpoint)
+    ok_policies, policies = gh_api(policies_endpoint)
+    problems = environment_problems(environment, policies, default) if ok_env and ok_policies else ["unreadable"]
+    if problems:
+        print("ci-protect --attest: %s still doesn't match (%s); fix it in the repository's settings"
+              % (ATTEST_ENVIRONMENT, "; ".join(problems)))
+        return 1
+    subprocess.run(["gh", "variable", "set", ATTEST_BRANCH_VARIABLE, "--body", default], cwd=str(ROOT),
+                   capture_output=True, text=True)
+    if recorded:
+        subprocess.run(["gh", "variable", "set", ATTEST_RECORDED_VARIABLE, "--body", "true"], cwd=str(ROOT),
+                       capture_output=True, text=True)
+    else:
+        subprocess.run(["gh", "variable", "delete", ATTEST_RECORDED_VARIABLE], cwd=str(ROOT),
+                       capture_output=True, text=True)
+    ok_secrets, listed = gh_api("repos/%s/environments/%s/secrets" % (name, ATTEST_ENVIRONMENT))
+    names = [s.get("name") for s in (listed or {}).get("secrets") or [] if isinstance(s, dict)] \
+        if ok_secrets and isinstance(listed, dict) else None
+    print("ci-protect --attest: %s deploys only from %s; repository variable %s=%s recorded. Add the secrets %s to "
+          "the environment only, and %s there too if the rule should be read live." % (
+              ATTEST_ENVIRONMENT, default, ATTEST_BRANCH_VARIABLE, default, ", ".join(ATTEST_SECRETS),
+              ATTEST_POLICY_SECRET))
+    print("ci-protect --attest: attest mode: %s" % attest_mode(
+        None if names is None else ATTEST_POLICY_SECRET in names, recorded))
+    print("ci-protect --attest: %s" % public_key_line(default))
+    return 0
+
+
 # --------------------------------------------------------------------------- health
 
 CHAINED_HOOKS = ("pre-commit", "commit-msg", "pre-push")
@@ -6034,17 +6184,25 @@ def protection_payload(current, contexts):
     return payload
 
 
-def ci_protect_command(argv):
-    """Make the harness-verify check required on a branch and create the approval label (needs gh)."""
-    contexts = ["verify"] + (["judge"] if "--with-judge" in argv else [])
+def github_repo():
+    """(owner/name, default branch) of the repository gh sees; placeholders when it sees none."""
     repo = subprocess.run(["gh", "repo", "view", "--json", "nameWithOwner,defaultBranchRef"], cwd=str(ROOT),
                           capture_output=True, text=True) if shutil.which("gh") else None
     try:
         info = json.loads(repo.stdout) if repo is not None and repo.returncode == 0 else {}
     except ValueError:
         info = {}
-    name = info.get("nameWithOwner") or "<owner>/<repo>"
-    default = (info.get("defaultBranchRef") or {}).get("name") or "main"
+    return (info.get("nameWithOwner") or "<owner>/<repo>",
+            (info.get("defaultBranchRef") or {}).get("name") or "main")
+
+
+def ci_protect_command(argv):
+    """Make the harness-verify check required on a branch and create the approval label (needs gh). With --attest,
+    set up the harness-attest environment instead (ADR-005)."""
+    name, default = github_repo()
+    if "--attest" in argv:
+        return ci_protect_attest(name, default, "--dry-run" in argv, "--recorded-fallback" in argv)
+    contexts = ["verify"] + (["judge"] if "--with-judge" in argv else [])
     branch = argv[argv.index("--branch") + 1] if "--branch" in argv and argv.index("--branch") + 1 < len(argv) else default
     endpoint = "repos/%s/branches/%s/protection" % (name, branch)
     current = {}
@@ -6375,6 +6533,9 @@ HISTORY_SHALLOW = ("this clone is shallow, so the judged code may be in a commit
                    "history with `git fetch --unshallow` (in CI, actions/checkout with fetch-depth: 0)")
 HISTORY_UNREADABLE = ("git timed out or failed reading the history, so the judged code may be in a commit that wasn't "
                       "read: rerun the export")
+HISTORY_MISSING = ("git can't read %d tree(s) of the history (their objects are missing: a partial clone that can't "
+                   "fetch them, or a damaged repository), so the judged code may be in one of them: restore the "
+                   "missing objects, in a partial clone by fetching them from its remote")
 
 
 def commits_by_code():
@@ -6391,17 +6552,23 @@ def commits_by_code():
     pairs = [line.split() for line in log.stdout.splitlines() if len(line.split()) == 2]
     trees = sorted({tree for _, tree in pairs})
     try:
-        out = subprocess.run(["git", "cat-file", "--batch"], cwd=str(ROOT), capture_output=True, timeout=GIT_TIMEOUT,
-                             input="".join(tree + "\n" for tree in trees).encode()).stdout
+        batch = subprocess.run(["git", "cat-file", "--batch"], cwd=str(ROOT), capture_output=True, timeout=GIT_TIMEOUT,
+                               input="".join(tree + "\n" for tree in trees).encode())
     except subprocess.TimeoutExpired:
         return {}, HISTORY_UNREADABLE
+    if batch.returncode:
+        return {}, HISTORY_UNREADABLE
+    out, unreadable = batch.stdout, 0
     code, pos = {}, 0
     for tree in trees:
         end = out.find(b"\n", pos)
-        fields = out[pos:end].split()
-        if end < 0 or len(fields) != 3:
+        fields = out[pos:end].split() if end >= 0 else []
+        if len(fields) == 2 and fields[1] == b"missing":
+            unreadable += 1
             pos = end + 1
             continue
+        if len(fields) != 3 or fields[0] != tree.encode():
+            return {}, HISTORY_UNREADABLE
         size, oid_bytes = int(fields[2]), len(tree) // 2
         body, pos = out[end + 1:end + 1 + size], end + 2 + size
         kept, i = [], 0
@@ -6418,7 +6585,8 @@ def commits_by_code():
         if tree in code:
             found.setdefault(code[tree], []).append(commit)
     shallow = git("rev-parse", "--is-shallow-repository").strip() == "true"
-    return found, HISTORY_SHALLOW if shallow else None
+    reasons = ([HISTORY_SHALLOW] if shallow else []) + ([HISTORY_MISSING % unreadable] if unreadable else [])
+    return found, "; ".join(reasons) or None
 
 
 def trace_task(task, current, by_code, incomplete, settings):
@@ -6451,7 +6619,7 @@ def trace_task(task, current, by_code, incomplete, settings):
     gaps = {"not judged": ["no judge verdict: nothing in this task is verified"],
             "fail": ["the latest judge verdict is a fail"],
             "pass on earlier code": ["the judge's pass is on earlier code, not on the current code"]}.get(verdict, [])
-    if incomplete and last is not None and fingerprint != current:
+    if incomplete and last is not None and fingerprint != current and not commits:
         gaps.append("history incomplete: %s" % incomplete)
     if files_from is None and not incomplete:
         gaps.append("the judged code is in no commit, so its test files are unknown")
@@ -7453,6 +7621,8 @@ def main(argv):
         return verify_command(argv[2:])
     if argv[1:2] == ["attest"]:
         return attest_command(argv[2:])
+    if argv[1:2] == ["environment-check"]:
+        return environment_check_command(argv[2:])
     if len(argv) == 3 and argv[1] == "approve":
         return approve_command(argv[2])
     if argv[1:2] == ["escalate"]:
