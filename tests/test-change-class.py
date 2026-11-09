@@ -824,9 +824,10 @@ COMMENT_AMBIGUOUS = "an HTML comment a reader may not end where the gates do"
 
 
 class CommentReach(unittest.TestCase):
-    """A comment a reader ends where the gates do: one that starts a line at 0-3 spaces, which a reader takes as an HTML
-    block ending at its '-->'. One that starts after text, or 4 or more columns in, may end with its paragraph for a
-    reader, or be code, so the spec is invalid rather than read one way or the other."""
+    """A comment a reader ends where the gates do: one that starts at column 0, which a reader takes as an HTML block
+    ending at its '-->'. One that starts after text may end with its paragraph for a reader, one indented 1-3 columns
+    with a list item, and one 4 or more columns in may be code, so the spec is invalid rather than read one way or the
+    other."""
     # context above the Requirements, text appended after the spec, ambiguous?
     TABLE = (
         ("A change. <!-- note\n\n", "-->\n", True),
@@ -835,7 +836,8 @@ class CommentReach(unittest.TestCase):
         ("A change.\n\n\t<!-- note -->\n", "", True),
         ("A change. <!-- note -->\n", "", False),
         ("A change.\n\n<!--\nnote\n\n-->\n", "", False),
-        ("A change.\n\n   <!-- note\n-->\n", "", False),
+        ("A change.\n\n   <!-- note\n-->\n", "", True),
+        ("A change.\n\n   <!-- note -->\n", "", False),
     )
 
     def setUp(self):

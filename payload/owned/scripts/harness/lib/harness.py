@@ -203,6 +203,10 @@ CONTAINER = re.compile(r"(?:>|(?:[-*+]|\d{1,9}[.)])(?=[ \t]|$))[ \t]*")
 # CommonMark's HTML blocks (types 1, 3, 4, 5: they end at the line holding their end condition, blank lines included;
 # types 6 and 7: they end at a blank line, and only 7 may not interrupt a paragraph). Type 2 is a comment, see
 # blank_comments_in_line.
+# '<!-->' and '<!--->' are whole comments (CommonMark 0.31), and a '-->' may share its dashes with the '<!--' before it:
+# the alternatives are tried in order, so each of these is matched whole and its '-->' is not missed.
+COMMENT_MARK = re.compile(r"<!--->|<!-->|<!--|-->")
+INLINE_COMMENT = re.compile(r"<!---?>|<!--.*?-->")
 HTML_BLOCKS = (
     (re.compile(r"<(?:pre|script|style|textarea)(?=[ \t>]|$)", re.I),
      re.compile(r"</(?:pre|script|style|textarea)>", re.I)),
@@ -227,6 +231,9 @@ STRUCTURE_REASON = ("the spec has a heading or code fence that is indented, foll
                     "HTML block: keep headings and fences at column 0, outside HTML blocks")
 HTML_REASON = ("the spec has a tag alone on a line right after a list or quote paragraph or a link reference definition: "
                "a reader may take it for text or for an HTML block; put a blank line before it")
+NESTED_HTML_REASON = ("the spec has an HTML block inside a list item or quote, or indented, that a reader may end where the "
+                      "item or quote ends: start a pre, script, style or textarea block, a '<?', a '<!' declaration or a "
+                      "CDATA block at column 0, and put a blank line after an indented tag")
 SETEXT_REASON = "the spec has a setext heading (text over a line of = or -): write headings as '## Title'"
 LINE_BREAK_REASON = ("the spec has a line break character a reader may take for a line end (a vertical tab, form feed, NEL, "
                      "or a Unicode line or paragraph separator): remove it")
@@ -239,8 +246,8 @@ STRUCTURE_CHARS = re.compile(r"[<#]|^[^A-Za-z`~]*(?:`{3}|~{3})")
 # A paragraph starting like this may be a link reference definition, which is no paragraph to CommonMark: a tag alone on
 # the next line may start an HTML block.
 LINK_DEFINITION_START = re.compile(r" {0,3}\[")
-COMMENT_REASON = ("the spec has an HTML comment a reader may not end where the gates do: a comment that starts after text, "
-                  "or 4 or more columns in, must close on its own line")
+COMMENT_REASON = ("the spec has an HTML comment a reader may not end where the gates do: a comment that doesn't start at "
+                  "column 0 must close on its own line")
 USER_APPROVED_CLASSES = ("feature", "schema")
 CLASS_GATES = {
     "docs": "policy may approve it when nothing is risky; a change to anything but documentation is a risk",
@@ -514,21 +521,25 @@ def character_reason(body, fenced):
 
 def blank_comments_in_line(line, inside):
     """(line with its HTML comment text blanked, whether a comment is still open at its end, whether a comment on the
-    line is one a reader may not end where the gates do). A comment that starts a line at 0-3 spaces runs to its '-->',
-    across lines, as a Markdown HTML block does. One that starts after text, or 4 or more columns in, must close on its
-    line: a reader would take it for an inline comment that ends with its paragraph, or for code. A '<!--' inside a
-    comment opens nothing."""
+    line is one a reader may not end where the gates do). A comment that starts at column 0 runs to its '-->', across
+    lines, as a Markdown HTML block does; '<!-->' and '<!--->' are whole comments. Any other comment must close on its
+    line: after text a reader takes it for an inline comment that ends with its paragraph, indented for one in a list
+    item that ends with the item, or for code. A '<!--' inside a comment opens nothing."""
     pieces, pos, ambiguous, must_close = [], 0, False, False
-    for m in re.finditer(r"<!--|-->", line):
-        if inside and m.group(0) == "-->":
+    for m in COMMENT_MARK.finditer(line):
+        if inside and m.group(0).endswith("-->"):
             pieces.append(blank(line[pos:m.end()]))
             pos, inside, must_close = m.end(), False, False
-        elif not inside and m.group(0) == "<!--":
+        elif not inside and m.group(0).startswith("<!--"):
             lead = line[:m.start()]
-            pieces.append(lead)
-            pos, inside = m.start(), True
+            pieces.append(line[pos:m.start()])
             ambiguous = ambiguous or (lead.strip() == "" and not re.fullmatch(r" {0,3}", lead))
-            must_close = not re.fullmatch(r" {0,3}", lead)
+            if m.group(0) == "<!--":
+                pos, inside = m.start(), True
+                must_close = lead != ""
+            else:
+                pieces.append(blank(m.group(0)))
+                pos = m.end()
     pieces.append(blank(line[pos:]) if inside else line[pos:])
     return "".join(pieces), inside, ambiguous or (inside and must_close)
 
@@ -545,6 +556,18 @@ def block_start(body):
         if not m:
             return rest, nested
         rest, nested = rest[m.end():], True
+
+
+def setext_underline(body):
+    """Whether body, or what it holds after any of its list and quote markers, is a setext underline. A lone '-' after
+    paragraph text is an underline, not an empty list item, since an empty item may not interrupt a paragraph."""
+    rest = body
+    while not (SETEXT_UNDERLINE.match(rest) or SETEXT_UNDERLINE.match(rest.lstrip(" \t"))):
+        m = CONTAINER.match(rest.lstrip(" \t"))
+        if not m:
+            return False
+        rest = rest.lstrip(" \t")[m.end():]
+    return True
 
 
 def html_block(rest, interrupts):
@@ -567,9 +590,10 @@ def scan_lines(text):
     commentless: the line with its comment text blanked, code kept. reason: why a reader could read the line differently
     from the gates, or ''. Only column-0 headings and fences are read: an indented one, one after a list or quote marker,
     one in an HTML block and a setext heading are refused, since Markdown may read them as text or code. HTML blocks
-    start and end as html_block says. A line break or an unusual space or control character a reader may read differently
+    start and end as html_block says; one a reader may end with its list item or quote is refused unless it ends on its
+    line or at the blank line after it. A line break or an unusual space or control character a reader may read differently
     is refused too (character_reason)."""
-    fence, comment, html, prev_text, prev_doubtful = None, False, None, False, False
+    fence, comment, html, prev_text, prev_doubtful, loose_html, prev_code = None, False, None, False, False, False, False
     for line in re.findall(r"[^\n]*\n|[^\n]+\Z", text or ""):
         body = line.rstrip("\r\n")
         if fence is not None:
@@ -579,7 +603,7 @@ def scan_lines(text):
                 FENCE_REASON if wide and closes_fence(wide.group(1), fence) else "")
             if close and closes_fence(close.group(1), fence):
                 fence = None
-            prev_text = False
+            prev_text = prev_code = False
             continue
         in_html = html is not None
         if html == "blank" and blank_line(body):
@@ -589,22 +613,31 @@ def scan_lines(text):
         reason = ""
         if not comment and off_column and (FENCE_RUN.match(rest) or ATX_HEADING.match(rest)):
             reason = STRUCTURE_REASON
-        elif not comment and prev_text and (SETEXT_UNDERLINE.match(body) or SETEXT_UNDERLINE.match(rest)):
+        # Indented code after a list item may be the item's text instead, which an underline makes a heading.
+        elif not comment and (prev_text or prev_code) and setext_underline(body):
             reason = SETEXT_REASON
         elif not comment and not in_html and prev_text and prev_doubtful and not nested and HTML_TAG_ALONE.match(rest):
             reason = HTML_REASON
         reason = character_reason(body, False) or reason
+        if loose_html and not blank_line(body):
+            reason = reason or NESTED_HTML_REASON
+        loose_html = False
         opening = None if comment or reason or off_column else FENCE_OPEN.match(body)
         if opening and not ("`" in opening.group(2) and opening.group(1)[0] == "`"):
             fence = opening.group(1)
             yield line, True, line, ""
-            prev_text = False
+            prev_text = prev_code = False
             continue
         started = None
-        if not comment and not reason and not in_html and (nested or PLAIN_INDENT.match(body)):
+        if not comment and not reason and not in_html and PLAIN_INDENT.match(body):
             started = html_block(rest, prev_text or nested)
-        if started is not None:
-            html = started
+        # A block in a list item or quote ends with the item or quote, so it isn't carried to the next line: that line is
+        # in the container too, nested or indented and refused wherever it matters, or past the container's end. An
+        # indented block may be in a list item, or not: only a blank line after it ends it in both readings.
+        if started is not None and (nested or body[:1] == " ") and started != "blank":
+            reason = NESTED_HTML_REASON
+        elif started is not None and not nested:
+            html, loose_html = started, body[:1] == " "
         block_comment = comment or bool(PLAIN_INDENT.match(body) and body.lstrip(" ").startswith("<!--"))
         if (in_html or started is not None) and not comment:
             commentless, ambiguous = line, False
@@ -620,6 +653,7 @@ def scan_lines(text):
         prev_text = (not blank_line(body) and not ATX_HEADING.match(body) and not in_html and started is None
                      and not code and not block_comment and not thematic)
         prev_doubtful = prev_text and bool(doubtful or prev_doubtful)
+        prev_code = code
 
 
 def comment_free(text):
@@ -805,7 +839,7 @@ def approval_heading_problem(text):
     and the freeze don't end."""
     for line, fenced, commentless, _ in scan_lines(text):
         body = line.rstrip("\r\n")
-        if not (APPROVAL_HEADING.match(body) or APPROVAL_HEADING.match(re.sub(r"<!--.*?-->", "", body))):
+        if not (APPROVAL_HEADING.match(body) or APPROVAL_HEADING.match(INLINE_COMMENT.sub("", body))):
             continue
         if not fenced and APPROVAL_HEADING.match(commentless.rstrip("\r\n")):
             continue

@@ -203,6 +203,118 @@ class HtmlBlockEnds(unittest.TestCase):
         self.assertIn(STRUCTURE, out)
 
 
+class CommentEnds(unittest.TestCase):
+    """A comment ends where CommonMark ends it, or the spec is refused. '<!-->' and '<!--->' are complete, empty comments
+    (CommonMark 0.31): a comment block that starts with one ends on that line, so a tag on the next line starts an HTML
+    block that may hide a heading. A comment block in a list item ends with the item, so one left open must start at
+    column 0."""
+
+    def setUp(self):
+        self.project = new_project(self)
+
+    def test_an_empty_comment_does_not_hide_the_html_block_after_it(self):
+        for task, empty in (("79.1", "<!-->"), ("79.2", "<!--->")):
+            with self.subTest(comment=empty):
+                append_to_spec(self.project, task, "\n" + empty + "\n<table>\n-->\n<!DOCTYPE html>\n===\n## Approval\n\n"
+                               "The change stores user passwords in plain text under src/auth/.\n" + APPROVAL)
+                self.project.grill_pass(task)
+
+                code, out = self.project.harness("approve", task, HARNESS_AUTONOMY="autonomous")
+
+                self.assertEqual(code, 1, out)
+                self.assertNotIn("Approved-by: policy", self.project.read("backbone/specs/%s.md" % task))
+                self.assertNotEqual(self.project.harness("spec-check", task)[0], 0)
+
+    def test_text_after_an_empty_comment_is_read(self):
+        for task, empty in (("79.3", "<!-->"), ("79.4", "<!--->")):
+            with self.subTest(comment=empty):
+                add_spec(self.project, task, edits=(
+                    ("## Open questions\n- none\n", "## Open questions\n" + empty + "\n- Is the export fast enough?\n"),))
+
+                code, out = self.project.harness("spec-check", task)
+
+                self.assertEqual(code, 1, out)
+                self.assertIn("open question", out.lower())
+
+    def test_empty_comments_are_blanked_where_they_stand(self):
+        for empty in ("<!-->", "<!--->", "text <!--> more", "text <!---> more"):
+            with self.subTest(line=empty):
+                text = empty + "\n## Approval\n"
+                self.assertEqual(engine.outline(text), text.replace("<!--->", " " * 6).replace("<!-->", " " * 5))
+
+    def test_an_indented_comment_left_open_is_refused(self):
+        for task, lines in (("79.5", "- item\n  <!--\n## Other\n- Is it fast?\n-->\n"), ("79.6", "   <!--\nx\n-->\n")):
+            with self.subTest(lines=lines):
+                append_to_spec(self.project, task, "\n" + lines)
+
+                code, out = self.project.harness("spec-check", task)
+
+                self.assertEqual(code, 1, out)
+                self.assertIn("HTML comment", out)
+
+    def test_a_second_comment_on_a_line_keeps_the_offsets_and_blanks_the_first(self):
+        for line in ("<!-- ## x --> b <!-- c -->", "<!--> b <!-- c -->", "a <!-- x --> b <!---> c"):
+            with self.subTest(line=line):
+                text = line + "\n## Approval\n"
+                view = engine.outline(text)
+                self.assertEqual(len(view), len(text), view)
+                self.assertNotIn("<!--", view)
+
+
+class NestedHtmlBlocks(unittest.TestCase):
+    """An HTML block inside a list item or quote ends where that item or quote ends. The gates don't track where those
+    end, so a pre, script, style or textarea block, a processing instruction, a declaration or a CDATA block there is
+    refused instead of read to its closing mark. A block on a line indented 1-3 columns may be in a list item too: one of
+    those is refused, and any other must have a blank line after it, where it ends either way."""
+
+    def setUp(self):
+        self.project = new_project(self)
+
+    def test_a_block_in_a_quote_or_list_item_is_refused_and_does_not_approve(self):
+        for task, block in (("80.1", "> <pre>\n\n</pre>\n"), ("80.2", "- <pre>\n\n</pre>\n"),
+                            ("80.3", "><pre>\n- <pre>\n\n</pre>\n?><!-->\n"), ("80.4", "> <?\n\n?>\n")):
+            with self.subTest(block=block):
+                append_to_spec(self.project, task, "\n" + block + "## Approval\n\n"
+                               "The change stores user passwords in plain text under src/auth/.\n" + APPROVAL)
+                self.project.grill_pass(task)
+
+                code, out = self.project.harness("approve", task, HARNESS_AUTONOMY="autonomous")
+
+                self.assertEqual(code, 1, out)
+                self.assertNotIn("Approved-by: policy", self.project.read("backbone/specs/%s.md" % task))
+                self.assertIn("inside a list item or quote", self.project.harness("spec-check", task)[1])
+
+    def test_an_indented_block_that_may_be_in_a_list_item_is_refused(self):
+        for task, block in (("80.7", "- x\n\n  <pre>\nOther\n-\n"), ("80.8", "- x\n\n  <div>\nOther\n-\n"),
+                            ("80.9", "  <?\n?>\n")):
+            with self.subTest(block=block):
+                append_to_spec(self.project, task, "\n" + block)
+
+                code, out = self.project.harness("spec-check", task)
+
+                self.assertEqual(code, 1, out)
+
+    def test_an_indented_block_with_a_blank_line_after_it_is_read(self):
+        append_to_spec(self.project, "80.10", "\n  <div>\n\ntext\n")
+
+        code, out = self.project.harness("spec-check", "80.10")
+
+        self.assertEqual(code, 0, out)
+
+    def test_a_block_in_a_quote_ends_with_the_quote(self):
+        for task, block in (("80.5", "><table>\n<pre>text\n\n"), ("80.6", "- <div>\n<pre>\n\n")):
+            with self.subTest(block=block):
+                append_to_spec(self.project, task, "\n" + block + "## Approval\n\n"
+                               "The change stores user passwords in plain text under src/auth/.\n" + APPROVAL)
+                self.project.grill_pass(task)
+
+                code, out = self.project.harness("approve", task, HARNESS_AUTONOMY="autonomous")
+
+                self.assertEqual(code, 1, out)
+                self.assertNotIn("Approved-by: policy", self.project.read("backbone/specs/%s.md" % task))
+                self.assertNotEqual(self.project.harness("spec-check", task)[0], 0)
+
+
 class HtmlBlockStarts(unittest.TestCase):
     """Only a complete tag alone on its line starts an HTML block that a blank line ends, and such a tag can't interrupt a
     paragraph. An autolink or a tag followed by text is a paragraph, so a heading after it is a section."""
@@ -377,10 +489,10 @@ class UnusualSpaces(unittest.TestCase):
         self.assertNotIn("line break", out)
         self.assertEqual(code, 0, out)
 
-    def test_a_non_breaking_space_in_inline_code_is_ordinary_text(self):
-        add_spec(self.project, "69.7", edits=(("A change. ", "A change. Run `a b` and ``c d`` first. "),))
+    def test_a_non_breaking_space_in_double_backtick_code_is_ordinary_text(self):
+        add_spec(self.project, "69.8", edits=(("A change. ", "A change. Run `a b` and ``c d`` first. "),))
 
-        code, out = self.project.harness("spec-check", "69.7")
+        code, out = self.project.harness("spec-check", "69.8")
 
         self.assertNotIn("unusual space", out)
         self.assertEqual(code, 0, out)
@@ -515,17 +627,46 @@ class SetextAndSections(unittest.TestCase):
         self.assertEqual(code, 2, out)
         self.assertIn("approved and therefore frozen", out)
 
+    def test_an_underline_under_a_list_items_indented_text_is_refused(self):
+        append_to_spec(self.project, "70.6", "\n- item\n\n    text\n  ---\n")
+
+        code, out = self.project.harness("spec-check", "70.6")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn(SETEXT, out)
+
+    def test_an_underline_under_a_deeply_indented_tag_is_refused(self):
+        append_to_spec(self.project, "70.8", "\ntext\n        > <table>\n-\n")
+
+        code, out = self.project.harness("spec-check", "70.8")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn(SETEXT, out)
+
+    def test_a_lone_dash_under_quoted_text_is_a_setext_underline_not_a_list_item(self):
+        for task, lines in (("70.4", "> text\n> -\n"), ("70.5", "> text\n> > -\n")):
+            with self.subTest(lines=lines):
+                append_to_spec(self.project, task, "\n" + lines)
+
+                code, out = self.project.harness("spec-check", task)
+
+                self.assertEqual(code, 1, out)
+                self.assertIn(SETEXT, out)
+
 
 # Fragments a spec may hold without any construct a reader could read differently. The mixed set adds those constructs,
 # and approval headings, which may or may not be read as the Approval section.
 CLEAN = ("", "text line", "## Open questions", "## Requirements", "### sub", "- item", "1. item", "  continued item",
-         "```", "~~~", "<!-- note -->", "<!--", "-->", "  text", "Approved-by: Ana (2026-11-08)",
-         "- REQ-1-1: The system shall x.", "# Title", "<https://example.com/x>", "<span>text</span> more",
-         "text <b>bold</b>", "<!DOCTYPE html>", "<?php echo 1; ?>", "<![CDATA[x]]>", "text\t<b>")
-RISKY = ("- ```", "  ## Approval", "> ## Approval", "> ```", "```md", "  ```", "    ```", "\t## Approval", "<div>", "</div>",
-         "<pre>", "</pre>", "<img src=\"x\">", "---", "===", "  Approved-by: Bo (2026-11-08)", "text <!-- x -->## Approval",
+         "```", "~~~", "<!-- note -->", "<!--", "-->", "<!-->", "<!--->", "<!---->", "<!-- a --> b <!-- c -->",
+         "  text", "Approved-by: Ana (2026-11-08)", "- REQ-1-1: The system shall x.", "# Title",
+         "<https://example.com/x>", "<span>text</span> more", "text <b>bold</b>", "<!DOCTYPE html>", "<?php echo 1; ?>",
+         "<![CDATA[x]]>", "text\t<b>")
+RISKY = ("- ```", "  ## Approval", "> ## Approval", "> ```", "```md", "  ```", "    ```", "\t## Approval", "<div>",
+         "</div>", "<pre>", "</pre>", "<img src=\"x\">", "---", "===", "  Approved-by: Bo (2026-11-08)",
+         "text <!-- x -->## Approval", "text <!--> ## Approval", "text <!---> x", "<!-- a --> ## Approval <!-- b",
          "<!--\n## Approval\n-->", "<?", "?>", "<![CDATA[", "]]>", "<!DOCTYPE", "<b>", "</b>", "<script>", "</script>",
-         "<span>", "</span>", "## Approval\n", "- <what this task does not do>", "<pre/>", "> <span>", "---", "</pre>", "    <div>")
+         "<span>", "</span>", "## Approval\n", "- <what this task does not do>", "<pre/>", "> <span>", "---", "</pre>",
+         "    <div>")
 
 
 def heading_lines(text):
@@ -562,6 +703,7 @@ if given is not None and MarkdownIt is not None:
         @given(lines=st.lists(st.sampled_from(CLEAN + RISKY), max_size=14))
         def test_the_gates_cut_sections_where_commonmark_does_or_refuse_the_spec(self, lines):
             text = "\n".join(lines) + "\n"
+            self.assertEqual(len(engine.outline(text)), len(text), text)
             if engine.spec_reading_problem(text) is not None:
                 return
             numbers, approval, end = commonmark(text)
@@ -582,11 +724,12 @@ if given is not None and MarkdownIt is not None:
     # and control characters a reader may or may not take for a space or a line end.
     SPACE_GAPS = ("", " ", "\t", "\u00a0", "\u2003", "\u200b", "\ufeff", "\v", "\f", "\x1c", "\x01", "\u2028", "\x85")
     SPACED_LINES = ("<div{}>", "<div{}class=\"x\"{}>", "<pre{}>", "</pre{}>", "<span{}>", "<script{}>", "<div{}/>",
-                    "<!--{}-->", "<!--{}", "{}-->", "<?{}", "?>{}", "<![CDATA[{}]]>", "<!DOCTYPE{}html>", "{}## Approval",
-                    "##{}Approval", "## Approval{}", "{}## Approval{}", "## Open questions{}", "{}# Title", "```{}",
-                    "{}```", "~~~{}", "{}text{}", "text{}", "{}", "<b>{}</b>", "<img{}src=\"x\">", "{}- ## Approval",
-                    "> {}## Approval", "{}Approved-by: Ana (2026-11-06)", "{}===", "{}---", "    {}## Approval",
-                    "\t{}```", "{}- item", "  {}text")
+                    "<!--{}-->", "<!--{}", "<!-->{}", "{}<!--->{}", "{}-->", "<?{}", "?>{}", "<![CDATA[{}]]>",
+                    "<!DOCTYPE{}html>", "{}## Approval", "##{}Approval", "## Approval{}", "{}## Approval{}",
+                    "## Open questions{}", "{}# Title", "```{}", "{}```", "~~~{}", "{}text{}", "text{}", "{}",
+                    "<b>{}</b>", "<img{}src=\"x\">", "{}- ## Approval", "> {}## Approval",
+                    "{}Approved-by: Ana (2026-11-06)", "{}===", "{}---", "    {}## Approval", "\t{}```", "{}- item",
+                    "  {}text")
 
     class WhitespaceAgreement(unittest.TestCase):
         """Wherever the gates read a spec without a reading problem, they cut it where CommonMark does: its headings, its
@@ -602,6 +745,7 @@ if given is not None and MarkdownIt is not None:
             if re.search("[\v\f\x1c-\x1e\x85\u2028\u2029]", text):
                 self.assertIsNotNone(engine.spec_reading_problem(text), text)
                 return
+            self.assertEqual(len(engine.outline(text)), len(text), text)
             if engine.spec_reading_problem(text) is not None:
                 return
             numbers, approval, end = commonmark(text)
@@ -617,11 +761,12 @@ if given is not None and MarkdownIt is not None:
     # block starts and ends, fences and headings, so each meets every other right after paragraph text and elsewhere.
     BLOCK_LINES = ("text line", "", "***", "___", "* * *", "_ _ _", "- - -", "---", "  ***", "    ***", "_\t_\t_",
                    "> ***", "- ***", "- * * *", "1. ***", ">", "> text", "> > text", "-", "- item", "* item", "+ ---",
-                   "1.", "1. item", "2. item", "1) text", "- > text", "> - item", "> - ---", "    code", "\tcode",
+                   "1.", "1. item", "2. item", "1) text", "- > text", "> - item", "> - ---", "> -", "> =", "    code", "\tcode",
                    "  text", "  ---", "    ---", "\t---", "> ---", "> ===", "===", "[a]: /url", "[a]:", "/url",
-                   "[x] done", "- [a]: /u", "<span>", "</span>", "<div>", "<pre>", "</pre>", "<hr/>", "<b>", "<!X>",
-                   "<?x?>", "<!-- x -->", "<!--", "-->", "> <span>", "- <span>", "  <span>", "text <span>",
-                   "## Approval", "  ## Approval", "> ## Approval", "# Title", "## Other", "#", "```", "~~~", "> ```",
+                   "[x] done", "- [a]: /u", "  <!--x", "- ", "  <pre>", "  <div>", "<span>", "</span>", "<div>", "<pre>", "</pre>", "<hr/>", "<b>", "<!X>",
+                   "<?x?>", "<!-- x -->", "<!--", "-->", "<!-->", "<!--->", "<!-->x", "<table>", "<!DOCTYPE html>",
+                   "><table>", "- <div>", "<pre>text", "> <span>", "- <span>", "  <span>", "text <span>", "## Approval",
+                   "  ## Approval", "> ## Approval", "# Title", "## Other", "#", "```", "~~~", "> ```",
                    "Approved-by: Ana (2026-11-08)")
 
     class BlockStartAgreement(unittest.TestCase):
