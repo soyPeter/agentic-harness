@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **The attest key's trust anchor is guarded, and repository copies of the key refuse (ADR-005, follow-up).**
+  `harness-attest.pub`, the public key the `attest` job checks its key against, is now an enforcement file: a pull
+  request that adds or changes it fails `verify --range` without the `harness-change-approved` label, a push that
+  changes it gets no statement, and agents may not write it (the implementer's scope, shell writes and code writes are
+  refused). The `attest` job's live step also lists the repository's secrets and variables with
+  `HARNESS_ATTEST_POLICY_TOKEN` and refuses to sign while a repository-level `HARNESS_ATTEST_KEY` or
+  `HARNESS_ATTEST_PASSWORD` exists, through the new `harness.py repository-check`; when the lists can't be read it
+  refuses unless the recorded-branch opt-in is set, and logs which. `ci-protect --attest` names such secrets and
+  variables, and `--delete-repo-copies` deletes them. `doctor` states the attest mode (live, recorded branch, none or
+  unknown) and warns of repository copies.
+  **Upgrading:** give `HARNESS_ATTEST_POLICY_TOKEN` read access to the repository's Secrets and Variables as well as
+  its Actions, or the live job refuses to sign. Publishing or rotating the public key is now a harness change: a pull
+  request with the label, or the user's own `HARNESS_VERIFY=off git push`.
+
 - **The deliverer's gh and git calls are read as the shell runs them (ADR-002).** Its gh allowlist can't be reached
   by other means. Refused: a merge, close, review or auto-merge named in a command outside a PR's title and body, `--web`,
   and `gh pr comment`, which delivery doesn't use; programs that run code or commands from their arguments or stdin

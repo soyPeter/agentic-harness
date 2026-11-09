@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -116,6 +117,40 @@ def step_script(name, source=None):
     step = WORKFLOW.read_text().split("      - name: %s\n" % name, 1)[1]
     script = textwrap.dedent(re.split(r"\n(?=      - name:|  \S)", step.split("        run: |\n", 1)[1], maxsplit=1)[0])
     return script.replace("https://github.com/soyPeter/agentic-harness.git", str(source)) if source else script
+
+
+# A stand-in for GitHub, the one service these checks can't reach: it answers a read (gh api <endpoint>, gh repo view)
+# with the JSON a test put under the exact command line in $FAKE_GH_ANSWERS, accepts every write, and logs every call
+# to $FAKE_GH_LOG. With $FAKE_GH_TOKEN set, it answers only a call made with GH_TOKEN equal to it.
+FAKE_GH = """#!%s
+import json, os, sys
+words = sys.argv[1:]
+with open(os.environ["FAKE_GH_LOG"], "a") as log:
+    log.write(" ".join(words) + "\\n")
+answers = json.load(open(os.environ["FAKE_GH_ANSWERS"]))
+if os.environ.get("FAKE_GH_TOKEN") and os.environ.get("GH_TOKEN") != os.environ["FAKE_GH_TOKEN"]:
+    sys.exit("fake gh: no token")
+if " ".join(words) in answers:
+    print(json.dumps(answers[" ".join(words)]))
+elif words[:2] == ["api", "-X"] or words[:1] in (["variable"], ["secret"]):
+    pass
+else:
+    sys.exit("fake gh: no answer for: gh " + " ".join(words))
+"""
+
+
+def fake_github(folder, answers):
+    """A bin folder holding the fake gh, and the settings that point it at answers."""
+    (folder / "bin").mkdir(parents=True, exist_ok=True)
+    (folder / "bin" / "gh").write_text(FAKE_GH % sys.executable)
+    (folder / "bin" / "gh").chmod(0o755)
+    (folder / "answers.json").write_text(json.dumps(answers))
+    return folder / "bin", dict(FAKE_GH_ANSWERS=str(folder / "answers.json"), FAKE_GH_LOG=str(folder / "gh.log"))
+
+
+def gh_calls(folder):
+    log = folder / "gh.log"
+    return log.read_text().splitlines() if log.exists() else []
 
 
 class Project:
@@ -420,6 +455,47 @@ class Refusals(unittest.TestCase):
                 self.assertIn("usage: harness.py attest --range <base>..<tip> [--allow-user-changes]", attest.stderr)
 
 
+class AttestPublicKeyHooks(unittest.TestCase):
+    """harness-attest.pub is the trust anchor of the attest job's key check, so agents may not write it, as they may not
+    write the harness's enforcement files: hooks run as Claude Code runs them, JSON on stdin."""
+
+    @classmethod
+    def setUpClass(cls):
+        temp = tempfile.TemporaryDirectory(prefix="attest ")
+        cls.addClassCleanup(temp.cleanup)
+        cls.project = Project(Path(temp.name).resolve() / "project")
+
+    def hook(self, *words, **call):
+        data = dict({"session_id": "s", "cwd": str(self.project.root)}, **call)
+        return self.project.run("python3", "-B", self.project.engine, "hook", *words, check=False,
+                                CLAUDE_PROJECT_DIR=str(self.project.root), input=json.dumps(data))
+
+    def test_the_implementer_may_not_write_it(self):
+        for tool, tool_input in (("Write", {"file_path": "harness-attest.pub", "content": "k"}),
+                                 ("Edit", {"file_path": str(self.project.root / "harness-attest.pub"),
+                                           "old_string": "a", "new_string": "b"})):
+            with self.subTest(tool=tool):
+                refused = self.hook("agent-guard", "implementer", tool_name=tool, tool_input=tool_input)
+
+                self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+                self.assertIn("may not edit harness-attest.pub", refused.stderr)
+        allowed = self.hook("agent-guard", "implementer", tool_name="Write",
+                            tool_input={"file_path": "src/key.py", "content": "k"})
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_no_shell_command_may_write_it(self):
+        for command in ("echo k > harness-attest.pub", "cp /tmp/k.pub harness-attest.pub",
+                        "rm harness-attest.pub", "cosign public-key --key k | tee harness-attest.pub",
+                        "python3 -c \"open('harness-attest.pub', 'w').write('k')\""):
+            with self.subTest(command=command):
+                refused = self.hook("pre-tool-use", tool_name="Bash", tool_input={"command": command})
+
+                self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+                self.assertIn("harness-attest.pub", refused.stderr)
+        allowed = self.hook("pre-tool-use", tool_name="Bash", tool_input={"command": "cat harness-attest.pub"})
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+
 class Ranges(unittest.TestCase):
     def setUp(self):
         self.project = new_project(self)
@@ -574,6 +650,39 @@ class Workflow(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("the harness itself changes", result.stderr)
+        self.assertFalse((runner / STATEMENT_FILE).exists())
+
+    def publish_key(self, project, text="a public key\n"):
+        """The user commits harness-attest.pub on the default branch, the way ADR-005 sets it up."""
+        project.write("harness-attest.pub", text)
+        return project.commit("chore: publish the attest public key")
+
+    def test_a_pull_request_that_publishes_or_replaces_the_attest_public_key_needs_the_approval_label(self):
+        project = new_project(self)
+        published = self.publish_key(project)
+        project.write("harness-attest.pub", "another public key\n")
+        project.commit("chore: rotate the attest key")
+        for base, change in ((project.adopted, "harness-attest.pub"), (published, "harness-attest.pub")):
+            with self.subTest(base=base):
+                _, base_engine = self.take_engine(project, self.pull_request(project, base), take=TAKE_BASE)
+
+                refused = self.verify_pull_request(project, base_engine)
+                allowed = self.verify_pull_request(project, base_engine, allow="--allow-user-changes")
+
+                self.assertEqual(refused.returncode, 1, refused.stdout)
+                self.assertIn("verify: the harness itself changes (%s)" % change, refused.stdout)
+                self.assertEqual((allowed.returncode, allowed.stdout), (0, "verify: ok\n"))
+
+    def test_a_pushed_change_of_the_attest_public_key_gets_no_statement(self):
+        project = new_project(self)
+        published = self.publish_key(project)
+        project.write("harness-attest.pub", "a key the push brings\n")
+        project.commit("chore: rotate the attest key")
+
+        result, runner = self.write_statement(project, published)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("the harness itself changes (harness-attest.pub)", result.stderr)
         self.assertFalse((runner / STATEMENT_FILE).exists())
 
     def test_a_push_whose_own_engine_passes_everything_gets_no_statement_from_the_engine_before_it(self):
@@ -807,16 +916,86 @@ class Workflow(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn("environment-check: ", result.stdout)
 
-    def environment_step(self, project, recorded, default="main", policy_token="", opt_in=""):
-        """The attest job's environment step where gh isn't on the PATH, so no policy read can succeed: the step
-        falls back to the recorded branch only when the user opted in."""
+    def environment_step(self, project, recorded, default="main", policy_token="", opt_in="", github=None):
+        """The attest job's environment step. Without github, gh isn't on the PATH, so no read can succeed and the
+        step falls back to the recorded branch only when the user opted in. With github, a fake gh answers those
+        reads, to the policy token only."""
         runner = Path(tempfile.mkdtemp(prefix="runner ", dir=str(project.root.parent)))
         (runner / "bin").mkdir()
-        os.symlink(shutil.which("mkdir"), str(runner / "bin" / "mkdir"))
+        settings = {}
+        if github is not None:
+            _, settings = fake_github(runner, github)
+            settings["FAKE_GH_TOKEN"] = policy_token
+        for tool in ("mkdir", "python3", "git"):
+            os.symlink(shutil.which(tool), str(runner / "bin" / tool))
         return project.run("/bin/bash", "-e", "-c", step_script(CHECK_ENVIRONMENT), check=False,
                            PATH=str(runner / "bin"), RUNNER_TEMP=str(runner), REPOSITORY="owner/attest",
                            DEFAULT_BRANCH=default, RECORDED_BRANCH=recorded, RECORDED_FALLBACK=opt_in,
-                           POLICY_TOKEN=policy_token, ENGINE_SCRIPT=str(project.engine))
+                           POLICY_TOKEN=policy_token, ENGINE_SCRIPT=str(project.engine), **settings)
+
+    def github(self, secrets=(), variables=(), listed=True):
+        """GitHub's answers to the policy token: the harness-attest rule admits only main, and the repository holds
+        secrets and variables (names) at repository level. listed=False: the lists can't be read."""
+        answers = {"api repos/owner/attest/environments/harness-attest": self.LIMITED,
+                   "api repos/owner/attest/environments/harness-attest/deployment-branch-policies": self.ONLY_MAIN}
+        if listed:
+            answers["api repos/owner/attest/actions/secrets?per_page=100"] = {
+                "total_count": len(secrets), "secrets": [{"name": name} for name in secrets]}
+            answers["api repos/owner/attest/actions/variables?per_page=100"] = {
+                "total_count": len(variables) + 1, "variables": [{"name": name, "value": "v"} for name in variables]
+                + [{"name": "HARNESS_ATTEST_BRANCH", "value": "main"}]}
+        return answers
+
+    def test_the_live_check_refuses_to_sign_while_a_repository_level_copy_of_an_attest_secret_exists(self):
+        project = new_project(self)
+
+        clean = self.environment_step(project, "main", policy_token="t", github=self.github(secrets=["OTHER"]))
+
+        self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
+        self.assertIn("attest mode: live", clean.stdout)
+        self.assertIn("repository-check: no repository-level HARNESS_ATTEST_KEY or HARNESS_ATTEST_PASSWORD",
+                      clean.stdout)
+        copies = {"the key as a repository secret": dict(secrets=["HARNESS_ATTEST_KEY"]),
+                  "the password as a repository secret": dict(secrets=["HARNESS_ATTEST_PASSWORD"]),
+                  "the key as a repository variable": dict(variables=["HARNESS_ATTEST_KEY"]),
+                  "the password as a repository variable": dict(variables=["HARNESS_ATTEST_PASSWORD"])}
+        for case, where in copies.items():
+            with self.subTest(case=case):
+                for opt_in in ("", "true"):
+                    result = self.environment_step(project, "main", policy_token="t", opt_in=opt_in,
+                                                   github=self.github(**where))
+
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    name = (where.get("secrets") or where.get("variables"))[0]
+                    self.assertIn("repository-check: the repository %s %s" % (
+                        "secret" if "secrets" in where else "variable", name), result.stdout)
+
+    def test_when_the_repository_lists_cant_be_read_the_live_check_refuses_unless_opted_in(self):
+        project = new_project(self)
+        unreadable = self.github(listed=False)
+
+        refused = self.environment_step(project, "main", policy_token="t", github=unreadable)
+        accepted = self.environment_step(project, "main", policy_token="t", opt_in="true", github=unreadable)
+        incomplete = self.github()
+        incomplete["api repos/owner/attest/actions/secrets?per_page=100"]["total_count"] = 101
+        partial = self.environment_step(project, "main", policy_token="t", opt_in="true", github=incomplete)
+
+        self.assertEqual(refused.returncode, 1, refused.stdout)
+        self.assertIn("::error::", refused.stdout)
+        self.assertIn("can't list the repository's secrets and variables", refused.stdout)
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+        self.assertIn("::warning::", accepted.stdout)
+        self.assertIn("repository copies: not checked (opted in)", accepted.stdout)
+        self.assertEqual(partial.returncode, 1, partial.stdout)
+        self.assertIn("repository-check: ", partial.stdout)
+
+    def test_without_the_policy_token_the_opted_in_job_logs_that_repository_copies_go_unchecked(self):
+        project = new_project(self)
+
+        accepted = self.environment_step(project, "main", opt_in="true")
+
+        self.assertEqual(accepted.returncode, 0, accepted.stdout)
+        self.assertIn("repository copies: not checked (opted in)", accepted.stdout)
 
     def test_without_a_readable_policy_the_recorded_default_branch_passes_only_after_an_opt_in(self):
         project = new_project(self)
@@ -898,9 +1077,76 @@ class Workflow(unittest.TestCase):
                      "HARNESS_ATTEST_BRANCH=main", "harness-attest.pub", "attest mode",
                      "delete the repository variable HARNESS_ATTEST_RECORDED_FALLBACK"):
             self.assertIn(line, plan.stdout)
+        self.assertIn("--delete-repo-copies", plan.stdout)
         opted = project.harness("ci-protect", "--attest", "--dry-run", "--recorded-fallback", check=False)
         self.assertIn("HARNESS_ATTEST_RECORDED_FALLBACK=true", opted.stdout)
         self.assertIn("recorded branch", opted.stdout)
+
+    def repository(self, project, environment_secrets=("HARNESS_ATTEST_KEY", "HARNESS_ATTEST_PASSWORD"), **lists):
+        """(fake gh's folder, settings) for project on GitHub as owner/attest: harness-attest set up for main with
+        environment_secrets, and the repository-level secrets and variables in lists."""
+        answers = dict(self.github(**lists), **{
+            "repo view --json nameWithOwner,defaultBranchRef": {"nameWithOwner": "owner/attest",
+                                                                "defaultBranchRef": {"name": "main"}},
+            "api repos/owner/attest/environments/harness-attest/secrets": {
+                "total_count": len(environment_secrets), "secrets": [{"name": n} for n in environment_secrets]}})
+        folder = Path(tempfile.mkdtemp(prefix="github ", dir=str(project.root.parent)))
+        bin_folder, settings = fake_github(folder, answers)
+        return folder, dict(settings, PATH="%s:%s" % (bin_folder, os.environ["PATH"]))
+
+    def test_ci_protect_attest_names_repository_copies_and_changes_nothing_unless_asked_to_delete_them(self):
+        project = new_project(self)
+        folder, settings = self.repository(project, secrets=["HARNESS_ATTEST_KEY"],
+                                           variables=["HARNESS_ATTEST_PASSWORD"])
+
+        refused = project.harness("ci-protect", "--attest", **settings)
+
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("the repository secret HARNESS_ATTEST_KEY", refused.stdout)
+        self.assertIn("the repository variable HARNESS_ATTEST_PASSWORD", refused.stdout)
+        self.assertIn("ci-protect --attest --delete-repo-copies", refused.stdout)
+        self.assertEqual([c for c in gh_calls(folder) if c.startswith(("api -X", "variable", "secret"))], [])
+
+    def test_ci_protect_attest_deletes_repository_copies_when_asked_before_it_sets_the_environment_up(self):
+        project = new_project(self)
+        folder, settings = self.repository(project, secrets=["HARNESS_ATTEST_KEY"],
+                                           variables=["HARNESS_ATTEST_PASSWORD"])
+
+        done = project.harness("ci-protect", "--attest", "--delete-repo-copies", **settings)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        writes = [c for c in gh_calls(folder) if c.startswith("api -X")]
+        self.assertEqual(writes[:3], ["api -X DELETE repos/owner/attest/actions/secrets/HARNESS_ATTEST_KEY",
+                                      "api -X DELETE repos/owner/attest/actions/variables/HARNESS_ATTEST_PASSWORD",
+                                      "api -X PUT repos/owner/attest/environments/harness-attest --input -"])
+        self.assertIn("deleted the repository secret HARNESS_ATTEST_KEY", done.stdout)
+        self.assertIn("deleted the repository variable HARNESS_ATTEST_PASSWORD", done.stdout)
+
+    def test_doctor_states_the_attest_mode_and_warns_of_repository_copies(self):
+        project = new_project(self)
+        modes = {
+            "attest mode: live": dict(environment_secrets=("HARNESS_ATTEST_KEY", "HARNESS_ATTEST_POLICY_TOKEN")),
+            "attest mode: recorded branch": dict(variables=["HARNESS_ATTEST_RECORDED_FALLBACK"]),
+            "attest mode: none": {},
+        }
+        for line, setup in modes.items():
+            with self.subTest(mode=line):
+                _, settings = self.repository(project, **setup)
+                if setup.get("variables"):
+                    answers = json.loads(Path(settings["FAKE_GH_ANSWERS"]).read_text())
+                    answers["api repos/owner/attest/actions/variables?per_page=100"]["variables"][0]["value"] = "true"
+                    Path(settings["FAKE_GH_ANSWERS"]).write_text(json.dumps(answers))
+
+                doctor = project.harness("doctor", **settings)
+
+                self.assertIn(line, doctor.stdout)
+                self.assertNotIn("HARNESS_ATTEST_KEY", doctor.stdout)
+        _, settings = self.repository(project, secrets=["HARNESS_ATTEST_KEY"])
+        warned = project.harness("doctor", **settings)
+        self.assertIn("warn  the repository secret HARNESS_ATTEST_KEY", warned.stdout)
+        self.assertIn("--delete-repo-copies", warned.stdout)
+        unknown = project.harness("doctor", PATH="/usr/bin:/bin")
+        self.assertIn("attest mode: unknown", unknown.stdout)
 
     def test_both_jobs_take_the_engine_the_same_way(self):
         self.assertEqual(step_script(TAKE_BASE), step_script(TAKE_PUSHED))
