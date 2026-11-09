@@ -43,7 +43,9 @@
   commit.
 
 - **Attestation setup and the traceability history gap.** `harness.py ci-protect --attest` sets up the `harness-attest`
-  environment (the default branch only, no repository-level attestation secrets) and checks it before it reports.
+  environment (the default branch only, no repository-level attestation secrets) and checks it before it reports. It
+  states the attest mode in force (a live read with `HARNESS_ATTEST_POLICY_TOKEN`, or the recorded-branch opt-in
+  `--recorded-fallback`) and whether `harness-attest.pub` is committed on the default branch.
   `trace export` says `history incomplete` only when the judged commit isn't found and the history may hold it: a
   shallow clone that holds the commit has no gap, and trees git can't read (missing objects, as in a partial clone
   whose remote is gone) are reported, where they were silently skipped before.
@@ -84,10 +86,12 @@
     previous tip, so a push can't pass its own change), and, with the secret `HARNESS_ATTEST_KEY` (a cosign private
     key) and `HARNESS_ATTEST_PASSWORD` in the environment `harness-attest`, signs it with cosign 3.1.4 (checked against
     its SHA-256) and a signing config without services, so nothing goes to a transparency log, and uploads the Statement
-    and its Sigstore bundle as the `harness-attestation` artifact. The job refuses a first or forced push, and refuses
-    to sign unless the environment admits only the default branch, checked with its own token or against the branch
-    `harness.py ci-protect --attest` recorded in the repository variable `HARNESS_ATTEST_BRANCH` (`harness.py
-    environment-check` judges the rule). Without the key the job does nothing; with it, a failure fails the job, and no
+    and its Sigstore bundle as the `harness-attestation` artifact. A thin pin must name a release tag, which the pull request check fetches too. The job refuses a first or forced push and a previous
+    tip with no verifier (it never takes the engine from the tip), checks the key against `harness-attest.pub` on the
+    previous tip, and refuses to sign unless the environment admits only the default branch: read live with the
+    step-scoped secret `HARNESS_ATTEST_POLICY_TOKEN` (`harness.py environment-check` judges the rule), or, only after
+    the maintainer opts in with `ci-protect --attest --recorded-fallback`, against the branch recorded in
+    `HARNESS_ATTEST_BRANCH`. Without the key the job does nothing; with it, a failure fails the job, and no
     step can change the pull request's check. A harness change never gets a CI statement in v1. Run
     `harness.py ci-protect --attest` once, then add the secrets to the environment, once the base branch runs a release
     with `attest` (see the ADR).
