@@ -19,6 +19,7 @@ Usage:
   harness.py verify [--range <base>..<tip>] [--allow-user-changes]   (gates on the staged change, or a CI range)
   harness.py attest --range <base>..<tip> [--allow-user-changes]     (in-toto statement of a verified range, ADR-005)
   harness.py environment-check <environment.json> <policies.json> <branch>   (CI: the attest environment's rule, ADR-005)
+  harness.py repository-check <secrets.json> <variables.json>    (CI: no repository-level attest secrets, ADR-005)
   harness.py approve <task-id>                                    (autonomous mode: policy approval of a low-risk spec)
   harness.py escalate <task-id> --reason <text> [--kind <k>] [--class <failure class>] [--needed <text>]
   harness.py escalations                                          (open escalations for the user)
@@ -33,7 +34,8 @@ Usage:
                                                                   (derived traceability export, ADR-004)
   harness.py ci-judge --range <base>..<tip>                       (CI: independent re-judging of finished tasks)
   harness.py ci-protect [--branch main] [--with-judge] [--dry-run] (require the CI checks; needs gh)
-  harness.py ci-protect --attest [--dry-run] [--recorded-fallback] (the harness-attest environment: default branch only)
+  harness.py ci-protect --attest [--dry-run] [--recorded-fallback] [--delete-repo-copies]
+                                                                  (the harness-attest environment: default branch only)
   harness.py doctor
 """
 import fnmatch
@@ -148,7 +150,7 @@ KNOWLEDGE_PATH_KEYS = ("path", "paths", "note", "notes", "hub", "name", "file", 
 # them are refused: they would skip the gates (task states, approvals, verdicts, settings, skill state).
 SHELL_PROTECTED = (r"^backbone(/|$)", r"^scripts/harness(/|$)", r"^\.claude(/|$)", r"^\.codex(/|$)", r"^\.opencode(/|$)",
                    r"^(AGENTS|CLAUDE)\.md$", r"^\.githooks(/|$)",
-                   r"^\.git/(hooks|harness)(/|$)", r"^\.git/config$")
+                   r"^\.git/(hooks|harness)(/|$)", r"^\.git/config$", r"^harness-attest\.pub$")
 # Thin mode (ADR-001): the launcher names the engine cache and the plugin it runs from. They decide the project's gates
 # but lie outside it, beyond the reach of the repository-relative protections.
 INSTALL_DIRS = (("HARNESS_ENGINES", "the harness engine cache"), ("HARNESS_PLUGIN_ROOT", "the harness plugin"))
@@ -160,7 +162,7 @@ USER_AGENT_MARK = "Agentic harness: generated from"
 # Harness files whose edits change enforcement; verify refuses commits that change them away from the lock.
 ENFORCEMENT_FILES = (r"^scripts/harness/", r"^\.claude/agents/", r"^\.github/workflows/harness-[^/]+\.ya?ml$",
                      r"^\.devcontainer/harness-agent/", r"^\.codex/(hooks\.json$|agents/|rules/harness\.rules$)",
-                     r"^\.opencode/(plugins/harness\.js$|agents/)")
+                     r"^\.opencode/(plugins/harness\.js$|agents/)", r"^harness-attest\.pub$")
 # What the main session (the orchestrator) may edit itself; specs, ADRs and code go through the role agents.
 ORCHESTRATOR_ALLOW = (r"^backbone/(?!specs/|adr/|\.verdicts/)", r"^\.claude/skills/", r"^CLAUDE\.md$")
 DECISIONS_FILE = ENGINE / "scripts/harness/decisions.json"
@@ -232,7 +234,7 @@ AGENT_SCOPES = {
     "scribe": ("allow", (r"^backbone/6-MEMORY\.md$", r"^backbone/adr/[^/]+\.md$", r"^backbone/5-DECISIONS\.md$",
                          r"^backbone/proposals/[^/]+\.md$")),
     "implementer": ("deny", (r"^backbone/", r"^\.claude/", r"^\.codex/", r"^\.opencode/", r"^scripts/harness/",
-                             r"^(AGENTS|CLAUDE)\.md$")),
+                             r"^(AGENTS|CLAUDE)\.md$", r"^harness-attest\.pub$")),
     # Reviewers never edit. Claude Code enforces this with their tool list; Codex has no per-agent tool list.
     "griller": ("allow", ()),
     "judge": ("allow", ()),
@@ -1205,7 +1207,7 @@ MUTATORS = ("rm", "rmdir", "unlink", "mv", "chmod", "chown", "truncate", "tee", 
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 SETTING_ASSIGNMENT = re.compile(r"^(HARNESS_[A-Z0-9_]+|SKIP_BUILD)=")
 PROTECTED_MENTION = re.compile(r"(?:^|[\s'\"/=(:])(backbone/|scripts/harness/|\.claude/|AGENTS\.md|CLAUDE\.md"
-                               r"|\.git/(?:hooks|harness|config))")
+                               r"|\.git/(?:hooks|harness|config)|harness-attest\.pub)")
 CODE_WRITES = re.compile(r"open\([^)]*,\s*['\"][wax+]|\.write_(text|bytes)\(|\bos\.(remove|unlink|rename|replace|"
                          r"chmod|truncate)\(|\bshutil\.(copy|move|rmtree)|\.(unlink|rename|touch|rmdir)\(|"
                          r"\bfs\.(writeFile|appendFile|unlink|rename|rm|copyFile)|\bFile\.(write|delete|rename)|"
@@ -1454,8 +1456,8 @@ def git_findings(words):
 
 def code_findings(code, label):
     if PROTECTED_MENTION.search(code) and CODE_WRITES.search(code):
-        return ["%s writes to harness-protected paths (backbone/, scripts/harness/, .claude/, git hooks); "
-                "use the Write/Edit tools so the gates see the change." % label]
+        return ["%s writes to harness-protected paths (backbone/, scripts/harness/, .claude/, git hooks, "
+                "harness-attest.pub); use the Write/Edit tools so the gates see the change." % label]
     return []
 
 
@@ -2212,7 +2214,7 @@ def escalations_command():
 # written some other way. In supervised mode the user edits these files too, so the snapshot is also taken as a
 # command starts, and only what changed while that command ran is reported.
 SNAPSHOT_ROOTS = ("backbone", "scripts/harness", ".claude", ".codex", ".opencode")
-SNAPSHOT_FILES = ("AGENTS.md", "CLAUDE.md")
+SNAPSHOT_FILES = ("AGENTS.md", "CLAUDE.md", "harness-attest.pub")
 SNAPSHOT_SKIP = (".claude/settings.local.json",)
 
 
@@ -3019,6 +3021,70 @@ def environment_check_command(argv):
     return 1 if problems else 0
 
 
+def repository_copies(secrets, variables):
+    """[(kind, name)] of the repository-level secrets and variables named like the attest job's secrets, from the JSON
+    of GET repos/<r>/actions/secrets and /variables; None when either list isn't whole. A repository secret signs when
+    the environment has none, and a variable of that name holds the key in plain text."""
+    found = []
+    for listing, kind in ((secrets, "secrets"), (variables, "variables")):
+        items = listing.get(kind) if isinstance(listing, dict) else None
+        if not isinstance(items, list) or listing.get("total_count") != len(items):
+            return None
+        found += [(kind, i["name"]) for i in items if isinstance(i, dict) and i.get("name") in ATTEST_SECRETS]
+    return found
+
+
+def copy_label(kind, name):
+    return "the repository %s %s" % (kind[:-1], name)
+
+
+def repository_check_command(argv):
+    """harness-verify's attest job: the repository's secrets and variables from gh api, judged here (ADR-005)."""
+    if len(argv) != 2:
+        sys.stderr.write("usage: harness.py repository-check <secrets.json> <variables.json>\n")
+        return 64
+    try:
+        copies = repository_copies(json.loads(read(argv[0]) or "null"), json.loads(read(argv[1]) or "null"))
+    except ValueError as exc:
+        print("repository-check: the repository's JSON doesn't parse: %s" % exc)
+        return 1
+    if copies is None:
+        print("repository-check: the lists of the repository's secrets and variables are incomplete")
+        return 1
+    for kind, name in copies:
+        print("repository-check: %s would sign or expose the attest key; keep %s in %s only" % (
+            copy_label(kind, name), name, ATTEST_ENVIRONMENT))
+    if not copies:
+        print("repository-check: no repository-level %s" % " or ".join(ATTEST_SECRETS))
+    return 1 if copies else 0
+
+
+def attest_repository(name):
+    """What the attest job finds on GitHub (ADR-005): (the names of harness-attest's secrets, whether the recorded-branch
+    opt-in is set, the repository-level copies of its secrets). Each is None when gh can't read it."""
+    ok, listed = gh_api("repos/%s/environments/%s/secrets" % (name, ATTEST_ENVIRONMENT))
+    environment = [s.get("name") for s in listed.get("secrets") or [] if isinstance(s, dict)] \
+        if ok and isinstance(listed, dict) else None
+    ok_secrets, secrets = gh_api("repos/%s/actions/secrets?per_page=100" % name)
+    ok_variables, variables = gh_api("repos/%s/actions/variables?per_page=100" % name)
+    copies = repository_copies(secrets, variables) if ok_secrets and ok_variables else None
+    recorded = any(isinstance(v, dict) and v.get("name") == ATTEST_RECORDED_VARIABLE and v.get("value") == "true"
+                   for v in variables.get("variables") or []) if copies is not None else None
+    return environment, recorded, copies
+
+
+def attest_health():
+    """(the attest mode doctor states, its issues)."""
+    name, _ = github_repo()
+    if name.startswith("<"):
+        return "unknown: gh sees no GitHub repository", []
+    environment, recorded, copies = attest_repository(name)
+    mode = attest_mode(None if environment is None else ATTEST_POLICY_SECRET in environment, recorded)
+    issues = [("warn", "%s: the attest job refuses to sign while it exists; delete it with harness.py ci-protect "
+                       "--attest --delete-repo-copies" % copy_label(kind, copy)) for kind, copy in copies or []]
+    return mode, issues
+
+
 def gh_api(endpoint, method=None, body=None):
     """(ok, parsed JSON or None) for gh api endpoint; body goes in as JSON."""
     words = ["gh", "api"] + (["-X", method] if method else []) + [endpoint] + (["--input", "-"] if body else [])
@@ -3040,6 +3106,8 @@ def attest_mode(policy_token, recorded):
     the environment's secrets can't be listed."""
     if policy_token is None:
         return "unknown: can't list the secrets of %s" % ATTEST_ENVIRONMENT
+    if recorded is None:
+        return "unknown: can't list the repository's secrets and variables"
     if policy_token:
         return "live: the job reads the rule with %s, and %s" % (
             ATTEST_POLICY_SECRET, "accepts the recorded branch when it can't read the rule (opted in)" if recorded
@@ -3057,15 +3125,16 @@ def public_key_line(default):
     return ("%s is not on %s: the job refuses to sign until it is committed there" % (ATTEST_PUBLIC_KEY, default))
 
 
-def ci_protect_attest(name, default, dry_run, recorded=False):
+def ci_protect_attest(name, default, dry_run, recorded=False, delete_copies=False):
     """Set the harness-attest environment up for the attest job (ADR-005): only the default branch may deploy to it,
-    no repository-level secret of the same names may stand in for its own, and the default branch is recorded in the
-    repository variable the job reads only when the user opted in (recorded=True) and the rule can't be read. States
-    the mode the job runs in, and checks the result before it says so."""
+    no repository-level secret or variable of the same names may stand in for its own (delete_copies deletes them), and
+    the default branch is recorded in the repository variable the job reads only when the user opted in (recorded=True)
+    and the rule can't be read. States the mode the job runs in, and checks the result before it says so."""
     rule = {"deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}
     endpoint = "repos/%s/environments/%s" % (name, ATTEST_ENVIRONMENT)
     if dry_run or name.startswith("<"):
-        print("ci-protect --attest: would refuse while repository secrets %s exist" % ", ".join(ATTEST_SECRETS))
+        print("ci-protect --attest: would refuse while repository secrets or variables %s exist (with "
+              "--delete-repo-copies: delete them)" % ", ".join(ATTEST_SECRETS))
         print("ci-protect --attest: would PUT %s %s" % (endpoint, json.dumps(rule)))
         print("ci-protect --attest: would make %s the only deployment branch of %s" % (default, ATTEST_ENVIRONMENT))
         print("ci-protect --attest: would set the repository variable %s=%s" % (ATTEST_BRANCH_VARIABLE, default))
@@ -3077,15 +3146,22 @@ def ci_protect_attest(name, default, dry_run, recorded=False):
         print("ci-protect --attest: attest mode without it: %s" % attest_mode(False, recorded))
         print("ci-protect --attest: %s" % public_key_line(default))
         return 0 if dry_run else 1
-    ok, secrets = gh_api("repos/%s/actions/secrets" % name)
-    if not ok or not isinstance(secrets, dict):
-        print("ci-protect --attest: can't list %s's secrets, so nothing was changed" % name)
+    _, _, copies = attest_repository(name)
+    if copies is None:
+        print("ci-protect --attest: can't list %s's secrets and variables, so nothing was changed" % name)
         return 1
-    leftover = [s.get("name") for s in secrets.get("secrets") or [] if isinstance(s, dict)
-                and s.get("name") in ATTEST_SECRETS]
-    if leftover:
-        print("ci-protect --attest: repository secrets %s would stand in for the environment's when it has none; "
-              "delete them (gh secret delete NAME) and rerun" % ", ".join(leftover))
+    for kind, copy in copies:
+        if not delete_copies:
+            print("ci-protect --attest: %s would stand in for the environment's or expose the key, and the attest "
+                  "job refuses to sign while it exists" % copy_label(kind, copy))
+        elif gh_api("repos/%s/actions/%s/%s" % (name, kind, copy), "DELETE")[0]:
+            print("ci-protect --attest: deleted %s" % copy_label(kind, copy))
+        else:
+            print("ci-protect --attest: can't delete %s, so nothing else was changed" % copy_label(kind, copy))
+            return 1
+    if copies and not delete_copies:
+        print("ci-protect --attest: nothing was changed. Put the key in %s first if it is only there, then run "
+              "harness.py ci-protect --attest --delete-repo-copies to delete them" % ATTEST_ENVIRONMENT)
         return 1
     if not gh_api(endpoint, "PUT", rule)[0]:
         print("ci-protect --attest: can't set %s, so nothing else was changed" % ATTEST_ENVIRONMENT)
@@ -3353,6 +3429,10 @@ def doctor():
                                                                  values["HARNESS_PROJECT_NAME"] or ROOT.name,
                                                                  adopted_summary(info)))
     issues = health()
+    if (ROOT / ".github/workflows/harness-verify.yml").is_file():
+        mode, attest_issues = attest_health()
+        print("attest mode: %s" % mode)
+        issues += attest_issues
     found, _ = scan()
     if found:
         blocks = sum(1 for f in found if f[1].severity == "block")
@@ -6111,7 +6191,8 @@ def ci_protect_command(argv):
     set up the harness-attest environment instead (ADR-005)."""
     name, default = github_repo()
     if "--attest" in argv:
-        return ci_protect_attest(name, default, "--dry-run" in argv, "--recorded-fallback" in argv)
+        return ci_protect_attest(name, default, "--dry-run" in argv, "--recorded-fallback" in argv,
+                                 "--delete-repo-copies" in argv)
     contexts = ["verify"] + (["judge"] if "--with-judge" in argv else [])
     branch = argv[argv.index("--branch") + 1] if "--branch" in argv and argv.index("--branch") + 1 < len(argv) else default
     endpoint = "repos/%s/branches/%s/protection" % (name, branch)
@@ -7533,6 +7614,8 @@ def main(argv):
         return attest_command(argv[2:])
     if argv[1:2] == ["environment-check"]:
         return environment_check_command(argv[2:])
+    if argv[1:2] == ["repository-check"]:
+        return repository_check_command(argv[2:])
     if len(argv) == 3 and argv[1] == "approve":
         return approve_command(argv[2])
     if argv[1:2] == ["escalate"]:

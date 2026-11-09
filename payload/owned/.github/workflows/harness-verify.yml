@@ -10,8 +10,9 @@
 # verifies the pushed range with the engine the push starts from (the previous tip), writes an in-toto statement of its
 # verdicts and signs it with the key in the `harness-attest` environment, which only the default branch may use. Pull
 # requests never run it, so they never see the key. Run `harness.py ci-protect --attest` once, commit the public key as
-# harness-attest.pub on the default branch, then add the secrets HARNESS_ATTEST_KEY and HARNESS_ATTEST_PASSWORD to that
-# environment (ADR-005 describes it). Without the key the job does nothing.
+# harness-attest.pub on the default branch (it is an enforcement file: a harness change), then add the secrets
+# HARNESS_ATTEST_KEY and HARNESS_ATTEST_PASSWORD to that environment only (ADR-005 describes it). The job refuses to sign
+# while repository-level copies of them exist. Without the key the job does nothing.
 name: harness-verify
 
 on:
@@ -261,7 +262,20 @@ jobs:
             echo "::warning::The harness-attest rule can't be read; the branch ci-protect --attest recorded ($DEFAULT_BRANCH) is accepted by opt-in (HARNESS_ATTEST_RECORDED_FALLBACK). The rule is not re-read."
             echo "attest mode: recorded branch $DEFAULT_BRANCH (opted in)"
           else
-            echo "::error::The harness-attest rule can't be read, and there is no opt-in to the recorded branch: no statement. Set HARNESS_ATTEST_POLICY_TOKEN in harness-attest (a token with Actions read on this repository), or run harness.py ci-protect --attest --recorded-fallback as a maintainer."
+            echo "::error::The harness-attest rule can't be read, and there is no opt-in to the recorded branch: no statement. Set HARNESS_ATTEST_POLICY_TOKEN in harness-attest (a token with read access to this repository's Actions, Secrets and Variables), or run harness.py ci-protect --attest --recorded-fallback as a maintainer."
+            exit 1
+          fi
+          if [[ -n "$POLICY_TOKEN" ]] \
+            && GH_TOKEN="$POLICY_TOKEN" gh api "repos/$REPOSITORY/actions/secrets?per_page=100" > "$dir/secret-names.json" 2>/dev/null \
+            && GH_TOKEN="$POLICY_TOKEN" gh api "repos/$REPOSITORY/actions/variables?per_page=100" \
+              > "$dir/variable-names.json" 2>/dev/null; then
+            echo "repository copies: checked with HARNESS_ATTEST_POLICY_TOKEN"
+            python3 "$ENGINE_SCRIPT" repository-check "$dir/secret-names.json" "$dir/variable-names.json"
+          elif [[ "$RECORDED_FALLBACK" == "true" ]]; then
+            echo "::warning::The repository's secrets and variables can't be listed; accepted by opt-in (HARNESS_ATTEST_RECORDED_FALLBACK). A repository-level HARNESS_ATTEST_KEY or HARNESS_ATTEST_PASSWORD goes unnoticed."
+            echo "repository copies: not checked (opted in)"
+          else
+            echo "::error::The job can't list the repository's secrets and variables, and there is no opt-in to the recorded branch: no statement. Give HARNESS_ATTEST_POLICY_TOKEN read access to the repository's Secrets and Variables."
             exit 1
           fi
 
