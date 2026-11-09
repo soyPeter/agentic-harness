@@ -609,26 +609,63 @@ class MachineGuard(unittest.TestCase):
                 self.assertEqual((code, out), (0, "{}\n" if source == "codex" else ""), err)
                 self.assertNotIn("outdated", status_line(self.env, source))
 
+    def test_status_names_the_release_the_guard_copy_is_from(self):
+        """install from a checkout of another release leaves a copy that the plugin, at this release, doesn't leave the
+        check to. Status run in that checkout names the copy's release, and says the plugin checks where its guard
+        differs, so the refusals it adds are explained."""
+        other = self.work / "other release"
+        for name in ("machine.sh", "tools/machine.py", "machine/guard.py"):
+            (other / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(str(ROOT / name), str(other / name))
+        (other / "VERSION").write_text("9.9.9\n")
+        with (other / "machine/guard.py").open("a") as handle:
+            handle.write("# release 9.9.9\n")
+        subprocess.run([str(other / "machine.sh"), "install", "--roots", str(self.roots), "--mode", "block"],
+                       env=self.env, check=True, capture_output=True, text=True)
+        status = subprocess.run([str(other / "machine.sh"), "status"], env=self.env, check=True, capture_output=True,
+                                text=True).stdout
+        claude = [line for line in status.splitlines() if line.split()[:1] == ["claude"]][0]
+        self.assertIn("guard hook present", claude)
+        self.assertIn("guard copy of release 9.9.9", claude)
+        self.assertIn("the agentic-harness plugin checks", claude)
+        code, _, err = self.plugin_answer("claude", edit("claude", self.plain / "x.py", self.plain), self.plain)
+        self.assertEqual(code, 2, err)
+        self.assertIn("outdated", status_line(self.env, "claude"))
+
     def test_codex_trust_written_inline_or_as_dotted_keys_is_read_or_reported(self):
         """Codex writes trust as [hooks.state."<key>"] tables. A config may also hold it as an inline table or dotted
-        keys: tomllib reads those (Python 3.11 and later), but Python 3.10 reads only the tables. There the guard
-        hook is reported as one whose state can't be told, and the plugin answers as well, which is the safe
-        direction."""
+        keys: tomllib reads both (Python 3.11 and later). Python 3.10 reads the dotted keys line by line, but not an
+        inline table: there the guard hook is reported as one whose state can't be told, and the plugin answers as
+        well, which is the safe direction."""
         self.install("block")
         (key, digest), = codex_hooks(self.env).values()
-        reads = subprocess.run(["python3", "-c", "import tomllib"], env=self.env, capture_output=True).returncode == 0
+        tomllib = subprocess.run(["python3", "-c", "import tomllib"], env=self.env, capture_output=True).returncode == 0
         forms = {"inline table": '[hooks]\nstate = {%s = {trusted_hash = "%s"}}\n' % (json.dumps(key), digest),
                  "dotted keys": 'hooks.state.%s.trusted_hash = "%s"\n' % (json.dumps(key), digest)}
         for form, text in forms.items():
             with self.subTest(form=form):
                 (codex_folder(self.env) / "config.toml").write_text(text)
                 code, out, err = self.plugin_answer("codex", edit("codex", self.plain / "x.py", self.plain), self.plain)
-                if reads:
+                if tomllib or form == "dotted keys":
                     self.assertIn("guard hook present", status_line(self.env, "codex"))
                     self.assertEqual((code, out), (0, "{}\n"), err)
                 else:
                     self.assertIn("can't be told", status_line(self.env, "codex"))
                     self.assertEqual(code, 2, err)
+
+    def test_codex_turning_the_guard_hook_off_in_a_form_the_reader_misses_leaves_the_plugin_checking(self):
+        """Codex skips a hook its config turns off, whatever the form of the setting: a quoted key, or a value that
+        isn't true or false. Whatever Python reads, the guard hook must not be reported as running, so the plugin
+        checks."""
+        self.install("block")
+        (key, digest), = codex_hooks(self.env).values()
+        for setting in ('"enabled" = false', "enabled = 0", 'enabled = "false"'):
+            with self.subTest(setting=setting):
+                text = '[hooks.state.%s]\ntrusted_hash = "%s"\n%s\n' % (json.dumps(key), digest, setting)
+                (codex_folder(self.env) / "config.toml").write_text(text)
+                self.assertNotIn("guard hook present", status_line(self.env, "codex"))
+                code, out, err = self.plugin_answer("codex", edit("codex", self.plain / "x.py", self.plain), self.plain)
+                self.assertEqual(code, 2, err)
 
 
 class CodexAppServer:

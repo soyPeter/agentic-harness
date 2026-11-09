@@ -259,8 +259,11 @@
   (there a refusal can come twice). `machine.sh status` says when the Codex guard hook isn't trusted, changed since it
   was trusted, or is turned off. The plugin also answers when the guard copy in `~/.agentic-harness/guard.py` isn't this
   release's (a plugin upgrade without `./machine.sh install`), since that copy may check other settings; status says to
-  install again. On Python 3.10, which has no `tomllib`, trust written as an inline table or dotted keys can't be read:
-  status says so, and the plugin answers too. `install --plugin` takes out an untrusted guard hook too. A live check
+  install again. Where `status` runs from the checkout that installed the copy, it names the copy's release (`install`
+  leaves it in `~/.agentic-harness/guard.release`) and says the plugin checks too wherever its own `guard.py` differs;
+  the plugin's copy can't be seen from there. On Python 3.10, which has no `tomllib`, the trust and on/off settings
+  are read from tables and dotted keys, quoted or not. A setting in any other form (an inline table, or an `enabled`
+  that isn't true or false) can't be read: status says so, and the plugin answers too. `install --plugin` takes out an untrusted guard hook too. A live check
   (`tests/test-machine-guard.py`, needs `codex` on the PATH, no model calls) compares this with what `codex
   app-server` itself lists and records.
 - **One reminder per session, also for hooks and tool calls run at once.** Claude Code and Codex run a call's hooks,

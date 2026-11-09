@@ -226,7 +226,8 @@ has it and every agent loads it:
     Where the plugin can't tell (it can't read that file, or Codex runs with `--dangerously-bypass-hook-trust`), it
     answers as well: a refusal can come twice, a reminder still comes once per session and repository. An installed
     guard is a copy: run `install` again after updating the harness. Until you do, the plugin doesn't leave the check
-    to that copy, and `status` says it is outdated.
+    to that copy, and `status` says it is outdated. Where `status` runs from the checkout that installed the copy, it
+    names the copy's release and says the plugin checks too wherever its own `guard.py` differs.
   - `machine.sh managed --out DIR` writes the same guard as Claude Code `managed-settings.json` and Codex
     `requirements.toml`, which nobody on the machine can switch off. Review them and install with sudo (see the
     generated INSTALL.md); the tool never writes system files. The plugin reads only the user's settings, so with a
