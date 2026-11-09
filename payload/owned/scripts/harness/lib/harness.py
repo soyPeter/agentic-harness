@@ -4296,19 +4296,25 @@ GIT_EXEC_REFUSAL = "--exec, --upload-pack and --receive-pack run a command the h
 PUSH_ALL_REFUSAL = "--all and --mirror push every branch, the default one included: push the branch by name."
 PUSH_DEFAULT_REFUSAL = ("it pushes only its own branch; the default branch changes through the PR, when the user "
                         "merges it.")
+PUSH_AFTER_SWITCH_REFUSAL = ("it doesn't push in a command that changes the branch (git checkout, switch): the harness "
+                             "checks a push against the branch the checkout is on now. Push in a command of its own.")
+REBASE_BRANCH_REFUSAL = ("git rebase with a branch argument checks that branch out first, and fast-forwards it: the "
+                         "deliverer rebases only its own branch onto an upstream (git rebase origin/main).")
 COPY_PROGRAMS = ("ln", "link", "cp", "mv", "install", "rsync", "ditto", "hash")
 CODE_PROGRAMS = ("awk", "gawk", "mawk", "nawk", "sed", "osascript", "fish", "csh", "tcsh", "tclsh", "pwsh", "lua", "php",
-                 "expect", "busybox", "jshell", "jrunscript", "Rscript", "julia", "runghc", "scala", "groovy", "ed", "ex",
-                 "vi", "vim", "nvim", "emacs", "less", "more", "man")
+                 "expect", "busybox", "jshell", "jrunscript", "Rscript", "julia", "runghc", "scala", "groovy", "swift",
+                 "ed", "ex", "vi", "vim", "nvim", "emacs", "less", "more", "man")
+# pytest loads any module as a plugin (-p code) and imports the conftest.py files it finds.
+TEST_RUNNERS = ("pytest", "py.test")
 LATER_PROGRAMS = ("coproc", "trap")
 RUNTIMES = re.compile(r"(?:python|perl|ruby|node|nodejs|bun|deno|tsx|ts-node)[\d.]*")
-REGISTRY_RUNNERS = ("npx", "bunx", "pnpx")
+# uv, pipx and poetry run a package, a script or an interpreter with whatever arguments follow.
+REGISTRY_RUNNERS = ("npx", "bunx", "pnpx", "uvx", "uv", "pipx", "poetry")
 PACKAGE_MANAGERS = ("npm", "pnpm", "yarn", "bun", "deno")
 REGISTRY_SUBCOMMANDS = ("x", "exec", "dlx", "create", "eval", "repl")
 MAKE_LIKE = ("make", "gmake", "just", "task", "ninja")
 # Build and task files a tool reads from the working directory as code, when a command writes one of them.
 IMPLICIT_READERS = MAKE_LIKE + ("npm", "pnpm", "yarn", "bun", "deno")
-PYTHON_TEST_MODULES = ("pytest", "unittest")
 VERSION_FLAGS = ("--version", "-V", "--help", "-h")
 # Node's and Bun's -v is their version; Python's and Ruby's is verbose mode, which then reads stdin.
 SHORT_VERSION_FLAG = ("node", "nodejs", "bun", "deno", "perl")
@@ -4318,9 +4324,13 @@ PERL_MODULE = re.compile(r"[A-Za-z_][\w:]*(?:=[\w.,:/+-]*)?")
 URL_WORD = re.compile(r"data:|://|^(npm|jsr):")
 # A stdin path or a file descriptor a program reads a file from: -, /dev/stdin, /dev/fd/N, /proc/self/fd/N.
 STDIN_FILE = re.compile(r"(?:^|=|-[A-Za-z])(?:/dev/stdin|/dev/fd/\d+|/proc/self/fd/\d+|-)$")
-WRITE_REDIRECTION = re.compile(r"(?:&>>?|>>?\|?)\s*(?:['\"]?)([^\s;&|<>()'\"]+)")
+WRITE_REDIRECTION = re.compile(r"(?:&>>?|>>?\|?)\s*")
+# The options that name the file a download writes.
+OUTPUT_OPTIONS = {"curl": ("-o", "--output"), "wget": ("-O", "--output-document")}
 SYSTEM_PREFIXES = ("/usr/", "/bin/", "/sbin/", "/opt/", "/Library/", "/System/", "/Applications/", "/nix/")
 GITHUB_REPO = re.compile(r"github\.com[/:]([^/\s]+/[^/\s#?]+?)(?:\.git)?(?:[/#?\s]|$)")
+# The git commands that change which branch HEAD names, so a push after one pushes a branch the gate didn't check.
+BRANCH_CHANGES = ("checkout", "switch", "symbolic-ref", "bisect", "worktree")
 REF_COMMANDS = ("checkout", "switch", "merge", "rebase", "reset", "branch", "fetch", "pull", "update-ref",
                 "symbolic-ref", "restore", "cherry-pick", "revert", "am", "worktree", "push")
 # Matched on command_view, the command without a PR's title and body. Heredoc bodies stay in the text, so a merge named
@@ -4338,8 +4348,8 @@ CODE_REFUSAL = ("%s runs the code or commands its arguments name, which the harn
 LATER_REFUSAL = "%s runs a command later, which the harness doesn't read; run the command where it's written."
 INLINE_REFUSAL = "%s runs code from its arguments (-c, -e, -p, -i), which the harness doesn't read: run a script file."
 STDIN_REFUSAL = "%s reads its code from stdin, which the harness doesn't read: run a script file."
-MODULE_REFUSAL = ("python3 -m runs a module that can run any code it's given (pty, timeit, pdb): the deliverer runs "
-                  "only pytest and unittest.")
+MODULE_REFUSAL = ("%s runs a module that can run any code it's given (pty and pdb run what they're given, unittest "
+                  "imports what it names, pytest loads any plugin): the deliverer runs no tests and no modules.")
 PERL_MODULE_REFUSAL = "perl -M runs the code its argument holds, which the harness doesn't read: name a module."
 URL_REFUSAL = ("%s loads code from a URL, a package or a data: URL, which the harness doesn't read: run a script file "
                "in the repo.")
@@ -4663,12 +4673,8 @@ def interpreter_refusal(base, rest):
     value_flags, k = value_options(base), 0
     while k < len(rest) and rest[k].startswith("-") and rest[k] != "-":
         word = rest[k]
-        if base.startswith("python") and word.startswith("-m"):
-            module = word[2:] or (rest[k + 1] if k + 1 < len(rest) else "")
-            return "" if module in PYTHON_TEST_MODULES else MODULE_REFUSAL
-        if base.startswith("python") and re.fullmatch(r"-[A-Za-z]*m", word) and not re.search(r"[cepEi]", word):
-            module = rest[k + 1] if k + 1 < len(rest) else ""
-            return "" if module in PYTHON_TEST_MODULES else MODULE_REFUSAL
+        if base.startswith("python") and re.match(r"-[A-Za-z]*m", word):
+            return MODULE_REFUSAL % (base + " -m")
         if base.startswith("perl") and word[:2] in ("-M", "-m"):
             value = word[2:] or (rest[k + 1] if k + 1 < len(rest) else "")
             if not PERL_MODULE.fullmatch(value):
@@ -4685,7 +4691,7 @@ def interpreter_refusal(base, rest):
             k += 2
             continue
         k += 1
-    if k >= len(rest) or rest[k] == "-" or REDIRECTION.match(rest[k]):
+    if k >= len(rest) or STDIN_FILE.search(rest[k]) or REDIRECTION.match(rest[k]):
         return STDIN_REFUSAL % base
     if URL_WORD.search(rest[k]):
         return URL_REFUSAL % base
@@ -4704,6 +4710,8 @@ def program_refusal(words):
     rest = words[at + 1:]
     if base in COPY_PROGRAMS:
         return COPY_REFUSAL
+    if base in TEST_RUNNERS:
+        return MODULE_REFUSAL % base
     if base in CODE_PROGRAMS:
         return CODE_REFUSAL % (base, base)
     if base in LATER_PROGRAMS:
@@ -5039,6 +5047,16 @@ def writes_default(word, targets):
     return dst in targets
 
 
+def git_subcommand(words):
+    """The subcommand of a git call, past git's own options, or None."""
+    if program(words) != "git":
+        return None
+    i = 1
+    while i < len(words) and words[i].startswith("-"):
+        i += 2 if words[i] == "-C" else 1
+    return words[i] if i < len(words) else None
+
+
 def git_refusal(segment, words, targets, on_default):
     """Why the deliverer may not run this git call, or None. git runs the commands its configuration names, and a ref
     command may move the default branch, by name or by the branch it's on."""
@@ -5066,6 +5084,8 @@ def git_refusal(segment, words, targets, on_default):
         if sub in ("fetch", "pull", "rebase"):
             if on_default and sub in ("pull", "rebase"):
                 return DEFAULT_BRANCH_REFUSAL
+            if sub == "rebase" and rebase_branch(rest):
+                return REBASE_BRANCH_REFUSAL
             if any(writes_default(w, targets) for w in rest if not w.startswith("-")):
                 return DEFAULT_BRANCH_REFUSAL
             return None
@@ -5084,33 +5104,60 @@ def git_refusal(segment, words, targets, on_default):
     return None
 
 
+def rebase_branch(rest):
+    """Whether a git rebase names the branch to rebase (git rebase <upstream> <branch>, --root <branch>), which it
+    checks out first."""
+    operands, i = [], 0
+    while i < len(rest):
+        word = rest[i]
+        if word in ("--onto", "-s", "--strategy", "-X", "--strategy-option", "-x", "--exec", "-C"):
+            i += 2
+            continue
+        if not word.startswith("-"):
+            operands.append(word)
+        i += 1
+    return len(operands) > ("--root" not in rest)
+
+
 def written_files(command):
-    """The paths a command writes: redirection targets, tee's files, and the last operand of cp, mv, install and ln. A
-    /dev/ path, a file descriptor and stdout aren't files."""
+    """The names of the files a command writes: redirection targets, tee's files, the last operand of cp, mv, install
+    and ln, dd's of= and a download's -o or -O. Each is read as the shell reads it (quotes and backslashes removed),
+    by its last path component. A /dev/ path, a file descriptor and stdout aren't files."""
     kept = split_heredocs(command)[0]
-    paths = [m.group(1) for m in WRITE_REDIRECTION.finditer(kept)]
+    paths = []
     for segment, _ in split_segments(kept):
-        words = shell_split(segment)
-        if program(words) == "tee":
+        for match in WRITE_REDIRECTION.finditer(segment):
+            target = shell_split(segment[match.end():])[:1]
+            paths += [re.split(r"[<>()]", target[0])[0]] if target else []
+        words = run_words(shell_split(segment))[0]
+        words = words[program_index(words):]
+        prog = program(words)
+        if prog == "tee":
             paths += [w for w in words[1:] if not w.startswith("-")]
-        elif program(words) in ("cp", "mv", "install", "ln") and len(words) > 2:
+        elif prog in ("cp", "mv", "install", "ln") and len(words) > 2:
             paths.append(words[-1])
-    return {os.path.normpath(p) for p in paths if p and not p.startswith(("/dev/", "&", "-"))}
+        elif prog == "dd":
+            paths += [w[3:] for w in words[1:] if w.startswith("of=")]
+        elif prog in OUTPUT_OPTIONS:
+            flags = gh_flags(words[1:], OUTPUT_OPTIONS[prog])[0]
+            paths += [value for name, value in flags if name in OUTPUT_OPTIONS[prog]]
+    return {os.path.basename(os.path.normpath(p)) for p in paths if p and not p.startswith(("/dev/", "&", "-"))}
 
 
 def written_run_refusal(words, written):
     """Why a call that runs a file the same command writes, or a tool that reads its build or test files from the
-    directory, is refused, or None. The harness reads the text a command writes, not what the file will run."""
+    directory, is refused, or None. Files are compared by name, whatever directory the call spells: an expansion or a
+    glob could name any of them. The harness reads the text a command writes, not what the file will run."""
     if not written:
         return None
     prog = program(words)
     runs_operands = RUNTIMES.fullmatch(prog) or prog in IMPLICIT_READERS
     named = [words[0]] + [w for w in words[1:] if runs_operands and not w.startswith("-")]
-    ran = sorted({os.path.normpath(w) for w in named if w} & written)
+    unread = [w for w in named if EXPANSION.search(w) or any(ch in w for ch in "*?[")]
+    ran = sorted({os.path.basename(os.path.normpath(w)) for w in named if w} & written) or unread
     if ran:
         return WRITES_RUN_REFUSAL % (", ".join(sorted(written)), ran[0])
-    python_tests = RUNTIMES.fullmatch(prog) and prog.startswith("python") and any(w in PYTHON_TEST_MODULES for w in words)
-    if prog in IMPLICIT_READERS or python_tests:
+    if prog in IMPLICIT_READERS:
         return IMPLICIT_RUN_REFUSAL % (", ".join(sorted(written)), prog)
     return None
 
@@ -5123,9 +5170,13 @@ def role_command_refusal(agent, command, cwd=None):
     targets = {b for b in ("main", "master", default_branch()) if b}
     on_default = git("rev-parse", "--abbrev-ref", "HEAD").strip() in targets
     written = written_files(command)
-    for segment, words, why in gh_calls(command):
+    calls = gh_calls(command)
+    switches = any(git_subcommand(words) in BRANCH_CHANGES for _, words, _ in calls)
+    for segment, words, why in calls:
         refusal = (why or program_refusal(words) or gh_refusal(segment, words, cwd, risk_added)
                    or git_refusal(segment, words, targets, on_default) or written_run_refusal(words, written))
+        if not refusal and switches and git_subcommand(words) == "push":
+            refusal = PUSH_AFTER_SWITCH_REFUSAL
         if refusal:
             return refusal
     if FORBIDDEN_TEXT.search(command_view(command)):
