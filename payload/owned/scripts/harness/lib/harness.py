@@ -4148,9 +4148,27 @@ PUSH_DEFAULT_REFUSAL = ("it pushes only its own branch; the default branch chang
                         "merges it.")
 COPY_PROGRAMS = ("ln", "link", "cp", "mv", "install", "rsync", "ditto", "hash")
 CODE_PROGRAMS = ("awk", "gawk", "mawk", "nawk", "sed", "osascript", "fish", "csh", "tcsh", "tclsh", "pwsh", "lua", "php",
-                 "expect", "busybox")
+                 "expect", "busybox", "jshell", "jrunscript", "Rscript", "julia", "runghc", "scala", "groovy", "ed", "ex",
+                 "vi", "vim", "nvim", "emacs", "less", "more", "man")
 LATER_PROGRAMS = ("coproc", "trap")
-INLINE_CODE = re.compile(r"^-(?!-)[A-Za-z]*[cepEmi]|^--(eval|print|command|interactive)$")
+RUNTIMES = re.compile(r"(?:python|perl|ruby|node|nodejs|bun|deno|tsx|ts-node)[\d.]*")
+REGISTRY_RUNNERS = ("npx", "bunx", "pnpx")
+PACKAGE_MANAGERS = ("npm", "pnpm", "yarn", "bun", "deno")
+REGISTRY_SUBCOMMANDS = ("x", "exec", "dlx", "create", "eval", "repl")
+MAKE_LIKE = ("make", "gmake", "just", "task", "ninja")
+# Build and task files a tool reads from the working directory as code, when a command writes one of them.
+IMPLICIT_READERS = MAKE_LIKE + ("npm", "pnpm", "yarn", "bun", "deno")
+PYTHON_TEST_MODULES = ("pytest", "unittest")
+VERSION_FLAGS = ("--version", "-V", "--help", "-h")
+# Node's and Bun's -v is their version; Python's and Ruby's is verbose mode, which then reads stdin.
+SHORT_VERSION_FLAG = ("node", "nodejs", "bun", "deno", "perl")
+INLINE_CODE = re.compile(r"^-(?!-)[A-Za-z]*[cepEmi]|^--(eval|print|command|interactive)(=|$)")
+PERL_MODULE = re.compile(r"[A-Za-z_][\w:]*(?:=[\w.,:/+-]*)?")
+# A URL, a registry or JSR package, or a data: URL is code from outside the repo.
+URL_WORD = re.compile(r"data:|://|^(npm|jsr):")
+# A stdin path or a file descriptor a program reads a file from: -, /dev/stdin, /dev/fd/N, /proc/self/fd/N.
+STDIN_FILE = re.compile(r"(?:^|=|-[A-Za-z])(?:/dev/stdin|/dev/fd/\d+|/proc/self/fd/\d+|-)$")
+WRITE_REDIRECTION = re.compile(r"(?:&>>?|>>?\|?)\s*(?:['\"]?)([^\s;&|<>()'\"]+)")
 SYSTEM_PREFIXES = ("/usr/", "/bin/", "/sbin/", "/opt/", "/Library/", "/System/", "/Applications/", "/nix/")
 GITHUB_REPO = re.compile(r"github\.com[/:]([^/\s]+/[^/\s#?]+?)(?:\.git)?(?:[/#?\s]|$)")
 REF_COMMANDS = ("checkout", "switch", "merge", "rebase", "reset", "branch", "fetch", "pull", "update-ref",
@@ -4168,8 +4186,24 @@ COPY_REFUSAL = ("it copies or links a program, which can run gh or git under ano
 CODE_REFUSAL = ("%s runs the code or commands its arguments name, which the harness doesn't read; the deliverer runs no "
                 "%s.")
 LATER_REFUSAL = "%s runs a command later, which the harness doesn't read; run the command where it's written."
-INLINE_REFUSAL = "%s runs code from its arguments (-c, -e, -p, -m, -i), which the harness doesn't read: run a script file."
+INLINE_REFUSAL = "%s runs code from its arguments (-c, -e, -p, -i), which the harness doesn't read: run a script file."
 STDIN_REFUSAL = "%s reads its code from stdin, which the harness doesn't read: run a script file."
+MODULE_REFUSAL = ("python3 -m runs a module that can run any code it's given (pty, timeit, pdb): the deliverer runs "
+                  "only pytest and unittest.")
+PERL_MODULE_REFUSAL = "perl -M runs the code its argument holds, which the harness doesn't read: name a module."
+URL_REFUSAL = ("%s loads code from a URL, a package or a data: URL, which the harness doesn't read: run a script file "
+               "in the repo.")
+REGISTRY_REFUSAL = ("%s runs a package from the registry, or the code its arguments hold, which the harness doesn't "
+                    "read: the deliverer runs no packages.")
+JAVA_REFUSAL = ("java --source, or - for its code, runs Java the harness doesn't read: run a compiled class or a jar "
+                "the repo has.")
+GO_REFUSAL = ("go run -exec runs a command, and a stdin, /dev/ path, module@version or URL runs code from outside the "
+              "repo: run a .go file or a package the repo has.")
+MAKE_REFUSAL = "%s reads its file from stdin or from an expansion, which the harness doesn't read: name a file the repo has."
+WRITES_RUN_REFUSAL = ("the command writes %s and runs %s: the harness reads what the command writes as text, not what "
+                      "it runs; that's the user's call.")
+IMPLICIT_RUN_REFUSAL = ("the command writes %s and runs %s, which reads its build or test files as code: the harness "
+                        "can't read what they run.")
 PATH_REFUSAL = ("it runs %s by path: the deliverer runs gh, git and the shell by name, and a program from a system "
                 "directory; a file it wrote itself can be another program.")
 NAME_REFUSAL = "it runs a gh or git binary under another name, which the harness reads by the name it's given."
@@ -4448,31 +4482,100 @@ def real_name(prog):
     return os.path.basename(os.path.realpath(path)) if path else ""
 
 
+def first_operand(words):
+    """The first word that isn't an option, or ""."""
+    return next((w for w in words if not w.startswith("-")), "")
+
+
+def value_options(base):
+    """The options a runtime takes a separate value for: read as the value, not as the script."""
+    if base.startswith("python"):
+        return ("-W", "-X")
+    if base.startswith("perl"):
+        return ("-I",)
+    if base.startswith("ruby"):
+        return ("-I", "-r", "-C", "-E")
+    if base.startswith("deno"):
+        return ("--import-map", "--config", "-L", "--lock", "--env-file")
+    if base.startswith("bun"):
+        return ("--preload", "-r", "--conditions", "--env-file")
+    return ("-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type",
+            "--env-file", "--title")
+
+
+def interpreter_refusal(base, rest):
+    """Why a runtime's arguments run code the harness doesn't read, or "": inline code (-c, -e, -p, -i), a module other
+    than the test runners, code from stdin, a URL or data: URL, or a perl -M argument that holds code. A version or
+    help flag alone runs nothing; a script file is read by its name."""
+    short = base.startswith(SHORT_VERSION_FLAG)
+    if len(rest) == 1 and rest[0] in VERSION_FLAGS + (("-v",) if short else ()):
+        return ""
+    value_flags, k = value_options(base), 0
+    while k < len(rest) and rest[k].startswith("-") and rest[k] != "-":
+        word = rest[k]
+        if base.startswith("python") and word.startswith("-m"):
+            module = word[2:] or (rest[k + 1] if k + 1 < len(rest) else "")
+            return "" if module in PYTHON_TEST_MODULES else MODULE_REFUSAL
+        if base.startswith("python") and re.fullmatch(r"-[A-Za-z]*m", word) and not re.search(r"[cepEi]", word):
+            module = rest[k + 1] if k + 1 < len(rest) else ""
+            return "" if module in PYTHON_TEST_MODULES else MODULE_REFUSAL
+        if base.startswith("perl") and word[:2] in ("-M", "-m"):
+            value = word[2:] or (rest[k + 1] if k + 1 < len(rest) else "")
+            if not PERL_MODULE.fullmatch(value):
+                return PERL_MODULE_REFUSAL
+            k += 1 if len(word) > 2 else 2
+            continue
+        if INLINE_CODE.match(word):
+            return INLINE_REFUSAL % base
+        if URL_WORD.search(word):
+            return URL_REFUSAL % base
+        if word in value_flags:
+            if k + 1 < len(rest) and URL_WORD.search(rest[k + 1]):
+                return URL_REFUSAL % base
+            k += 2
+            continue
+        k += 1
+    if k >= len(rest) or rest[k] == "-" or REDIRECTION.match(rest[k]):
+        return STDIN_REFUSAL % base
+    if URL_WORD.search(rest[k]):
+        return URL_REFUSAL % base
+    return ""
+
+
 def program_refusal(words):
     """Why the deliverer may not run the program a segment runs, or "": a program that copies or links another, runs
-    code or commands from its arguments or stdin, runs a command later, or runs gh or git by a path or name that isn't
-    theirs."""
+    code or commands from its arguments or stdin, a registry package, a make-style tool reading stdin, runs a command
+    later, or runs gh or git by a path or name that isn't theirs."""
     at = program_index(words)
     if at >= len(words):
         return ""
     prog = words[at]
     base = prog.rsplit("/", 1)[-1]
+    rest = words[at + 1:]
     if base in COPY_PROGRAMS:
         return COPY_REFUSAL
     if base in CODE_PROGRAMS:
         return CODE_REFUSAL % (base, base)
     if base in LATER_PROGRAMS:
         return LATER_REFUSAL % base
-    if base in INTERPRETERS:
-        rest = words[at + 1:]
-        k = 0
-        while k < len(rest) and rest[k].startswith("-") and rest[k] != "-":
-            if INLINE_CODE.match(rest[k]):
-                return INLINE_REFUSAL % base
-            k += 1
-        if k >= len(rest) or rest[k] == "-" or REDIRECTION.match(rest[k]):
-            return STDIN_REFUSAL % base
-    if "/" in prog and (base not in ("gh", "git") + SHELLS + INTERPRETERS
+    if base in REGISTRY_RUNNERS or (base in PACKAGE_MANAGERS and first_operand(rest) in REGISTRY_SUBCOMMANDS):
+        return REGISTRY_REFUSAL % base
+    if base in MAKE_LIKE and any(w == "-" or STDIN_FILE.search(w) or re.search(r"[$`]|^[<>]\(", w) for w in rest):
+        return MAKE_REFUSAL % base
+    if base == "java" and ("-" in rest or any(w == "--source" or w.startswith("--source=") for w in rest)):
+        return JAVA_REFUSAL
+    if base == "go" and "run" in rest:
+        after = rest[rest.index("run") + 1:]
+        if any(w in ("-exec", "--exec") or w.startswith(("-exec=", "/dev/", "--exec=")) or w == "-" or "@" in w
+               or "://" in w for w in after):
+            return GO_REFUSAL
+    if RUNTIMES.fullmatch(base):
+        if base.startswith(("bun", "deno")) and first_operand(rest) == "run":
+            rest = rest[rest.index("run") + 1:]
+        why = interpreter_refusal(base, rest)
+        if why:
+            return why
+    if "/" in prog and ((base not in ("gh", "git") + SHELLS and not RUNTIMES.fullmatch(base))
                         or not os.path.realpath(prog).startswith(SYSTEM_PREFIXES)):
         return PATH_REFUSAL % prog
     real = real_name(prog)
@@ -4481,11 +4584,58 @@ def program_refusal(words):
     return ""
 
 
+ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.S)
+ANSI_C_ESCAPE = re.compile(r"\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|[0-7]{1,3}|.)", re.S)
+ANSI_C_SIMPLE = {"a": " ", "b": " ", "e": " ", "E": " ", "f": " ", "n": " ", "r": " ", "t": " ", "v": " "}
+# A heredoc whose body is a PR's body or a commit message, which the shell reads as text.
+TEXT_BODY_FILE = re.compile(r"\bgh\s+(?:-\S+\s+)*pr\s+(?:create|new|edit)\b.*--body-file(?:=|\s+)-(?=\s|$)"
+                            r"|\bgit\b.*\bcommit\b.*(?:-[A-Za-z]*F|--file)(?:=|\s+)-(?=\s|$)")
+
+
+def decode_ansi_c(match):
+    key = match.group(1)
+    if len(key) > 1 and key[0] in "xu":
+        return chr(int(key[1:], 16))
+    if key[0] in "01234567":
+        return chr(int(key, 8))
+    return ANSI_C_SIMPLE.get(key, key)
+
+
+def ansi_c_view(command):
+    """The command with each $'...' string read as the characters its escapes name: a \\t or \\n is a blank, so a
+    command after one is a word of its own."""
+    return ANSI_C.sub(lambda m: ANSI_C_ESCAPE.sub(decode_ansi_c, m.group(1)), command)
+
+
+def text_bodies_removed(command):
+    """The command with the bodies of heredocs that carry a PR's body (--body-file -) or a commit message (-F -) taken
+    out. The opening line stays, so a call on it is still read."""
+    lines, out, i = command.split("\n"), [], 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        match = HEREDOC.search(line)
+        if match and TEXT_BODY_FILE.search(line):
+            while i < len(lines) and lines[i].strip() != match.group(2):
+                i += 1
+    return "\n".join(out)
+
+
 def command_view(command):
-    """The command with a PR's title and body taken out: the text of gh pr create and edit is text, not a call."""
-    if not re.search(r"\bgh\s+(?:-\S+\s+)*pr\s+(?:create|new|edit)\b", command):
-        return command
-    return PR_TEXT_VALUE.sub("", command)
+    """The command as the text check reads it: its $'...' strings decoded, a PR's title and body and a commit message
+    taken out, and the bodies of heredocs that carry a PR body or commit message removed. The text of these is text,
+    not calls."""
+    view = text_bodies_removed(ansi_c_view(command))
+    if re.search(r"\bgh\s+(?:-\S+\s+)*pr\s+(?:create|new|edit)\b", view):
+        view = PR_TEXT_VALUE.sub("", view)
+    parts = []
+    for segment, op in split_segments(view):
+        _, words = shell_words(segment)
+        if program(words) == "git" and "commit" in words[1:]:
+            segment = COMMIT_MESSAGE.sub(lambda m: m.group(1) + "''", segment)
+        parts.append(segment + op)
+    return "".join(parts)
 
 
 def gh_parts(words):
@@ -4724,6 +4874,21 @@ def names_default(word, targets):
     return False
 
 
+def writes_default(word, targets):
+    """Whether a refspec's destination (src:dst) is the default branch, or a wildcard that could be (+main:refs/heads/main,
+    refs/heads/*:refs/heads/*). A source alone writes nothing."""
+    if ":" not in word:
+        return False
+    dst = word.lstrip("+").split(":", 1)[1]
+    if "*" in dst:
+        return True
+    for prefix in ("refs/heads/", "heads/"):
+        if dst.startswith(prefix):
+            dst = dst[len(prefix):]
+            break
+    return dst in targets
+
+
 def git_refusal(segment, words, targets, on_default):
     """Why the deliverer may not run this git call, or None. git runs the commands its configuration names, and a ref
     command may move the default branch, by name or by the branch it's on."""
@@ -4748,6 +4913,12 @@ def git_refusal(segment, words, targets, on_default):
     if sub in REF_COMMANDS:
         if "$" in segment or "`" in segment:
             return GIT_EXPANSION_REFUSAL
+        if sub in ("fetch", "pull", "rebase"):
+            if on_default and sub in ("pull", "rebase"):
+                return DEFAULT_BRANCH_REFUSAL
+            if any(writes_default(w, targets) for w in rest if not w.startswith("-")):
+                return DEFAULT_BRANCH_REFUSAL
+            return None
         for word in rest:
             if word == "-" or "@{-" in word:
                 return DEFAULT_BRANCH_REFUSAL
@@ -4763,6 +4934,37 @@ def git_refusal(segment, words, targets, on_default):
     return None
 
 
+def written_files(command):
+    """The paths a command writes: redirection targets, tee's files, and the last operand of cp, mv, install and ln. A
+    /dev/ path, a file descriptor and stdout aren't files."""
+    kept = split_heredocs(command)[0]
+    paths = [m.group(1) for m in WRITE_REDIRECTION.finditer(kept)]
+    for segment, _ in split_segments(kept):
+        words = shell_split(segment)
+        if program(words) == "tee":
+            paths += [w for w in words[1:] if not w.startswith("-")]
+        elif program(words) in ("cp", "mv", "install", "ln") and len(words) > 2:
+            paths.append(words[-1])
+    return {os.path.normpath(p) for p in paths if p and not p.startswith(("/dev/", "&", "-"))}
+
+
+def written_run_refusal(words, written):
+    """Why a call that runs a file the same command writes, or a tool that reads its build or test files from the
+    directory, is refused, or None. The harness reads the text a command writes, not what the file will run."""
+    if not written:
+        return None
+    prog = program(words)
+    runs_operands = RUNTIMES.fullmatch(prog) or prog in IMPLICIT_READERS
+    named = [words[0]] + [w for w in words[1:] if runs_operands and not w.startswith("-")]
+    ran = sorted({os.path.normpath(w) for w in named if w} & written)
+    if ran:
+        return WRITES_RUN_REFUSAL % (", ".join(sorted(written)), ran[0])
+    python_tests = RUNTIMES.fullmatch(prog) and prog.startswith("python") and any(w in PYTHON_TEST_MODULES for w in words)
+    if prog in IMPLICIT_READERS or python_tests:
+        return IMPLICIT_RUN_REFUSAL % (", ".join(sorted(written)), prog)
+    return None
+
+
 def role_command_refusal(agent, command, cwd=None):
     """Why agent may not run command, or None. The deliverer reaches GitHub, but the decisions there stay the user's."""
     if agent != "deliverer":
@@ -4770,9 +4972,10 @@ def role_command_refusal(agent, command, cwd=None):
     risk_added = set()
     targets = {b for b in ("main", "master", default_branch()) if b}
     on_default = git("rev-parse", "--abbrev-ref", "HEAD").strip() in targets
+    written = written_files(command)
     for segment, words, why in gh_calls(command):
         refusal = (why or program_refusal(words) or gh_refusal(segment, words, cwd, risk_added)
-                   or git_refusal(segment, words, targets, on_default))
+                   or git_refusal(segment, words, targets, on_default) or written_run_refusal(words, written))
         if refusal:
             return refusal
     if FORBIDDEN_TEXT.search(command_view(command)):

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **The deliverer's gate reads more runtimes and package runners (ADR-002, follow-up).** Refused: `bun`, `deno`, `tsx` and `ts-node` code (`-e`, `eval`), `npx`, `bunx`, `pnpx` and package runners (`npm exec`, `pnpm dlx`, `yarn dlx`, `create`), `java --source`, `jshell`, `go run` from stdin or with `-exec`, `perl -M` with code, `node --eval=` and data: URLs, `pythonX.Y` and `nodejs` by version name, and Python modules other than `pytest` and `unittest`. `--version` and `--help` alone are allowed. `make`, `just`, `task` and `ninja` read no file from stdin or an expansion. A command that writes a file and then runs it, or runs `make`, `npm` or `pytest` after writing one, is refused. `$'...'` escapes are read as the characters they name. A commit message and a `--body-file -` heredoc are text. `git fetch origin main`, `git rebase origin/main` and `git pull --rebase origin main` are allowed on a feature branch; a pull or rebase on the default branch, and a refspec that writes it, are refused. The residual limits are in HOOKS.md.
+
 - **The deliverer's gh and git calls are read as the shell runs them (ADR-002).** Its gh allowlist can't be reached
   by other means. Refused: a merge, close, review or auto-merge named in a command outside a PR's title and body, `--web`,
   and `gh pr comment`, which delivery doesn't use; programs that run code or commands from their arguments or stdin
