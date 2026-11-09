@@ -576,12 +576,49 @@ class History(TracedProject):
         self.assertNotIn("is in no commit", needs["TASK-7.1"]["harness_gaps"])
         self.assertNotIn("history incomplete", needs["TASK-7.2"].get("harness_gaps", ""))
 
+    def test_a_shallow_clone_that_holds_the_judged_commit_reports_no_gap(self):
+        shallow = self.clone("shallow-holding", depth=3)
+        needs = self.needs_at(shallow)
+
+        self.assertEqual(needs["TASK-7.1"]["harness_test_files_from"], "commit %s" % self.specs)
+        self.assertNotIn("history incomplete", needs["TASK-7.1"]["harness_gaps"])
+
     def test_a_full_clone_finds_the_commit_that_carries_the_judged_code(self):
         full = self.clone("full")
         needs = self.needs_at(full)
 
         self.assertEqual(needs["TASK-7.1"]["harness_test_files_from"], "commit %s" % self.specs)
         self.assertNotIn("history incomplete", needs["TASK-7.1"]["harness_gaps"])
+
+    def test_trees_git_cannot_read_make_the_history_incomplete_not_a_missing_commit(self):
+        root = self.copy_without_trees("missing", [self.first, self.specs])
+        needs = self.needs_at(root)
+
+        self.assertIn("history incomplete: git can't read", needs["TASK-7.1"]["harness_gaps"])
+        self.assertNotIn("is in no commit", needs["TASK-7.1"]["harness_gaps"])
+        self.assertNotIn("history incomplete", needs["TASK-7.2"].get("harness_gaps", ""))
+
+    def test_a_partial_clone_whose_remote_is_gone_reports_incomplete_history(self):
+        source = self.copy_without_trees("remote", [])
+        self.command("git", "config", "uploadpack.allowFilter", "true", cwd=source)
+        partial = self.outside / "partial"
+        self.command("git", "clone", "-q", "--filter=tree:0", "file://%s" % source, str(partial), cwd=self.outside)
+        shutil.rmtree(str(source))
+        needs = self.needs_at(partial)
+
+        self.assertIn("history incomplete: git timed out or failed reading the history",
+                      needs["TASK-7.1"]["harness_gaps"])
+        self.assertNotIn("is in no commit", needs["TASK-7.1"]["harness_gaps"])
+
+    def copy_without_trees(self, name, commits):
+        """A copy of the project whose root trees of commits are gone from its object store, as a partial clone that
+        can't fetch them has them. The copy keeps loose objects, so each one is a file to remove."""
+        root = self.outside / name
+        shutil.copytree(str(self.project), str(root), symlinks=True)
+        for commit in commits:
+            tree = self.command("git", "rev-parse", commit + "^{tree}", cwd=root).stdout.strip()
+            (root / ".git" / "objects" / tree[:2] / tree[2:]).unlink()
+        return root
 
 
 class StateFingerprint(TracedProject):
