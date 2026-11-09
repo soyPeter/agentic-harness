@@ -541,6 +541,132 @@ class MachineGuard(unittest.TestCase):
                                      (False, []))
                 self.assertIn('"%s" must be a list of folders' % name, machine(self.env, "status"))
 
+    def test_a_blank_or_relative_folder_in_the_settings_checks_nothing(self):
+        """'' and a relative folder resolve against each session's working directory, so they name a different folder in
+        each session. The settings are reported, and nothing is checked."""
+        self.install("block")
+        settings = self.home / ".agentic-harness/machine.json"
+        written = json.loads(settings.read_text())
+        for name, value in (("roots", [""]), ("roots", ["  "]), ("roots", ["."]), ("exempt", [""])):
+            with self.subTest(name=name, value=value):
+                settings.write_text(json.dumps(dict(written, **{name: value})))
+                for source, plugin in itertools.product(("claude", "codex"), (False, True)):
+                    call = edit(source, self.plain / "x.py", self.plain)
+                    self.assertEqual(cli(self.env, source, call, plugin=plugin), (False, []))
+                self.assertIn('"%s" must list folders by their absolute paths' % name, machine(self.env, "status"))
+
+    def test_install_writes_relative_roots_as_absolute_paths(self):
+        self.install("block")
+        subprocess.run([str(ROOT / "machine.sh"), "install", "--roots", "repos", "--mode", "block"], cwd=self.work,
+                       env=self.env, check=True, capture_output=True, text=True)
+        settings = json.loads((self.home / ".agentic-harness/machine.json").read_text())
+        self.assertEqual(settings["roots"], [str(self.roots)])
+        self.assertTrue(cli(self.env, "claude", edit("claude", self.plain / "x.py", self.plain))[0])
+
+    def test_an_enroll_setting_that_is_not_an_absolute_path_checks_nothing(self):
+        """The guard's enrolment check reads this path. A value that isn't one raised inside it, and the guard let every
+        call through while status said the settings were usable."""
+        self.install("block")
+        settings = self.home / ".agentic-harness/machine.json"
+        written = json.loads(settings.read_text())
+        for value in (5, ["a"], "", "enroll.sh", None):
+            with self.subTest(enroll=value):
+                settings.write_text(json.dumps(dict(written, enroll=value)))
+                for source in ("claude", "codex"):
+                    self.assertEqual(cli(self.env, source, edit(source, self.plain / "x.py", self.plain)), (False, []))
+                    self.assertEqual(cli(self.env, source, shell("make", self.plain)), (False, []))
+                self.assertIn('"enroll" must be the path to enroll.sh', machine(self.env, "status"))
+
+    def older_guard(self):
+        """The copy an earlier release installed: the same hook without the settings check."""
+        text = (ROOT / "machine/guard.py").read_text(encoding="utf-8")
+        return text.replace("def problem(settings):",
+                            "def problem(settings):\n    return None\n\n\ndef checked(settings):", 1)
+
+    def plugin_answer(self, source, call, cwd):
+        """The plugin's machine-guard hook as the CLI runs it: (exit code, stdout, stderr)."""
+        command = ["python3", str(ROOT / "plugin/launcher.py"), "hook", "machine-guard", "--from", source]
+        result = subprocess.run(command, cwd=cwd, env=self.env, input=json.dumps(call), capture_output=True, text=True)
+        return result.returncode, result.stdout, result.stderr
+
+    def test_an_outdated_guard_copy_is_not_left_to_the_plugin(self):
+        """The plugin steps aside for the guard hook only while the copy it runs is this release's. After a plugin
+        upgrade without install, an earlier copy keeps its rules: with settings it doesn't check, it refuses every
+        repository, and the plugin would have left that to it. Status says to install again."""
+        self.install("block")
+        (self.home / ".agentic-harness/guard.py").write_text(self.older_guard(), encoding="utf-8")
+        for source in ("claude", "codex"):
+            with self.subTest(source=source):
+                code, _, err = self.plugin_answer(source, edit(source, self.plain / "x.py", self.plain), self.plain)
+                self.assertEqual(code, 2, err)
+                self.assertIn("refused this edit", err)
+                self.assertIn("outdated", status_line(self.env, source))
+                self.assertIn("./machine.sh install", status_line(self.env, source))
+        self.install("block")
+        for source in ("claude", "codex"):
+            with self.subTest(source=source, reinstalled=True):
+                code, out, err = self.plugin_answer(source, edit(source, self.plain / "x.py", self.plain), self.plain)
+                self.assertEqual((code, out), (0, "{}\n" if source == "codex" else ""), err)
+                self.assertNotIn("outdated", status_line(self.env, source))
+
+    def test_status_names_the_release_the_guard_copy_is_from(self):
+        """install from a checkout of another release leaves a copy that the plugin, at this release, doesn't leave the
+        check to. Status run in that checkout names the copy's release, and says the plugin checks where its guard
+        differs, so the refusals it adds are explained."""
+        other = self.work / "other release"
+        for name in ("machine.sh", "tools/machine.py", "machine/guard.py"):
+            (other / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(str(ROOT / name), str(other / name))
+        (other / "VERSION").write_text("9.9.9\n")
+        with (other / "machine/guard.py").open("a") as handle:
+            handle.write("# release 9.9.9\n")
+        subprocess.run([str(other / "machine.sh"), "install", "--roots", str(self.roots), "--mode", "block"],
+                       env=self.env, check=True, capture_output=True, text=True)
+        status = subprocess.run([str(other / "machine.sh"), "status"], env=self.env, check=True, capture_output=True,
+                                text=True).stdout
+        claude = [line for line in status.splitlines() if line.split()[:1] == ["claude"]][0]
+        self.assertIn("guard hook present", claude)
+        self.assertIn("guard copy of release 9.9.9", claude)
+        self.assertIn("the agentic-harness plugin checks", claude)
+        code, _, err = self.plugin_answer("claude", edit("claude", self.plain / "x.py", self.plain), self.plain)
+        self.assertEqual(code, 2, err)
+        self.assertIn("outdated", status_line(self.env, "claude"))
+
+    def test_codex_trust_written_inline_or_as_dotted_keys_is_read_or_reported(self):
+        """Codex writes trust as [hooks.state."<key>"] tables. A config may also hold it as an inline table or dotted
+        keys: tomllib reads both (Python 3.11 and later). Python 3.10 reads the dotted keys line by line, but not an
+        inline table: there the guard hook is reported as one whose state can't be told, and the plugin answers as
+        well, which is the safe direction."""
+        self.install("block")
+        (key, digest), = codex_hooks(self.env).values()
+        tomllib = subprocess.run(["python3", "-c", "import tomllib"], env=self.env, capture_output=True).returncode == 0
+        forms = {"inline table": '[hooks]\nstate = {%s = {trusted_hash = "%s"}}\n' % (json.dumps(key), digest),
+                 "dotted keys": 'hooks.state.%s.trusted_hash = "%s"\n' % (json.dumps(key), digest)}
+        for form, text in forms.items():
+            with self.subTest(form=form):
+                (codex_folder(self.env) / "config.toml").write_text(text)
+                code, out, err = self.plugin_answer("codex", edit("codex", self.plain / "x.py", self.plain), self.plain)
+                if tomllib or form == "dotted keys":
+                    self.assertIn("guard hook present", status_line(self.env, "codex"))
+                    self.assertEqual((code, out), (0, "{}\n"), err)
+                else:
+                    self.assertIn("can't be told", status_line(self.env, "codex"))
+                    self.assertEqual(code, 2, err)
+
+    def test_codex_turning_the_guard_hook_off_in_a_form_the_reader_misses_leaves_the_plugin_checking(self):
+        """Codex skips a hook its config turns off, whatever the form of the setting: a quoted key, or a value that
+        isn't true or false. Whatever Python reads, the guard hook must not be reported as running, so the plugin
+        checks."""
+        self.install("block")
+        (key, digest), = codex_hooks(self.env).values()
+        for setting in ('"enabled" = false', "enabled = 0", 'enabled = "false"'):
+            with self.subTest(setting=setting):
+                text = '[hooks.state.%s]\ntrusted_hash = "%s"\n%s\n' % (json.dumps(key), digest, setting)
+                (codex_folder(self.env) / "config.toml").write_text(text)
+                self.assertNotIn("guard hook present", status_line(self.env, "codex"))
+                code, out, err = self.plugin_answer("codex", edit("codex", self.plain / "x.py", self.plain), self.plain)
+                self.assertEqual(code, 2, err)
+
 
 class CodexAppServer:
     """`codex app-server` in a throwaway home: the hooks as Codex itself lists them, and the trust /hooks records."""
