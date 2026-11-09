@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **The deliverer's gh and git calls are read as the shell runs them (ADR-002).** Its gh allowlist can't be reached
+  by other means. Refused: a merge, close, review or auto-merge named in a command outside a PR's title and body, `--web`,
+  and `gh pr comment`, which delivery doesn't use; programs that run code or commands from their arguments or stdin
+  (`python3 -c`, `perl -e`, `node -e`, `awk`, `sed`, `osascript`, `fish`, `csh`, `tcsh`, a heredoc fed to an interpreter),
+  `coproc`, `trap` and `hash`; copies and links (`ln`, `cp`, `mv`, `install`); a program run by a path outside the system
+  directories, or a gh or git binary under another name. A variable that runs a command (`GH_BROWSER=`, `GIT_SSH_COMMAND=`,
+  `PATH=`) set as a prefix or exported; `git -c`, `git config` writes, `--exec`, `--upload-pack` and `--receive-pack`.
+  gh acts on this repository only: `-R`, URLs and `gh api --hostname` are refused when they name another one. A git ref
+  command that names the default branch in any spelling (`git checkout main`, `git push origin HEAD:heads/main`), or uses
+  an expansion, is refused, and so is `git push --all` and `--mirror`. Unquoted globs and braces are refused in gh and
+  git calls and in command names; `ls tests/*.py`, `git rev-parse @{u}` and `gh api` placeholders are allowed.
+
 - **Spec parsing reads Markdown the way it renders (ADR-002, follow-up).** The gates now share one reading of a spec's
   headings, code blocks, comments and sections. A fence closes only at a run of its own character at least as long, at
   0-3 spaces, so an indented closer no longer ends a block early and hides the requirements below it from the freeze.
