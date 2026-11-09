@@ -9,9 +9,9 @@
 # Optional (ADR-005): the `attest` job runs on a push to the default branch (`main` below: change it to yours). It
 # verifies the pushed range with the engine the push starts from (the previous tip), writes an in-toto statement of its
 # verdicts and signs it with the key in the `harness-attest` environment, which only the default branch may use. Pull
-# requests never run it, so they never see the key. Run `harness.py ci-protect --attest` once, then add the secrets
-# HARNESS_ATTEST_KEY and HARNESS_ATTEST_PASSWORD to that environment (ADR-005 describes it). Without the key the job
-# does nothing.
+# requests never run it, so they never see the key. Run `harness.py ci-protect --attest` once, commit the public key as
+# harness-attest.pub on the default branch, then add the secrets HARNESS_ATTEST_KEY and HARNESS_ATTEST_PASSWORD to that
+# environment (ADR-005 describes it). Without the key the job does nothing.
 name: harness-verify
 
 on:
@@ -48,6 +48,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/trusted"
           mode=full
           commit=
+          version=
           pin_source="$BASE_REF"
           if git cat-file -e "$BASE_REF:backbone/.harness-lock.json" 2>/dev/null; then
             pin=$(git show "$BASE_REF:backbone/.harness-lock.json" | python3 -c '
@@ -62,32 +63,38 @@ jobs:
                       raise ValueError("invalid thin engine version")
                   if not re.fullmatch(r"[0-9a-f]{40}", lock.get("commit", "")):
                       raise ValueError("invalid thin engine commit")
-              print(mode, lock.get("commit", ""))
+              print(mode, lock.get("commit", ""), lock.get("version", ""))
           except (ValueError, TypeError) as exc:
               sys.exit("Invalid base branch harness lock: %s" % exc)
             ')
-            read -r mode commit <<< "$pin"
+            read -r mode commit version <<< "$pin"
+          fi
+          if [[ "${REFUSE_FIRST_INSTALL:-}" == "true" ]] && [[ "$mode" != thin ]] \
+            && ! git cat-file -e "$BASE_REF:scripts/harness/lib" 2>/dev/null; then
+            echo "::error::$BASE_REF has neither a harness nor a thin pin, so there is no released engine to take the verifier from. The engine is never taken from a later commit."
+            exit 1
           fi
           if [[ "$mode" == full ]] && ! git cat-file -e "$BASE_REF:scripts/harness/lib" 2>/dev/null \
             && [[ ! -f scripts/harness/lib/harness.py ]] && [[ -f backbone/.harness-lock.json ]]; then
-            commit=$(python3 -c 'import json, re, sys; lock=json.load(open("backbone/.harness-lock.json"));
+            tip_pin=$(python3 -c 'import json, re, sys; lock=json.load(open("backbone/.harness-lock.json"));
           assert lock.get("mode") == "thin" and re.fullmatch(r"[0-9a-f]{40}", lock.get("commit", "")), "invalid initial thin pin";
-          print(lock["commit"])')
-            mode=thin
+          assert re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._-]*", lock.get("version", "")), "invalid initial thin version";
+          print("thin", lock["commit"], lock["version"])')
+            read -r mode commit version <<< "$tip_pin"
             pin_source=HEAD
           fi
           if [[ "$mode" == thin ]]; then
             git -C "$RUNNER_TEMP/trusted" init -q
             if ! git -C "$RUNNER_TEMP/trusted" fetch -q --depth 1 \
-              "https://github.com/soyPeter/agentic-harness.git" "$commit"; then
-              echo "::error::Cannot fetch the base branch's pinned engine $commit."
+              "https://github.com/soyPeter/agentic-harness.git" "refs/tags/v$version"; then
+              echo "::error::Cannot fetch the release v$version that the base branch's pin names."
               exit 1
             fi
-            if [[ "$(git -C "$RUNNER_TEMP/trusted" rev-parse FETCH_HEAD)" != "$commit" ]]; then
-              echo "::error::Fetched engine does not match the base branch's pin."
+            if [[ "$(git -C "$RUNNER_TEMP/trusted" rev-parse 'FETCH_HEAD^{commit}')" != "$commit" ]]; then
+              echo "::error::The release v$version is not the base branch's pinned engine $commit."
               exit 1
             fi
-            git -C "$RUNNER_TEMP/trusted" checkout -q --detach FETCH_HEAD
+            git -C "$RUNNER_TEMP/trusted" checkout -q --detach "$commit"
             engine="$RUNNER_TEMP/trusted/payload/owned/scripts/harness/lib/harness.py"
             if [[ ! -f "$engine" ]]; then
               echo "::error::The pinned engine has no verifier."
@@ -151,6 +158,7 @@ jobs:
         shell: bash
         env:
           BASE_REF: ${{ github.event.before }}
+          REFUSE_FIRST_INSTALL: "true"
         run: |
           set -o pipefail
           assets=(scripts/harness/lib scripts/harness/guardrails.core.conf
@@ -162,6 +170,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/trusted"
           mode=full
           commit=
+          version=
           pin_source="$BASE_REF"
           if git cat-file -e "$BASE_REF:backbone/.harness-lock.json" 2>/dev/null; then
             pin=$(git show "$BASE_REF:backbone/.harness-lock.json" | python3 -c '
@@ -176,32 +185,38 @@ jobs:
                       raise ValueError("invalid thin engine version")
                   if not re.fullmatch(r"[0-9a-f]{40}", lock.get("commit", "")):
                       raise ValueError("invalid thin engine commit")
-              print(mode, lock.get("commit", ""))
+              print(mode, lock.get("commit", ""), lock.get("version", ""))
           except (ValueError, TypeError) as exc:
               sys.exit("Invalid base branch harness lock: %s" % exc)
             ')
-            read -r mode commit <<< "$pin"
+            read -r mode commit version <<< "$pin"
+          fi
+          if [[ "${REFUSE_FIRST_INSTALL:-}" == "true" ]] && [[ "$mode" != thin ]] \
+            && ! git cat-file -e "$BASE_REF:scripts/harness/lib" 2>/dev/null; then
+            echo "::error::$BASE_REF has neither a harness nor a thin pin, so there is no released engine to take the verifier from. The engine is never taken from a later commit."
+            exit 1
           fi
           if [[ "$mode" == full ]] && ! git cat-file -e "$BASE_REF:scripts/harness/lib" 2>/dev/null \
             && [[ ! -f scripts/harness/lib/harness.py ]] && [[ -f backbone/.harness-lock.json ]]; then
-            commit=$(python3 -c 'import json, re, sys; lock=json.load(open("backbone/.harness-lock.json"));
+            tip_pin=$(python3 -c 'import json, re, sys; lock=json.load(open("backbone/.harness-lock.json"));
           assert lock.get("mode") == "thin" and re.fullmatch(r"[0-9a-f]{40}", lock.get("commit", "")), "invalid initial thin pin";
-          print(lock["commit"])')
-            mode=thin
+          assert re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._-]*", lock.get("version", "")), "invalid initial thin version";
+          print("thin", lock["commit"], lock["version"])')
+            read -r mode commit version <<< "$tip_pin"
             pin_source=HEAD
           fi
           if [[ "$mode" == thin ]]; then
             git -C "$RUNNER_TEMP/trusted" init -q
             if ! git -C "$RUNNER_TEMP/trusted" fetch -q --depth 1 \
-              "https://github.com/soyPeter/agentic-harness.git" "$commit"; then
-              echo "::error::Cannot fetch the base branch's pinned engine $commit."
+              "https://github.com/soyPeter/agentic-harness.git" "refs/tags/v$version"; then
+              echo "::error::Cannot fetch the release v$version that the base branch's pin names."
               exit 1
             fi
-            if [[ "$(git -C "$RUNNER_TEMP/trusted" rev-parse FETCH_HEAD)" != "$commit" ]]; then
-              echo "::error::Fetched engine does not match the base branch's pin."
+            if [[ "$(git -C "$RUNNER_TEMP/trusted" rev-parse 'FETCH_HEAD^{commit}')" != "$commit" ]]; then
+              echo "::error::The release v$version is not the base branch's pinned engine $commit."
               exit 1
             fi
-            git -C "$RUNNER_TEMP/trusted" checkout -q --detach FETCH_HEAD
+            git -C "$RUNNER_TEMP/trusted" checkout -q --detach "$commit"
             engine="$RUNNER_TEMP/trusted/payload/owned/scripts/harness/lib/harness.py"
             if [[ ! -f "$engine" ]]; then
               echo "::error::The pinned engine has no verifier."
@@ -228,21 +243,54 @@ jobs:
         if: env.HARNESS_ATTEST_SIGN == 'true'
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          POLICY_TOKEN: ${{ secrets.HARNESS_ATTEST_POLICY_TOKEN }}
           REPOSITORY: ${{ github.repository }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           RECORDED_BRANCH: ${{ vars.HARNESS_ATTEST_BRANCH }}
+          RECORDED_FALLBACK: ${{ vars.HARNESS_ATTEST_RECORDED_FALLBACK }}
         run: |
           dir="$RUNNER_TEMP/harness-attest-environment"
           mkdir -p "$dir"
-          if gh api "repos/$REPOSITORY/environments/harness-attest" > "$dir/environment.json" 2>/dev/null \
-            && gh api "repos/$REPOSITORY/environments/harness-attest/deployment-branch-policies" \
+          if [[ -n "$POLICY_TOKEN" ]] \
+            && GH_TOKEN="$POLICY_TOKEN" gh api "repos/$REPOSITORY/environments/harness-attest" > "$dir/environment.json" 2>/dev/null \
+            && GH_TOKEN="$POLICY_TOKEN" gh api "repos/$REPOSITORY/environments/harness-attest/deployment-branch-policies" \
               > "$dir/policies.json" 2>/dev/null; then
+            echo "attest mode: live check of the harness-attest rule (HARNESS_ATTEST_POLICY_TOKEN)"
             python3 "$ENGINE_SCRIPT" environment-check "$dir/environment.json" "$dir/policies.json" "$DEFAULT_BRANCH"
-          elif [[ -n "$RECORDED_BRANCH" && "$RECORDED_BRANCH" == "$DEFAULT_BRANCH" ]]; then
-            echo "The job's token can't read the harness-attest environment; ci-protect --attest recorded that it deploys only from $DEFAULT_BRANCH."
+          elif [[ "$RECORDED_FALLBACK" == "true" && -n "$RECORDED_BRANCH" && "$RECORDED_BRANCH" == "$DEFAULT_BRANCH" ]]; then
+            echo "::warning::The harness-attest rule can't be read; the branch ci-protect --attest recorded ($DEFAULT_BRANCH) is accepted by opt-in (HARNESS_ATTEST_RECORDED_FALLBACK). The rule is not re-read."
+            echo "attest mode: recorded branch $DEFAULT_BRANCH (opted in)"
           else
-            echo "::error::The job's token can't read the harness-attest environment, and no ci-protect --attest record says it deploys only from $DEFAULT_BRANCH: no statement. Run harness.py ci-protect --attest as a maintainer."
+            echo "::error::The harness-attest rule can't be read, and there is no opt-in to the recorded branch: no statement. Set HARNESS_ATTEST_POLICY_TOKEN in harness-attest (a token with Actions read on this repository), or run harness.py ci-protect --attest --recorded-fallback as a maintainer."
+            exit 1
+          fi
+
+      - name: Install cosign
+        if: env.HARNESS_ATTEST_SIGN == 'true'
+        shell: bash
+        run: |
+          cosign="$RUNNER_TEMP/cosign"
+          curl -fsSL --retry 3 -o "$cosign" \
+            https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign-linux-amd64
+          echo "424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa  $cosign" | sha256sum -c -
+          chmod +x "$cosign"
+
+      - name: Check the attestation key
+        if: env.HARNESS_ATTEST_SIGN == 'true'
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+          HARNESS_ATTEST_KEY: ${{ secrets.HARNESS_ATTEST_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.HARNESS_ATTEST_PASSWORD }}
+        run: |
+          published="$RUNNER_TEMP/harness-attest-published.pub"
+          if ! git show "$BEFORE:harness-attest.pub" > "$published" 2>/dev/null; then
+            echo "::error::$BEFORE has no harness-attest.pub. Commit the public key on the default branch first: no statement."
+            exit 1
+          fi
+          "$RUNNER_TEMP/cosign" public-key --key env://HARNESS_ATTEST_KEY > "$RUNNER_TEMP/harness-attest-received.pub"
+          if ! cmp -s "$published" "$RUNNER_TEMP/harness-attest-received.pub"; then
+            echo "::error::The attest key is not the public key on $BEFORE (harness-attest.pub). A key from elsewhere (a repository-level secret, say) would sign: no statement."
             exit 1
           fi
 
@@ -268,10 +316,6 @@ jobs:
           COSIGN_PASSWORD: ${{ secrets.HARNESS_ATTEST_PASSWORD }}
         run: |
           cosign="$RUNNER_TEMP/cosign"
-          curl -fsSL --retry 3 -o "$cosign" \
-            https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign-linux-amd64
-          echo "424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa  $cosign" | sha256sum -c -
-          chmod +x "$cosign"
           # No services in the signing config: nothing goes to a transparency log or timestamp authority.
           "$cosign" signing-config create --out "$RUNNER_TEMP/signing-config.json"
           dir="$RUNNER_TEMP/harness-attestation"

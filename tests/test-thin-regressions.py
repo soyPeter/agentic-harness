@@ -209,6 +209,7 @@ assert h['decisions'].load_definitions(str(h['DECISIONS_FILE']))['decisions']
         self.run_command("git", "-C", str(source), "init", "-q", "-b", "main")
         self.run_command("git", "-C", str(source), "add", "-A")
         self.run_command("git", "-C", str(source), "commit", "-qm", "engine")
+        self.run_command("git", "-C", str(source), "tag", "v9.9.9")
         commit = self.run_command("git", "-C", str(source), "rev-parse", "HEAD").stdout.strip()
         lock = self.project / "backbone/.harness-lock.json"
         lock.parent.mkdir()
@@ -237,6 +238,7 @@ assert h['decisions'].load_definitions(str(h['DECISIONS_FILE']))['decisions']
         self.run_command("git", "-C", str(source), "init", "-q", "-b", "main")
         self.run_command("git", "-C", str(source), "add", "-A")
         self.run_command("git", "-C", str(source), "commit", "-qm", "engine")
+        self.run_command("git", "-C", str(source), "tag", "v9.9.9")
         commit = self.run_command("git", "-C", str(source), "rev-parse", "HEAD").stdout.strip()
         self.commit_base()
         lock = self.project / "backbone/.harness-lock.json"

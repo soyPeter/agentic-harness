@@ -33,7 +33,7 @@ Usage:
                                                                   (derived traceability export, ADR-004)
   harness.py ci-judge --range <base>..<tip>                       (CI: independent re-judging of finished tasks)
   harness.py ci-protect [--branch main] [--with-judge] [--dry-run] (require the CI checks; needs gh)
-  harness.py ci-protect --attest [--dry-run]                      (the harness-attest environment: default branch only)
+  harness.py ci-protect --attest [--dry-run] [--recorded-fallback] (the harness-attest environment: default branch only)
   harness.py doctor
 """
 import fnmatch
@@ -2980,7 +2980,10 @@ def attest_command(argv):
 
 ATTEST_ENVIRONMENT = "harness-attest"
 ATTEST_BRANCH_VARIABLE = "HARNESS_ATTEST_BRANCH"
+ATTEST_RECORDED_VARIABLE = "HARNESS_ATTEST_RECORDED_FALLBACK"
 ATTEST_SECRETS = ("HARNESS_ATTEST_KEY", "HARNESS_ATTEST_PASSWORD")
+ATTEST_POLICY_SECRET = "HARNESS_ATTEST_POLICY_TOKEN"
+ATTEST_PUBLIC_KEY = "harness-attest.pub"
 
 
 def environment_problems(environment, policies, branch):
@@ -3032,10 +3035,33 @@ def gh_api(endpoint, method=None, body=None):
         return True, None
 
 
-def ci_protect_attest(name, default, dry_run):
+def attest_mode(policy_token, recorded):
+    """The mode the attest job runs in, as ci-protect --attest states it. policy_token is True, False or None when
+    the environment's secrets can't be listed."""
+    if policy_token is None:
+        return "unknown: can't list the secrets of %s" % ATTEST_ENVIRONMENT
+    if policy_token:
+        return "live: the job reads the rule with %s, and %s" % (
+            ATTEST_POLICY_SECRET, "accepts the recorded branch when it can't read the rule (opted in)" if recorded
+            else "refuses to sign when it can't read the rule")
+    if recorded:
+        return ("recorded branch: no %s, so the job accepts the branch ci-protect recorded (opted in), and the rule "
+                "is not re-read" % ATTEST_POLICY_SECRET)
+    return "none: no %s and no opt-in, so the job refuses to sign" % ATTEST_POLICY_SECRET
+
+
+def public_key_line(default):
+    """Whether the public key the attest job checks against is committed on the default branch (ADR-005)."""
+    if show(default, ATTEST_PUBLIC_KEY):
+        return "%s is committed on %s" % (ATTEST_PUBLIC_KEY, default)
+    return ("%s is not on %s: the job refuses to sign until it is committed there" % (ATTEST_PUBLIC_KEY, default))
+
+
+def ci_protect_attest(name, default, dry_run, recorded=False):
     """Set the harness-attest environment up for the attest job (ADR-005): only the default branch may deploy to it,
     no repository-level secret of the same names may stand in for its own, and the default branch is recorded in the
-    repository variable the job reads when its token can't read the environment. Checks the result before it says so."""
+    repository variable the job reads only when the user opted in (recorded=True) and the rule can't be read. States
+    the mode the job runs in, and checks the result before it says so."""
     rule = {"deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}
     endpoint = "repos/%s/environments/%s" % (name, ATTEST_ENVIRONMENT)
     if dry_run or name.startswith("<"):
@@ -3043,6 +3069,13 @@ def ci_protect_attest(name, default, dry_run):
         print("ci-protect --attest: would PUT %s %s" % (endpoint, json.dumps(rule)))
         print("ci-protect --attest: would make %s the only deployment branch of %s" % (default, ATTEST_ENVIRONMENT))
         print("ci-protect --attest: would set the repository variable %s=%s" % (ATTEST_BRANCH_VARIABLE, default))
+        print("ci-protect --attest: would %s" % (
+            "set the repository variable %s=true" % ATTEST_RECORDED_VARIABLE if recorded
+            else "delete the repository variable %s" % ATTEST_RECORDED_VARIABLE))
+        print("ci-protect --attest: attest mode with %s in %s: %s" % (
+            ATTEST_POLICY_SECRET, ATTEST_ENVIRONMENT, attest_mode(True, recorded)))
+        print("ci-protect --attest: attest mode without it: %s" % attest_mode(False, recorded))
+        print("ci-protect --attest: %s" % public_key_line(default))
         return 0 if dry_run else 1
     ok, secrets = gh_api("repos/%s/actions/secrets" % name)
     if not ok or not isinstance(secrets, dict):
@@ -3074,9 +3107,22 @@ def ci_protect_attest(name, default, dry_run):
         return 1
     subprocess.run(["gh", "variable", "set", ATTEST_BRANCH_VARIABLE, "--body", default], cwd=str(ROOT),
                    capture_output=True, text=True)
+    if recorded:
+        subprocess.run(["gh", "variable", "set", ATTEST_RECORDED_VARIABLE, "--body", "true"], cwd=str(ROOT),
+                       capture_output=True, text=True)
+    else:
+        subprocess.run(["gh", "variable", "delete", ATTEST_RECORDED_VARIABLE], cwd=str(ROOT),
+                       capture_output=True, text=True)
+    ok_secrets, listed = gh_api("repos/%s/environments/%s/secrets" % (name, ATTEST_ENVIRONMENT))
+    names = [s.get("name") for s in (listed or {}).get("secrets") or [] if isinstance(s, dict)] \
+        if ok_secrets and isinstance(listed, dict) else None
     print("ci-protect --attest: %s deploys only from %s; repository variable %s=%s recorded. Add the secrets %s to "
-          "the environment only." % (ATTEST_ENVIRONMENT, default, ATTEST_BRANCH_VARIABLE, default,
-                                     ", ".join(ATTEST_SECRETS)))
+          "the environment only, and %s there too if the rule should be read live." % (
+              ATTEST_ENVIRONMENT, default, ATTEST_BRANCH_VARIABLE, default, ", ".join(ATTEST_SECRETS),
+              ATTEST_POLICY_SECRET))
+    print("ci-protect --attest: attest mode: %s" % attest_mode(
+        None if names is None else ATTEST_POLICY_SECRET in names, recorded))
+    print("ci-protect --attest: %s" % public_key_line(default))
     return 0
 
 
@@ -6065,7 +6111,7 @@ def ci_protect_command(argv):
     set up the harness-attest environment instead (ADR-005)."""
     name, default = github_repo()
     if "--attest" in argv:
-        return ci_protect_attest(name, default, "--dry-run" in argv)
+        return ci_protect_attest(name, default, "--dry-run" in argv, "--recorded-fallback" in argv)
     contexts = ["verify"] + (["judge"] if "--with-judge" in argv else [])
     branch = argv[argv.index("--branch") + 1] if "--branch" in argv and argv.index("--branch") + 1 < len(argv) else default
     endpoint = "repos/%s/branches/%s/protection" % (name, branch)
