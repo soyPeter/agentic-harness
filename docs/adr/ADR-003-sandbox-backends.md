@@ -197,6 +197,15 @@ Still open after v1:
 5. The egress allowlist enforced from a separate container; the agent's container without NET_ADMIN or NET_RAW.
 6. `tests/test-sandbox-evidence.py` in the self-test, and `tests/test-sandbox-egress.py` against a real container
    (with `HARNESS_E2E=1`).
+7. Not in CI yet. A Linux job for `tests/test-sandbox-egress.py` with `HARNESS_E2E=1` would be the only job that runs
+   the container path, and the test skips without docker or the devcontainer CLI, so a job would need guard steps.
+   It isn't added because the test doesn't build reliably here. On Docker Desktop 29.8.2 (buildx v0.37.2), devcontainer
+   CLI 0.88.0 passed all 11 tests in one full run; the next full run stopped the `Tamper` class, and `Tamper` alone
+   failed in two of two runs. 0.90.0 stopped the `Allowlist` and `Tamper` classes. Each failure is buildx's "additional
+   privileges requested: pass --allow=fs.read=…" error for the Dockerfile the CLI writes under the temp folder. That is buildx's check for files a bake reads outside its context, so it
+   isn't switched off here: `BUILDX_BAKE_ENTITLEMENTS_FS=0` made the failing class pass, but the buildx material found
+   disagrees on what it does. To settle it, run the test in a Linux job with the same CLI and buildx, and add the job,
+   with its guard steps, once it passes there.
 
 ## Alternatives considered
 - **A vendor adapter first (E2B or Daytona):** gives microVM isolation soon, but without the local fallback and the
