@@ -223,8 +223,8 @@ FENCE_REASON = ("the spec has a code fence indented 4 or more columns, or with a
                 "reader ends them where the gates do")
 STRUCTURE_REASON = ("the spec has a heading or code fence that is indented, follows a list or quote marker, or sits in an "
                     "HTML block: keep headings and fences at column 0, outside HTML blocks")
-HTML_REASON = ("the spec has a tag alone on a line right after a list or quote paragraph: a reader may take it for "
-               "text or for an HTML block; put a blank line before it")
+HTML_REASON = ("the spec has a tag alone on a line right after a list or quote paragraph or a link reference definition: "
+               "a reader may take it for text or for an HTML block; put a blank line before it")
 SETEXT_REASON = "the spec has a setext heading (text over a line of = or -): write headings as '## Title'"
 LINE_BREAK_REASON = ("the spec has a line break character a reader may take for a line end (a vertical tab, form feed, NEL, "
                      "or a Unicode line or paragraph separator): remove it")
@@ -232,7 +232,11 @@ UNUSUAL_SPACE_REASON = ("the spec has an unusual space or control character on a
                         "plain space or tab there")
 LINE_BREAKS = re.compile(r"[\x0b\x0c\x1c-\x1e\x85\u2028\u2029]")
 UNUSUAL_SPACES = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\xa0\u1680\u2000-\u200f\u2028\u2029\u202f\u205f\u2060\u3000\ufeff]")
-STRUCTURE_CHARS = re.compile(r"[<#`~]")
+# A backtick or tilde matters only in a fence marker; inline code may hold any space.
+STRUCTURE_CHARS = re.compile(r"[<#]|^[^A-Za-z`~]*(?:`{3}|~{3})")
+# A paragraph starting like this may be a link reference definition, which is no paragraph to CommonMark: a tag alone on
+# the next line may start an HTML block.
+LINK_DEFINITION_START = re.compile(r" {0,3}\[")
 COMMENT_REASON = ("the spec has an HTML comment a reader may not end where the gates do: a comment that starts after text, "
                   "or 4 or more columns in, must close on its own line")
 USER_APPROVED_CLASSES = ("feature", "schema")
@@ -563,7 +567,7 @@ def scan_lines(text):
     one in an HTML block and a setext heading are refused, since Markdown may read them as text or code. HTML blocks
     start and end as html_block says. A line break or an unusual space or control character a reader may read differently
     is refused too (character_reason)."""
-    fence, comment, html, prev_text, prev_nested = None, False, None, False, False
+    fence, comment, html, prev_text, prev_doubtful = None, False, None, False, False
     for line in re.findall(r"[^\n]*\n|[^\n]+\Z", text or ""):
         body = line.rstrip("\r\n")
         if fence is not None:
@@ -583,9 +587,9 @@ def scan_lines(text):
         reason = ""
         if not comment and off_column and (FENCE_RUN.match(rest) or ATX_HEADING.match(rest)):
             reason = STRUCTURE_REASON
-        elif not comment and prev_text and SETEXT_UNDERLINE.match(body):
+        elif not comment and prev_text and (SETEXT_UNDERLINE.match(body) or SETEXT_UNDERLINE.match(rest)):
             reason = SETEXT_REASON
-        elif not comment and not in_html and prev_text and prev_nested and not nested and HTML_TAG_ALONE.match(rest):
+        elif not comment and not in_html and prev_text and prev_doubtful and not nested and HTML_TAG_ALONE.match(rest):
             reason = HTML_REASON
         reason = character_reason(body, False) or reason
         opening = None if comment or reason or off_column else FENCE_OPEN.match(body)
@@ -608,10 +612,12 @@ def scan_lines(text):
             html = None
         yield line, False, commentless, COMMENT_REASON if ambiguous else reason
         code = not prev_text and not blank_line(body) and not PLAIN_INDENT.match(body)
-        thematic = not prev_text and bool(THEMATIC_BREAK.match(body))
+        # Only '---' after text is a setext underline (refused above); '***' and '___' end the paragraph.
+        thematic = bool(THEMATIC_BREAK.match(body))
+        doubtful = nested or (not prev_text and LINK_DEFINITION_START.match(body))
         prev_text = (not blank_line(body) and not ATX_HEADING.match(body) and not in_html and started is None
                      and not code and not block_comment and not thematic)
-        prev_nested = prev_text and (nested or prev_nested)
+        prev_doubtful = prev_text and bool(doubtful or prev_doubtful)
 
 
 def comment_free(text):

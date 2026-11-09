@@ -253,6 +253,59 @@ class HtmlBlockStarts(unittest.TestCase):
         self.assertIn("put a blank line before it", out)
 
 
+class ParagraphInterruptions(unittest.TestCase):
+    """A '***' or '___' thematic break ends the paragraph above it (only '---' would make it a setext heading), so a tag
+    alone on the next line starts an HTML block that takes the heading below it. A link reference definition is not a
+    paragraph either, and a setext underline in a list or quote makes a heading there, so a tag or underline after either
+    is refused rather than read one way or the other."""
+
+    def setUp(self):
+        self.project = new_project(self)
+
+    def test_a_tag_after_a_thematic_break_after_text_hides_the_approval_heading(self):
+        for n, rule in enumerate(("***", "___", "* * *", "  _ _ _")):
+            with self.subTest(rule=rule):
+                task = "70.%d" % (n + 1)
+                replace_approval(self.project, task, "Some text.\n%s\n<span>\n## Approval\n\n%s\n%s"
+                                 % (rule, PASSWORD, APPROVAL))
+
+                code, out = self.project.harness("spec-check", task)
+
+                self.assertEqual(code, 1, out)
+                self.assertIn(STRUCTURE, out)
+                code, out = self.project.analyst_edit(task, "Edit", old_string=PASSWORD,
+                                                      new_string="Passwords are hashed.")
+                self.assertEqual(code, 2, out)
+
+    def test_a_tag_after_a_link_reference_definition_is_refused(self):
+        replace_approval(self.project, "70.5", "[docs]: https://example.com/docs\n<span>\n## Approval\n\n%s\n%s"
+                         % (PASSWORD, APPROVAL))
+
+        code, out = self.project.harness("spec-check", "70.5")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("put a blank line before it", out)
+
+    def test_a_setext_heading_in_a_quote_or_list_is_refused(self):
+        for n, block in enumerate(("> Out of scope\n> ---\n", "- Out of scope\n    ---\n")):
+            with self.subTest(block=block):
+                task = "70.%d" % (n + 6)
+                add_spec(self.project, task, edits=(("## Approval\n", "## Approval\n" + APPROVAL + "\n" + block + "- "
+                                                     + PASSWORD + "\n"),))
+
+                code, out = self.project.harness("spec-check", task)
+
+                self.assertEqual(code, 1, out)
+                self.assertIn(SETEXT, out)
+
+    def test_a_thematic_break_after_text_is_not_refused(self):
+        add_spec(self.project, "70.8", edits=(("## Open questions\n", "Some text.\n***\nMore text.\n___\n\n## Open questions\n"),))
+
+        code, out = self.project.harness("spec-check", "70.8")
+
+        self.assertEqual(code, 0, out)
+
+
 def replace_approval(project, task, block):
     """The spec with its Approval section, the template's last, replaced by block (which holds the user's approval)."""
     add_spec(project, task)
@@ -322,6 +375,22 @@ class UnusualSpaces(unittest.TestCase):
 
         self.assertNotIn("unusual space", out)
         self.assertNotIn("line break", out)
+        self.assertEqual(code, 0, out)
+
+    def test_a_non_breaking_space_in_inline_code_is_ordinary_text(self):
+        add_spec(self.project, "69.7", edits=(("A change. ", "A change. Run `a b` and ``c d`` first. "),))
+
+        code, out = self.project.harness("spec-check", "69.7")
+
+        self.assertNotIn("unusual space", out)
+        self.assertEqual(code, 0, out)
+
+    def test_a_non_breaking_space_in_inline_code_is_ordinary_text(self):
+        add_spec(self.project, "69.7", edits=(("A change. ", "A change. Run `a b` first. "),))
+
+        code, out = self.project.harness("spec-check", "69.7")
+
+        self.assertNotIn("unusual space", out)
         self.assertEqual(code, 0, out)
 
 
@@ -541,6 +610,31 @@ if given is not None and MarkdownIt is not None:
             self.assertEqual(gate_approval, approval, text)
             self.assertEqual(gate_end, end, text)
             self.assertEqual(fenced_gate(text), fenced_commonmark(text), text)
+
+
+    # Lines that start, end or continue a block in some contexts and not others: thematic breaks, setext underlines,
+    # list and quote markers (empty, nested, ordered from 1 or not), link reference definitions, indented code, HTML
+    # block starts and ends, fences and headings, so each meets every other right after paragraph text and elsewhere.
+    BLOCK_LINES = ("text line", "", "***", "___", "* * *", "_ _ _", "- - -", "---", "  ***", "    ***", "_\t_\t_",
+                   "> ***", "- ***", "- * * *", "1. ***", ">", "> text", "> > text", "-", "- item", "* item", "+ ---",
+                   "1.", "1. item", "2. item", "1) text", "- > text", "> - item", "> - ---", "    code", "\tcode",
+                   "  text", "  ---", "    ---", "\t---", "> ---", "> ===", "===", "[a]: /url", "[a]:", "/url",
+                   "[x] done", "- [a]: /u", "<span>", "</span>", "<div>", "<pre>", "</pre>", "<hr/>", "<b>", "<!X>",
+                   "<?x?>", "<!-- x -->", "<!--", "-->", "> <span>", "- <span>", "  <span>", "text <span>",
+                   "## Approval", "  ## Approval", "> ## Approval", "# Title", "## Other", "#", "```", "~~~", "> ```",
+                   "Approved-by: Ana (2026-11-08)")
+
+    class BlockStartAgreement(unittest.TestCase):
+        """Which blocks may interrupt a paragraph, and what ends one, as CommonMark has it: wherever the gates read a spec
+        without a reading problem, they put its headings and Approval section where CommonMark does."""
+
+        @settings(max_examples=2000, deadline=None)
+        @given(lines=st.lists(st.sampled_from(BLOCK_LINES), min_size=1, max_size=10))
+        def test_the_gates_cut_the_spec_where_commonmark_does_or_refuse_it(self, lines):
+            text = "\n".join(lines) + "\n"
+            if engine.spec_reading_problem(text) is not None:
+                return
+            self.assertEqual(gate_sections(text), commonmark(text), text)
 
 
     def fenced_commonmark(text):

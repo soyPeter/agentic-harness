@@ -45,6 +45,15 @@
   an unusual space beside a tag, heading or fence, is invalid until the characters are removed or replaced with an ASCII
   space, tab or newline.
 
+- **Thematic breaks and link reference definitions follow CommonMark (follow-up to the spaces and blank lines).** A
+  `***` or `___` line after paragraph text is a thematic break, not more text, so a tag alone on the next line starts an
+  HTML block and a `## Approval` under it is refused, not read as the Approval section. A tag alone after a paragraph that
+  starts with `[`, which a reader may take for a link reference definition, is refused, and so is a setext underline in a
+  list or quote. An unusual space in inline code is text again: only a line that starts with a fence marker counts as a
+  fence for the unusual-space check. **Upgrading:** a spec with a heading in the HTML block that a tag alone after a `***` or
+  `___` break starts, a tag alone after a `[`-led paragraph, or a setext heading in a list or quote is invalid until it
+  is rewritten.
+
 - **Adopting a pack again keeps your edits.** `harness.py adopt` compared a pack file only with the release's copy, so
   a file edited after the last adoption was replaced by the release's copy with no backup, after a pin move or a
   `--to-thin`. An edited file is now kept. When the release changed it too, its copy goes to `<file>.harness-new` and
