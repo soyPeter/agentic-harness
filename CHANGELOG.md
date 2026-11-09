@@ -36,6 +36,15 @@
   **Upgrading:** a spec with a heading inside one of these blocks is invalid, and so is a tag alone on the line after a
   list or quote paragraph; rewrite them.
 
+- **Spaces, blank lines and line breaks follow CommonMark (follow-up to the HTML blocks).** A tag's name ends at a space
+  or a tab only, so a form feed, vertical tab or non-breaking space in a tag can't hide a heading below it in an HTML
+  block: the spec is refused. A line of only a non-breaking space or another Unicode space is text, not a blank line: it
+  keeps an HTML block open, and it is a paragraph ahead of a setext underline. A vertical tab, form feed, NEL, or a
+  Unicode line or paragraph separator anywhere in a spec makes it invalid, and so does an unusual space or control
+  character on a line with a `<`, `#`, backtick or tilde. **Upgrading:** a spec with a line break character anywhere, or
+  an unusual space beside a tag, heading or fence, is invalid until the characters are removed or replaced with an ASCII
+  space, tab or newline.
+
 - **Adopting a pack again keeps your edits.** `harness.py adopt` compared a pack file only with the release's copy, so
   a file edited after the last adoption was replaced by the release's copy with no backup, after a pin move or a
   `--to-thin`. An edited file is now kept. When the release changed it too, its copy goes to `<file>.harness-new` and

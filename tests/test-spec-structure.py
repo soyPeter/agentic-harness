@@ -4,7 +4,9 @@ throwaway projects.
 A heading or code fence that a reader would take for something else makes the spec invalid, so every gate refuses it:
 an indented heading or fence, one after a list or quote marker, one in an HTML block, a setext heading. Headings the
 gates read are the ones a reader sees at column 0, and a section ends at the next '#' or '##' heading. Once the user
-approves a spec, everything outside its Approval section is frozen, whatever section follows it.
+approves a spec, everything outside its Approval section is frozen, whatever section follows it. Spaces are the ASCII
+space and tab, as CommonMark has them: a line break a reader may take for one, or an unusual space beside a tag, heading
+or fence, makes the spec invalid rather than being read one way or another.
 
 The property checks compare the gates' heading lines and Approval section boundaries with CommonMark (markdown-it-py,
 a test-only requirement) on generated specs. They need hypothesis and markdown-it-py (pip install -r
@@ -251,6 +253,114 @@ class HtmlBlockStarts(unittest.TestCase):
         self.assertIn("put a blank line before it", out)
 
 
+def replace_approval(project, task, block):
+    """The spec with its Approval section, the template's last, replaced by block (which holds the user's approval)."""
+    add_spec(project, task)
+    path = "backbone/specs/%s.md" % task
+    text = project.read(path)
+    project.write(path, text[:text.index("## Approval")] + block)
+
+
+class UnusualSpaces(unittest.TestCase):
+    """CommonMark ends a tag's name at a space or a tab, and an ATX heading needs one of them after its #s. A form feed,
+    a vertical tab, NEL or a line or paragraph separator is a line end to Python's splitlines and a reader may take it for
+    a space, so the spec is refused outright. An unusual space or control character on a line with a tag, heading or
+    fence is refused too: the gates can't tell where a reader would start the block. Elsewhere it is ordinary text."""
+
+    def setUp(self):
+        self.project = new_project(self)
+
+    def test_a_form_feed_in_a_tag_does_not_start_a_block_that_hides_the_approval(self):
+        replace_approval(self.project, "69.1", '<span\fclass="x">\n## Approval\n\n' + PASSWORD + "\n" + APPROVAL)
+
+        code, out = self.project.harness("spec-check", "69.1")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("line break", out)
+        code, out = self.project.analyst_edit("69.1", "Edit", old_string=PASSWORD, new_string="Passwords are hashed.")
+        self.assertEqual(code, 2, out)
+        self.assertIn("approved and therefore frozen", out)
+
+    def test_a_vertical_tab_in_a_tag_does_not_start_a_block_that_hides_the_approval(self):
+        replace_approval(self.project, "69.2", '<div\v>\n## Approval\n\n' + PASSWORD + "\n" + APPROVAL)
+
+        code, out = self.project.harness("spec-check", "69.2")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("line break", out)
+
+    def test_a_form_feed_after_a_pre_tag_is_refused(self):
+        replace_approval(self.project, "69.3", '<pre\f>\n\n## Approval\n\n</pre>\n' + PASSWORD + "\n" + APPROVAL)
+
+        code, out = self.project.harness("spec-check", "69.3")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("line break", out)
+
+    def test_a_non_breaking_space_in_a_tag_is_refused(self):
+        replace_approval(self.project, "69.4", '<div\u00a0class="x">\n## Approval\n\n' + PASSWORD + "\n" + APPROVAL)
+
+        code, out = self.project.harness("spec-check", "69.4")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("unusual space", out)
+
+    def test_a_line_separator_anywhere_in_the_spec_is_refused(self):
+        for separator in ("\u2028", "\u2029", "\x85"):
+            with self.subTest(separator=repr(separator)):
+                add_spec(self.project, "69.5", edits=(("A change. ", "A change." + separator),))
+
+                code, out = self.project.harness("spec-check", "69.5")
+
+                self.assertEqual(code, 1, out)
+                self.assertIn("line break", out)
+
+    def test_a_non_breaking_space_in_prose_is_ordinary_text(self):
+        add_spec(self.project, "69.6", edits=(("A change. ", "A change.\u00a0Second\u00a0sentence. "),))
+
+        code, out = self.project.harness("spec-check", "69.6")
+
+        self.assertNotIn("unusual space", out)
+        self.assertNotIn("line break", out)
+        self.assertEqual(code, 0, out)
+
+
+class BlankLines(unittest.TestCase):
+    """CommonMark's blank line holds only spaces and tabs. A line of a non-breaking space or another Unicode space is text:
+    it keeps an HTML block open and a line of text ahead of a setext underline. A line that starts with one is a paragraph,
+    not indented code."""
+
+    def setUp(self):
+        self.project = new_project(self)
+
+    def test_a_line_of_only_a_non_breaking_space_does_not_end_an_html_block(self):
+        replace_approval(self.project, "70.1", "<div>\n\u00a0\n## Approval\n\n" + PASSWORD + "\n" + APPROVAL)
+
+        code, out = self.project.harness("spec-check", "70.1")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn(STRUCTURE, out)
+        code, out = self.project.analyst_edit("70.1", "Edit", old_string=PASSWORD, new_string="Passwords are hashed.")
+        self.assertEqual(code, 2, out)
+        self.assertIn("approved and therefore frozen", out)
+
+    def test_a_line_of_only_an_em_space_is_text_for_a_setext_underline(self):
+        add_spec(self.project, "70.2", edits=(("## Open questions\n", "\u2003\n===\n## Open questions\n"),))
+
+        code, out = self.project.harness("spec-check", "70.2")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn(SETEXT, out)
+
+    def test_a_line_that_starts_with_a_non_breaking_space_is_text_for_a_setext_underline(self):
+        add_spec(self.project, "70.3", edits=(("## Open questions\n", "\u00a0text\n---\n## Open questions\n"),))
+
+        code, out = self.project.harness("spec-check", "70.3")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn(SETEXT, out)
+
+
 class BundledTemplate(unittest.TestCase):
     """The template every new spec starts from reads as the gates' spec: no heading or fence is read as something else."""
 
@@ -397,6 +507,53 @@ if given is not None and MarkdownIt is not None:
             text = "\n".join(lines) + "\n"
             self.assertIsNone(engine.spec_reading_problem(text), text)
             self.assertEqual(heading_lines(text), commonmark(text)[0], text)
+
+
+    # Lines built from tags, headings, fences and blank-looking text, with the spaces around them drawn from the Unicode
+    # and control characters a reader may or may not take for a space or a line end.
+    SPACE_GAPS = ("", " ", "\t", "\u00a0", "\u2003", "\u200b", "\ufeff", "\v", "\f", "\x1c", "\x01", "\u2028", "\x85")
+    SPACED_LINES = ("<div{}>", "<div{}class=\"x\"{}>", "<pre{}>", "</pre{}>", "<span{}>", "<script{}>", "<div{}/>",
+                    "<!--{}-->", "<!--{}", "{}-->", "<?{}", "?>{}", "<![CDATA[{}]]>", "<!DOCTYPE{}html>", "{}## Approval",
+                    "##{}Approval", "## Approval{}", "{}## Approval{}", "## Open questions{}", "{}# Title", "```{}",
+                    "{}```", "~~~{}", "{}text{}", "text{}", "{}", "<b>{}</b>", "<img{}src=\"x\">", "{}- ## Approval",
+                    "> {}## Approval", "{}Approved-by: Ana (2026-11-06)", "{}===", "{}---", "    {}## Approval",
+                    "\t{}```", "{}- item", "  {}text")
+
+    class WhitespaceAgreement(unittest.TestCase):
+        """Wherever the gates read a spec without a reading problem, they cut it where CommonMark does: its headings, its
+        fenced code, its Approval section. A line break a reader may take for one, or an unusual space beside a tag,
+        heading or fence, is a reading problem instead."""
+
+        @settings(max_examples=600, deadline=None)
+        @given(lines=st.lists(st.tuples(st.sampled_from(SPACED_LINES), st.sampled_from(SPACE_GAPS),
+                                        st.sampled_from(SPACE_GAPS)).map(lambda t: t[0].format(t[1], t[2])),
+                              max_size=12))
+        def test_the_gates_cut_the_spec_where_commonmark_does_or_refuse_it(self, lines):
+            text = "\n".join(lines) + "\n"
+            if re.search("[\v\f\x1c-\x1e\x85\u2028\u2029]", text):
+                self.assertIsNotNone(engine.spec_reading_problem(text), text)
+                return
+            if engine.spec_reading_problem(text) is not None:
+                return
+            numbers, approval, end = commonmark(text)
+            gate_numbers, gate_approval, gate_end = gate_sections(text)
+            self.assertEqual(gate_numbers, numbers, text)
+            self.assertEqual(gate_approval, approval, text)
+            self.assertEqual(gate_end, end, text)
+            self.assertEqual(fenced_gate(text), fenced_commonmark(text), text)
+
+
+    def fenced_commonmark(text):
+        """The line numbers CommonMark puts in fenced code blocks, fence lines included."""
+        lines = set()
+        for token in MarkdownIt("commonmark", {"html": True}).parse(text):
+            if token.type == "fence":
+                lines.update(range(token.map[0], token.map[1]))
+        return lines
+
+
+    def fenced_gate(text):
+        return {i for i, (_, fenced, _, _) in enumerate(engine.scan_lines(text)) if fenced}
 
 
 if given is not None:

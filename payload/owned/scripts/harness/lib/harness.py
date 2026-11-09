@@ -216,7 +216,8 @@ HTML_TAG_BLOCK = re.compile(
 _ATTRIBUTE = r"[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*(?:[^\"'=<>`\x00-\x20]+|'[^']*'|\"[^\"]*\"))?"
 HTML_TAG_ALONE = re.compile(
     r"(?:<[A-Za-z][A-Za-z0-9-]*(?:%s)*[ \t]*/?>|</[A-Za-z][A-Za-z0-9-]*[ \t]*>)[ \t]*$" % _ATTRIBUTE, re.I)
-PLAIN_INDENT = re.compile(r" {0,3}\S")
+# Indented code starts with 4 spaces or a tab, so anything else after 0-3 spaces is text, a non-breaking space included.
+PLAIN_INDENT = re.compile(r" {0,3}[^ \t]")
 THEMATIC_BREAK = re.compile(r" {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
 FENCE_REASON = ("the spec has a code fence indented 4 or more columns, or with a tab: keep fences at column 0, so every "
                 "reader ends them where the gates do")
@@ -225,6 +226,13 @@ STRUCTURE_REASON = ("the spec has a heading or code fence that is indented, foll
 HTML_REASON = ("the spec has a tag alone on a line right after a list or quote paragraph: a reader may take it for "
                "text or for an HTML block; put a blank line before it")
 SETEXT_REASON = "the spec has a setext heading (text over a line of = or -): write headings as '## Title'"
+LINE_BREAK_REASON = ("the spec has a line break character a reader may take for a line end (a vertical tab, form feed, NEL, "
+                     "or a Unicode line or paragraph separator): remove it")
+UNUSUAL_SPACE_REASON = ("the spec has an unusual space or control character on a line with a tag, heading or fence: use a "
+                        "plain space or tab there")
+LINE_BREAKS = re.compile(r"[\x0b\x0c\x1c-\x1e\x85\u2028\u2029]")
+UNUSUAL_SPACES = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\xa0\u1680\u2000-\u200f\u2028\u2029\u202f\u205f\u2060\u3000\ufeff]")
+STRUCTURE_CHARS = re.compile(r"[<#`~]")
 COMMENT_REASON = ("the spec has an HTML comment a reader may not end where the gates do: a comment that starts after text, "
                   "or 4 or more columns in, must close on its own line")
 USER_APPROVED_CLASSES = ("feature", "schema")
@@ -478,6 +486,26 @@ def blank(text):
     return re.sub(r"[^\n]", " ", text)
 
 
+def blank_line(line):
+    """CommonMark's blank line: spaces and tabs only. str.strip() also takes a non-breaking space, which is text."""
+    return line.strip(" \t") == ""
+
+
+def blank_text(text):
+    return text.strip(" \t\r\n") == ""
+
+
+def character_reason(body, fenced):
+    """Why a line's characters could be read differently from the gates, or ''. A line break a reader or splitlines takes
+    for one is refused anywhere. An unusual space or control character is refused beside a tag, heading or fence, where
+    a reader would start a block, and is ordinary text elsewhere."""
+    if LINE_BREAKS.search(body):
+        return LINE_BREAK_REASON
+    if not fenced and UNUSUAL_SPACES.search(body) and STRUCTURE_CHARS.search(body):
+        return UNUSUAL_SPACE_REASON
+    return ""
+
+
 def blank_comments_in_line(line, inside):
     """(line with its HTML comment text blanked, whether a comment is still open at its end, whether a comment on the
     line is one a reader may not end where the gates do). A comment that starts a line at 0-3 spaces runs to its '-->',
@@ -533,20 +561,22 @@ def scan_lines(text):
     commentless: the line with its comment text blanked, code kept. reason: why a reader could read the line differently
     from the gates, or ''. Only column-0 headings and fences are read: an indented one, one after a list or quote marker,
     one in an HTML block and a setext heading are refused, since Markdown may read them as text or code. HTML blocks
-    start and end as html_block says."""
+    start and end as html_block says. A line break or an unusual space or control character a reader may read differently
+    is refused too (character_reason)."""
     fence, comment, html, prev_text, prev_nested = None, False, None, False, False
     for line in re.findall(r"[^\n]*\n|[^\n]+\Z", text or ""):
         body = line.rstrip("\r\n")
         if fence is not None:
             wide = WIDE_FENCE.match(body)
             close = FENCE_CLOSE.match(body)
-            yield line, True, line, FENCE_REASON if wide and closes_fence(wide.group(1), fence) else ""
+            yield line, True, line, character_reason(body, True) or (
+                FENCE_REASON if wide and closes_fence(wide.group(1), fence) else "")
             if close and closes_fence(close.group(1), fence):
                 fence = None
             prev_text = False
             continue
         in_html = html is not None
-        if html == "blank" and not body.strip():
+        if html == "blank" and blank_line(body):
             html, in_html = None, False
         rest, nested = block_start(body)
         off_column = nested or body[:1] in (" ", "\t") or in_html
@@ -557,6 +587,7 @@ def scan_lines(text):
             reason = SETEXT_REASON
         elif not comment and not in_html and prev_text and prev_nested and not nested and HTML_TAG_ALONE.match(rest):
             reason = HTML_REASON
+        reason = character_reason(body, False) or reason
         opening = None if comment or reason or off_column else FENCE_OPEN.match(body)
         if opening and not ("`" in opening.group(2) and opening.group(1)[0] == "`"):
             fence = opening.group(1)
@@ -576,9 +607,9 @@ def scan_lines(text):
         if html not in (None, "blank") and html.search(body):
             html = None
         yield line, False, commentless, COMMENT_REASON if ambiguous else reason
-        code = not prev_text and bool(body.strip()) and not PLAIN_INDENT.match(body)
+        code = not prev_text and not blank_line(body) and not PLAIN_INDENT.match(body)
         thematic = not prev_text and bool(THEMATIC_BREAK.match(body))
-        prev_text = (bool(body.strip()) and not ATX_HEADING.match(body) and not in_html and started is None
+        prev_text = (not blank_line(body) and not ATX_HEADING.match(body) and not in_html and started is None
                      and not code and not block_comment and not thematic)
         prev_nested = prev_text and (nested or prev_nested)
 
@@ -750,13 +781,13 @@ def adr_file(adr_id):
 
 
 def adr_status(text):
-    lines = [line.strip() for line in (md_section(text, "Status") or "").splitlines() if line.strip()]
+    lines = [line.strip() for line in (md_section(text, "Status") or "").splitlines() if not blank_line(line)]
     return lines[0] if lines else ""
 
 
 def validate_adr(text, name):
     problems = ["%s: section '## %s' is missing or empty" % (name, title)
-                for title in ADR_SECTIONS if not (md_section(text, title) or "").strip()]
+                for title in ADR_SECTIONS if blank_text(md_section(text, title) or "")]
     return problems + stubs(name, comment_free(text))
 
 
@@ -818,7 +849,7 @@ def top_level_items(section):
     for line in (section or "").splitlines():
         if re.match(r"^[-*]\s+\S", line):
             items.append(re.sub(r"^[-*]\s+", "", line).strip())
-        elif items and line.strip():
+        elif items and not blank_line(line):
             items[-1] += " " + line.strip()
     return items
 
@@ -952,7 +983,7 @@ def class_label(text):
 
 def validate_spec(task, text=None):
     text = read(spec_path(task)) if text is None else text
-    if not text.strip():
+    if blank_text(text):
         return ["no spec at %s (the analyst agent writes it)" % spec_rel(task)]
     body = comment_free(text)
     problems = []
@@ -2956,7 +2987,7 @@ def attested_task(task, commits, tip):
         "title": task_title(task),
         "finishedIn": finished_in,
         "spec": {"path": spec_rel(task),
-                 "fingerprint": spec_fingerprint(task, spec_text) if spec_text.strip() else None,
+                 "fingerprint": spec_fingerprint(task, spec_text) if not blank_text(spec_text) else None,
                  "approval": approval_lines(md_section(spec_text, "Approval") or "")},
         "changeClass": {"class": cls, "declared": declared, "problem": problem},
         "grill": verdict_brief(verdict_history(task, "grill")),
