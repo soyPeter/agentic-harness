@@ -2,6 +2,9 @@
 # Self-test: installs the harness into throwaway repositories and exercises the
 # installer, every Claude Code hook, the git hooks and the update path.
 # Usage: tests/run-tests.sh
+#   The property checks need tests/requirements.txt installed; without it they are skipped.
+#   HYPOTHESIS_PROFILE=ci       fewer examples per property, as in the pull request jobs (default: thorough, all)
+#   HARNESS_TEST_JOBS=<n>       how many tests/test-*.py files run at once (default: one per CPU)
 set -u
 
 HARNESS="$(cd "$(dirname "$0")/.." && pwd)"
