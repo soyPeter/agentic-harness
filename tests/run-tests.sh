@@ -72,6 +72,7 @@ print("Judged.\n\n```json\n" + json.dumps(body, indent=2) + "\n```")' "$@"
 
 # The Python test files share no state with the sections below or with each other, so they run alongside them from
 # the start, HARNESS_TEST_JOBS at a time (default: one per CPU), slowest first, each with its own temporary folder.
+# They run niced: the sections are the longest chain on a CI runner, and the files finish in the CPU time it leaves.
 # The last section reports them in this order. Each line: tests/test-<file>.py|the check's name.
 PY_TESTS="change-class|the class table through risk, approve, next, start, finish and receipt (properties need hypothesis)
 deliverer-gate|the deliverer's gate: every way of running a command, and its properties (with hypothesis)
@@ -95,7 +96,7 @@ PY_JOBS="${HARNESS_TEST_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
 printf 'Python test files: %s at a time, Hypothesis profile %s\n' "$PY_JOBS" "${HYPOTHESIS_PROFILE:-thorough}"
 printf '%s\n' "$PY_TESTS" | while IFS='|' read -r file _; do mkdir -p "$PY_WORK/$file/tmp"; echo "$file"; done |
   xargs -P "$PY_JOBS" -I{} sh -c 'd="$1/$2"; start=$(date +%s)
-    TMPDIR="$d/tmp" python3 -B "$3/tests/test-$2.py" > "$d/out" 2>&1; code=$?
+    TMPDIR="$d/tmp" nice -n 10 python3 -B "$3/tests/test-$2.py" > "$d/out" 2>&1; code=$?
     echo $(( $(date +%s) - start )) > "$d/seconds"; echo "$code" > "$d/exit.tmp" && mv "$d/exit.tmp" "$d/exit"' \
     _ "$PY_WORK" {} "$HARNESS" &
 PY_PID=$!
