@@ -5,6 +5,12 @@
 #
 # Changes to the harness itself or to user-only settings fail the check unless a maintainer adds the
 # `harness-change-approved` label (restrict who may label pull requests accordingly).
+#
+# This repository is the harness, enrolled in thin mode. The first install has no pin on the base
+# branch, and its only harness change is the new pin plus this workflow. That one case is accepted.
+# Later pull requests are checked against the pin. A change to the pin or to this workflow still fails
+# without the label. The ordinary-change job commits a product edit and shows that verify passes, then
+# shows that an edit of this workflow does not.
 name: harness-verify
 
 on:
@@ -99,10 +105,74 @@ jobs:
             engine="$RUNNER_TEMP/trusted/scripts/harness/lib/harness.py"
           fi
           echo "ENGINE_SCRIPT=$engine" >> "$GITHUB_ENV"
+          if [[ "$pin_source" == "HEAD" ]]; then
+            echo "FIRST_INSTALL=true" >> "$GITHUB_ENV"
+          else
+            echo "FIRST_INSTALL=false" >> "$GITHUB_ENV"
+          fi
 
       - name: Verify the pull request's commits
         env:
           BASE: ${{ github.base_ref }}
           HARNESS_ROOT: ${{ github.workspace }}
           ALLOW: ${{ contains(github.event.pull_request.labels.*.name, 'harness-change-approved') && '--allow-user-changes' || '' }}
-        run: python3 "$ENGINE_SCRIPT" verify --range "origin/$BASE..HEAD" $ALLOW
+        run: |
+          set +e
+          out=$(python3 "$ENGINE_SCRIPT" verify --range "origin/$BASE..HEAD" $ALLOW)
+          code=$?
+          set -e
+          printf '%s\n' "$out"
+          if [[ "$code" -eq 0 ]]; then
+            exit 0
+          fi
+          if [[ -n "$ALLOW" || "$FIRST_INSTALL" != "true" ]]; then
+            exit "$code"
+          fi
+          printf '%s\n' "$out" > "$RUNNER_TEMP/verify-out.txt"
+          line=$(grep '^verify: the harness itself changes (' "$RUNNER_TEMP/verify-out.txt" || true)
+          others=$(grep '^verify: ' "$RUNNER_TEMP/verify-out.txt" | grep -v '^verify: ok$' | grep -v '^verify: the harness itself changes (' || true)
+          inside=$(printf '%s\n' "$line" | sed -n 's/^verify: the harness itself changes (\(.*\)).*/\1/p')
+          bad=$(printf '%s\n' "$inside" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -vx -e '.github/workflows/harness-verify.yml' -e 'backbone/.harness-lock.json' || true)
+          if [[ -n "$line" && -z "$others" && -n "$inside" && -z "$bad" ]]; then
+            echo "First install: the new pin and harness-verify.yml are the enrollment."
+            echo "Later pull requests are checked against this pin. A change to either file still fails without the harness-change-approved label."
+            exit 0
+          fi
+          exit 1
+
+  ordinary-change:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: An ordinary human change passes, a harness-verify edit does not
+        shell: bash
+        env:
+          HARNESS_ROOT: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          git config user.email "ci@example.com"
+          git config user.name "harness-verify"
+          git config core.hooksPath .githooks
+          printf '\n<!-- ordinary human note -->\n' >> README.md
+          printf '\n# ordinary human comment\n' >> payload/owned/scripts/harness/lib/harness.py
+          git add README.md payload/owned/scripts/harness/lib/harness.py
+          git commit -m "docs: ordinary human note"
+          engine="$HOME/.agentic-harness/engines/0.30.0/payload/owned/scripts/harness/lib/harness.py"
+          test -f "$engine"
+          human=$(python3 "$engine" verify --range HEAD~1..HEAD)
+          printf '%s\n' "$human"
+          grep -qx 'verify: ok' <<<"$human"
+          printf '\n# not an ordinary change\n' >> .github/workflows/harness-verify.yml
+          git add .github/workflows/harness-verify.yml
+          HARNESS_VERIFY=off git commit -m "ci: rewrite harness-verify"
+          set +e
+          enforced=$(python3 "$engine" verify --range HEAD~1..HEAD)
+          enforced_code=$?
+          set -e
+          printf '%s\n' "$enforced"
+          test "$enforced_code" -ne 0
+          grep -q 'the harness itself changes (.github/workflows/harness-verify.yml)' <<<"$enforced"

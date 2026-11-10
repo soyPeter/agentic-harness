@@ -16,14 +16,15 @@ This repository is the agentic harness, enrolled in thin mode at v0.30.0. Worker
 
 ## Design rules
 1. Thin mode. Commands go through the pinned launcher, `~/.agentic-harness/engines/0.30.0/plugin/launcher.py`, once work has started. The copy at `plugin/launcher.py` in this clone is product source and workers will edit it.
-2. `HARNESS_PROFILE="triple"` refuses `--merge`, `--trust` and `orca-nightly`. Delivery is `--pr` only. Pedro merges.
-3. `HARNESS_ORCA_AGENTS` is `default=claude judge=codex`. The judge runs on a different model.
-4. Parallel workers: 2.
-5. A spec whose Change-Class is `docs` or `refactor` can be approved by policy when it is low risk. `feature` and `schema` wait for Pedro's `Approved-by:` line.
-6. A spec's `ADRs:` line must name an ADR file in `backbone/adr/`. Product ADRs live in `docs/adr/` and are indexed in `5-DECISIONS.md`. Cite an Accepted backbone ADR on the `ADRs:` line (ADR-002 for the stack). Mention a Proposed product ADR in the narrative, not on that line, or policy will not approve the spec.
-7. Wave 1 tasks are audits and docs. They read the plan path on their task line. If that file is not on the base branch, the plan does not exist for the worker yet.
-8. Do not adopt the catalog pack `triple`. The profile and the pack are different things.
-9. Do not change a product ADR's status. Pedro does that.
+2. `.githooks/pre-commit` is the shim from main, not the v0.30.0 copy. The release shim treats a worktree's git dir as the engine cache and refuses the commit. Orca uses one worktree per task. This shim clears those git variables and still runs the pinned engine. Do not put the v0.30.0 shim back.
+3. `HARNESS_PROFILE="triple"` refuses `--merge`, `--trust` and `orca-nightly`. Delivery is `--pr` only. Pedro merges.
+4. `HARNESS_ORCA_AGENTS` is `default=claude judge=codex`. The judge runs on a different model.
+5. Parallel workers: 2.
+6. A spec whose Change-Class is `docs` or `refactor` can be approved by policy when it is low risk. `feature` and `schema` wait for Pedro's `Approved-by:` line.
+7. A spec's `ADRs:` line must name an ADR file in `backbone/adr/`. Product ADRs live in `docs/adr/` and are indexed in `5-DECISIONS.md`. Cite an Accepted backbone ADR on the `ADRs:` line (ADR-002 for the stack). Mention a Proposed product ADR in the narrative, not on that line, or policy will not approve the spec.
+8. Wave 1 tasks are audits and docs. They read the plan path on their task line. If that file is not on the base branch, the plan does not exist for the worker yet.
+9. Do not adopt the catalog pack `triple`. The profile and the pack are different things.
+10. Do not change a product ADR's status. Pedro does that.
 
 ## NEVER DO
 - Do not run `orca` without `--dry-run` from an agent. Pedro starts the real run.
