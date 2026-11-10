@@ -42,6 +42,43 @@
   setext heading is invalid until it is rewritten. The user's approval under an indented `  ## Approval` no longer
   counts. A section that a fenced example or an HTML block used to hide is now read, so it may need fixing too.
 
+- **HTML blocks follow CommonMark (follow-up to the Markdown reading).** A `<?`, `<!X` or `<![CDATA[` block now ends at
+  its closing mark even after a blank line, so a `## Approval` hidden in one no longer passes as a section. `<pre>`,
+  `<script>`, `<style>` and `<textarea>` blocks interrupt a paragraph. An autolink, or a tag followed by text, at the
+  start of a line is text, so a heading below it no longer makes the spec invalid. A CR or CRLF line end is read as LF
+  in the file and in the text a hook proposes, so a lone CR can't add an unfrozen section to an approved spec.
+  **Upgrading:** a spec with a heading inside one of these blocks is invalid, and so is a tag alone on the line after a
+  list or quote paragraph; rewrite them.
+
+- **Spaces, blank lines and line breaks follow CommonMark (follow-up to the HTML blocks).** A tag's name ends at a space
+  or a tab only, so a form feed, vertical tab or non-breaking space in a tag can't hide a heading below it in an HTML
+  block: the spec is refused. A line of only a non-breaking space or another Unicode space is text, not a blank line: it
+  keeps an HTML block open, and it is a paragraph ahead of a setext underline. A vertical tab, form feed, NEL, or a
+  Unicode line or paragraph separator anywhere in a spec makes it invalid, and so does an unusual space or control
+  character on a line with a `<`, `#`, backtick or tilde. **Upgrading:** a spec with a line break character anywhere, or
+  an unusual space beside a tag, heading or fence, is invalid until the characters are removed or replaced with an ASCII
+  space, tab or newline.
+
+- **Thematic breaks and link reference definitions follow CommonMark (follow-up to the spaces and blank lines).** A
+  `***` or `___` line after paragraph text is a thematic break, not more text, so a tag alone on the next line starts an
+  HTML block and a `## Approval` under it is refused, not read as the Approval section. A tag alone after a paragraph that
+  starts with `[`, which a reader may take for a link reference definition, is refused, and so is a setext underline in a
+  list or quote. An unusual space in inline code is text again: only a line that starts with a fence marker counts as a
+  fence for the unusual-space check. **Upgrading:** a spec with a heading in the HTML block that a tag alone after a `***` or
+  `___` break starts, a tag alone after a `[`-led paragraph, or a setext heading in a list or quote is invalid until it
+  is rewritten.
+
+- **Comments and HTML blocks in lists and quotes follow CommonMark (follow-up to the thematic breaks).** `<!-->` and
+  `<!--->` are whole, empty comments, as in CommonMark 0.31: they no longer hold a comment open to a later `-->`, where a
+  tag after them could hide a `## Approval` that the gates still read. A second comment on a line no longer shifts the
+  text the gates read. An HTML block or comment in a list item or quote ends with the item or quote. The gates don't
+  track where those end, so they refuse what could be read either way: a `<pre>`, `<script>`, `<style>`, `<textarea>`,
+  `<?`, `<!X` or CDATA block in a list item or quote or on an indented line, an indented tag that starts a block with no
+  blank line after it, and a comment left open on a line that doesn't start at column 0. A lone `-` under quoted text is
+  a setext underline, not an empty list item, and is refused; so is an underline under indented text, which may belong
+  to a list item. **Upgrading:** move such
+  blocks and multi-line comments to column 0; a spec that relies on them is invalid until they are.
+
 - **Adopting a pack again keeps your edits.** `harness.py adopt` compared a pack file only with the release's copy, so
   a file edited after the last adoption was replaced by the release's copy with no backup, after a pin move or a
   `--to-thin`. An edited file is now kept. When the release changed it too, its copy goes to `<file>.harness-new` and
