@@ -7,8 +7,9 @@ Answers 401 unless the Authorization header is "lin_test_key", as Linear does fo
 """
 import json
 import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from socketserver import TCPServer  # HTTPServer resolves its host name on start, which can hang on macOS
 
 FIXTURES, PORT_FILE, CALLS = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 
@@ -44,6 +45,6 @@ class Handler(BaseHTTPRequestHandler):
         return self.answer(200, {"data": {"issue": None}})
 
 
-server = HTTPServer(("127.0.0.1", 0), Handler)
+server = TCPServer(("127.0.0.1", 0), Handler)
 PORT_FILE.write_text(str(server.server_address[1]))
 server.serve_forever()
