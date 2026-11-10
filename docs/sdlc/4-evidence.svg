@@ -109,7 +109,7 @@
 <rect x="1176" y="1004" width="540" height="178" rx="3" fill="#FAF9F6" stroke="#E2602A" stroke-width="1.5" stroke-dasharray="7 6"/>
 <text x="1196" y="1034" class="tiny" fill="#E2602A">ADR-005 · HARNESS-VERIFY, AFTER THE MERGE</text>
 <text x="1196" y="1066" class="title-s">Signed verdict attestation</text>
-<text x="1196" y="1096" class="body"><tspan x="1196" dy="0">attest --range: an in-toto statement about a commit and</tspan><tspan x="1196" dy="23">its code tree, only for a range that verifies. On a push</tspan><tspan x="1196" dy="23">to the default branch, CI signs it with cosign if a key is</tspan><tspan x="1196" dy="23">set.</tspan></text>
+<text x="1196" y="1096" class="body"><tspan x="1196" dy="0">attest --range: an in-toto statement about a commit and</tspan><tspan x="1196" dy="23">its code tree, only for a range that verifies. On a push</tspan><tspan x="1196" dy="23">to main, CI writes it with the previous tip's engine and</tspan><tspan x="1196" dy="23">signs it if the key matches harness-attest.pub.</tspan></text>
 <g><rect x="48" y="1215" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="48" y1="1227.24" x2="66" y2="1227.24" stroke="#E2602A" stroke-width="2"/><line x1="48" y1="1236.76" x2="66" y2="1236.76" stroke="#E2602A" stroke-width="2"/></g>
 <text x="78" y="1238" class="tiny">CHECKED BY THE HARNESS</text>
 <g><path d="M372,1219 L385,1232 L372,1245 L359,1232 z" fill="#FAF9F6" stroke="#262523" stroke-width="1.8"/><path d="M372,1226 L378,1232 L372,1238 L366,1232 z" fill="#E2602A"/></g>

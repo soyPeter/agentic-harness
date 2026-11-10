@@ -54,23 +54,34 @@ Checked on 2026-11-07, revised on 2026-11-08:
 
 ## Decision
 When a change lands on the default branch, the `attest` job of `harness-verify.yml` runs. It verifies the pushed
-range, writes an in-toto Statement about the pushed commit with the engine at that commit, and, when the project has
-configured a signing key, signs the statement with cosign inside the protected environment `harness-attest` and keeps
-both as a workflow artifact. Pull requests get the verify check only: no secrets, no signing, nothing for a pull
+range, writes an in-toto Statement about the pushed commit with the engine the push starts from (the default branch's
+previous tip), and, when the project has configured a signing key, signs the statement with cosign inside the protected
+environment `harness-attest` and keeps both as a workflow artifact. Pull requests get the verify check only: no secrets, no signing, nothing for a pull
 request to edit into a signature.
 
 ### Where and when the statement is made
 - **The pushed range** is `github.event.before..github.sha`. The statement is about the commit on the default branch.
   For a squash or rebase merge that is not the pull request's head, and the head is not attested at all.
-- **The engine is the one at the tip.** The job takes the verifier with the same steps as the pull request check,
-  from the pushed commit. For a range that passes `verify` without `--allow-user-changes`, the one the job uses, verify
-  refuses any change to the engine (`scripts/harness/`), to the workflows (`.github/workflows/harness-*`), to the
-  lock, to the tool contracts and to user-only settings. So the engine, the workflow and the lock at the tip are the
-  ones at the base, and the statement is written by the verifier that was in force before the push.
+- **The engine is the one the push starts from.** The job takes the verifier from `github.event.before`, the previous
+  tip of the default branch, with the steps the pull request check uses for its base: a pinned engine in thin mode,
+  else the `scripts/harness/` of that commit. The engine at the pushed tip, which the push may have changed, never
+  checks its own change. The statement's check is `verify --range` with the same flags, and for a range without
+  `--allow-user-changes` it refuses any change in the range to the engine (`scripts/harness/`), to the workflows
+  (`.github/workflows/harness-*`), to the lock, to the tool contracts and to user-only settings. So the statement is
+  written by the verifier that was in force before the push, and a push that changes the harness gets no statement.
+- **The previous tip must hold a verifier.** It has a harness, or a thin pin that names the release `v<version>` and
+  resolves to the pinned commit (the job fetches that tag and compares it). Otherwise the job refuses, and it never
+  falls back to the checked-out copy. The pull request check keeps that fallback for a first install; the attest job
+  has none. So a push that deletes the harness, followed by a push that restores a doctored harness, gets no statement:
+  the second push's previous tip has no verifier.
 - **No label in CI.** The job never passes `--allow-user-changes`. A push that changes the harness, even one a
   maintainer approved with `harness-change-approved`, gets no statement: the job fails and says why. Reading the
   merged pull request's label to allow that case is a follow-up.
-- **A base that isn't an ancestor** (a first push, or a forced push) gets no statement. The job refuses it.
+- **A first or forced push gets no statement.** The `Check the pushed range` step refuses an all-zero
+  `github.event.before` (a first push) and a previous tip that isn't an ancestor of the pushed commit (a forced push),
+  before any engine is taken.
+- **The environment is checked before anything is written or signed.** The `Check the harness-attest environment` step
+  refuses unless the environment admits only the default branch (see Keys).
 
 ### The statement
 `harness.py attest --range <base>..<tip> [--allow-user-changes]` writes the unsigned Statement to stdout.
@@ -115,11 +126,52 @@ a breaking change gets a new type.
 ### Keys
 In order of preference:
 
-1. **A self-managed key (v1).** A cosign key pair: the encrypted private key and its password are secrets of the
-   `harness-attest` environment, `HARNESS_ATTEST_KEY` and `HARNESS_ATTEST_PASSWORD`. The project publishes the public
-   key, for example on its default branch and in its documentation; a verifier takes it from there, never from the
-   change it checks. Signing uses a signing config without services, so nothing leaves the runner and nothing becomes
-   public.
+1. **A self-managed key (v1).** A cosign key pair. The public key is committed to the default branch as
+   `harness-attest.pub`, the file the verifier example below reads. The encrypted private key and its password are
+   secrets of the `harness-attest` environment, `HARNESS_ATTEST_KEY` and `HARNESS_ATTEST_PASSWORD`. Signing uses a
+   signing config without services, so nothing leaves the runner and nothing becomes public.
+
+   `harness.py ci-protect --attest` sets the environment up. It refuses while repository-level secrets or variables
+   named `HARNESS_ATTEST_KEY` or `HARNESS_ATTEST_PASSWORD` exist, and names them; with `--delete-repo-copies` it
+   deletes them first. It makes the default branch the environment's only deployment branch, reads the result back,
+   and records the branch in the repository variable `HARNESS_ATTEST_BRANCH`. It then states the mode the job will run
+   in, and whether `harness-attest.pub` is on the default branch. `harness.py doctor` states the mode too, and warns of
+   repository-level copies.
+
+   **The key is checked against the published public key.** Before anything is written or signed, the job derives the
+   public key from the key it received and compares it with `harness-attest.pub` at the previous tip, the commit the
+   verifier comes from. A key of any other value refuses, wherever it came from. GitHub resolves a job's secret from the
+   environment first and from the repository when the environment has none, and a variable of the same name shadows the
+   same way, so the job can't tell where a key came from, only whose key it is. The public key comes from the previous
+   tip, never the pushed commit, so a push can't publish the key that signs it.
+
+   **The public key is an enforcement file.** `harness-attest.pub` is the trust anchor of that check, so it is guarded
+   like the harness's own files: a pull request that adds or changes it fails `verify --range` unless a maintainer
+   adds the `harness-change-approved` label, agents may not write it (the implementer's scope, and the shell and code
+   checks of the hooks refuse it), and a push that changes it gets no statement, like any harness change. The user
+   publishes it as a harness change: through a pull request with the label, or with their own
+   `HARNESS_VERIFY=off git push`, since the pre-push check refuses it otherwise. To rotate: publish the new public key
+   that way (that push gets no statement), then replace the two secrets in the environment; the next push is signed
+   with the new key.
+
+   **Reading the rule.** The job checks that the environment admits only the default branch. It reads the rule live in
+   its own step, with a fine-grained token in the environment secret `HARNESS_ATTEST_POLICY_TOKEN` that has read access
+   to the repository's Actions, Secrets and Variables and nothing else. GitHub's REST reference for "Get an environment"
+   names the Actions permission; the page checked was GitHub Enterprise Server's, so confirm it on github.com before
+   relying on it. Secrets read lists secret names, never their values. Only that step sees the token. When the rule can't be read, the job refuses, unless a maintainer opted in with
+   `harness.py ci-protect --attest --recorded-fallback` (the repository variable `HARNESS_ATTEST_RECORDED_FALLBACK` is
+   `true`). The opt-in accepts the branch `HARNESS_ATTEST_BRANCH` records and does not re-read the rule, so a later
+   removal of the rule goes unnoticed; that is the price of the opt-in. The job logs the mode it runs in, `live` or
+   `recorded branch`, and `ci-protect --attest` states the mode in force.
+
+   **Repository secrets.** A repository-level copy of the key is used where the environment has none, so removing
+   the environment's secret would not stop the signing, and every workflow of the repository can read the copy. In
+   the same step and with the same token, the job lists the repository's secrets and variables (names only) and refuses
+   to sign while one named `HARNESS_ATTEST_KEY` or `HARNESS_ATTEST_PASSWORD` exists; a variable of that name would hold
+   the key in plain text. It refuses when either list can't be read or is incomplete (more than 100 entries), unless
+   the maintainer opted into the recorded branch, and logs which: `repository copies: checked` or `not checked (opted
+   in)`. Without the token the opt-in is the only way to sign, and then a copy goes unnoticed: the key check still
+   refuses any key other than the published one. Keep the two secrets in the environment only.
 2. **A cloud KMS key (follow-up).** `--key gcpkms://…`, `awskms://…`, `azurekms://…` or `hashivault://…`, with the
    workflow authenticating through OIDC federation. The key can't be copied out of the KMS, which logs every use.
    Preferred for regulated profiles such as `triple`.
@@ -153,6 +205,8 @@ same engine's `attest` on the same commits and compare bytes.
   and nothing in it can change the result of that check.
 - `attest` runs the checks again itself, so a statement for a failing range can't be written, not even by hand. The
   job fails and the artifact is not written.
+- A failed check of the environment or of the key, a first or forced push, a previous tip with no verifier, or a range
+  that changes the harness, fails the job before anything is written or signed.
 - The push has already happened when the job runs, so a failure is an alarm, not a gate: a red run on the default
   branch that needs a fix and a rerun. A failure to write, sign or upload fails the job when the key is configured;
   a project that asked for attestations gets no silent gaps.
@@ -169,9 +223,10 @@ same engine's `attest` on the same commits and compare bytes.
   signature: running the same engine's `attest` on the same commits must give the same bytes.
 - **Who can make one.** Anyone who can read `HARNESS_ATTEST_KEY` and its password, and any run that the
   `harness-attest` environment admits. The environment's deployment-branch rule (only the default branch) keeps
-  pull requests out, and the repository's files can't set that rule. Set it before adding the secrets, and consider
-  required reviewers on the environment, so each signing waits for a person. A key holder can sign anything offline
-  until the key is rotated and verifiers stop trusting it.
+  pull requests out, and the repository's files can't set that rule. The job checks the rule, but a job that creates
+  the environment on first use gets no rule, so a maintainer runs `ci-protect --attest` before the secrets are added.
+  Consider required reviewers on the environment, so each signing waits for a person. A key holder can sign anything
+  offline until the key is rotated and verifiers stop trusting it.
 - **Settings are recorded as resolved.** A value placed in a setting, and in particular one placed in the environment
   (a URL with a token in it, for example), is in the statement and in the artifact. Credentials don't belong in
   harness settings.
@@ -196,6 +251,29 @@ environment, and the pull request's run lost its secrets and its signing steps. 
 the full resolved `settings`, because verify's result depends on every setting it reads through `conf()`, not on four
 of them, and a statement that names only some of them makes a claim it can't keep. The statement is about the commit
 on the default branch, not the pull request's head.
+
+Later in the same change: the engine moved from the pushed tip to the previous tip. The first version took the verifier
+from the commit being attested, so a push that made `harness.py` pass everything would have been signed by the engine it
+brought in. The environment's rule became a check in the job, since the job creates an environment with no rule on
+first use, and `ci-protect --attest` sets it.
+
+Then an independent re-review found three gaps, closed in the same change:
+- The attest job took the engine from the tip when the previous tip had no harness. That is the first-install fallback
+  of the pull request check, and it let a push that restored a doctored harness sign its own verdict. The job now
+  refuses instead, and a thin pin must name a release tag.
+- A repository-level copy of the key, added after setup, was signed with. A marker variable can't tell the two apart
+  (a repository variable of the same name is visible to the job too), so the job checks the key against the public key
+  the previous tip publishes.
+- The environment's rule was read with the job's `GITHUB_TOKEN`, and the fallback to the recorded branch was taken
+  without a choice. The rule is now read with a token of its own, in one step; the recorded branch needs an explicit
+  opt-in, and `ci-protect --attest` states the mode in force.
+
+A further re-review found two more:
+- `harness-attest.pub` was an ordinary file, so a pull request could replace the trust anchor of the key check without
+  the approval label. It is now an enforcement file.
+- A repository-level copy of the key, the same key, still signed after the environment's secret was removed, and every
+  workflow could read it. The job now lists the repository's secrets and variables with the policy token and refuses
+  while a copy exists; `ci-protect --attest --delete-repo-copies` deletes them, and `doctor` reports them and the mode.
 
 ## Alternatives considered
 - **SLSA VSA as the predicate**: `verifiedLevels` would have to carry made-up levels. The useful ideas of a VSA
@@ -229,6 +307,11 @@ on the default branch, not the pull request's head.
     verifiers stop trusting that key).
   - The engine-taking steps are in both jobs of the workflow; a test keeps the two copies identical.
   - CI downloads cosign, and a failed download or signature fails the `attest` job of a project that configured a key.
+  - The job reads the environment's rule with a read-only token the project creates and rotates, or the maintainer
+    opts into the recorded branch, which trusts the setup-time record. Either way the mode in force is stated.
+  - The public key is a file on the default branch: it's committed before the first signing as a harness change (a
+    pull request with the label, or the user's own push), and a rotation takes two pushes (publish the new key, which gets no
+    statement, then replace the secrets).
 - **Unchanged**:
   - What `verify` checks and how it gates.
   - Projects without the key.

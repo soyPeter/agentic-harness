@@ -67,8 +67,8 @@ only).
   the implementer. Once the task is committed, the `deliverer` pushes the branch, opens the PR with each task's receipt
   and labels, and watches CI. It runs only the gh commands delivery needs, against this repository only; it can't
   merge, approve or close, and its git ref commands (checkout, merge, reset, push and the like) may not name the default
-  branch, which changes only through the PR. Finishing, committing and pushing (pre-push hook) all refuse a task without its review passes. Both are on by default (`HARNESS_REVIEW`,
-  `HARNESS_DELIVER`, user-only).
+  branch, which changes only through the PR. Finishing, committing and pushing (pre-push hook) all refuse a task
+  without its review passes. Both are on by default (`HARNESS_REVIEW`, `HARNESS_DELIVER`, user-only).
 
 ## Who decides, by Change-Class
 
@@ -113,11 +113,13 @@ pass stale.
 - **Signed verdict attestations** (optional, [ADR-005](docs/adr/ADR-005-verdict-attestations.md), Proposed):
   `harness.py attest --range <base>..<tip>` prints an in-toto Statement about the tip commit with each finished task's
   verdict chain (spec fingerprint, grill, judge and review verdicts, Change-Class, risk and receipt), only for a range
-  that passes `verify --range`, and the same bytes for the same commits. With a cosign key in the secrets
-  `HARNESS_ATTEST_KEY` and `HARNESS_ATTEST_PASSWORD` of the `harness-attest` environment (restricted to the default
-  branch), the `attest` job of `harness-verify` writes the statement for each push to the default branch, signs it
-  without a transparency log, and keeps it as the `harness-attestation` artifact. Pull requests never see the key. It
-  claims no SLSA level. Details and limits in `backbone/HOOKS.md`.
+  that passes `verify --range`, and the same bytes for the same commits. On each push to the default branch, the
+  `attest` job of `harness-verify` writes it with the engine the push starts from (the previous tip, never the pushed
+  one) and signs it with cosign, without a transparency log, when the `harness-attest` environment holds the key
+  (`HARNESS_ATTEST_KEY`, `HARNESS_ATTEST_PASSWORD`). The key must match the public key committed as
+  `harness-attest.pub`, an enforcement file like the harness's own. `harness.py ci-protect --attest` sets up the
+  environment, restricted to the default branch. Pull requests never see the key, and the statement claims no SLSA
+  level. Details and limits in `backbone/HOOKS.md`.
 - **What binds whom**: the hooks and gates bind agents. The user can still switch a gate off in `harness.conf` or
   commit with `HARNESS_VERIFY=off`; CI's `harness-verify` is what binds everyone, once it is required.
 - **Safe updates**: harness files are tracked by hash. Local edits are detected and never overwritten silently.
