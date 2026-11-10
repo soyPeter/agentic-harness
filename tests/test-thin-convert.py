@@ -13,6 +13,8 @@ import tempfile
 import textwrap
 import unittest
 
+from hypothesis_profiles import examples
+
 try:
     from hypothesis import HealthCheck, given, settings, strategies as st
 except ImportError:
@@ -867,7 +869,7 @@ class AdoptEdits(Fixture):
         def test_adopting_again_keeps_every_edited_file_and_writes_the_release_copy_beside_it(self):
             self.skipTest("needs hypothesis (pip install -r tests/requirements.txt)")
     else:
-        @settings(max_examples=8, deadline=None, database=None, suppress_health_check=list(HealthCheck))
+        @settings(max_examples=examples(8), deadline=None, database=None, suppress_health_check=list(HealthCheck))
         @given(data=st.data())
         def test_adopting_again_keeps_every_edited_file_and_writes_the_release_copy_beside_it(self, data):
             edits = data.draw(st.sets(st.sampled_from(self.packed)), label="edited")
@@ -964,7 +966,7 @@ class PackProperties(Fixture):
         def test_removing_a_pack_keeps_exactly_the_edited_files(self):
             self.skipTest("needs hypothesis (pip install -r tests/requirements.txt)")
     else:
-        @settings(max_examples=6, deadline=None, database=None, suppress_health_check=list(HealthCheck))
+        @settings(max_examples=examples(6), deadline=None, database=None, suppress_health_check=list(HealthCheck))
         @given(data=st.data())
         def test_removing_a_pack_keeps_exactly_the_edited_files(self, data):
             edits = data.draw(st.sets(st.sampled_from(self.packed)), label="edited")
@@ -1189,7 +1191,7 @@ class Properties(Fixture):
         def test_edited_files_are_backed_up_and_restored(self):
             self.skipTest("needs hypothesis (pip install -r tests/requirements.txt)")
     else:
-        @settings(max_examples=8, deadline=None, database=None, suppress_health_check=list(HealthCheck))
+        @settings(max_examples=examples(8), deadline=None, database=None, suppress_health_check=list(HealthCheck))
         @given(data=st.data())
         def test_edited_files_are_backed_up_and_restored(self, data):
             edits = data.draw(st.sets(st.sampled_from(self.owned), max_size=6), label="edited")
