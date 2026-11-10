@@ -6,7 +6,14 @@
 - **Target repository:** https://github.com/soyPeter/agentic-harness
 - **Location:** `docs/research/2026-11-structural-skeleton-spec-plan.md`. It is a plan, not an ADR. It adds an opt-in format for content the architect already writes, with no new authority boundary. If WP2 ends up making skeletons a gate input, that change gets its own ADR.
 - **Decision authority (proposed role, unassigned):** repository maintainer. PR merge stays with the user.
-- **Related:** `payload/owned/backbone/templates/spec.md` (Architecture, Tech requirements); `payload/owned/.claude/agents/architect.md`; `payload/owned/.claude/agents/judge.md`; `HARNESS_REQ_STYLE=ears` as the precedent for an opt-in spec style; [ADR-002](../adr/ADR-002-change-class-ladder.md); [ADR-004](../adr/ADR-004-traceability-export.md). Does not depend on the untracked local ADR-003 (evidence closed loop), ADR-006 or the delegation-contracts plan. Distinct from the local dependency-gate plan (task order) and the PR-body opener plan (review summary).
+- **Related:** `payload/owned/backbone/templates/spec.md` (Architecture, Tech requirements); `payload/owned/.claude/agents/architect.md`; `payload/owned/.claude/agents/judge.md`; `HARNESS_REQ_STYLE=ears` as the precedent for an opt-in spec style; [ADR-002](../adr/ADR-002-change-class-ladder.md); [ADR-004](../adr/ADR-004-traceability-export.md). Does not depend on [ADR-007](../adr/ADR-007-evidence-closed-loop.md), [ADR-006](../adr/ADR-006-external-agent-resource-admission.md) or the [delegation-contracts plan](2026-11-delegation-contracts-qualification-plan.md). Distinct from the dependency-gate plan (task order) and the PR-body opener plan (review summary).
+
+## Decisions (2026-11-10)
+
+Pedro accepted the following defaults:
+
+- Accept the WP0 no-go and keep the plan parked.
+- Re-run WP0 only for a greenfield task, a project with the tester on, or judge failures caused by interfaces or type mismatches.
 
 ## Evidence and baseline
 
@@ -109,5 +116,4 @@ Out of scope: generating code from skeletons, formal verification (Dafny, Verus,
 
 ## Decisions needed (human)
 
-1. Accept the WP0 no-go and park the plan, or override and start WP1 on the stubs-only design?
-2. Which future project should trigger a WP0 re-run (for example the Triple Disputes pilot, once it has judge history)?
+Resolved on 2026-11-10. See Decisions (2026-11-10).

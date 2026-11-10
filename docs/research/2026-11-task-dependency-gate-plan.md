@@ -5,7 +5,15 @@
 - **Target repository:** https://github.com/soyPeter/agentic-harness
 - **Location:** `docs/research/2026-11-task-dependency-gate-plan.md` (implementation plan under existing decisions; not an ADR, because it extends an existing gate to a rule the coordinator already applies, without a new architectural boundary).
 - **Decision authority (proposed role, unassigned):** repository maintainer; PR merge stays with the user as today.
-- **Related:** `payload/owned/backbone/HOOKS.md` (Orca queue, start gate); `payload/owned/backbone/8-WORKFLOW.md` step 7; `payload/owned/AGENTS.md` sections 4 and 7; [ADR-002](../adr/ADR-002-change-class-ladder.md). Does not depend on the untracked local ADR-003 (evidence closed loop) or ADR-006 drafts.
+- **Related:** `payload/owned/backbone/HOOKS.md` (Orca queue, start gate); `payload/owned/backbone/8-WORKFLOW.md` step 7; `payload/owned/AGENTS.md` sections 4 and 7; [ADR-002](../adr/ADR-002-change-class-ladder.md). Does not depend on [ADR-007](../adr/ADR-007-evidence-closed-loop.md) or [ADR-006](../adr/ADR-006-external-agent-resource-admission.md).
+
+## Decisions (2026-11-10)
+
+Pedro accepted the following defaults:
+
+- Run the WP0 audit. If it finds no existing gate outside Orca, implement option B (one computed `blocked` state, `start` refuses a blocked task, and a bad reference is handled as below). If a gate already exists, stop the plan.
+- Dependencies are a hard gate in supervised mode as well as in `run` and Orca, so behaviour does not depend on the runner.
+- Bad references warn for one release, then become an error.
 
 ## Evidence and baseline
 
@@ -86,6 +94,4 @@ Out of scope: a board UI, a JSON task store, Kanvas itself, YOLO-style scoped au
 
 ## Decisions needed (human)
 
-1. Is WP0 worth running (does any real backlog use `(after:)` outside Orca)? If not, close this plan.
-2. Should dependencies be a hard gate in supervised mode too, or only in `run`/Orca? (Proposed: everywhere, so behaviour doesn't depend on the runner.)
-3. Validation of bad references: warning for one release then error, or error immediately?
+Resolved on 2026-11-10. See Decisions (2026-11-10).

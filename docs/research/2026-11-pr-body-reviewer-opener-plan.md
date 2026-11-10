@@ -7,6 +7,14 @@
 - **Decision authority (proposed role, unassigned):** repository maintainer; merge stays with the user as today.
 - **Related:** README "Change receipt"; `payload/owned/backbone/HOOKS.md` sections "Deliverer" and "Change receipt"; `payload/owned/backbone/8-WORKFLOW.md` step 15; [ADR-002](../adr/ADR-002-change-class-ladder.md) (risk labels); [ADR-005](../adr/ADR-005-verdict-attestations.md) (Proposed).
 
+## Decisions (2026-11-10)
+
+Pedro accepted the following defaults:
+
+- Run the WP1 audit (3 to 5 real PR bodies). If bodies are already short, stop the plan.
+- The opener stays optional and labelled. It is not required to be human-edited before merge.
+- Do not record model or effort in run metadata yet.
+
 ## Evidence and baseline
 
 - **Source (primary):** Simon Willison, ["Hide your slop PR descriptions behind details/summary"](https://simonwillison.net/2026/Nov/9/details-summary/), 9 Nov 2026. He opens agent-written PRs with a short human-approved paragraph (sometimes a screenshot), then folds the full agent-written description in a GitHub `<details>` block whose `<summary>` names the model and effort level. His stated reason: accurate, comprehensive agent descriptions still read as "too long to read", so reviewers skip them. This is a practitioner's account, not a study.
@@ -55,6 +63,4 @@ Out of scope: auto-merge, new labels, new ceremonies, changing what the receipt 
 
 ## Decisions needed (human)
 
-1. Is reviewer fatigue on harness PRs a real problem worth WP1? (If no, close this plan.)
-2. Should the opener be required to be human-edited before merge, or stay optional and labelled? (Proposed: optional + labelled; requiring it would be a new ceremony.)
-3. Should model/effort be recorded in run metadata so the summary can name it?
+Resolved on 2026-11-10. See Decisions (2026-11-10).
