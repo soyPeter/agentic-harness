@@ -14,6 +14,7 @@ import string
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -375,6 +376,36 @@ class Capture(Project):
         _, fixtures, _ = self.export("--allows")
         (fixture,) = [f for f in fixtures.values() if f["call"]["input"]["tool_name"] == "Edit"]
         self.assertEqual(fixture["replay"]["state"], "dependent")
+
+
+class Budget(Project):
+    """Claude Code kills a hook that runs past 30 s, and a killed hook lets the call through: a hook answers well
+    inside that whatever the input, with the answer it gives the short command."""
+    PADDING = ("TOKEN", "a", "Ab1", "a://b", "eyJ", "AKIA", "-----BEGIN ", "x=", "Authorization: ", "sk-", "-p", ":",
+               "DB_PASS=", "\"k\": ")
+
+    def timed(self, command):
+        started = time.monotonic()
+        result = self.bash(command, env={"HARNESS_HOOK_BUDGET": "120"})
+        return result, time.monotonic() - started
+
+    def test_a_refused_command_padded_with_secret_like_text_is_refused_in_time(self):
+        reason = self.blocked(self.bash("rm -rf backbone/"))
+        problem = next(line for line in reason.splitlines() if line.startswith("  - "))
+        for size in (60 * 1024, 1024 * 1024):
+            for padding in self.PADDING:
+                with self.subTest(padding=padding, size=size):
+                    result, seconds = self.timed("rm -rf backbone/ backbone/A" + padding * (size // len(padding)))
+                    self.assertIn(problem, self.blocked(result))
+                    self.assertLess(seconds, 15)
+
+    def test_an_allowed_command_padded_with_secret_like_text_is_allowed_in_time(self):
+        for size in (60 * 1024, 1024 * 1024):
+            for padding in self.PADDING:
+                with self.subTest(padding=padding, size=size):
+                    result, seconds = self.timed("echo " + padding * (size // len(padding)))
+                    self.allowed(result)
+                    self.assertLess(seconds, 15)
 
 
 class Candidates(Project):

@@ -435,6 +435,7 @@ def gate_on(key):
 GIT_TIMEOUT = 120
 HOOK_BUDGET = 25
 FAIL_CLOSED_HOOKS = ("pre-tool-use", "agent-guard")
+VERDICT = []   # the exit code a gate hook has decided on, once it has
 
 
 def git(*args):
@@ -1405,10 +1406,29 @@ def split_segments(command):
     return [(s, op) for s, op in segments if s.strip()]
 
 
+# shlex builds a word one character at a time, in time quadratic in its length, past the hook's budget on a long one.
+# A long run of characters it reads literally is swapped for a short stand-in and put back in the words.
+LITERAL_RUN = re.compile(r"[A-Za-z0-9_./:=+,@%^~-]{256,}")
+STAND_IN = re.compile(r"\x00(\d+)\x00")
+
+
+def lexed(segment, punctuation=False, comments=False):
+    """shlex's words of segment (whitespace-split, POSIX); ValueError as shlex raises it."""
+    runs = []
+    if "\x00" not in segment:
+        segment = LITERAL_RUN.sub(lambda m: runs.append(m.group()) or "\x00%d\x00" % (len(runs) - 1), segment)
+    lexer = shlex.shlex(segment, posix=True, punctuation_chars=punctuation)
+    lexer.whitespace_split = True
+    if not comments:
+        lexer.commenters = ""
+    words = list(lexer)
+    return [STAND_IN.sub(lambda m: runs[int(m.group(1))], w) for w in words] if runs else words
+
+
 def shell_words(segment):
     """(leading VAR=value assignments, remaining words), with wrappers such as sudo and env dropped."""
     try:
-        words = shlex.split(segment, comments=True)
+        words = lexed(segment, comments=True)
     except ValueError:
         words = segment.split()
     assignments = []
@@ -1431,6 +1451,19 @@ def short_flags(words):
     return {c for w in words if w.startswith("-") and not w.startswith("--") for c in w[1:]}
 
 
+REAL_PATHS = {}   # a hook process answers one call; a long command names the same path many times
+
+
+def real_path(path):
+    """os.path.realpath, or the lexical path when it is longer than any path the system opens: realpath checks it one
+    component at a time, which takes a hook past its budget on a megabyte-long one, and no call can reach it anyway."""
+    if path not in REAL_PATHS:
+        if len(REAL_PATHS) > 10000:
+            REAL_PATHS.clear()
+        REAL_PATHS[path] = os.path.realpath(path) if len(path) <= 4096 else os.path.normpath(path)
+    return REAL_PATHS[path]
+
+
 def protected_path(path_str, cwd):
     """Repository-relative path if path_str points into a shell-protected harness path, else None."""
     if not path_str or path_str.startswith("-"):
@@ -1438,7 +1471,7 @@ def protected_path(path_str, cwd):
     path = os.path.expandvars(os.path.expanduser(path_str))
     if not os.path.isabs(path):
         path = os.path.join(cwd or str(ROOT), path)
-    full, root = os.path.realpath(path), os.path.realpath(str(ROOT))
+    full, root = real_path(path), real_path(str(ROOT))
     if full != root and not full.startswith(root + os.sep):
         return None
     name = os.path.relpath(full, root).replace(os.sep, "/")
@@ -1525,7 +1558,7 @@ def install_path(path_str, cwd):
     path = os.path.expandvars(os.path.expanduser(path_str))
     if not os.path.isabs(path):
         path = os.path.join(cwd or str(ROOT), path)
-    full, root = os.path.realpath(path), os.path.realpath(str(ROOT))
+    full, root = real_path(path), real_path(str(ROOT))
     for variable, label in INSTALL_DIRS:
         base = os.environ.get(variable)
         if not base:
@@ -1620,7 +1653,7 @@ def shell_findings(command, cwd=None, depth=0):
             refusal = eval_out_refusal(words, script, cwd)
             if refusal:
                 found.append(refusal)
-        for path in written_paths(segment, words):
+        for path in dict.fromkeys(written_paths(segment, words)):
             label = install_path(path, cwd)
             if label:
                 found.append("%s is in %s, which decides this project's gates; agents may not change it."
@@ -2451,7 +2484,7 @@ def command_started(data):
     tool_input = data.get("tool_input") or {}
     timeout = tool_input.get("timeout")
     seconds = timeout / 1000.0 if isinstance(timeout, (int, float)) and timeout > 0 else 120
-    running[command_mark(data)] = {"command": redact_text(str(tool_input.get("command") or ""))[:300],
+    running[command_mark(data)] = {"command": redacted_head(tool_input.get("command") or "", 300),
                                    "until": time.time() + seconds + RUNNING_MARGIN_SECONDS}
     write_snapshot(files, running)
 
@@ -3979,10 +4012,12 @@ def deny(reason, kind="block", causes=None):
     beyond the call's input, or None)] when several checks refused it, for eval replay."""
     lines = [line.strip(" -") for line in reason.strip().splitlines() if line.strip()]
     specific = next((line for line in lines[1:] if line), lines[0] if lines else "")
-    capture = capture_call("blocked", specific, causes) if CAPTURING else None
-    log_event(kind, reason=redact_text(specific)[:200], detail=redact_text(reason)[:2000],
-              **({"capture": capture} if capture else {}))
     sys.stderr.write(reason.rstrip() + "\n")
+    sys.stderr.flush()
+    VERDICT.append(2)
+    capture = capture_call("blocked", specific, causes) if CAPTURING else None
+    log_event(kind, reason=redacted_head(specific, 200), detail=redacted_head(reason, 2000),
+              **({"capture": capture} if capture else {}))
     sys.exit(2)
 
 
@@ -4320,9 +4355,7 @@ def shell_skills(command, cwd=None):
     command, _ = split_heredocs(command)
     for segment, _ in split_segments(command):
         try:
-            lexer = shlex.shlex(segment, posix=True, punctuation_chars=True)
-            lexer.whitespace_split = True
-            words = list(lexer)
+            words = lexed(segment, punctuation=True, comments=True)
         except ValueError:
             continue
         prog = program(words)
@@ -6887,6 +6920,7 @@ def report_command(argv):
 # escalations need a model or a person to evaluate; they are exported as eval prompts and not replayed (ADR-007).
 
 CAPTURE_MAX_INPUT = 64 * 1024
+CAPTURE_MAX_REASON = 1000
 CAPTURE_REFUSALS = 200
 CAPTURE_ALLOWS = 20   # per gate
 CAPTURE_SKIPPED = ("Read", "Grep", "Glob", "LS", "TodoWrite")
@@ -6904,45 +6938,129 @@ REPLAY_FILES = ("backbone/harness.conf", "backbone/guardrails.conf", "backbone/r
                 "backbone/.harness-lock.json", ".claude/settings.json")
 EVAL_USAGE = ("usage: harness.py eval export <candidate-id> | --refusals | --allows [--days N] [--out DIR]\n"
               "       harness.py eval replay [DIR] [--engine <path to harness.py>] [--json]\n")
-_SECRET_VALUE = r"[^\s\"'`$;&|<>()]"
-# The core guardrails' secret rules (private keys, AWS key ids), widened to the whole key, then common token shapes,
-# then credentials found by where they sit. A token keeps its prefix and length, so the rule that refused it still
-# fires on the placeholder and the fixture replays the same way.
-SECRET_PATTERNS = (
-    ("private-key", re.compile(r"(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)(.*?)(-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
-                               re.S), "block"),
-    ("aws-key-id", re.compile(r"(AKIA|ASIA)([0-9A-Z]{16,})"), "shape"),
-    ("github-token", re.compile(r"(gh[pousr]_|github_pat_)([A-Za-z0-9_]{20,})"), "shape"),
-    ("anthropic-key", re.compile(r"(sk-ant-)([A-Za-z0-9_-]{16,})"), "shape"),
-    ("api-key", re.compile(r"(\bsk-)(?!ant-)([A-Za-z0-9_-]{20,})"), "shape"),
-    ("slack-token", re.compile(r"(xox[abposr]-)([A-Za-z0-9-]{8,})"), "shape"),
-    ("authorization", re.compile(r"(?i)(authorization[\"']?\s*[:=]\s*[\"']?(?:(?:bearer|basic|token|bot)\s+)?)(%s{8,})"
-                                 % _SECRET_VALUE), "value"),
-    ("url-credentials", re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:)([^/\s@]+)(?=@)"), "value"),
-    ("secret-variable", re.compile(r"(\b[A-Z][A-Z0-9_]*(?:PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|API_?KEY|ACCESS_?KEY|"
-                                   r"PRIVATE_?KEY|CREDENTIALS?)[A-Z0-9_]*\s*[=:]\s*[\"']?)(%s{4,})" % _SECRET_VALUE),
-     "value"),
+# Secrets are found by shape (a token keeps its prefix and length, so the rule that refused it still fires on the
+# placeholder and the fixture replays the same way), by block (a private key keeps its BEGIN and END lines) and by
+# where they sit (the value given to a name that says it holds one). A hook must answer within Claude Code's timeout,
+# and its watchdog can't stop a running regex, so every pattern here is linear: a fixed start and one run, or bounded
+# repeats, and callers bound the text first (redacted_head).
+SHAPED_SECRETS = (
+    ("aws-key-id", re.compile(r"(AKIA|ASIA)([0-9A-Z]{16,})")),
+    ("github-token", re.compile(r"(gh[pousr]_|github_pat_)([A-Za-z0-9_]{20,})")),
+    ("anthropic-key", re.compile(r"(sk-ant-)([A-Za-z0-9_-]{16,})")),
+    ("api-key", re.compile(r"(\bsk-)(?!ant-)([A-Za-z0-9_-]{20,})")),
+    ("slack-token", re.compile(r"(xox[abposr]-)([A-Za-z0-9-]{8,})")),
 )
+URL_CREDENTIALS = re.compile(r"(://[^/\s:@\"'<>]{1,256}:)([^/\s@\"'<>]{1,512})(?=@)")
+NAME_RUN = re.compile(r"[A-Za-z0-9_.-]+")
+SECRET_WORDS = re.compile(r"PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIAL")
+UPPER_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
+ASSIGNED = re.compile(r"[\"']?[ \t]{0,8}(?:=|:(?!//))[ \t]{0,8}")
+UNQUOTED = re.compile(r"[^\s;&|<>()\"'`,]+")
+AUTH_SCHEMES = ("bearer", "basic", "token", "bot", "digest")
+REDACTED = "REDACTED"
+REDACT_SLACK = 512
+
+
+def shaped(body):
+    return (REDACTED + "X" * len(body))[:len(body)]
+
+
+def redact_blocks(text, found):
+    """Private key blocks emptied between their BEGIN and END lines (to the end of text when it has no END)."""
+    out, pos = [], 0
+    while True:
+        begin = text.find("-----BEGIN ", pos)
+        if begin < 0:
+            break
+        close = text.find("-----", begin + 11, begin + 91)
+        if close < 0 or "PRIVATE KEY" not in text[begin + 11:close]:
+            out.append(text[pos:begin + 11])
+            pos = begin + 11
+            continue
+        body = close + 5
+        end = text.find("-----END ", body)
+        end = len(text) if end < 0 else end
+        if text[body:end] != "\n%s\n" % REDACTED:
+            found["private-key"] += 1
+        out.append(text[pos:body] + "\n%s\n" % REDACTED)
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def secret_name(name):
+    return len(name) <= 256 and (name.lower() == "authorization" or (
+        UPPER_NAME.fullmatch(name) is not None and SECRET_WORDS.search(name) is not None))
+
+
+def value_end(text, start):
+    """Where the value at start ends: its closing quote (or the end of text), or the end of an unquoted run."""
+    if text[start:start + 1] in ("\"", "'"):
+        end = text.find(text[start], start + 1)
+        return len(text) if end < 0 else end
+    run = UNQUOTED.match(text, start)
+    return run.end() if run else start
+
+
+def redact_assigned(text, found):
+    """The values given to names that say they hold a secret (TOKEN=..., "password": "...", Authorization: Bearer
+    ...), whatever the value looks like."""
+    out, pos, kept = [], 0, 0
+    while True:
+        name = NAME_RUN.search(text, pos)
+        if not name:
+            break
+        pos = name.end()
+        if not secret_name(name.group()):
+            continue
+        assigned = ASSIGNED.match(text, pos)
+        if not assigned or text.startswith("=", assigned.end()):
+            continue
+        start = assigned.end()
+        quoted = text[start:start + 1] in ("\"", "'")
+        end = value_end(text, start)
+        if not quoted and text[start:end].lower() in AUTH_SCHEMES:
+            gap = re.match(r"[ \t]{1,8}", text[end:end + 8])
+            if gap:
+                start = end + gap.end()
+                end = value_end(text, start)
+        value = text[start + quoted:end]
+        pos = max(pos, end)
+        if not value or REDACTED in value:
+            continue
+        found["secret-variable"] += 1
+        out.append(text[kept:start + quoted] + REDACTED)
+        kept = end
+    out.append(text[kept:])
+    return "".join(out)
 
 
 def redact_text(text, found=None):
-    """text with every secret SECRET_PATTERNS knows replaced by a placeholder; found counts them by kind."""
+    """text with every secret these rules know replaced by a placeholder; found counts them by kind."""
     if not isinstance(text, str):
         return text
-    for name, pattern, style in SECRET_PATTERNS:
-        def swap(match, name=name, style=style):
-            body = match.group(2)
-            if style == "block":
-                new = match.group(1) + "\nREDACTED\n" + match.group(3)
-            elif style == "shape":
-                new = match.group(1) + ("REDACTED" + "X" * len(body))[:len(body)]
-            else:
-                new = match.group(1) + "REDACTED"
-            if new != match.group(0) and found is not None:
+    found = Counter() if found is None else found
+    text = redact_blocks(text, found)
+    for name, pattern in SHAPED_SECRETS:
+        def swap(match, name=name):
+            new = match.group(1) + shaped(match.group(2))
+            if new != match.group(0):
                 found[name] += 1
             return new
         text = pattern.sub(swap, text)
-    return text
+
+    def userinfo(match):
+        if match.group(2) != REDACTED:
+            found["url-credentials"] += 1
+        return match.group(1) + REDACTED
+    text = URL_CREDENTIALS.sub(userinfo, text)
+    return redact_assigned(text, found)
+
+
+def redacted_head(text, limit):
+    """The first limit characters of text, redacted. Redacting reads past the cut, so a secret that crosses it is
+    still found whole, but never the whole of a long text."""
+    return redact_text(str(text)[:limit + REDACT_SLACK])[:limit]
 
 
 def map_strings(value, change):
@@ -7102,7 +7220,7 @@ def _capture_call(outcome, reason, causes):
               "note": note, "task": tasks[0] if len(tasks) == 1 else None, "redacted": dict(found),
               "settings": capture_settings()}
     if expected is not None:
-        record["reason"] = portable(redact_text(expected), pairs)
+        record["reason"] = portable(redacted_head(expected, CAPTURE_MAX_REASON), pairs)
     folder.mkdir(parents=True, exist_ok=True)
     handle, temp = tempfile.mkstemp(dir=str(folder), suffix=".tmp")
     with os.fdopen(handle, "w", encoding="utf-8") as out:
@@ -8677,6 +8795,10 @@ def hook_budget(name):
         return
 
     def expired(_signum, _frame):
+        if VERDICT:   # the answer was given; only the capture after it ran out of time
+            if VERDICT[-1] == 0 and HOOK_SOURCE == "codex" and not EMITTED:
+                os.write(1, b"{}\n")
+            os._exit(VERDICT[-1])
         if name in FAIL_CLOSED_HOOKS:
             sys.stderr.write("Harness hook ran out of time (%ds; slow git or filesystem). The call is refused to stay "
                              "safe; retry it.\n" % budget)
@@ -8722,6 +8844,7 @@ def main(argv):
                                  role_from_env=bool(data.get("harness_role")) and not from_input)
             HOOKS[argv[2]](data)
             if CAPTURING:
+                VERDICT.append(0)
                 capture_call("allowed")
         finally:
             slow = hook_slow_threshold()
