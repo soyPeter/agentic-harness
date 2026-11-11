@@ -4784,8 +4784,8 @@ API_VALUE_FLAGS = ("-F", "-f", "-H", "-p", "-q", "-t", "-X", "--cache", "--field
 LABEL_VALUE_FLAGS = ("-c", "-d", "-R", "--color", "--description", "--repo")
 MERGE_REFUSAL = "it opens and updates the PR; merging is the user's call, like closing or approving it."
 EXTERNAL_REFUSAL = ("delivery is external here (HARNESS_DELIVER=external): the factory pushes and talks to GitHub from "
-                    "its trusted clone, so no agent pushes or writes to GitHub (gh only reads, git doesn't push by "
-                    "any name). Stop and report")
+                    "its trusted clone, and the lane has no credentials to; agents run gh reads only and no git push "
+                    "(nor git or gh through xargs or find -exec, nor git's own git-* programs). Stop and report")
 EXPANSION_REFUSAL = ("write the gh command out: an expansion ($... or `...`) outside a flag's value can add flags or "
                      "commands the harness can't read.")
 DELIVERY_GH_REFUSAL = ("it runs only the gh commands delivery needs: gh pr create, edit, view, checks and list, "
@@ -6181,18 +6181,23 @@ EXTERNAL_GH_READS = {"pr": ("view", "checks", "list", "ls", "status", "diff"), "
                      "repo": ("view",), "label": ("list",), "issue": ("view", "list", "status"),
                      "release": ("view", "list"), "workflow": ("view", "list"), "auth": ("status",), "search": None,
                      "status": None}
-GIT_PUSHES = ("push", "send-pack", "http-push")
+# git subcommands that push, or run commands that may (None: every form; a tuple: with one of these words).
+GIT_PUSHES = {"push": None, "send-pack": None, "http-push": None, "subtree": None, "submodule": ("foreach",),
+              "lfs": ("push",)}
 
 
 def external_refusal(command):
     """Why a command is refused to every agent under external delivery, or None: the factory pushes and talks to
     GitHub from its trusted clone, so the lane runs no gh write and no git push, by any name."""
-    if not re.search(r"(?<![\w.-])(git|gh)(?![\w.-])", command):
+    if not re.search(r"(?<![\w.-])(git|gh)(?![\w.])", command):
         return None
     for segment, words, why in gh_calls(command):
         prog = program(words[program_index(words):])
-        if why and re.search(r"(?<![\w.-])(git|gh)(?![\w.-])", segment):
+        if why and re.search(r"(?<![\w.-])(git|gh)(?![\w.])", segment):
             return "%s (%s)" % (EXTERNAL_REFUSAL, why.rstrip("."))
+        run, _ = runner_command(prog, words)
+        if prog.startswith("git-") or (run and (program(run).startswith("git") or program(run) == "gh")):
+            return EXTERNAL_REFUSAL
         words = words[program_index(words):]
         if prog == "gh":
             name, sub, args = gh_parts(words)
@@ -6202,7 +6207,8 @@ def external_refusal(command):
         elif prog == "git":
             options = words[1:words.index(git_subcommand(words))] if git_subcommand(words) in words else words[1:]
             sub = git_subcommand(words)
-            if any(o.split("=", 1)[0] in ("-c", "--config-env", "--exec-path") for o in options) or sub in GIT_PUSHES:
+            pushes = sub in GIT_PUSHES and (GIT_PUSHES[sub] is None or any(w in GIT_PUSHES[sub] for w in words))
+            if any(o.split("=", 1)[0] in ("-c", "--config-env", "--exec-path") for o in options) or pushes:
                 return EXTERNAL_REFUSAL
             if sub == "config" and not any(w in GIT_CONFIG_READS for w in words) and \
                     len([w for w in words[words.index("config") + 1:] if not w.startswith("-")]) >= 2:
@@ -7225,6 +7231,8 @@ code as committed (ignore the [WIP] lookup: the task is {task}). Do not modify a
 
 def ci_judge_command(argv):
     """CI: re-judge every task finished in a range with an independent judge session."""
+    if delivery_key_refusal("ci-judge"):
+        return 1
     if argv[:1] != ["--range"] or len(argv) < 2:
         sys.stderr.write("usage: harness.py ci-judge --range <base>..<tip>\n")
         return 64

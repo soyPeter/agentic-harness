@@ -11,9 +11,12 @@
 
 - **One run per task on every runner path, and no pushes from any role under external delivery.** `run` without
   `--only` now locks each task it drives as `run --only` does, and `orca` leaves out (and holds) the tasks it drives,
-  so one task can't run twice at once from any worktree. Under `HARNESS_DELIVER="external"` every agent and the main
-  session, not only the deliverer, only reads GitHub: `gh` runs its read subcommands and `gh api` reads only, and
-  git pushes nothing by any name (`push`, `send-pack`, `-c`, `--config-env`, `--exec-path`, config writes, aliases).
+  so one task can't run twice at once from any worktree. Under `HARNESS_DELIVER="external"`, where the boundary is that the
+  lane holds no push credential, the hooks add defence in depth for every agent and the main session, not only the
+  deliverer: `gh` runs its read subcommands and `gh api` reads only, and git runs no push-capable subcommand (`push`,
+  `send-pack`, `http-push`, `subtree`, `submodule foreach`, `lfs push`), no `-c`, `--config-env` or `--exec-path`, no
+  config write or alias, no `git-*` program directly, and no git or gh through `xargs`, `parallel` or `find -exec`.
+  `ci-judge` refuses to start with `HARNESS_DELIVERY_KEY` set, like `run` and `orca`.
 
 - **The task's cost ledger fails closed and counts a killed session.** `run` reserves each session in the ledger
   before it starts, for what is left of `HARNESS_TASK_BUDGET_USD`, and settles it with the cost when it ends, so a

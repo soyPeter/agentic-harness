@@ -232,8 +232,9 @@ class ExternalDelivery(unittest.TestCase):
                    HARNESS_AGENT_CMD=agent, HARNESS_DELIVERY_KEY="factory-secret")
         run = self.p.harness("run", check=False, env=env)
         orca = self.p.harness("orca", "--pr", check=False, env=env)
+        judge = self.p.harness("ci-judge", "--range", "HEAD~1..HEAD", check=False, env=env)
 
-        for name, result in (("run", run), ("orca", orca)):
+        for name, result in (("run", run), ("orca", orca), ("ci-judge", judge)):
             with self.subTest(command=name):
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn("%s: HARNESS_DELIVERY_KEY is set in this environment" % name, result.stdout)
@@ -287,6 +288,19 @@ class ExternalDelivery(unittest.TestCase):
             for command in allowed:
                 with self.subTest(agent=agent, command=command):
                     self.assertEqual(self.p.bash(command, agent).returncode, 0)
+
+    def test_git_runs_no_push_through_runners_subcommands_or_its_own_binaries(self):
+        refused = ("find . -maxdepth 0 -exec git push origin HEAD \\;", "git subtree push --prefix=x origin main",
+                   "/usr/libexec/git-core/git-push origin HEAD", "git-push origin HEAD",
+                   "git submodule foreach git push", "git lfs push origin HEAD", "echo HEAD | xargs git push origin",
+                   "sh -c 'git push origin HEAD'", "find . -maxdepth 0 -exec gh pr merge 9 \\;")
+        for agent in ("implementer", "deliverer", None):
+            for command in refused:
+                with self.subTest(agent=agent, command=command):
+                    answer = self.p.bash(command, agent)
+
+                    self.assertEqual(answer.returncode, 2, answer.stderr)
+        self.assertEqual(self.p.bash("git submodule status", "implementer").returncode, 0)
 
     def test_doctor_knows_the_delivery_modes(self):
         accepted = self.p.harness("doctor", check=False).stdout
