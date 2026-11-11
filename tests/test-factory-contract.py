@@ -344,6 +344,12 @@ SPELLINGS = (
     "cd scripts/harness/lib && python3 - {c} <harness.py",
     "cat scripts/harness/lib/harness.py | python3 - {c}",
     "python3 /dev/stdin {c} < scripts/harness/lib/harness.py",
+    "cd scripts/harness/lib && < harness.py python3 - {c}",
+    "cat scripts/harness/lib/harness.py | cat | python3 - {c}",
+    "cd scripts/harness/lib && python3 - {c} < h*.py",
+    "echo 'scripts/harness/lib/harness.py {c}' | xargs python3",
+    "echo scripts/harness/lib/harness.py | xargs -I@ sh -c 'python3 @ {c}'",
+    "find scripts -name harness.py -exec {{}} {c} \\;",
 )
 # Running the engine through code the hooks don't read, or from a copy, whatever the command.
 CODE_AND_COPIES = (
@@ -356,7 +362,17 @@ CODE_AND_COPIES = (
     "git show HEAD:scripts/harness/lib/harness.py > /tmp/h.py",
     "ln -s $PWD/scripts/harness/lib/harness.py tool.py",
     "alias h='python3 scripts/harness/lib/harness.py'",
+    "python3 -c \"exec(open('scripts/harness/lib/harness.py').read())\"",
 )
+# A program read from stdin (a pipe, a redirect, input to xargs or find -exec) is code the hooks can't read; a literal
+# heredoc or here-string they can.
+STDIN_PROGRAMS = ("echo 'print(1)' | python3", "echo 'print(1)' | python3 -", "python3 < tool.py", "node < tool.js",
+                  "python3 - <<< \"$(cat tool.py)\"", "find tests -name 'test_*.py' -exec python3 {} \\;",
+                  "ls *.sh | xargs -n1 bash", "git ls-files | xargs sh -c 'echo $0'", "timeout 9 python3 - < tool.py")
+LITERAL_PROGRAMS = ("python3 - <<'EOF'\nprint(1)\nEOF", "python3 - <<< 'print(1)'", "python3 tools/x.py < input.txt",
+                    "cat data.csv | python3 tools/x.py", "python3 --version", "node --version",
+                    "git ls-files '*.py' | xargs python3 -m pyflakes",
+                    "python3 -c \"print(open('scripts/harness/lib/harness.py').read()[:10])\"")
 ALLOWED = ("python3 scripts/harness/lib/harness.py next 1.1 --json", "python3 -B scripts/harness/lib/harness.py contract",
            "python3 scripts/harness/lib/harness.py escalate 1.1 --reason x",
            "python3 scripts/harness/lib/harness.py delivery-plan 7.1 --json",
@@ -366,7 +382,7 @@ ALLOWED = ("python3 scripts/harness/lib/harness.py next 1.1 --json", "python3 -B
            "python3 scripts/harness/lib/harness.py next 1.1 --json > /tmp/next.json",
            "python3 scripts/harness/lib/harness.py state --json 2>/dev/null | head -5",
            "find tests -name '*.py' -exec grep -l intake {} \\;", "git ls-files '*.py' | xargs python3 -m pyflakes",
-           "find tests -name 'test_*.py' -exec python3 {} \\;", "python3 - <<'EOF'\nprint(1)\nEOF",
+           "python3 - <<'EOF'\nprint(1)\nEOF",
            "npm run build", "make run", "docker run --rm alpine true")
 
 
@@ -391,6 +407,16 @@ class UserOnlyCommands(unittest.TestCase):
         for command in CODE_AND_COPIES:
             with self.subTest(command=command):
                 self.assertEqual(self.p.bash(command, "implementer").returncode, 2)
+
+    def test_a_program_from_stdin_is_refused_and_a_literal_one_allowed(self):
+        for command in STDIN_PROGRAMS:
+            with self.subTest(command=command):
+                self.assertEqual(self.p.bash(command, "implementer").returncode, 2)
+        for command in LITERAL_PROGRAMS:
+            with self.subTest(command=command):
+                answer = self.p.bash(command, "implementer")
+
+                self.assertEqual(answer.returncode, 0, answer.stderr)
 
     def test_the_agents_own_commands_and_reads_of_the_engine_are_allowed(self):
         for command in ALLOWED:
@@ -453,13 +479,20 @@ class GitDirectory(unittest.TestCase):
                 (self.lane, 'rm "$(git rev-parse --git-common-dir)/harness/costs/task-1.1.jsonl"'),
                 (self.lane, "rm -f `git rev-parse --git-dir`/../../harness/events.jsonl"),
                 (self.lane, "D=$(git rev-parse --git-common-dir); rm -f $D/harness/costs/task-1.1.jsonl"),
-                (self.lane, 'echo "{}" > "$GIT_DIR/harness/events.jsonl"')):
+                (self.lane, 'echo "{}" > "$GIT_DIR/harness/events.jsonl"'),
+                (self.p, "find . -name '*.jsonl' -delete"), (self.lane, "find . -name .git -delete"),
+                (self.p, "rm -rf .gi?/harness"), (self.p, "truncate -s0 .gi*/harness/events.jsonl"),
+                (self.p, 'rm -f "$PWD/.git/harness/events.jsonl"'),
+                (self.lane, 'cd "$(git rev-parse --git-common-dir)" && rm -f harness/costs/task-1.1.jsonl'),
+                (self.p, "find .git/harness -type f | xargs rm"), (self.p, "ln -sf /dev/null .git/harness/events.jsonl")):
             with self.subTest(command=command):
                 self.assertEqual(project.bash(command, "implementer").returncode, 2)
 
     def test_reads_and_other_writes_are_allowed(self):
         for project, command in ((self.p, "cat .git/harness/events.jsonl"), (self.lane, "git status --short"),
-                                 (self.p, "find . -name '*.pyc' -delete"), (self.p, 'rm -f "$TMPDIR/x.txt"'),
+                                 (self.p, "find src -name '*.pyc' -delete"), (self.p, 'rm -f "$TMPDIR/x.txt"'),
+                                 (self.p, "rm -f build/*.o"), (self.p, 'rm -f "$PWD/build/x.o"'),
+                                 (self.p, "cd src && rm -f x.pyc"),
                                  (self.p, "find .git -name '*.lock' -print"),
                                  (self.lane, "tail -3 %s" % shlex.quote(str(self.common / "harness/events.jsonl")))):
             with self.subTest(command=command):

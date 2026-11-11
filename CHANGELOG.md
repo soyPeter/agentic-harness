@@ -39,6 +39,12 @@
   substitution that points there. Reads stay allowed. **Behaviour change:** a supervised session can no longer write
   `.git/info/exclude`; use `.gitignore`.
 
+- **Agents run no program the hooks can't read.** For every agent, an interpreter reading its program from stdin (a
+  pipe or a file redirect) is refused unless the program is a literal heredoc or here-string, and `xargs`, `parallel`
+  and `find -exec` may not run a shell, or an interpreter whose program comes from their input, nor (`xargs`,
+  `parallel`) a command that changes the files their input names. **Behaviour change:** `echo 'print(1)' | python3`
+  and `find tests -name '*.py' -exec python3 {} \;` are refused; put the program in a file or a heredoc. Reading the
+  harness engine's text in `python3 -c` is allowed again; running or importing it stays refused.
 - **Agents can't start a user-only command by another spelling.** The shell gate refused `harness.py run`, `linear`,
   `intake` and the other user-only commands only when `harness.py` and the command were in fixed places, so
   `python3 -B -I .../harness.py intake`, the thin launcher, `-m harness`, a script or command from an expansion, a

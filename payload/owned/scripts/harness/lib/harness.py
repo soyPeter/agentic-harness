@@ -1652,7 +1652,7 @@ def code_findings(code, label):
     if PROTECTED_MENTION.search(code) and CODE_WRITES.search(code):
         found.append("%s writes to harness-protected paths (backbone/, scripts/harness/, .claude/, git hooks, "
                      "harness-attest.pub); use the Write/Edit tools so the gates see the change." % label)
-    if ENGINE_CODE.search(code):
+    if ENGINE_IMPORT.search(code) or (ENGINE_NAME.search(code) and CODE_RUNS.search(code)):
         found.append("%s runs the harness engine from code the hooks don't read; run harness.py itself, with the "
                      "commands agents may run." % label)
     return found
@@ -1665,7 +1665,11 @@ USER_COMMANDS = ("run", "orca", "orca-nightly", "snapshot", "linear", "intake", 
 FIND_EXEC = ("-exec", "-execdir", "-ok", "-okdir")
 PLANNING_COMMANDS = ("orca", "orca-nightly", "linear")
 ENGINE_MODULES = ("harness", "launcher", "thin")
-ENGINE_CODE = re.compile(r"\b(?:harness|launcher|thin)\.py\b|\brunpy\b|\b(?:import|from)\s+(?:harness|launcher|thin)\b")
+ENGINE_NAME = re.compile(r"\b(?:harness|launcher|thin)\.py\b")
+ENGINE_IMPORT = re.compile(r"\brunpy\b|\b(?:import|from)\s+(?:harness|launcher|thin)\b|"
+                           r"\b(?:import_module|__import__)\s*\(\s*['\"](?:harness|launcher|thin)\b")
+CODE_RUNS = re.compile(r"\bexec(?:file)?\s*\(|\bcompile\s*\(|\bimportlib\b|\bsubprocess\b|\bchild_process\b|"
+                       r"\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\b(?:spawn|exec)Sync\b")
 USER_COMMAND_REFUSAL = ("harness.py %s is for the user, CI, an agent factory or an Orca automation's precheck, not "
                         "agents, however the engine is started: run, orca, orca-nightly, snapshot, linear, intake, "
                         "delivery-record, ci-judge, ci-protect and pin are theirs.")
@@ -1689,7 +1693,9 @@ def is_runtime(word):
 
 def stdin_script(words, start):
     """Whether the runtime at words[start] reads its script from stdin: an operand -, /dev/stdin or /dev/fd/N, or no
-    script operand at all (-c and -m name their code)."""
+    script operand at all (-c and -m name their code; --version and --help run nothing)."""
+    if any(w in VERSION_FLAGS for w in words[start + 1:]):
+        return False
     i = start + 1
     while i < len(words):
         word = words[i]
@@ -1704,23 +1710,97 @@ def stdin_script(words, start):
     return True
 
 
-def engine_findings(prog, words, written, segment="", fed=False):
+def redirections(words):
+    """(words without their redirections, [(operator, target)]): < x, 2>/dev/null, <<EOF and <<< text, wherever they
+    stand, a redirection before the command included."""
+    kept, found, i = [], [], 0
+    while i < len(words):
+        m = REDIRECTION.match(words[i])
+        if not m:
+            kept.append(words[i])
+            i += 1
+            continue
+        rest = words[i][m.end():]
+        found.append((m.group(1), rest if rest else (words[i + 1] if i + 1 < len(words) else "")))
+        i += 1 if rest else 2
+    return kept, found
+
+
+XARGS_VALUE_FLAGS = ("-I", "-J", "-L", "-n", "-P", "-s", "-E", "-e", "-a", "-d", "-R", "-S")
+
+
+def runner_command(prog, words):
+    """(the command words, its replacement token) that xargs, parallel or find -exec runs with arguments from its
+    input or its search, or (None, None)."""
+    if prog in ("xargs", "parallel"):
+        i, token = 1, "{}"
+        while i < len(words) and words[i].startswith("-"):
+            flag = words[i]
+            if flag[:2] in ("-I", "-J") and flag[:2] in XARGS_VALUE_FLAGS:
+                token = flag[2:] or (words[i + 1] if i + 1 < len(words) else "")
+                i += 1 if flag[2:] else 2
+            elif flag in XARGS_VALUE_FLAGS:
+                i += 2
+            else:
+                i += 1
+        return words[i:], token
+    at = next((i for i, w in enumerate(words) if w in FIND_EXEC), None) if prog == "find" else None
+    if at is None:
+        return None, None
+    end = next((j for j in range(at + 1, len(words)) if words[j] in (";", "+")), len(words))
+    return words[at + 1:end], "{}"
+
+
+def script_operand(words):
+    """The script an interpreter command runs ("" when it reads it from stdin), or None for -c and -m code."""
+    i = 1
+    while i < len(words):
+        word = words[i]
+        if word in ("-c", "-m"):
+            return None
+        if word in ("-X", "-W"):
+            i += 2
+            continue
+        if word == "-" or not word.startswith("-"):
+            return "" if word == "-" or STDIN_FILE.search(word) else word
+        i += 1
+    return ""
+
+
+def program_findings(prog, words):
+    """A program the hooks can't read: an interpreter's program from stdin (a pipe or a file redirect; a literal
+    heredoc or here-string is read), and a shell or interpreter a runner (xargs, parallel, find -exec) gives a program
+    from its input. A program in a file runs as the repo's code, which the gates and the judge check."""
+    command, redirects = redirections(words)
+    command = command[program_index(command):]
+    name = program(command)
+    if is_runtime(name) and not any(w in VERSION_FLAGS for w in command[1:]) and script_operand(command) == "":
+        literal = any(op in ("<<", "<<-") or (op == "<<<" and not re.search(r"[$`]", target))
+                      for op, target in redirects)
+        if not literal:
+            return ["It runs %s on a program from stdin (a pipe or a redirect), which the hooks can't read: put the "
+                    "program in a file, or in a heredoc." % name]
+    run, token = runner_command(prog, words)
+    if not run:
+        return []
+    run = run[program_index(run):]
+    from_input = lambda w: not w or "{}" in w or bool(token and token in w)
+    name = program(run)
+    operand = script_operand(run) if is_runtime(name) else None
+    module = run[run.index("-m") + 1] if is_runtime(name) and "-m" in run[:-1] else None
+    if from_input(run[0]) or name in SHELLS or (operand is not None and (from_input(operand) or engine_script(operand))) \
+            or module in ENGINE_MODULES + ("runpy",):
+        return ["It runs a program or shell whose code comes from %s's input or search, which the hooks can't read; "
+                "run the script by its path, with its arguments written out." % prog]
+    if prog in ("xargs", "parallel") and name in MUTATORS:
+        return ["%s %s changes the files its input names, which the hooks can't read; name them." % (prog, name)]
+    return []
+
+
+def engine_findings(prog, words, written):
     """Why a command that starts, copies or aliases the harness engine is refused to agents. The engine runs from its
-    own path, where the hooks read its command; a copy, an alias, a module run, a script word from an expansion, its
-    source on an interpreter's stdin or a command built from input (xargs, find -exec) would run any command unread.
-    fed: the segment reads a pipe from a command that names the engine."""
-    runtimes = [i for i, w in enumerate(words) if is_runtime(w)]
-    names_engine = any(engine_script(w) for w in words)
-    builds = prog in ("xargs", "parallel") or (prog == "find" and any(w in FIND_EXEC for w in words))
-    if builds and runtimes:
-        operand = next((w for w in words[runtimes[0] + 1:] if not w.startswith("-")), "")
-        if names_engine or fed or ((not operand or operand == "{}" or operand in words[:runtimes[0]])
-                                   and any(w in USER_COMMANDS + ("pin",) for w in words[runtimes[0] + 1:])):
-            return ["It runs a script with arguments built from input or a file search (xargs, parallel, find -exec), "
-                    "which the hooks can't read; run the harness engine by its path, with the command written out."]
-    if runtimes and runtimes[0] == 0 and stdin_script(words, 0) and (fed or ENGINE_CODE.search(segment)):
-        return ["It feeds the harness engine to an interpreter on stdin, which the hooks can't read; run harness.py by "
-                "its path."]
+    own path, where the hooks read its command; a copy, an alias, a module run or a script word from an expansion
+    would run any command unread. A program from stdin or from a runner's input is program_findings'."""
     script = next((i for i, w in enumerate(words) if engine_script(w)), None)
     run = script is not None and (script == 0 or any(w in INTERPRETERS or RUNTIMES.fullmatch(w)
                                                      for w in map(program, ([w] for w in words[:script]))))
@@ -1764,9 +1844,8 @@ def shell_findings(command, cwd=None, depth=0):
         if prog == "cd" and len(words) > 1:
             cwd = os.path.join(cwd or str(ROOT), os.path.expanduser(words[1]))
             continue
-        fed = index > 0 and segments[index - 1][1] == "|" and any(
-            engine_script(w) for w in shell_words(segments[index - 1][0])[1])
-        found.extend(engine_findings(prog, words, written_paths(segment, words), segment, fed))
+        found.extend(engine_findings(prog, words, written_paths(segment, words)))
+        found.extend(program_findings(prog, words))
         found.extend(git_dir_findings(prog, words, segment, cwd))
         for path in written_paths(segment, words):
             label = install_path(path, cwd)
