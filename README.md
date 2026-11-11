@@ -150,10 +150,11 @@ pass stale.
   verdicts.
 - **Eval replay** ([ADR-002](docs/adr/ADR-002-change-class-ladder.md) follow-up (c)): the hooks keep each refused call,
   and the newest allowed ones per gate, redacted, in `.git/harness/captures/`. `harness.py report --json` gives each
-  harness candidate an id and the captured inputs behind it. `harness.py eval export <candidate-id>|--refusals|--allows
-  [--out DIR]` drafts reviewable fixtures into `backbone/proposals/evals/`; the user moves the ones to keep into
-  `backbone/evals/`, which agents can't change. `harness.py eval replay [DIR] [--engine <harness.py>] [--json]` runs
-  the state-free ones through `hook pre-tool-use` in a throwaway checkout and exits 1 on a refusal now allowed (a hole),
+  harness candidate an id and its captures by id and digest. `harness.py eval export <candidate-id>|--refusals|--allows
+  [--out DIR]` drafts reviewable fixtures into `.git/harness/eval-drafts/`; the user moves the ones to keep into
+  `backbone/evals/`, which agents can't change, and commits them. `harness.py eval replay [DIR] [--engine <harness.py>]
+  [--json]` runs the committed state-free ones through `hook pre-tool-use` in a throwaway checkout and exits 1 on a
+  refusal now allowed (a hole),
   an allowed call now blocked (a false block) or a refusal that gives another reason. Judge failures and escalations
   are exported as eval prompts and not replayed; model-based replay is
   [ADR-007](docs/adr/ADR-007-evidence-closed-loop.md)'s.

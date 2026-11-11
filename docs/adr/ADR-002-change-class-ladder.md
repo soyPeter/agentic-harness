@@ -76,15 +76,33 @@ are the user's: agents only draft them.
 **What v1 covers.**
 - Capture: a refused `pre-tool-use` call, and a bounded sample of allowed ones per gate, is kept in `.git/harness/`
   with its input redacted and size-capped, its settings fingerprint, and whether its outcome is state-free or
-  state-dependent, with why.
-- Candidates: `harness.py report --json` gives each one an id, kind, reason, tasks and the captured inputs behind it.
-- Fixtures: `harness.py eval export` drafts reviewable fixtures into `backbone/proposals/evals/`. `backbone/evals/` is
-  user-owned like `tools.conf`: the hooks refuse agents' writes to it, and verify refuses a commit that changes it
-  unless the user makes it (`HARNESS_VERIFY=off`, or the `harness-change-approved` label in CI).
-- Replay: `harness.py eval replay [--engine <harness.py>]` runs the state-free fixtures through `hook pre-tool-use` in a
-  throwaway checkout, and exits non-zero on a hole (a refusal now allowed), a false block (an allowed call now
-  blocked), a changed refusal reason or an error. Judge-fail and escalation candidates are exported as eval prompts and
-  not replayed.
+  state-dependent, with why. An allowed file change keeps only its path, size and digest.
+- Candidates: `harness.py report --json` gives each one an id, kind, reason, tasks and its captures by id and digest.
+- Fixtures: `harness.py eval export` drafts reviewable fixtures into `.git/harness/eval-drafts/`, never committed.
+  `backbone/evals/` is user-owned like `tools.conf`: the hooks and `eval export` itself refuse agents' writes to it by
+  any path, and verify refuses a commit that changes it unless the user makes it (`HARNESS_VERIFY=off`, or the
+  `harness-change-approved` label in CI).
+- Replay: `harness.py eval replay [--engine <harness.py>]` runs the committed state-free fixtures through
+  `hook pre-tool-use` in a throwaway checkout, and exits non-zero on a hole (a refusal now allowed), a false block (an
+  allowed call now blocked), a changed refusal reason, an error, or no fixtures to replay. Judge-fail and escalation
+  candidates are exported as eval prompts and not replayed.
+
+**After review (2026-11-11).** An independent review of the first version found that capture could make a refusal
+late enough for Claude Code to kill the hook, which lets the call through; that common secret shapes and the content of
+allowed file changes reached the captures and could be committed from the drafts folder; and that `backbone/evals/`
+and the captures could still be written through a shell variable, a symlink, another spelling or another worktree. The
+fixes, in this version:
+- A hook answers before it captures, and its watchdog keeps that answer. Redaction runs in linear time on text cut to
+  what is kept, and the shell checks parse long words and paths in linear time too.
+- Redaction treats an unknown value given to a secret-like name as a secret, and knows flags, URLs, more token
+  prefixes, JWTs, every non-public key block and random-looking runs. Allowed file changes keep no content, drafts stay
+  in the git folder, export leaves out a fixture that still looks like it holds a secret, and the report names inputs
+  by digest.
+- The engine resolves `eval export --out` itself, the gates read `backbone/evals/` in any case and in every worktree,
+  agents can't write the harness's records in the git folder (the minimal rule; the ADR-008 prerequisites refuse
+  agents' writes anywhere in the git folder), and replay reads only committed fixtures.
+- Refusals are kept per gate and a flood evicts its own captures first; a shell check whose path went through a
+  symlink is state-dependent.
 
 **Left for later.**
 - Running the replay in CI, in the self-test and in `harness-verify` with the base branch's engine against the pull
