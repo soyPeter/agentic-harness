@@ -1,7 +1,7 @@
 # ADR-005: Signed verdict attestations in CI
 
 ## Status
-Proposed
+Accepted
 
 ## Date
 2026-11-07, revised 2026-11-08 (signing moved to the default branch's push; see "Revision")

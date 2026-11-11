@@ -1,7 +1,7 @@
 # ADR-004: Traceability export from the receipt's evidence: ReqIF, needs.json and an HTML matrix, derived and one-way
 
 ## Status
-Proposed
+Accepted
 
 ## Date
 2026-11-07

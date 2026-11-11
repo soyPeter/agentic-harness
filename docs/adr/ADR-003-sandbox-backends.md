@@ -1,7 +1,7 @@
 # ADR-003: Sandbox backends and sandbox evidence
 
 ## Status
-Proposed
+Accepted
 
 ## Date
 2026-11-07
