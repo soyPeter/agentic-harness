@@ -191,6 +191,10 @@ so the proxy can attribute spend (assumed). The harness, proposed (follow-up 3):
 - refuses to start another session once the ledger reaches the budget, and treats the proxy's refusal as a cap hit
   rather than a retryable failure: it escalates with kind `budget` and stops.
 
+The ledger is accounting and defence in depth, not the enforcement: an agent with a shell in the lane can write any
+file its user can, the ledger included. The enforcing per-task cap, like the per-day cap, is the key proxy's; the
+harness reports each session's cost to the factory and stops when the proxy refuses.
+
 `HARNESS_RUN_MAX_COST` stays as the per-run limit for runs outside the factory.
 
 **Events for the factory's audit log.** The factory tails `.git/harness/events.jsonl` read-only and forwards each
@@ -328,8 +332,9 @@ Every case fails closed: no work starts, and nothing is pushed or merged that th
   2. **Intake with provenance and the trusted-sender verdict** (M): `intake`, the frozen `## Source` section,
      idempotence on `dedupe_key`, escalation for untrusted senders; the same provenance on `linear import`.
   3. **Spend caps per task and per day** (S to M): `HARNESS_TASK_BUDGET_USD`, the per-task ledger, refusing a new
-     session over budget, the `budget` escalation kind and cost on the receipt. The per-day cap and booking before each
-     call are the proxy's.
+     session over budget, the `budget` escalation kind and cost on the receipt. The enforcing caps, per task and per
+     day, and booking before each call are the proxy's: the ledger is accounting and defence in depth, since an agent
+     with a shell can write any file its user can.
   4. **Delivery from a trusted clone** (M): `HARNESS_DELIVER="external"`, `delivery-plan`, `delivery-record`.
   5. **Model routing per role in `run`, and the model in every verdict** (M).
   6. **A security lens that risk switches on** (M): the `security` lens, `HARNESS_SECURITY_PATHS`, the trigger in
@@ -383,8 +388,9 @@ What was built, and where it reads this ADR one way among several:
   reading as nothing. Reaching the cap escalates the task (`budget`) and the run goes on with other tasks. The proxy's
   refusal is recognised only while a budget is set, as an HTTP 402 in the agent's own error report; the proxy must
   refuse that way (assumed). It escalates `budget` and stops the run, since the day's cap may refuse the next task too.
-  The escalation's class is `permission_denied`. A session whose agent reports no price (Codex) adds nothing, so the
-  ledger is a floor; the proxy stays the enforcement point.
+  The escalation's class is `permission_denied`. The ledger is accounting and defence in depth: an agent with a shell
+  can write any file its user can, the ledger included, so the enforcing per-task cap, like the per-day one, is the
+  proxy's. A session whose agent reports no price (Codex) adds nothing, so the ledger is a floor.
 - **2, intake.** Task ids are `intake.<n>`. The dedupe index is in the shared git directory, with the Source sections of
   the checkout's specs as a fallback. An untrusted request is escalated (`intake`) at once and, once a person resolves
   that, its Source is a risk reason, so `approve` escalates it again and only a person's `Approved-by:` line lets it
@@ -396,25 +402,30 @@ What was built, and where it reads this ADR one way among several:
   import` trusts the ticket by default, since the user runs it; the factory passes `--sender-verdict`. The user-only
   commands (`intake`, `delivery-record`, and `run`, `linear` and the others that were refused only in one spelling
   before) are refused to agents however the engine is started: interpreter flags, the launcher, a module run, an
-  expansion, a shell function, code that runs it, a copy. Two rules hold for every program: an interpreter reading its
-  program from stdin is refused unless it is a literal heredoc, and `xargs`, `parallel` and `find -exec` may not run a
-  shell or an interpreter whose program comes from their input. `intake` and `linear import` leave the out-of-band
-  snapshot alone, so if an agent runs them anyway by a path the shell checks miss, their writes show as tampering.
+  expansion, a shell function, code that runs it, a copy. Rules hold for every program: an interpreter or a shell
+  reading its program from stdin (a pipe, a redirect, a process substitution) is refused unless it is a literal heredoc;
+  `xargs`, `parallel` and `find -exec` may not run a shell or an interpreter whose program comes from their input;
+  `env -S` is read as its command, and `awk system()` and git given a command to run (a `!` alias, a command key such as
+  `core.sshCommand`) are refused; and the gate tracks what the command itself sets (variables, loops, `read`, `cd`,
+  `pushd`, `popd`). `intake` and `linear import` leave the out-of-band snapshot alone, so if an agent runs them anyway
+  by a path the shell checks miss, their writes show as tampering.
 - **4, delivery from a trusted clone.** The lane can't read the pull request's labels, so the factory passes them to
   `delivery-plan` (`--pr-labels`) and gets the labels to add and remove. `delivery-record` takes the trusted clone's
   `verify` result and refuses a report whose verified head or range isn't the task's `HEAD`, or a `delivered` one whose
   verify failed. In external mode the boundary is that the lane holds no push credential; the hooks add defence in depth
-  (every agent runs `gh` reads only and no push-capable git, nor git or gh through a runner or as a `git-*` program),
-  and a deliverer's report isn't recorded: only `delivery-record` writes the `deliver` event `next` reads, and a record
-  counts only for its own task. With `HARNESS_DELIVERY_KEY`, a secret the factory sets for `delivery-record` and `next`
-  only (`run`, `orca` and `ci-judge` refuse to start while it is in their environment, since a session could read it
-  from its parent), records are signed and `next` counts only signed ones. `harness.py orca` was not otherwise adapted:
-  it leaves such a task waiting at the deliver step and starts no deliverer.
+  (every agent runs `gh` reads only and no push-capable git, nor git or gh through a runner or as a `git-*` program,
+  each command classified by its parsed words and a command named by an expansion refused), and a deliverer's report
+  isn't recorded: only `delivery-record` writes the `deliver` event `next` reads, and a record counts only for its own
+  task. With `HARNESS_DELIVERY_KEY`, a secret the factory sets for `delivery-record` and `next` only (`run`, `orca` and
+  `ci-judge` refuse to start while it is in their environment, since a session could read it from its parent), records
+  are signed and `next` counts only signed ones. `harness.py orca` was not otherwise adapted: it leaves such a task
+  waiting at the deliver step and starts no deliverer.
 - **Agents write nothing in the git directory**, with the file tools or the shell, by a relative or an absolute path,
   from the checkout or a linked worktree, through a glob, `$PWD`, `$VAR`, `git rev-parse` or an unresolved `cd`, or with
-  `find -delete` from a folder that holds it: the event log, the cost ledgers, the run locks and the out-of-band
-  snapshot live there. A task's run also leaves a marker beside them, so a missing ledger fails closed even when the
-  event log is gone too.
+  `find -delete` or a writer run by `find -exec` or `xargs` that can reach it (a `find` that prunes `.git`, or whose
+  `-name` patterns match nothing there, stays allowed), or through a target the hooks can't resolve: the event log, the
+  cost ledgers, the run locks and the out-of-band snapshot live there. A task's run also leaves a marker beside them, so
+  a missing ledger fails closed even when the event log is gone too.
 
 What remains open, plainly: the shell checks read command text, and a text check can't see every spelling; the lane's
 agents can also run code the hooks don't read (a test or a script they write and run). Such code can still append to the
