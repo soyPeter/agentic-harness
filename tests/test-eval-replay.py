@@ -64,6 +64,30 @@ SECRETS = {
     "bearer": "tok3n.Bearer.Value",
 }
 
+PLANTED = (   # (where the secret sits, the secret): every shape a review found passing the first redaction
+    ("aws_secret_access_key=%s aws s3 ls", "Zq81wLxs9VbT2mKp7RfY"),
+    ("password=%s ./run", "Zq82hunter2-Kp7"),
+    ("DB_PASS=%s ./run", "Zq83dbpass"),
+    ("export db_password='%s and more'", "Zq84 with space"),
+    ("API_TOKEN=\"%s$HOME\" ./run", "Zq85$dollar"),
+    ("mysql -u root -p%s shop", "Zq86mysqlpw"),
+    ("curl -u admin:%s https://example.com", "Zq87curlpw"),
+    ("curl --user admin:%s https://example.com", "Zq88curlpw"),
+    ("./deploy --password %s", "Zq89flagpw"),
+    ("./deploy --token=%s", "Zq90flagtok"),
+    ("echo '{\"password\": \"%s\"}'", "Zq91jsonpw"),
+    ("curl -H 'X-Api-Key: %s' https://example.com", "Zq92apikey"),
+    ("echo %s", "sk_live_" + "51HZq93StripeLiveKeyAbCdEf"),
+    ("echo %s", "AIza" + "SyZq94GoogleKeyAbCdEfGhIjKlMnOpQrS"),
+    ("echo %s", "npm_" + "Zq95NpmTokenAbCdEfGhIjKlMnOpQrStUvWx"),
+    ("echo %s", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJacTk2In0.Zq96SignatureAbCdEfGhIjKlMnOp"),
+    ("cat <<EOF\n%s\nEOF", "-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBGZq97PgpKeyBodyLine\n=Zq97\n"
+                           "-----END PGP PRIVATE KEY BLOCK-----"),
+    ("cat <<EOF\n%s\nEOF", "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktZq98\n"
+                           "-----END OPENSSH PRIVATE KEY-----"),
+    ("echo %s", "Zq99x8Kd02LmQwTz7Rv4Yp1Nb6Hc3Js5Fg"),
+)
+
 
 def secret_command(kind, secret):
     """A refused shell command (git reset --hard) that carries secret where that kind of secret is usually found."""
@@ -201,9 +225,25 @@ class Project(unittest.TestCase):
         return [line for line in secret.splitlines() if len(line) >= 8 and not line.startswith("-----")]
 
     def harness_files(self):
-        """Every file the harness keeps for this project outside the work tree, as text."""
-        folder = self.project / ".git/harness"
-        return {p: p.read_text(errors="replace") for p in folder.rglob("*") if p.is_file()}
+        """Every file the harness keeps for this project, as text: its records in the git folder, and drafts."""
+        files = [p for folder in (self.project / ".git/harness", self.project / "backbone/proposals")
+                 for p in folder.rglob("*") if p.is_file()]
+        return {p: p.read_text(errors="replace") for p in files}
+
+    def kept_and_printed(self):
+        """What the harness keeps and prints about the calls made: its files, eval export's default output and
+        report --json."""
+        printed = [self.harness("eval", "export", what).stdout for what in ("--refusals", "--allows")]
+        printed.append(self.harness("report", "--json").stdout)
+        return dict(self.harness_files(), **{"printed by command %d" % i: text for i, text in enumerate(printed)})
+
+    def plant(self, command):
+        """command run, and written into a file, where the gates refuse it and where they may let it through (the
+        guardrails refuse some secrets anywhere)."""
+        self.blocked(self.bash("git reset --hard; " + command))
+        self.bash(command)
+        self.blocked(self.write("backbone/tools.conf", command + "\n"))
+        self.write("docs/notes.md", command + "\n", agent_id="a1", agent_type="implementer")
 
 
 class Capture(Project):
@@ -261,15 +301,50 @@ class Capture(Project):
     def test_allowed_calls_are_a_bounded_sample_per_gate(self):
         for n in range(25):
             self.allowed(self.bash("ls folder-%d" % n))
-        self.allowed(self.write("docs/notes.md", "# Notes\n", agent_id="a1", agent_type="implementer"))
+        self.allowed(self.pre("mcp__tracker__list_issues", {"team": "core"}))
         _, fixtures, _ = self.export("--allows")
         shell = [f for f in fixtures.values() if f["call"]["input"]["tool_name"] == "Bash"]
-        files = [f for f in fixtures.values() if f["call"]["input"]["tool_name"] == "Write"]
+        tools = [f for f in fixtures.values() if f["call"]["input"]["tool_name"] != "Bash"]
         self.assertEqual(len(shell), 20, "the newest 20 allowed shell commands are kept")
         self.assertIn("ls folder-24", [f["call"]["input"]["tool_input"]["command"] for f in shell])
         self.assertNotIn("ls folder-0", [f["call"]["input"]["tool_input"]["command"] for f in shell])
-        self.assertEqual(len(files), 1)
+        self.assertEqual(len(tools), 1)
         self.assertTrue(all(f["kind"] == "allow" and f["expect"]["outcome"] == "allowed" for f in fixtures.values()))
+
+    def test_an_allowed_file_change_keeps_its_path_size_and_digest_not_its_content(self):
+        implementer = dict(agent_id="a1", agent_type="implementer")
+        self.allowed(self.write("docs/notes.md", "host=db\napi=Zq77NotNamedAsASecret\n", **implementer))
+        self.allowed(self.pre("Edit", {"file_path": str(self.project / "docs/notes.md"), "old_string": "db",
+                                       "new_string": "Zq78NewText"}, **implementer))
+        _, fixtures, result = self.export("--allows")
+        self.assertEqual(fixtures, {}, "an allowed file change isn't replayed")
+        self.assertIn("path, size and digest", result.stdout)
+        kept = self.kept_and_printed()
+        for text in ("Zq77NotNamedAsASecret", "Zq78NewText"):
+            for name, content in kept.items():
+                self.assertNotIn(text, content, "an allowed change's content was kept in %s" % name)
+        self.assertTrue(any("docs/notes.md" in content for content in kept.values()), "its path is kept")
+
+    def test_no_planted_secret_reaches_the_captures_drafts_exports_or_report(self):
+        for holder, secret in PLANTED:
+            self.plant(holder % secret)
+        kept = self.kept_and_printed()
+        for holder, secret in PLANTED:
+            for part in self.secret_lines(secret):
+                for name, text in kept.items():
+                    self.assertNotIn(part, text, "%r leaked into %s" % (holder % secret, name))
+
+    def test_export_writes_no_fixture_that_still_holds_a_secret(self):
+        """A capture an engine with a narrower redaction kept: export leaves it out rather than write it."""
+        self.blocked(self.bash("git reset --hard"))
+        (path,) = (self.project / ".git/harness/captures").rglob("*.json")
+        record = json.loads(path.read_text())
+        record["call"]["input"]["tool_input"]["command"] = "git reset --hard; export STRIPE=sk_live_51Zq55AbCdEfGhIjKl"
+        path.write_text(json.dumps(record))
+        out, fixtures, result = self.export("--refusals")
+        self.assertEqual(fixtures, {})
+        self.assertIn("looks like a secret", result.stdout)
+        self.assertNotIn("Zq55", result.stdout + self.harness("report", "--json").stdout)
 
     def test_the_same_allowed_call_is_kept_once(self):
         for _ in range(3):
@@ -359,24 +434,6 @@ class Capture(Project):
         result, data = self.replay(out)
         self.assertEqual(data["counts"], {"as-expected": 1}, data)
 
-    def test_an_allowed_edit_that_needed_the_session_s_skills_is_state_dependent(self):
-        read = {"session_id": "s1", "agent_id": "a1", "agent_type": "implementer", "tool_name": "Read",
-                "tool_input": {"file_path": str(self.project / ".claude/skills/code-quality/SKILL.md")}}
-        self.harness("hook", "post-tool-use", input=json.dumps(read), check=True)
-        self.allowed(self.write("src/app.py", "print(1)\n", agent_id="a1", agent_type="implementer"))
-        _, fixtures, _ = self.export("--allows")
-        (fixture,) = [f for f in fixtures.values() if f["call"]["input"]["tool_name"] == "Write"]
-        self.assertEqual(fixture["replay"]["state"], "dependent")
-        self.assertIn("skill", fixture["replay"]["why"])
-
-    def test_an_allowed_edit_that_a_state_gate_checked_is_state_dependent(self):
-        self.set_tasks(["- [ ] **Task 9.1: Item** (spec: backbone/specs/9.1.md)"])
-        self.allowed(self.pre("Edit", {"file_path": str(self.project / "backbone/3-TASKS.md"),
-                                       "old_string": "Task 9.1: Item", "new_string": "Task 9.1: Items"}))
-        _, fixtures, _ = self.export("--allows")
-        (fixture,) = [f for f in fixtures.values() if f["call"]["input"]["tool_name"] == "Edit"]
-        self.assertEqual(fixture["replay"]["state"], "dependent")
-
 
 class Budget(Project):
     """Claude Code kills a hook that runs past 30 s, and a killed hook lets the call through: a hook answers well
@@ -441,7 +498,10 @@ class Candidates(Project):
         self.assertTrue(refusal["id"].startswith("refusal-"))
         self.assertIn("git commit -n", refusal["reason"])
         self.assertEqual(refusal["tasks"], ["10.1", "10.2", "10.3"])
-        self.assertEqual([c["input"]["tool_input"]["command"] for c in refusal["captures"]], ["git commit -n -m wip"])
+        self.assertEqual(len(refusal["captures"]), 1)
+        capture = refusal["captures"][0]
+        self.assertTrue(capture["id"] and capture["digest"])
+        self.assertNotIn("input", capture, "report --json names a captured input; eval export writes it out")
         self.assertEqual(refusal["captures"][0]["replay"]["state"], "free")
         self.assertEqual(found["judge-fail"]["tasks"], ["10.2", "10.3"])
         self.assertEqual(found["escalation"]["reason"], "runner")
@@ -463,9 +523,11 @@ class Candidates(Project):
 
     def test_a_refusal_candidate_exports_its_inputs_as_fixtures_in_the_drafts_folder(self):
         refusal = self.candidates()["refusal"]
+        status = self.run_command("git", "status", "--porcelain").stdout
         result = self.harness("eval", "export", refusal["id"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        drafts = self.fixtures(self.project / "backbone/proposals/evals")
+        self.assertEqual(self.run_command("git", "status", "--porcelain").stdout, status, "drafts are never committed")
+        drafts = self.fixtures(self.project / ".git/harness/eval-drafts")
         fixture = self.by_command(drafts, "git commit -n -m wip")
         self.assertEqual(fixture["provenance"]["candidate"], refusal["id"])
         self.assertEqual(fixture["provenance"]["tasks"], ["10.1", "10.2", "10.3"])
@@ -538,7 +600,7 @@ class UserOwnedFixtures(Project):
         self.harness("hook", "post-tool-use", input=json.dumps(data), env=auto)
         events = (self.project / ".git/harness/events.jsonl").read_text()
         self.assertNotIn('"kind": "tamper"', events)
-        self.assertTrue(list((self.project / "backbone/proposals/evals").glob("*.json")))
+        self.assertTrue(list((self.project / ".git/harness/eval-drafts").glob("*.json")))
 
 
 class Replay(Project):
@@ -687,13 +749,23 @@ class Properties(Project):
             st.text(alphabet=alnum + "-_", min_size=20, max_size=60).map(lambda s: "sk-ant-api03-" + s),
             st.text(alphabet=alnum + "-", min_size=10, max_size=40).map(lambda s: "xoxb-" + s),
             st.text(alphabet=alnum + "+/=\n", min_size=16, max_size=120).map(
-                lambda s: "-----BEGIN PRIVATE KEY-----\n%s\n-----END PRIVATE KEY-----" % s))
+                lambda s: "-----BEGIN PRIVATE KEY-----\n%s\n-----END PRIVATE KEY-----" % s),
+            st.text(alphabet=alnum + "+/=\n", min_size=16, max_size=120).map(
+                lambda s: "-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n%s\n-----END PGP PRIVATE KEY BLOCK-----" % s),
+            st.text(alphabet=alnum, min_size=24, max_size=40).map(lambda s: "sk_live_" + s),
+            st.text(alphabet=alnum + "-_", min_size=35, max_size=35).map(lambda s: "AIza" + s),
+            st.text(alphabet=alnum, min_size=36, max_size=36).map(lambda s: "npm_" + s),
+            st.tuples(*[st.text(alphabet=alnum + "-_", min_size=10, max_size=40)] * 3).map(
+                lambda p: "eyJ%s.eyJ%s.%s" % p),
+            st.randoms().map(lambda r: "".join(r.choice(string.ascii_letters + string.digits) for _ in range(40))))
         value = st.text(alphabet=alnum + "!#%*+,-.:=?^_~", min_size=6, max_size=40).map(lambda s: "Sk" + s)
         placed = st.one_of(
             st.tuples(shaped, st.sampled_from(["echo '%s'", "printf %%s '%s' > /tmp/k", "X=1 cat <<EOF\n%s\nEOF"])),
             st.tuples(value, st.sampled_from(["export SERVICE_TOKEN=%s", "DB_PASSWORD='%s' ./run",
                                               "git clone https://ci:%s@example.com/r.git",
-                                              "curl -H \"Authorization: Bearer %s\" https://example.com"])))
+                                              "curl -H \"Authorization: Bearer %s\" https://example.com"]
+                                             + [holder for holder, _ in PLANTED if not holder.startswith(("echo %",
+                                                                                                         "cat <<"))])))
 
         @settings(max_examples=examples(12))
         @given(placed)
@@ -701,13 +773,10 @@ class Properties(Project):
         def test_redaction_never_leaks_a_planted_secret(self, case):
             secret, holder = case
             assume("REDACTED" not in secret and "XXXX" not in secret)
-            refused = "git reset --hard; " + holder % secret
-            self.blocked(self.bash(refused))
-            self.allowed(self.bash(holder % secret))
+            self.plant(holder % secret)
             out, _, _ = self.export("--refusals")
             self.export("--allows", out=out)
-            texts = list(self.harness_files().values()) + [p.read_text() for p in out.rglob("*.json")]
-            texts.append(self.harness("report", "--json").stdout)
+            texts = list(self.kept_and_printed().values()) + [p.read_text() for p in out.rglob("*.json")]
             for line in self.secret_lines(secret):
                 for text in texts:
                     self.assertNotIn(line, text)

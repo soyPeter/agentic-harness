@@ -46,6 +46,7 @@ Usage:
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -4202,8 +4203,8 @@ def hook_pre_tool_use(data):
              "the user." % path)
     if path == EVALS_DIR or path.startswith(EVALS_DIR + "/"):
         deny("Harness blocked this change to %s: fixtures in %s/ say what the gates must keep refusing or allowing, "
-             "so only the user changes them. Draft fixtures with harness.py eval export (into %s/) for the user to "
-             "review and move." % (path, EVALS_DIR, EVAL_DRAFTS))
+             "so only the user changes them. Draft fixtures with harness.py eval export for the user to review and "
+             "move." % (path, EVALS_DIR))
     if path == "backbone/3-TASKS.md":
         checks = (wip_collision, start_gate, judge_gate, blocked_guard, light_guard)
     elif path == "backbone/harness.conf":
@@ -6928,7 +6929,7 @@ CAPTURING = {}   # the pre-tool-use or agent-guard call being answered, set by m
 REPLAY_STATE = []   # why that call's outcome depends on more than its input and the rules, as the gates find out
 ROOT_TOKEN, HOME_TOKEN = "{{HARNESS_ROOT}}", "{{HOME}}"
 EVALS_DIR = "backbone/evals"
-EVAL_DRAFTS = "backbone/proposals/evals"
+EVAL_DRAFTS = "backbone/proposals/evals"   # where an agent may still export to, by naming it
 FIXTURE_FORMAT = "agentic-harness eval/v1"
 STATE_FREE = ("its outcome depends only on the input and the rules and settings (shell checks, tool contracts, "
               "guardrail rules, protected paths, role scopes)")
@@ -6946,18 +6947,34 @@ EVAL_USAGE = ("usage: harness.py eval export <candidate-id> | --refusals | --all
 SHAPED_SECRETS = (
     ("aws-key-id", re.compile(r"(AKIA|ASIA)([0-9A-Z]{16,})")),
     ("github-token", re.compile(r"(gh[pousr]_|github_pat_)([A-Za-z0-9_]{20,})")),
+    ("gitlab-token", re.compile(r"(glpat-)([A-Za-z0-9_-]{20,})")),
     ("anthropic-key", re.compile(r"(sk-ant-)([A-Za-z0-9_-]{16,})")),
     ("api-key", re.compile(r"(\bsk-)(?!ant-)([A-Za-z0-9_-]{20,})")),
-    ("slack-token", re.compile(r"(xox[abposr]-)([A-Za-z0-9-]{8,})")),
+    ("stripe-key", re.compile(r"(\b[prs]k_(?:live|test)_)([A-Za-z0-9]{16,})")),
+    ("google-key", re.compile(r"(AIza)([A-Za-z0-9_-]{30,})")),
+    ("npm-token", re.compile(r"(\bnpm_)([A-Za-z0-9]{30,})")),
+    ("slack-token", re.compile(r"(xox[abposre]-)([A-Za-z0-9-]{8,})")),
+    ("jwt", re.compile(r"(?<![A-Za-z0-9_-])(eyJ)([A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*)")),
 )
+# A password in a URL, or a long user name there (a token used as one).
 URL_CREDENTIALS = re.compile(r"(://[^/\s:@\"'<>]{1,256}:)([^/\s@\"'<>]{1,512})(?=@)")
+URL_TOKEN_USER = re.compile(r"(://)([^/\s:@\"'<>]{20,256})(?=@)")
+# Passwords given to flags: mysql -p<password>, curl -u user:<password>.
+FLAG_SECRETS = (
+    ("password-flag", re.compile(r"(?<![^\s\"'])(-p)([^\s\"'`;&|<>()-][^\s\"'`;&|<>()]{2,})")),
+    ("user-password", re.compile(r"(?<![^\s\"'])(-u[ \t]{0,8}|--(?:proxy-)?user[ \t=]{1,8})([^\s:\"'`]{1,256}:)"
+                                 r"([^\s\"'`;&|<>()]{1,512})")),
+)
 NAME_RUN = re.compile(r"[A-Za-z0-9_.-]+")
-SECRET_WORDS = re.compile(r"PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIAL")
-UPPER_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
+# A name that may hold a secret, in any case: an unknown value given to one is taken for a secret.
+SECRET_WORDS = re.compile(r"(?i)key|token|secret|pass|pwd|credential|auth|cookie")
+HIGH_ENTROPY_RUN = re.compile(r"[A-Za-z0-9+/=_-]{32,}")
+FLAG_GAP = re.compile(r"[ \t]{1,8}(?=[^\s-])")   # --password <value>
 ASSIGNED = re.compile(r"[\"']?[ \t]{0,8}(?:=|:(?!//))[ \t]{0,8}")
 UNQUOTED = re.compile(r"[^\s;&|<>()\"'`,]+")
 AUTH_SCHEMES = ("bearer", "basic", "token", "bot", "digest")
 REDACTED = "REDACTED"
+PUBLIC_BLOCKS = ("PUBLIC", "CERTIFICATE", "SIGNATURE", "SIGNED")
 REDACT_SLACK = 512
 
 
@@ -6973,7 +6990,7 @@ def redact_blocks(text, found):
         if begin < 0:
             break
         close = text.find("-----", begin + 11, begin + 91)
-        if close < 0 or "PRIVATE KEY" not in text[begin + 11:close]:
+        if close < 0 or any(word in text[begin + 11:close] for word in PUBLIC_BLOCKS):
             out.append(text[pos:begin + 11])
             pos = begin + 11
             continue
@@ -6989,8 +7006,18 @@ def redact_blocks(text, found):
 
 
 def secret_name(name):
-    return len(name) <= 256 and (name.lower() == "authorization" or (
-        UPPER_NAME.fullmatch(name) is not None and SECRET_WORDS.search(name) is not None))
+    return len(name) <= 256 and SECRET_WORDS.search(name) is not None
+
+
+def entropy(text):
+    counts = Counter(text)
+    return -sum(n / len(text) * math.log2(n / len(text)) for n in counts.values())
+
+
+def random_looking(run):
+    """A run of 32 or more characters mixing upper case, lower case and digits, as spread out as random text."""
+    return (len(run) >= 32 and any(c.isupper() for c in run) and any(c.islower() for c in run)
+            and any(c.isdigit() for c in run) and entropy(run) >= 4.2)
 
 
 def value_end(text, start):
@@ -7014,6 +7041,8 @@ def redact_assigned(text, found):
         if not secret_name(name.group()):
             continue
         assigned = ASSIGNED.match(text, pos)
+        if not assigned and name.group().startswith("-"):
+            assigned = FLAG_GAP.match(text, pos)
         if not assigned or text.startswith("=", assigned.end()):
             continue
         start = assigned.end()
@@ -7049,12 +7078,27 @@ def redact_text(text, found=None):
             return new
         text = pattern.sub(swap, text)
 
-    def userinfo(match):
-        if match.group(2) != REDACTED:
-            found["url-credentials"] += 1
-        return match.group(1) + REDACTED
-    text = URL_CREDENTIALS.sub(userinfo, text)
-    return redact_assigned(text, found)
+    def tail(kind):
+        def swap(match):
+            if match.group(match.lastindex) == REDACTED:
+                return match.group(0)
+            found[kind] += 1
+            return "".join(match.groups()[:-1]) + REDACTED
+        return swap
+    text = URL_CREDENTIALS.sub(tail("url-credentials"), text)
+    text = URL_TOKEN_USER.sub(tail("url-credentials"), text)
+    for kind, pattern in FLAG_SECRETS:
+        text = pattern.sub(tail(kind), text)
+    text = redact_assigned(text, found)
+
+    def spread(match):
+        run = match.group()
+        parts = run.split("/") if run.count("/") > 1 else [run]   # a path: each name on its own
+        new = "/".join(shaped(part) if random_looking(part) else part for part in parts)
+        if new != run:
+            found["high-entropy"] += 1
+        return new
+    return HIGH_ENTROPY_RUN.sub(spread, text)
 
 
 def redacted_head(text, limit):
@@ -7075,7 +7119,28 @@ def map_strings(value, change):
 
 
 def redacted(value, found=None):
-    return map_strings(value, lambda text: redact_text(text, found))
+    """value (JSON-shaped) with its secrets replaced: those redact_text finds, and every value of a field whose name
+    says it holds one."""
+    found = Counter() if found is None else found
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if isinstance(key, str) and isinstance(item, str) and item and secret_name(key) and REDACTED not in item:
+                found["secret-field"] += 1
+                out[key] = REDACTED
+            else:
+                out[key] = redacted(item, found)
+        return out
+    if isinstance(value, list):
+        return [redacted(item, found) for item in value]
+    return redact_text(value, found)
+
+
+def secret_kinds(value):
+    """What redaction would still replace in value (Counter by kind): empty for text already redacted."""
+    found = Counter()
+    redacted(value, found)
+    return found
 
 
 def portable_paths(cwd=None):
@@ -7157,6 +7222,11 @@ def captures_dir():
     return events_file().parent / "captures"
 
 
+def eval_drafts_dir():
+    """The default for eval export: beside the captures, in the git folder, so a draft is never committed."""
+    return events_file().parent / "eval-drafts"
+
+
 def git_facts():
     """What the deliverer's gate reads from git besides the command: the origin, the default and the current branch."""
     return {"origin": git("remote", "get-url", "origin").strip() or None, "default": default_branch(),
@@ -7188,17 +7258,25 @@ def _capture_call(outcome, reason, causes):
         payload["agent_type"] = role   # replayed through pre-tool-use, which finds the role here
     found = Counter()
     pairs = portable_paths(raw.get("cwd"))
+    gate = capture_gate(tool)
     raw_input = json.dumps(payload, sort_keys=True)
     kept = len(raw_input.encode("utf-8")) <= CAPTURE_MAX_INPUT
+    note = None if kept else "its input was over %d KiB, so it wasn't kept" % (CAPTURE_MAX_INPUT // 1024)
+    if outcome == "allowed" and gate == "file":
+        # An allowed change may write anything (a .env, a key); only where it went is kept.
+        change = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+        blob = json.dumps(change, sort_keys=True).encode("utf-8")
+        payload["tool_input"] = {k: change[k] for k in ("file_path", "notebook_path") if isinstance(change.get(k), str)}
+        payload["tool_input"].update(bytes=len(blob), sha256=hashlib.sha256(blob).hexdigest())
+        kept, note = False, "an allowed file change keeps its path, size and digest, not its content"
     call = {"hook": "pre-tool-use", "source": HOOK_SOURCE, "role": role,
             "role_from_env": bool(CAPTURING.get("role_from_env")),
-            "env": portable(redacted(settings_env(), found), pairs),
-            "git": portable(redacted(git_facts(), found), pairs) if role == "deliverer" and tool == "Bash" else None,
-            "input": portable(redacted(payload, found), pairs) if kept else None}
-    key = dict(call, input=call["input"] if kept else hashlib.sha256(raw_input.encode("utf-8")).hexdigest())
+            "env": redacted(portable(settings_env(), pairs), found),
+            "git": redacted(portable(git_facts(), pairs), found) if role == "deliverer" and tool == "Bash" else None,
+            "input": redacted(portable(payload, pairs), found)
+            if kept or gate == "file" and outcome == "allowed" else None}
+    key = dict(call, input=call["input"] if call["input"] else hashlib.sha256(raw_input.encode("utf-8")).hexdigest())
     cid = hashlib.sha256(json.dumps(key, sort_keys=True).encode("utf-8")).hexdigest()[:16]
-    note = None if kept else "its input was over %d KiB, so it wasn't kept" % (CAPTURE_MAX_INPUT // 1024)
-    gate = capture_gate(tool)
     folder = captures_dir() / ("blocked" if outcome == "blocked" else "allowed/" + gate)
     path = folder / ("%s.json" % cid)
     if outcome == "allowed" and path.exists():
@@ -7220,7 +7298,8 @@ def _capture_call(outcome, reason, causes):
               "note": note, "task": tasks[0] if len(tasks) == 1 else None, "redacted": dict(found),
               "settings": capture_settings()}
     if expected is not None:
-        record["reason"] = portable(redacted_head(expected, CAPTURE_MAX_REASON), pairs)
+        record["reason"] = redact_text(portable(str(expected)[:CAPTURE_MAX_REASON + REDACT_SLACK], pairs))[
+            :CAPTURE_MAX_REASON]
     folder.mkdir(parents=True, exist_ok=True)
     handle, temp = tempfile.mkstemp(dir=str(folder), suffix=".tmp")
     with os.fdopen(handle, "w", encoding="utf-8") as out:
@@ -7258,8 +7337,10 @@ def read_captures(outcome):
 
 
 def capture_summary(record):
+    """A capture as report --json names it: the input only by its digest (eval export writes it out, redacted)."""
+    blob = json.dumps((record.get("call") or {}).get("input"), sort_keys=True).encode("utf-8")
     return {"id": record.get("id"), "at": record.get("at"), "tool": record.get("tool"), "replay": record.get("replay"),
-            "kept": record.get("kept"), "note": record.get("note"), "input": (record.get("call") or {}).get("input")}
+            "kept": record.get("kept"), "note": record.get("note"), "digest": hashlib.sha256(blob).hexdigest()[:16]}
 
 
 def refusal_captures(events, reason):
@@ -7282,9 +7363,10 @@ def fixture_from(record, candidate_id=None, tasks=None):
     if kind == "refusal":
         expect["reason"] = record.get("reason")
     found = record.get("redacted") or {}
-    note = ("Redacted before it was kept: %s. The project's folder is written %s and the home folder %s. Read the "
-            "input before you commit it." % (", ".join("%s %d" % kv for kv in sorted(found.items())) or
-                                            "no secret found", ROOT_TOKEN, HOME_TOKEN))
+    note = ("Redacted before it was kept: %s. The project's folder is written %s and the home folder %s. Redaction "
+            "finds the secret shapes and names it knows, not every secret, so read the input before you commit it."
+            % (", ".join("%s %d" % kv for kv in sorted(found.items())) or "nothing it recognised", ROOT_TOKEN,
+               HOME_TOKEN))
     return {"fixture": FIXTURE_FORMAT, "id": "%s-%s" % (kind, record["id"][:12]), "kind": kind, "expect": expect,
             "replay": record.get("replay"), "call": record.get("call"),
             "provenance": {"captures": [record["id"]], "captured_at": record.get("at"), "hook": record.get("hook"),
@@ -7332,10 +7414,11 @@ def eval_export(args):
         return 64
     days = int(days) if days else 7
     what = rest[0]
-    folder = Path(out).expanduser() if out else ROOT / EVAL_DRAFTS
+    folder = Path(out).expanduser() if out else eval_drafts_dir()
     target = Path(os.path.realpath(str(folder)))
     inside = target.relative_to(ROOT).as_posix() if target == ROOT or ROOT in target.parents else None
-    if inside is not None and not inside.startswith("backbone/") and not git("check-ignore", "--", inside).strip():
+    if inside is not None and not inside.startswith(("backbone/", ".git/")) \
+            and not git("check-ignore", "--", inside).strip():
         sys.stderr.write("eval export: %s is inside the repository, outside backbone/, and git doesn't ignore it: an "
                          "untracked file there counts as code and would make the judge's passes stale. Write it to "
                          "the drafts folder (the default), outside the repository or to a git-ignored folder.\n"
@@ -7373,6 +7456,12 @@ def eval_export(args):
             continue
         documents.append(fixture_from(record, candidate_id, tasks))
     written = present = 0
+    for document in list(documents):
+        leaks = secret_kinds({key: document.get(key) for key in ("call", "expect", "candidate", "prompt")})
+        if leaks:
+            documents.remove(document)
+            skipped.append("%s: it still holds text that looks like a secret (%s), so it isn't written; the "
+                           "capture was kept by an engine that redacted less" % (document["id"], ", ".join(sorted(leaks))))
     for document in documents:
         path = folder / ("%s.json" % document["id"])
         if path.exists():
@@ -7388,8 +7477,7 @@ def eval_export(args):
         snapshot_refresh()
     print("eval export: %d fixture(s) written to %s, %d already there, %d skipped%s"
           % (written, folder, present, len(skipped),
-             "; review them, then the user moves the ones to keep into %s/" % EVALS_DIR
-             if written and Path(os.path.abspath(str(folder))) != ROOT / EVALS_DIR else ""))
+             "; review them, then the user moves the ones to keep into %s/" % EVALS_DIR if written else ""))
     return 0
 
 
@@ -7493,7 +7581,7 @@ def replay_fixture(fixture, engine, root, temp, current):
         return "error", None, "the hook exited %d%s" % (result.returncode, ": " + tail if tail else "")
     got = "blocked" if result.returncode == 2 else "allowed"
     expected = fixture["expect"]["outcome"]
-    lines = [key for key in (reason_key(line) for line in result.stderr.splitlines()) if key]
+    lines = [key for key in (reason_key(redact_text(line)) for line in result.stderr.splitlines()) if key]
     refusal = lines[1 if len(lines) > 1 else 0] if got == "blocked" and lines else None
     if expected == "blocked" and got == "allowed":
         return "newly-allowed", got, None
@@ -7617,8 +7705,8 @@ def eval_out_refusal(words, script, cwd):
     name = protected_path(out, cwd)
     if name and not (name == EVAL_DRAFTS or name.startswith(EVAL_DRAFTS + "/")):
         return ("eval export --out %s writes into %s: fixtures in %s/ say what the gates must keep refusing or "
-                "allowing, so only the user moves them there. Export drafts (the default, %s/) for the user to review."
-                % (out, name, EVALS_DIR, EVAL_DRAFTS))
+                "allowing, so only the user moves them there. Export drafts (the default, in the git folder, or %s/) "
+                "for the user to review." % (out, name, EVALS_DIR, EVAL_DRAFTS))
     return None
 
 
