@@ -17,6 +17,8 @@ import subprocess
 import tempfile
 import unittest
 
+from hypothesis_profiles import examples
+
 try:
     from hypothesis import given, settings, strategies as st
 except ImportError:
@@ -806,7 +808,7 @@ if given is not None:
     CALL_SEPARATORS = ("; ", " && ", " || ", "\n", " & ")
 
     class DelivererGateProperties(GateProject):
-        @settings(max_examples=40, deadline=None)
+        @settings(max_examples=examples(40), deadline=None)
         @given(agent=deliverers, names=st.lists(labels, min_size=1, max_size=3),
                form=st.sampled_from(ADD_LABEL_FORMS))
         def test_the_deliverer_adds_only_triage_labels_and_one_risk_label(self, agent, names, form):
@@ -816,7 +818,7 @@ if given is not None:
 
             self.assertEqual(code, 0 if keeps_one_risk_label(names) else 2, message)
 
-        @settings(max_examples=60, deadline=None)
+        @settings(max_examples=examples(60), deadline=None)
         @given(agent=deliverers, names=st.lists(labels, min_size=1, max_size=2),
                form=st.sampled_from(ADD_LABEL_FORMS), carrier=st.sampled_from(SAME_AS_DIRECT))
         def test_a_label_command_gets_the_same_decision_however_the_shell_runs_it(self, agent, names, form,
@@ -828,14 +830,14 @@ if given is not None:
 
             self.assertEqual(code, 0 if keeps_one_risk_label(names) else 2, message)
 
-        @settings(max_examples=30, deadline=None)
+        @settings(max_examples=examples(30), deadline=None)
         @given(agent=deliverers, name=labels, force=st.sampled_from(FORCE_FORMS))
         def test_the_deliverer_creates_only_triage_labels_and_never_forces(self, agent, name, force):
             code, message = self.decision("gh label create %s --color FBCA04%s" % (shlex.quote(name), force), agent)
 
             self.assertEqual(code, 0 if name in TRIAGE_LABELS and not force else 2, message)
 
-        @settings(max_examples=60, deadline=None)
+        @settings(max_examples=examples(60), deadline=None)
         @given(agent=deliverers, on_pr=st.lists(labels, max_size=3, unique=True),
                added=st.none() | st.sampled_from(RISK_LABELS), removed=st.lists(labels, max_size=2, unique=True))
         def test_a_pr_keeps_one_risk_label_that_only_goes_up(self, agent, on_pr, added, removed):
@@ -850,7 +852,7 @@ if given is not None:
 
             self.assertEqual(code, 0 if keeps_one else 2, message)
 
-        @settings(max_examples=40, deadline=None)
+        @settings(max_examples=examples(40), deadline=None)
         @given(agent=deliverers, added=st.lists(st.sampled_from(RISK_LABELS), min_size=2, max_size=3),
                forms=st.lists(st.sampled_from(ADD_LABEL_FORMS), min_size=3, max_size=3),
                separator=st.sampled_from(CALL_SEPARATORS))
@@ -862,7 +864,7 @@ if given is not None:
 
             self.assertEqual(code, 0 if len(set(added)) == 1 else 2, message)
 
-        @settings(max_examples=40, deadline=None)
+        @settings(max_examples=examples(40), deadline=None)
         @given(agent=deliverers, command=st.sampled_from(DELIVERY_GH + OTHER_GH),
                carrier=st.sampled_from(SAME_AS_DIRECT))
         def test_the_deliverer_runs_only_delivery_gh_commands_however_the_shell_runs_them(self, agent, command,
@@ -873,7 +875,7 @@ if given is not None:
 
             self.assertEqual(code, 0 if command in DELIVERY_GH else 2, message)
 
-        @settings(max_examples=60, deadline=None)
+        @settings(max_examples=examples(60), deadline=None)
         @given(agent=deliverers, endpoint=st.sampled_from(API_ENDPOINTS),
                method=st.none() | st.sampled_from(("GET", "get", "HEAD", "POST", "PUT", "PATCH", "DELETE")),
                method_form=st.sampled_from(API_METHOD_FORMS), body=st.sampled_from(API_BODIES),
@@ -890,14 +892,14 @@ if given is not None:
             code, message = self.decision(command, agent)
 
             self.assertEqual(code, 0 if reads else 2, message)
-        @settings(max_examples=30, deadline=None)
+        @settings(max_examples=examples(30), deadline=None)
         @given(agent=deliverers, name=st.sampled_from(RISKY_ENV), form=st.sampled_from(ENV_FORMS))
         def test_a_variable_that_runs_a_command_is_refused_in_every_form(self, agent, name, form):
             code, message = self.decision(form.format(n=name), agent)
 
             self.assertEqual(code, 2, message)
 
-        @settings(max_examples=40, deadline=None)
+        @settings(max_examples=examples(40), deadline=None)
         @given(agent=deliverers, char=st.sampled_from("{}*?[]"),
                position=st.sampled_from(("name", "subcommand", "flag")))
         def test_an_unquoted_brace_or_glob_in_a_name_or_flag_is_refused(self, agent, char, position):
@@ -908,7 +910,7 @@ if given is not None:
 
             self.assertEqual(code, 2, message)
 
-        @settings(max_examples=40, deadline=None)
+        @settings(max_examples=examples(40), deadline=None)
         @given(agent=deliverers, char=st.sampled_from("{},*?[]"))
         def test_a_quoted_brace_or_glob_is_text(self, agent, char):
             code, message = self.decision("gh pr view 7 " + shlex.quote("--json" + char + "labels"), agent)
