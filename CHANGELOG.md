@@ -15,8 +15,9 @@
   lane holds no push credential, the hooks add defence in depth for every agent and the main session, not only the
   deliverer: `gh` runs its read subcommands and `gh api` reads only, and git runs no push-capable subcommand (`push`,
   `send-pack`, `http-push`, `subtree`, `submodule foreach`, `lfs push`), no `-c`, `--config-env` or `--exec-path`, no
-  config write or alias, no `git-*` program directly, and no git or gh through `xargs`, `parallel` or `find -exec`.
-  `ci-judge` refuses to start with `HARNESS_DELIVERY_KEY` set, like `run` and `orca`.
+  config write or alias, no `git-*` program directly, and no git or gh through `xargs`, `parallel` or `find -exec`;
+  each command is classified by its parsed words (`gi''t push` is `git push`), and a command named by an expansion
+  (`G=git; $G push`) is refused. `ci-judge` refuses to start with `HARNESS_DELIVERY_KEY` set, like `run` and `orca`.
 
 - **The task's cost ledger fails closed and counts a killed session.** `run` reserves each session in the ledger
   before it starts, for what is left of `HARNESS_TASK_BUDGET_USD`, and settles it with the cost when it ends, so a
