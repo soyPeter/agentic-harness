@@ -3,8 +3,8 @@
 
 A thin project runs the release its backbone/.harness-lock.json pins, and its hooks come from the agentic-harness
 plugin (ADR-001). On the host the user installs that plugin. In here this script fetches the pinned release into
-~/.agentic-harness/engines/<version>/, where the launcher looks for it, refuses it unless it is the pinned commit with no
-local changes, and links it into ~/.agentic-harness/plugins/, the folder CLAUDE_CODE_PLUGIN_DIRS names
+~/.agentic-harness/engines/<version>/, where the launcher looks for it, refuses it unless it is the pinned commit with
+no local changes, and links it into ~/.agentic-harness/plugins/, the folder CLAUDE_CODE_PLUGIN_DIRS names
 (docker-compose.yml), so every Claude Code session in the sandbox loads it. The launcher would fetch the release itself,
 but it ships inside that release. A full install needs nothing: its hooks are in the project.
 
@@ -40,7 +40,8 @@ def pinned_engine(lock):
         engine.parent.mkdir(parents=True, exist_ok=True)
         fetched = Path(tempfile.mkdtemp(prefix=".fetch-%s-" % version, dir=str(engine.parent)))
         try:
-            if git("clone", "--quiet", "--depth", "1", "--branch", "v" + version, source, str(fetched / "engine")) is None:
+            cloned = git("clone", "--quiet", "--depth", "1", "--branch", "v" + version, source, str(fetched / "engine"))
+            if cloned is None:
                 raise RuntimeError("could not fetch v%s from %s" % (version, source))
             os.rename(str(fetched / "engine"), str(engine))
         finally:

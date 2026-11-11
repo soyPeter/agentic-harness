@@ -179,7 +179,8 @@ def message(kind, family, attributes, seq):
     for code, payload in attributes:
         size = 4 + len(payload)
         body += struct.pack("=HH", size, code) + payload + b"\0" * (-size % 4)
-    return struct.pack("=IHHII", 16 + len(body), (NFNL_SUBSYS_ULOG << 8) | kind, NLM_F_REQUEST | NLM_F_ACK, seq, 0) + body
+    header = struct.pack("=IHHII", 16 + len(body), (NFNL_SUBSYS_ULOG << 8) | kind, NLM_F_REQUEST | NLM_F_ACK, seq, 0)
+    return header + body
 
 
 def configure(sock, family, attributes, seq):

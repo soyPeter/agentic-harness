@@ -532,7 +532,8 @@ console.log(JSON.stringify(texts));
             env = dict(image if inside else self.env)
             if plugin_dirs is not None:
                 env["CLAUDE_CODE_PLUGIN_DIRS"] = plugin_dirs
-            return self.run_at(self.project, "python3", "-B", str(LAUNCHER), "doctor", env=env, check=False).stdout
+            result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "doctor", env=env, check=False)
+            return result.stdout + result.stderr
 
         missing = "Claude Code sessions in this sandbox would not load the agentic-harness plugin v0.30.0"
         self.assertIn(missing, doctor())
@@ -542,6 +543,11 @@ console.log(JSON.stringify(texts));
         self.assertIn("v0.30.1", doctor(str(other)))
         self.assertIn(missing, doctor("%s:%s" % (other, pinned)))
         self.assertNotIn(missing, doctor(inside=False))
+        unreadable = self.work / "unreadable-plugins"
+        unreadable.mkdir(mode=0)
+        self.addCleanup(unreadable.chmod, 0o755)
+        self.assertNotIn(missing, doctor("%s:%s" % (unreadable, pinned)))
+        self.assertNotIn("Traceback", doctor("%s:%s" % (unreadable, pinned)))
 
 
 if __name__ == "__main__":

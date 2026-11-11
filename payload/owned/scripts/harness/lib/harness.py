@@ -2673,8 +2673,8 @@ def sandbox_start_problem(task):
     """Why task can't start in the sandbox this process runs in, or None. A start is checked where it happens, so CI's
     verify, which runs elsewhere, never checks it."""
     return sandbox_refusal(task, sandbox.evidence(conf()["HARNESS_SANDBOX_BACKEND"]), "cannot start here",
-                           "this session's sandbox", "Start it inside the .devcontainer/harness-agent/ sandbox (harness.py "
-                           "run brings it up with HARNESS_SANDBOX_START=on)")
+                           "this session's sandbox", "Start it inside the .devcontainer/harness-agent/ sandbox "
+                           "(harness.py run brings it up with HARNESS_SANDBOX_START=on)")
 
 
 def sandbox_finish_problem(task, judged):
@@ -3409,8 +3409,10 @@ def offered_plugins():
     found = []
     for entry in filter(None, os.environ.get("CLAUDE_CODE_PLUGIN_DIRS", "").split(os.pathsep)):
         path = Path(os.path.expanduser(entry))
-        manifest = path / ".claude-plugin/plugin.json"
-        candidates = [path] if manifest.is_file() else sorted(path.iterdir()) if path.is_dir() else []
+        try:
+            candidates = [path] if (path / ".claude-plugin/plugin.json").is_file() else sorted(path.iterdir())
+        except OSError:
+            continue
         for plugin in candidates:
             data = json_file(plugin / ".claude-plugin/plugin.json") or {}
             if data.get("name") == "agentic-harness":
@@ -6523,7 +6525,8 @@ def run_command(argv):
         return run_worktrees(queue, "--pr" in argv) or (1 if unsandboxed else 0)
     if dry_run:
         if starting:
-            print("run: would bring up .devcontainer/harness-agent/ with the devcontainer CLI and run each session in it")
+            print("run: would bring up .devcontainer/harness-agent/ with the devcontainer CLI and run each session in "
+                  "it")
         for task, title, state in queue:
             print("run: would %s task %s: %s" % ("resume" if state == "wip" else "start", task, title))
         return 0

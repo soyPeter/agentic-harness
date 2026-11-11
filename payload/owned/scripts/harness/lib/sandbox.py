@@ -33,8 +33,6 @@ ALLOWLIST_PATH = "/run/harness-egress/allowlist"
 # What the egress container denied (egress.py), on the same read-only volume.
 DENIALS_PATH = "/run/harness-egress/denials.jsonl"
 DENIALS_CITED = 10
-
-
 # The sandbox a project carries, relative to its root; HARNESS_SANDBOX_START brings it up with the devcontainer CLI.
 DEVCONTAINER_CONFIG = ".devcontainer/harness-agent/devcontainer.json"
 # A build on a cold cache installs the agent CLI; a session's own timeout is enforced inside the container too.
@@ -92,11 +90,11 @@ class SandboxBackend(object):
 class Devcontainer(SandboxBackend):
     """The local .devcontainer/harness-agent/ sandbox. By default sessions run where the runner runs: inside the
     container when the user started it there, otherwise on the host, and this backend starts and destroys nothing.
-    With start (HARNESS_SANDBOX_START=on) a runner on the host brings the project's sandbox up with the devcontainer CLI,
-    has the harness inside check it (harness: its command there) and runs each session in it, with the agent command
-    the sandbox defines, then stops the containers it started. HARNESS_SANDBOX_IMAGE is set by the image's environment,
-    which a host can set too, so the container is claimed only when the process shows the container's restrictions and
-    the egress container's list (isolation)."""
+    With start (HARNESS_SANDBOX_START=on) a runner on the host brings the project's sandbox up with the devcontainer
+    CLI, has the harness inside check it (harness: its command there) and runs each session in it, with the agent
+    command the sandbox defines, then stops the containers it started. HARNESS_SANDBOX_IMAGE is set by the image's
+    environment, which a host can set too, so the container is claimed only when the process shows the container's
+    restrictions and the egress container's list (isolation)."""
     name = "devcontainer"
 
     def __init__(self, start=False, harness=None):
@@ -161,7 +159,8 @@ class Devcontainer(SandboxBackend):
                 "--config", str(Path(workspace) / DEVCONTAINER_CONFIG)]
 
     def in_workspace(self, sandbox, argv, env=None):
-        remote_env = [arg for key, value in sorted((env or {}).items()) for arg in ("--remote-env", "%s=%s" % (key, value))]
+        remote_env = [arg for key, value in sorted((env or {}).items())
+                      for arg in ("--remote-env", "%s=%s" % (key, value))]
         return (self.cli(sandbox.workspace, "exec") + remote_env +
                 ["sh", "-c", 'cd "$1" && shift && exec "$@"', "sh", sandbox.remote_workspace] + argv)
 
