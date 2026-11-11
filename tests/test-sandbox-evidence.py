@@ -367,10 +367,12 @@ class Start(Project):
     (harness.py sandbox-approve), and agents may not change either.
     """
 
-    def tools(self, *names, failing=False, unisolated=False):
+    def tools(self, *names, failing=False, unisolated=False, racing=False, running=False):
         """A PATH with git, python3 and sh, and executables standing in for names: they succeed, or fail like a sandbox
         that can't come up. unisolated: devcontainer brings up a "sandbox" that runs everything right here, on the
-        host."""
+        host. racing: devcontainer up first rewrites the workspace's devcontainer.json with an initializeCommand, as an
+        agent racing the check would, and records whether the definition it was given has one. running: docker says
+        a container of the project's sandbox is running."""
         folder = Path(tempfile.mkdtemp(prefix="tools ", dir=str(self.work)))
         for tool in ("git", "python3", "sh"):
             (folder / tool).symlink_to(shutil.which(tool))
@@ -378,10 +380,14 @@ class Start(Project):
             script = folder / name
             if unisolated and name == "devcontainer":
                 script.write_text(UNISOLATED_DEVCONTAINER % str(folder / "calls"))
+            elif racing and name == "devcontainer":
+                script.write_text(RACING_DEVCONTAINER % (str(folder / "calls"), str(self.project / DEVCONTAINER_REL)))
+            elif running and name == "docker":
+                script.write_text("#!/bin/sh\necho \"docker $*\" >> '%s/calls'\necho 0123456789ab\n" % folder)
             else:
                 script.write_text("#!/bin/sh\necho \"${0##*/} $*\" >> '%s/calls'\n%s\n" % (
-                    folder, 'echo \'{"outcome":"error","message":"the build failed"}\'; exit 1' if failing
-                    else "exit 0"))
+                    folder, 'echo \'{"outcome":"error","message":"the build failed"}\'; exit 1'
+                    if failing and name == "devcontainer" else "exit 0"))
             script.chmod(0o755)
         return str(folder)
 
@@ -525,6 +531,59 @@ class Start(Project):
         self.assertIn("isolation_class none", run.stdout)
         self.assertNotIn("attempt 1", run.stdout)
 
+    def test_run_brings_up_a_private_checked_copy_so_a_change_made_after_the_check_never_runs(self):
+        self.approve()
+        config = self.project / DEVCONTAINER_REL
+        kept = config.read_text()
+        self.addCleanup(config.write_text, kept)
+        path = self.tools("devcontainer", "docker", racing=True)
+
+        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
+
+        calls = (Path(path) / "calls").read_text()
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("given: clean", calls)
+        given = Path(re.search(r"(?m)^config: (.+)$", calls).group(1))
+        self.assertFalse(str(given.resolve()).startswith(str(self.project)), given)
+        override = json.loads((given.parent / "docker-compose.workspace.yml").read_text())
+        self.assertEqual(override["services"]["agent"]["volumes"][0]["source"], str(self.project))
+
+    def test_run_refuses_while_the_projects_sandbox_is_already_up(self):
+        self.approve()
+        path = self.tools("devcontainer", "docker", running=True)
+
+        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
+
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("already up", run.stdout)
+        self.assertNotIn("devcontainer up", (Path(path) / "calls").read_text())
+
+    def test_the_isolation_check_ignores_modules_the_workspace_holds(self):
+        self.approve()
+        spoof = self.project / "json.py"
+        spoof.write_text("def dumps(value):\n    return '[\"container\", \"spoofed\"]'\n")
+        self.addCleanup(spoof.unlink)
+        path = self.tools("devcontainer", "docker", unisolated=True)
+
+        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
+
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("isolation_class none", run.stdout)
+
+    def test_a_definition_file_that_cannot_be_read_is_refused_cleanly(self):
+        dockerfile = self.project / ".devcontainer/harness-agent/Dockerfile"
+        dockerfile.chmod(0)
+        self.addCleanup(dockerfile.chmod, 0o644)
+
+        doctor = self.harness("doctor", check=False, HARNESS_SANDBOX_START="on", PATH=self.tools("devcontainer", "docker"))
+        approve = self.harness("sandbox-approve", check=False)
+
+        self.assertEqual(doctor.returncode, 1, doctor.stdout + doctor.stderr)
+        self.assertIn("sandbox-approve", doctor.stdout)
+        self.assertNotIn("Traceback", doctor.stdout + doctor.stderr + approve.stdout + approve.stderr)
+        self.assertEqual(approve.returncode, 1, approve.stdout + approve.stderr)
+        self.assertIn("Dockerfile", approve.stdout)
+
     def test_agents_cannot_change_the_sandbox_definition_or_approve_it(self):
         config = self.project / DEVCONTAINER_REL
         approvals = Path(self.env["HOME"]) / ".agentic-harness/sandbox-approvals.json"
@@ -546,6 +605,25 @@ class Start(Project):
                 hook = self.harness("hook", "pre-tool-use", input=json.dumps(dict(call, agent_id="a1")), check=False)
 
                 self.assertEqual(hook.returncode, 2, hook.stdout + hook.stderr)
+
+
+RACING_DEVCONTAINER = """#!/usr/bin/env python3
+import sys
+args = sys.argv[1:]
+calls, workspace_config = %r, %r
+with open(calls, "a") as log:
+    log.write(" ".join(["devcontainer"] + args) + "\\n")
+    if args[0] == "up":
+        with open(workspace_config) as config:
+            text = config.read()
+        with open(workspace_config, "w") as config:
+            config.write(text.replace('"name"', '"initializeCommand": "touch /tmp/escaped", "name"', 1))
+        log.write("config: %%s\\n" %% args[args.index("--config") + 1])
+        with open(args[args.index("--config") + 1]) as given:
+            log.write("given: %%s\\n" %% ("evil" if "initializeCommand" in given.read() else "clean"))
+print('{"outcome": "error", "message": "stopped by the test"}')
+sys.exit(1)
+"""
 
 
 UNISOLATED_DEVCONTAINER = """#!/usr/bin/env python3

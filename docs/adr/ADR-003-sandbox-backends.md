@@ -300,7 +300,7 @@ Still open after v1:
   CLI when the runner isn't already in it, has the harness inside run `doctor` and refuses every session when either
   fails. `exec` runs each session in the agent's container with the agent command the sandbox defines and the harness
   settings the user's environment sets, and enforces the session's timeout inside the container. `teardown` stops the
-  containers the backend started after every session; a sandbox that was already up stays up. `doctor` errors without
+  containers the backend started after every session. `doctor` errors without
   the devcontainer CLI, `docker` or the sandbox files, so `run` refuses; `run --worktree` is refused in this mode,
   because a worktree's git metadata lies outside what the sandbox mounts. The default stays `off`: turning it on needs
   Docker and the devcontainer CLI on every machine that runs `run`. The Compose project is named after the sandbox's
@@ -312,6 +312,17 @@ Still open after v1:
   `~/.agentic-harness/sandbox-approvals.json`, which no sandbox mounts. The lock isn't the anchor, because it lives in
   the workspace the agent can write. After `up`, the host's own code checks that a process in the agent's container is
   isolated. Agents can't write the definition or the approvals, or run `sandbox-approve`.
+  A second review found a window between the check and `devcontainer up` reading the files, which an agent's process
+  left in a sandbox that was already up could use to swap them. So `run` refuses to start while the project's sandbox
+  is up, stops it after every session, and brings up a private copy of the definition, checked after it was copied,
+  from `~/.agentic-harness/sandbox-runs/` (a generated Compose file mounts the workspace by its absolute path). The
+  isolation check runs in Python's isolated mode, so no module in the workspace stands in for the standard library,
+  and a definition file that can't be read counts as a changed one.
+  Limits: in a full install, `run` on the host executes the workspace's own `scripts/harness/`, which an agent in the
+  sandbox can write too, so the approval protects thin installs, whose engine lives outside the project; use thin mode
+  with `HARNESS_SANDBOX_START=on`. Other spellings of `harness.py sandbox-approve` in an agent's shell command (a
+  split path, `xargs`, `runpy`) are the class PR #90 refuses for every user-only command through its `USER_COMMANDS`
+  list; whichever of the two merges second must add `sandbox-approve` to that list.
 - **6. Orca's workers inside a backend's sandbox: deferred (2026-11-11).** Orca starts each worker itself, on the host,
   in the task's worktree. Running workers in the sandbox needs Orca to launch them through the sandbox (a launch command
   per agent that goes through `devcontainer exec`) and worktrees whose git metadata the sandbox can see: a worktree's

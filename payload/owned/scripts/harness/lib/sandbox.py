@@ -38,6 +38,10 @@ DENIALS_CITED = 10
 UNPRINTABLE = re.compile(r"[^A-Za-z0-9._:/\[\]()-]")
 # The sandbox a project carries, relative to its root; HARNESS_SANDBOX_START brings it up with the devcontainer CLI.
 DEVCONTAINER_CONFIG = ".devcontainer/harness-agent/devcontainer.json"
+# Written into the private copy run brings up once it is checked: it mounts the workspace by its absolute path, which
+# the copy's own relative mount no longer reaches, and the copy's devcontainer.json is rewritten to name it.
+WORKSPACE_OVERRIDE = "docker-compose.workspace.yml"
+UNREADABLE = "unreadable"
 # A build on a cold cache installs the agent CLI; a session's own timeout is enforced inside the container too.
 UP_SECONDS = 1800
 EXEC_GRACE_SECONDS = 60
@@ -102,7 +106,7 @@ class Devcontainer(SandboxBackend):
 
     def __init__(self, start=False, harness=None, reference=None):
         self.start, self.harness, self.reference = start, harness, reference
-        self.compose_project = None
+        self.compose_project = self.config = None
 
     def starts_sandbox(self):
         return self.start and isolation()[0] != "container"
@@ -113,17 +117,23 @@ class Devcontainer(SandboxBackend):
         problem = start_problem(workspace, self.reference)
         if problem:
             raise SandboxError(problem)
-        running = self.containers(workspace, running=True)
+        # With none of the sandbox's processes left, nothing an agent started there can change the definition while it
+        # is checked and read.
+        if self.containers(workspace, running=True):
+            raise SandboxError("the project's sandbox is already up (an editor's Reopen in Container, say), and run "
+                               "brings it up itself for each session and stops it afterwards, so that nothing an agent "
+                               "left running there can change its definition between the check and devcontainer up. "
+                               "Stop it first (close the editor's container, or docker stop its two containers)")
+        self.config = private_definition(workspace, self.reference)
         try:
             up = subprocess.run(self.cli(workspace, "up"), capture_output=True, text=True, timeout=UP_SECONDS)
         except subprocess.TimeoutExpired:
             raise SandboxError("devcontainer up did not finish in %d seconds" % UP_SECONDS)
         result = last_json(up.stdout)
+        self.compose_project = result.get("composeProjectName")
         if up.returncode != 0 or result.get("outcome") != "success":
             raise SandboxError("devcontainer up failed: %s" % (result.get("message") or up.stderr.strip()[-600:]
                                                                 or "exit %d" % up.returncode))
-        if not running:
-            self.compose_project = result.get("composeProjectName")
         box = Sandbox(workspace, result.get("containerId"), result.get("remoteWorkspaceFolder") or "/workspace")
         isolated, reason = self.probe(box)
         if isolated != "container":
@@ -164,7 +174,7 @@ class Devcontainer(SandboxBackend):
 
     def cli(self, workspace, command):
         return ["devcontainer", command, "--workspace-folder", str(workspace),
-                "--config", str(Path(workspace) / DEVCONTAINER_CONFIG)]
+                "--config", str(self.config or Path(workspace) / DEVCONTAINER_CONFIG)]
 
     def in_workspace(self, sandbox, argv, env=None):
         remote_env = [arg for key, value in sorted((env or {}).items())
@@ -181,17 +191,22 @@ class Devcontainer(SandboxBackend):
         harness inside, which the workspace holds."""
         source = Path(__file__).read_text(encoding="utf-8") + "\nprint(json.dumps(isolation()))\n"
         try:
-            found = subprocess.run(self.in_workspace(sandbox, ["python3", "-B", "-"]), input=source,
+            # -I: no module from the workspace, the user's site or the environment stands in for the standard library.
+            found = subprocess.run(self.in_workspace(sandbox, ["python3", "-I", "-B", "-"]), input=source,
                                    capture_output=True, text=True, timeout=120)
             return tuple(last_json_value(found.stdout))
         except (subprocess.TimeoutExpired, TypeError, ValueError):
             return "unknown", "the isolation check didn't answer"
 
     def containers(self, workspace, running=False):
-        """The ids of the agent's container docker knows for the workspace."""
+        """The ids of the agent's container docker knows for the workspace. Raises SandboxError when docker can't
+        say."""
         found = subprocess.run(["docker", "ps", "-q"] + ([] if running else ["-a"]) +
                                ["--filter", "label=devcontainer.local_folder=%s" % workspace],
                                capture_output=True, text=True)
+        if found.returncode != 0:
+            raise SandboxError("docker can't list the sandbox's containers: %s" % (found.stderr.strip()[-300:]
+                                                                                  or "exit %d" % found.returncode))
         return found.stdout.split()
 
     def copy_in(self, sandbox, host_path, sandbox_path):
@@ -206,8 +221,7 @@ class Devcontainer(SandboxBackend):
         return published_hosts(ALLOWLIST_PATH)
 
     def teardown(self, sandbox):
-        """Stops the containers this backend started, which ends whatever a session left running; a sandbox that was
-        already up stays as it was."""
+        """Stops the containers this backend started, which ends whatever a session left running."""
         if sandbox.container is None or not self.compose_project:
             return
         project = subprocess.run(["docker", "ps", "-q", "--filter",
@@ -329,7 +343,11 @@ def start_problem(workspace, reference=None):
         return ("HARNESS_SANDBOX_START is on, but %s isn't on the PATH, so run can't bring the sandbox up (the "
                 "devcontainer CLI: npm install -g @devcontainers/cli; docker: Docker Desktop, OrbStack or Docker "
                 "Engine)" % " and ".join(missing))
-    folder = Path(workspace) / DEVCONTAINER_CONFIG.rsplit("/", 1)[0]
+    return untrusted_definition(Path(workspace) / DEVCONTAINER_CONFIG.rsplit("/", 1)[0], workspace, reference)
+
+
+def untrusted_definition(folder, workspace, reference):
+    """Why this machine doesn't trust the sandbox definition in folder, for workspace, or None."""
     digest = definition_digest(folder)
     if reference is not None and definition_digest(reference) == digest:
         return None
@@ -342,16 +360,59 @@ def start_problem(workspace, reference=None):
             % (DEVCONTAINER_CONFIG.rsplit("/", 1)[0], digest))
 
 
+def private_runs():
+    """Where run keeps the copies of sandbox definitions it brings up: outside every project, so no sandbox mounts it."""
+    return Path(os.path.expanduser("~/.agentic-harness/sandbox-runs"))
+
+
+def private_definition(workspace, reference):
+    """The devcontainer.json run brings up: a copy of the workspace's definition in a folder of this machine's user,
+    checked after it was copied, plus a Compose file that mounts the workspace by its absolute path. A change made to
+    the workspace after the check never reaches devcontainer up. Raises SandboxError."""
+    source = Path(workspace) / DEVCONTAINER_CONFIG.rsplit("/", 1)[0]
+    runs = private_runs() / hashlib.sha256(os.path.realpath(str(workspace)).encode("utf-8")).hexdigest()[:16]
+    copy = runs / source.name
+    shutil.rmtree(str(runs), ignore_errors=True)
+    try:
+        runs.mkdir(parents=True, mode=0o700)
+        shutil.copytree(str(source), str(copy), symlinks=True)
+    except (OSError, shutil.Error) as exc:
+        raise SandboxError("the sandbox's definition can't be copied to check it: %s" % exc)
+    problem = untrusted_definition(copy, workspace, reference)
+    if problem:
+        raise SandboxError(problem)
+    try:
+        config = jsonc_loads((copy / "devcontainer.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise SandboxError("the sandbox's devcontainer.json can't be read: %s" % exc)
+    compose = config.get("dockerComposeFile") if isinstance(config, dict) else None
+    compose = [compose] if isinstance(compose, str) else compose
+    if not compose or not isinstance(config.get("service"), str):
+        raise SandboxError("the sandbox's devcontainer.json names no dockerComposeFile and service to bring up")
+    mount = {"type": "bind", "source": os.path.realpath(str(workspace)),
+             "target": config.get("workspaceFolder") or "/workspace", "consistency": "cached"}
+    (copy / WORKSPACE_OVERRIDE).write_text(json.dumps({"services": {config["service"]: {"volumes": [mount]}}}) + "\n",
+                                           encoding="utf-8")
+    # The devcontainer CLI takes no other file name for its configuration.
+    (copy / "devcontainer.json").write_text(json.dumps(dict(config, dockerComposeFile=list(compose) + [WORKSPACE_OVERRIDE]),
+                                                       indent=2) + "\n", encoding="utf-8")
+    return copy / "devcontainer.json"
+
+
 def definition_files(folder):
     """[(path relative to folder, sha256 of its content or of a symlink's target)] for every file in the sandbox's
     folder, sorted."""
     found = []
     for path in sorted(Path(folder).rglob("*")):
-        if path.is_symlink():
-            found.append((path.relative_to(folder).as_posix(),
-                          "symlink:" + hashlib.sha256(os.readlink(str(path)).encode("utf-8")).hexdigest()))
-        elif path.is_file():
-            found.append((path.relative_to(folder).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()))
+        name = path.relative_to(folder).as_posix()
+        try:
+            if path.is_symlink():
+                found.append((name, "symlink:" + hashlib.sha256(os.readlink(str(path)).encode("utf-8")).hexdigest()))
+            elif path.is_file():
+                found.append((name, hashlib.sha256(path.read_bytes()).hexdigest()))
+        except OSError:
+            # Gone or unreadable while it was hashed: a definition no one approved.
+            found.append((name, UNREADABLE))
     return found
 
 

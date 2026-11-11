@@ -1536,9 +1536,10 @@ def install_path(path_str, cwd):
         agent = os.path.realpath(str(agent))
         if full == agent or agent.startswith(full.rstrip(os.sep) + os.sep):
             return "the harness's role agents"
-    approvals = os.path.realpath(str(sandbox.approvals_file()))
-    if full == approvals or approvals.startswith(full.rstrip(os.sep) + os.sep):
-        return "the sandbox definitions approved on this machine"
+    for private in (sandbox.approvals_file(), sandbox.private_runs()):
+        private = os.path.realpath(str(private))
+        if full == private or full.startswith(private + os.sep) or private.startswith(full.rstrip(os.sep) + os.sep):
+            return "the sandbox definitions approved and brought up on this machine"
     return None
 
 
@@ -6515,6 +6516,10 @@ def sandbox_approve_command(_argv):
     folder = ROOT / SANDBOX_DEFINITION
     if not folder.is_dir():
         print("sandbox-approve: %s is missing; nothing to approve" % SANDBOX_DEFINITION)
+        return 1
+    unreadable = [name for name, digest in sandbox.definition_files(folder) if digest == sandbox.UNREADABLE]
+    if unreadable:
+        print("sandbox-approve: %s can't be read, so %s can't be approved" % (", ".join(unreadable), SANDBOX_DEFINITION))
         return 1
     digest = sandbox.definition_digest(folder)
     reference = sandbox_reference()

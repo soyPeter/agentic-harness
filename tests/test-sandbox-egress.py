@@ -12,8 +12,9 @@ from inside, as the agent (Restrictions needs only docker):
 - a judge pass recorded inside records that sandbox, and the receipt shows it on the host;
 - in a thin project (ThinSandbox), the container fetches the pinned engine when it starts and Claude Code loads it as
   the plugin, so the same holds through the launcher;
-- with HARNESS_SANDBOX_START=on (HostRun), run on the host brings the sandbox up itself and runs each session in it,
-  stops the session inside when it times out, and stops the containers it started.
+- with HARNESS_SANDBOX_START=on (HostRun), run on the host brings the sandbox up itself, from a checked copy of its
+  definition, runs each session in it, stops a session that times out and stops the containers afterwards; it refuses
+  a definition changed after the user approved it, and a sandbox someone else already brought up.
 Restrictions runs the harness-agent image directly, with the agent's restrictions and each one left out: the sandbox is
 recorded as a container only with all of them and the published allowlist at /run/harness-egress/allowlist. Schema work
 that needs a container (HARNESS_SANDBOX_REQUIRE=schema=container) starts and is judged there and then finishes on the
@@ -632,16 +633,34 @@ class HostRun(Sandbox):
         self.assertIn("NoNewPrivs:\t1", self.session_log("7.1"))
         self.assertEqual(self.running(), [], "the run stops the sandbox it started")
 
-    def test_a_session_that_outlives_its_timeout_is_stopped_inside_a_sandbox_that_was_already_up(self):
-        self.up()
-
+    def test_a_session_that_outlives_its_timeout_is_stopped_with_its_sandbox(self):
         run = self.run_task("7.2", HARNESS_RUN_TASK_TIMEOUT="5")
-        sessions = self.inside("ps -eo args | grep -c '[a]gent.py'")
 
         self.assertIn("run: task 7.2 attempt 1", run.stdout, run.stdout + run.stderr)
         self.assertIn("exit None", run.stdout)
-        self.assertEqual(sessions.stdout.strip(), "0", "the timed-out session still runs in the sandbox")
-        self.assertNotEqual(self.running(), [], "a sandbox that was up before the run stays up")
+        self.assertEqual(self.running(), [], "the timed-out session's sandbox still runs")
+
+    def test_run_refuses_a_sandbox_someone_else_already_brought_up(self):
+        tasks = self.project / "backbone/3-TASKS.md"
+        # An earlier session may have escalated the task; the user takes it back, so run has a task to start.
+        tasks.write_text(re.sub(r"(?m)^(.*\*\*Task 7\.1: .*?)\s+[-\u2014]+\s+BLOCKED:.*$", r"\1", tasks.read_text()))
+        self.up()
+        self.addCleanup(self.stop)
+        runs = self.project / ".git/harness/runs"
+        before = sorted(runs.glob("*/*.log")) if runs.is_dir() else []
+
+        run = self.run_task("7.1")
+
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("already up", run.stdout)
+        self.assertEqual(sorted(runs.glob("*/*.log")) if runs.is_dir() else [], before, "a session ran")
+
+    def stop(self):
+        for container in self.running():
+            project = docker("inspect", "-f", '{{index .Config.Labels "com.docker.compose.project"}}', container)
+            ids = docker("ps", "-q", "--filter", "label=com.docker.compose.project=%s" % project.stdout.strip())
+            if ids.stdout.split():
+                docker("stop", *ids.stdout.split())
 
 
 class Tamper(Sandbox):
