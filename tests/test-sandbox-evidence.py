@@ -474,7 +474,8 @@ class Start(Project):
         self.approve()
         path = self.tools("devcontainer", "docker", failing=True, compose=True)
 
-        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
+        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path,
+                              CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-test")
 
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         self.assertIn("the sandbox could not start", run.stdout)
@@ -487,8 +488,10 @@ class Start(Project):
     def test_a_sandbox_definition_this_machine_has_not_approved_starts_nothing(self):
         path = self.tools("devcontainer", "docker")
 
-        doctor = self.harness("doctor", check=False, HARNESS_SANDBOX_START="on", PATH=path)
-        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
+        doctor = self.harness("doctor", check=False, HARNESS_SANDBOX_START="on", PATH=path,
+                              CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-test")
+        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path,
+                              CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-test")
 
         self.assertEqual(doctor.returncode, 1, doctor.stdout)
         self.assertIn("harness.py sandbox-approve", doctor.stdout)
@@ -505,7 +508,8 @@ class Start(Project):
                 config.write_text(kept.replace('"name"', change, 1) + ("\n" if change == '"name"' else ""))
                 path = self.tools("devcontainer", "docker")
 
-                run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
+                run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path,
+                              CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-test")
 
                 self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
                 self.assertIn("sandbox-approve", run.stdout)
@@ -534,7 +538,8 @@ class Start(Project):
         self.approve()
         path = self.tools("devcontainer", "docker", unisolated=True, compose=True)
 
-        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
+        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path,
+                              CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-test")
 
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         self.assertIn("isolation_class none", run.stdout)
@@ -548,7 +553,8 @@ class Start(Project):
         self.addCleanup(config.write_text, kept)
         path = self.tools("devcontainer", "docker", racing=True, compose=True)
 
-        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
+        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path,
+                              CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-test")
 
         calls = (Path(path) / "calls").read_text()
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
@@ -568,7 +574,8 @@ class Start(Project):
         self.addCleanup(config.write_text, kept)
         path = self.tools("devcontainer", "docker", racing=True, compose=True)
 
-        self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
+        self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path,
+                              CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-test")
 
         calls = (Path(path) / "calls").read_text()
         project = re.search(r"(?m)^project: (.*)$", calls).group(1)
@@ -591,6 +598,91 @@ class Start(Project):
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         self.assertIn("relative to the sandbox's folder", run.stdout)
         self.assertNotIn("devcontainer up", (Path(path) / "calls").read_text())
+
+    @unittest.skipUnless(REAL_DOCKER, "resolves the Compose files with docker compose config")
+    def test_each_session_gets_a_fresh_claude_folder_instead_of_the_shared_login(self):
+        self.approve()
+        config = self.project / DEVCONTAINER_REL
+        kept = config.read_text()
+        self.addCleanup(config.write_text, kept)
+        path = self.tools("devcontainer", "docker", racing=True, compose=True)
+
+        self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path,
+                        CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-test")
+
+        override = json.loads(re.search(r"(?m)^override: (.*)$", (Path(path) / "calls").read_text()).group(1))
+        volumes = override["services"]["agent"]["volumes"]
+        self.assertIn({"type": "tmpfs", "target": "/home/agent/.claude", "tmpfs": {"mode": 0o1777}}, volumes)
+
+    @unittest.skipUnless(REAL_DOCKER, "resolves the Compose files with docker compose config")
+    def test_claude_code_sessions_need_their_credentials_from_the_environment(self):
+        self.approve()
+        path = self.tools("devcontainer", "docker", compose=True)
+
+        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
+
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", run.stdout)
+        self.assertNotIn("devcontainer up", (Path(path) / "calls").read_text())
+
+    @unittest.skipUnless(REAL_DOCKER, "resolves the Compose files with docker compose config")
+    def test_a_definition_that_reaches_past_its_folder_or_the_sandbox_starts_nothing(self):
+        compose = self.project / ".devcontainer/harness-agent/docker-compose.yml"
+        config = self.project / DEVCONTAINER_REL
+        outside = self.work / "outside.yml"
+        outside.write_text("services:\n  agent:\n    privileged: true\n")
+        agent = "  agent:\n    build: .\n"
+        changes = {   # what an approved definition adds -> the words the refusal uses
+            "extends": (compose, agent, agent + "    extends:\n      file: %s\n      service: agent\n" % outside),
+            "include": (compose, "services:\n", "include:\n  - %s\nservices:\n" % outside),
+            "env_file": (compose, agent, agent + "    env_file: [extra.env]\n"),
+            "build context": (compose, agent, "  agent:\n    build: %s\n" % self.work),
+            "volumes_from": (compose, agent, agent + "    volumes_from: [egress]\n"),
+            "privileged": (compose, agent, agent + "    privileged: true\n"),
+            "cap_add": (compose, agent, agent + "    cap_add: [SYS_ADMIN]\n"),
+            "devices": (compose, agent, agent + "    devices: [/dev/null:/dev/null]\n"),
+            "network_mode": (compose, "    network_mode: service:egress\n", "    network_mode: host\n"),
+            "pid": (compose, agent, agent + "    pid: host\n"),
+            "docker.sock": (compose, "      - ../..:/workspace:cached\n",
+                            "      - ../..:/workspace:cached\n      - /var/run/docker.sock:/var/run/docker.sock\n"),
+            "driver_opts": (compose, "  egress-allowlist:\n",
+                            "  egress-allowlist:\n    driver_opts: {type: none, o: bind, device: /tmp}\n"),
+            "initializeCommand": (config, '"name"', '"initializeCommand": "id", "name"'),
+            "mounts": (config, '"name"', '"mounts": ["source=/tmp,target=/x,type=bind"], "name"'),
+            "runArgs": (config, '"name"', '"runArgs": ["--privileged"], "name"'),
+        }
+        kept = {path: path.read_text() for path in (compose, config)}
+        (self.project / ".devcontainer/harness-agent/extra.env").write_text("X=1\n")
+        self.addCleanup((self.project / ".devcontainer/harness-agent/extra.env").unlink)
+        for name, (path, old, new) in changes.items():
+            with self.subTest(change=name):
+                self.assertIn(old, kept[path])
+                path.write_text(kept[path].replace(old, new, 1))
+                self.addCleanup(path.write_text, kept[path])
+                self.approve()
+                tools = self.tools("devcontainer", "docker", compose=True)
+
+                run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=tools,
+                                      CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-test")
+                path.write_text(kept[path])
+
+                self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+                self.assertIn(name, run.stdout)
+                self.assertNotIn("devcontainer up", (Path(tools) / "calls").read_text())
+
+    @unittest.skipUnless(REAL_DOCKER, "resolves the Compose files with docker compose config")
+    def test_a_build_that_buildx_refuses_says_what_to_do(self):
+        self.approve()
+        tools = self.tools("devcontainer", "docker", compose=True)
+        (Path(tools) / "devcontainer").write_text(
+            "#!/bin/sh\necho 'additional privileges requested: pass \"--allow=fs.read=/tmp/x\" to grant requested "
+            "privileges' >&2\necho '{\"outcome\":\"error\",\"message\":\"Command failed: docker compose build\"}'\nexit 1\n")
+
+        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=tools,
+                              CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-test")
+
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("BUILDX_BAKE_ENTITLEMENTS_FS", run.stdout)
 
     def test_a_symlink_in_the_definition_is_never_trusted(self):
         link = self.project / ".devcontainer/harness-agent/extra.yml"
@@ -623,7 +715,8 @@ class Start(Project):
         self.addCleanup(spoof.unlink)
         path = self.tools("devcontainer", "docker", unisolated=True, compose=True)
 
-        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
+        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path,
+                              CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-test")
 
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         self.assertIn("isolation_class none", run.stdout)
@@ -678,6 +771,8 @@ with open(calls, "a") as log:
             config.write(text.replace('"name"', '"initializeCommand": "touch /tmp/escaped", "name"', 1))
         log.write("config: %%s\\n" %% args[args.index("--config") + 1])
         log.write("project: %%s\\ncwd: %%s\\n" %% (os.environ.get("COMPOSE_PROJECT_NAME"), os.getcwd()))
+        with open(os.path.join(os.path.dirname(args[args.index("--config") + 1]), "docker-compose.workspace.yml")) as f:
+            log.write("override: %%s\\n" %% f.read().strip())
         with open(args[args.index("--config") + 1]) as given:
             log.write("given: %%s\\n" %% ("evil" if "initializeCommand" in given.read() else "clean"))
 print('{"outcome": "error", "message": "stopped by the test"}')
@@ -745,6 +840,14 @@ class Upgrade(Project):
 
 
 class SandboxFiles(Project):
+    def test_the_image_keeps_the_harness_hooks_on_whatever_a_user_setting_says(self):
+        folder = self.project / ".devcontainer/harness-agent"
+        managed = json.loads((folder / "managed-settings.json").read_text())
+
+        self.assertIs(managed["disableAllHooks"], False)
+        self.assertIn("COPY managed-settings.json /etc/claude-code/managed-settings.json",
+                      (folder / "Dockerfile").read_text())
+
     def test_the_image_is_built_from_a_base_pinned_by_digest(self):
         self.assertRegex(self.harness_agent_image(), r"^[a-z0-9./_-]+(:[\w.-]+)?@sha256:[0-9a-f]{64}$")
         self.assertIn("FROM ${HARNESS_SANDBOX_IMAGE}",

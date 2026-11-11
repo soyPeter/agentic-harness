@@ -43,6 +43,12 @@ DEVCONTAINER_CONFIG = ".devcontainer/harness-agent/devcontainer.json"
 # the copy's own relative mount no longer reaches, and the copy's devcontainer.json is rewritten to name it.
 WORKSPACE_OVERRIDE = "docker-compose.workspace.yml"
 UNREADABLE = "unreadable"
+# devcontainer.json keys that act on the host or widen the container; the shipped definition uses none.
+HOST_KEYS = ("initializeCommand", "mounts", "runArgs", "privileged", "capAdd", "securityOpt", "workspaceMount")
+# Compose keys that read files run can't check: other Compose files, env files, secrets and configs.
+FILE_KEYS = re.compile(r"(?m)^[ \t]*[\"']?(extends|include|env_file|secrets|configs)[\"']?[ \t]*:")
+# What the shipped egress container adds to apply its rules; no other service adds anything.
+EGRESS_CAPABILITIES = {"NET_ADMIN", "NET_RAW"}
 # A build on a cold cache installs the agent CLI; a session's own timeout is enforced inside the container too.
 UP_SECONDS = 1800
 EXEC_GRACE_SECONDS = 60
@@ -139,8 +145,12 @@ class Devcontainer(SandboxBackend):
         box = Sandbox(workspace, result.get("containerId"), result.get("remoteWorkspaceFolder") or "/workspace")
         if up.returncode != 0 or result.get("outcome") != "success":
             self.teardown(box)
-            raise SandboxError("devcontainer up failed: %s" % (result.get("message") or up.stderr.strip()[-600:]
-                                                                or "exit %d" % up.returncode))
+            entitlement = "additional privileges requested" in up.stdout + up.stderr
+            raise SandboxError("devcontainer up failed: %s%s" % (
+                result.get("message") or up.stderr.strip()[-600:] or "exit %d" % up.returncode,
+                ". docker buildx refused to read the build file the devcontainer CLI writes outside the build context "
+                "(its file entitlement check, ADR-003): run again, and if it keeps failing, build with "
+                "BUILDX_BAKE_ENTITLEMENTS_FS=0 set" if entitlement else ""))
         isolated, reason = self.probe(box)
         if isolated != "container":
             self.teardown(box)
@@ -438,68 +448,137 @@ def checked_copy(workspace, reference, private):
     compose = [compose] if isinstance(compose, str) else compose
     if not compose or not isinstance(config.get("service"), str):
         raise SandboxError("the sandbox's devcontainer.json names no dockerComposeFile and service to bring up")
-    mount = {"type": "bind", "source": os.path.realpath(str(workspace)),
-             "target": config.get("workspaceFolder") or "/workspace", "consistency": "cached"}
-    (copy / WORKSPACE_OVERRIDE).write_text(json.dumps({"services": {config["service"]: {"volumes": [mount]}}}) + "\n",
-                                           encoding="utf-8")
-    files = [os.path.realpath(str(copy / name)) for name in compose] + [str(copy / WORKSPACE_OVERRIDE)]
-    outside = [name for name, path in zip(compose, files) if not path.startswith(str(copy.resolve()) + os.sep)]
+    acting = [key for key in HOST_KEYS if key in config]
+    if acting:
+        raise SandboxError("the sandbox's devcontainer.json sets %s, which run never brings up: these run on the host "
+                           "or widen the container" % ", ".join(acting))
+    files = [Path(os.path.realpath(str(copy / name))) for name in compose]
+    outside = [name for name, path in zip(compose, files) if not str(path).startswith(str(copy.resolve()) + os.sep)]
     if outside:
         raise SandboxError("the sandbox's devcontainer.json names Compose files outside its folder (%s), which run "
                            "can't check" % ", ".join(outside))
-    unsafe = unsafe_mounts(compose, copy, workspace, private, config["service"], mount["target"])
-    if unsafe:
-        raise SandboxError(unsafe)
+    for name, path in zip(compose, files):
+        try:
+            keys = sorted(set(FILE_KEYS.findall(path.read_text(encoding="utf-8"))))
+        except (OSError, UnicodeDecodeError) as exc:
+            raise SandboxError("the sandbox's Compose file %s can't be read: %s" % (name, exc))
+        if keys:
+            raise SandboxError("the sandbox's Compose file %s uses %s, which read files run can't check; keep the "
+                               "Compose file self-contained" % (name, ", ".join(keys)))
+    service, target = config["service"], config.get("workspaceFolder") or "/workspace"
+    folder = Path(workspace) / DEVCONTAINER_CONFIG.rsplit("/", 1)[0]
+    here, there = resolved(compose, folder, workspace), resolved(compose, copy, workspace)
+    problem = relative_mounts(here, there, workspace, service, target)
+    if problem:
+        raise SandboxError(problem)
+    mounts = [{"type": "bind", "source": os.path.realpath(str(workspace)), "target": target, "consistency": "cached"}]
+    # A volume the agent writes to outlives the session; a tmpfs doesn't. Mode 1777: the agent's user writes it.
+    mounts += [{"type": "tmpfs", "target": volume["target"], "tmpfs": {"mode": 0o1777}}
+               for volume in (there["services"].get(service) or {}).get("volumes") or []
+               if volume.get("type") == "volume" and not volume.get("read_only")]
+    (copy / WORKSPACE_OVERRIDE).write_text(json.dumps({"services": {service: {"volumes": mounts}}}) + "\n",
+                                           encoding="utf-8")
+    final = resolved(compose + [WORKSPACE_OVERRIDE], copy, workspace)
+    problem = unsafe_services(final, copy, private) or missing_credentials(final, service)
+    if problem:
+        raise SandboxError(problem)
     # The devcontainer CLI takes no other file name for its configuration.
     (copy / "devcontainer.json").write_text(json.dumps(dict(config, dockerComposeFile=list(compose) + [WORKSPACE_OVERRIDE]),
                                                        indent=2) + "\n", encoding="utf-8")
     return copy / "devcontainer.json"
 
 
-def bind_mounts(files, folder, workspace):
-    """{(service, target): source} of the bind mounts the Compose files give, resolved from folder as docker compose
-    resolves them for devcontainer up, or the reason they can't be resolved."""
-    argv = ["docker", "compose"] + [arg for path in files for arg in ("-f", str(path))] + ["config", "--format", "json"]
-    resolved = subprocess.run(argv, capture_output=True, text=True, cwd=str(folder),
-                              env=dict(os.environ, COMPOSE_PROJECT_NAME=compose_project(workspace)))
+def resolved(compose, folder, workspace):
+    """The Compose files in folder as docker compose resolves them for devcontainer up. Raises SandboxError."""
+    argv = ["docker", "compose"] + [arg for name in compose for arg in ("-f", str(Path(folder) / name))] + \
+        ["config", "--format", "json"]
+    found = subprocess.run(argv, capture_output=True, text=True, cwd=str(folder),
+                           env=dict(os.environ, COMPOSE_PROJECT_NAME=compose_project(workspace)))
     try:
-        services = json.loads(resolved.stdout).get("services") or {}
-    except (ValueError, AttributeError):
-        return "docker compose can't resolve the sandbox's Compose files: %s" % (resolved.stderr.strip()[-400:]
-                                                                                or "exit %d" % resolved.returncode)
+        config = json.loads(found.stdout)
+    except ValueError:
+        config = None
+    if not isinstance(config, dict) or not isinstance(config.get("services"), dict):
+        raise SandboxError("docker compose can't resolve the sandbox's Compose files: %s" % (
+            found.stderr.strip()[-400:] or "exit %d" % found.returncode))
+    return config
+
+
+def binds(config):
+    """{(service, target): source} of the bind mounts in a resolved Compose configuration."""
     return {(name, volume.get("target")): os.path.realpath(str(volume.get("source") or ""))
-            for name, service in services.items() for volume in (service or {}).get("volumes") or []
+            for name, service in config["services"].items() for volume in (service or {}).get("volumes") or []
             if isinstance(volume, dict) and volume.get("type") == "bind"}
 
 
-def unsafe_mounts(compose, copy, workspace, private, service, workspace_target):
-    """Why the copy's Compose files mount something run can't bring up safely, or None. A bind from a path relative to
-    the sandbox's folder resolves differently from the private copy, so only the workspace mount, which the generated
-    file replaces, may be one. No bind may hold or lie in ~/.agentic-harness, where the approvals and copies are."""
-    folder = Path(workspace) / DEVCONTAINER_CONFIG.rsplit("/", 1)[0]
-    here = bind_mounts([folder / name for name in compose], folder, workspace)
-    there = bind_mounts([copy / name for name in compose], copy, workspace)
-    for found in (here, there):
-        if isinstance(found, str):
-            return found
+def relative_mounts(here, there, workspace, service, target):
+    """Why a bind mount resolves differently from the private copy than from the workspace, or None. Only the
+    workspace's own mount, which the generated Compose file replaces, may be relative."""
+    ours, theirs = binds(here), binds(there)
     real = os.path.realpath(str(workspace))
-    for (name, target), source in sorted(there.items()):
-        if here.get((name, target)) != source and not (
-                name == service and target == workspace_target and here.get((name, target)) == real):
+    for (name, mount), source in sorted(theirs.items()):
+        if ours.get((name, mount)) != source and not (
+                name == service and mount == target and ours.get((name, mount)) == real):
             return ("the sandbox's Compose file mounts %s into %s from a path relative to the sandbox's folder, which "
                     "run can't reproduce from its private copy: mount the workspace at the devcontainer.json's "
-                    "workspaceFolder, or use an absolute path" % (target, name))
-    final = bind_mounts([copy / name for name in compose] + [copy / WORKSPACE_OVERRIDE], copy, workspace)
-    if isinstance(final, str):
-        return final
+                    "workspaceFolder, or use an absolute path" % (mount, name))
+    return None
+
+
+def unsafe_services(config, copy, private):
+    """Why the resolved Compose configuration lets a container past the sandbox, or None: host namespaces, devices,
+    privileges or capabilities beyond the egress container's own, another container's volumes, the docker socket, a
+    volume bound to a host path, a build context outside the definition, or a mount of ~/.agentic-harness."""
     harness_home = os.path.realpath(os.path.expanduser("~/.agentic-harness"))
-    copied = os.path.realpath(str(private))
-    for (name, target), source in sorted(final.items()):
+    copied, checked = os.path.realpath(str(private)), os.path.realpath(str(copy))
+    for name, service in sorted(config["services"].items()):
+        service = service or {}
+        build = service.get("build") or {}
+        context = os.path.realpath(str(build.get("context") or checked)) if isinstance(build, dict) else checked
+        reasons = [
+            ("build context", context != checked and not context.startswith(checked + os.sep)
+             or isinstance(build, dict) and bool(build.get("additional_contexts"))),
+            ("volumes_from", bool(service.get("volumes_from"))),
+            ("privileged", bool(service.get("privileged"))),
+            ("cap_add", bool(set(service.get("cap_add") or []) - (EGRESS_CAPABILITIES if name == "egress" else set()))),
+            ("devices", bool(service.get("devices"))),
+            ("network_mode", service.get("network_mode") == "host"),
+            ("pid", service.get("pid") == "host"),
+            ("ipc", service.get("ipc") == "host"),
+            ("userns_mode", service.get("userns_mode") == "host"),
+            ("security_opt", any("unconfined" in str(item) for item in service.get("security_opt") or [])),
+        ]
+        found = [reason for reason, unsafe in reasons if unsafe]
+        if found:
+            return ("the sandbox's Compose file gives %s %s, which run never brings up: it would reach past the "
+                    "sandbox" % (name, ", ".join(found)))
+    for (name, target), source in sorted(binds(config).items()):
+        if os.path.basename(source) == "docker.sock":
+            return "the sandbox's Compose file mounts the docker socket (%s) into %s, which controls the host" % (
+                source, name)
         if (source == harness_home or source.startswith(harness_home + os.sep) or source == copied
                 or harness_home.startswith(source.rstrip(os.sep) + os.sep)):
             return ("the sandbox's Compose file mounts %s into %s, which holds or lies in %s, where this machine keeps "
                     "the sandbox approvals and run's copies" % (source, name, harness_home))
+    bound = sorted(name for name, volume in (config.get("volumes") or {}).items()
+                   if isinstance(volume, dict) and volume.get("driver_opts"))
+    if bound:
+        return ("the sandbox's Compose file gives the volume %s driver_opts, which can bind a host path past the "
+                "sandbox" % ", ".join(bound))
     return None
+
+
+def missing_credentials(config, service):
+    """Why Claude Code sessions in the sandbox would have no credentials, or None: run gives each session a fresh
+    ~/.claude, so the login stored there isn't used, and the credentials come from this environment."""
+    environment = (config["services"].get(service) or {}).get("environment") or {}
+    command = str(environment.get("HARNESS_AGENT_CMD") or "") if isinstance(environment, dict) else ""
+    words = command.split()
+    if not words or os.path.basename(words[0]) != "claude" or any(os.environ.get(v) for v in CREDENTIAL_VARIABLES):
+        return None
+    return ("the sandbox's sessions run Claude Code, and run gives each one a fresh ~/.claude, without the login stored "
+            "in the sandbox: set CLAUDE_CODE_OAUTH_TOKEN (from claude setup-token) or ANTHROPIC_API_KEY in the "
+            "environment run starts from")
 
 
 def definition_files(folder):

@@ -20,6 +20,10 @@ RUN useradd -m -s /bin/bash agent \
     && install -d -o agent -g agent /home/agent/.claude /home/agent/.agentic-harness \
          /home/agent/.agentic-harness/plugins
 
+# Managed settings outrank every user and project file, so nothing the agent writes to ~/.claude turns the harness's
+# hooks off; the agent can't change this root-owned copy.
+COPY managed-settings.json /etc/claude-code/managed-settings.json
+
 COPY init-firewall.sh /usr/local/bin/init-firewall.sh
 COPY trust-workspace.py /usr/local/bin/trust-workspace.py
 COPY thin-engine.py /usr/local/bin/thin-engine.py

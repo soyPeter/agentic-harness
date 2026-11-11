@@ -28,7 +28,13 @@
     afterwards, and a bind mount the copy would resolve differently, one into `~/.agentic-harness`, or a symlink in the
     definition stops the run. The Compose project is named by the harness, and the containers are removed after every
     session, so nothing an agent changes inside them reaches the next. After `up`, the host's own code checks, with an
-    absolute interpreter and no environment, that the agent's container isolates its sessions. In a full install `run` executes the
+    absolute interpreter and no environment, that the agent's container isolates its sessions. Each session gets a
+    fresh `~/.claude` (a tmpfs over every named volume the agent writes to), so Claude Code's credentials must come
+    from the environment (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`); the image's root-owned managed settings
+    keep the harness's hooks on whatever a user settings file says. A definition that reaches past its folder or the
+    sandbox (`initializeCommand`, `mounts`, `runArgs` in `devcontainer.json`; `extends`, `include`, `env_file`,
+    privileges, host namespaces, extra capabilities, the docker socket, bind-device volumes in the Compose file) stops
+    the run, and a docker buildx file entitlement failure says what to do. In a full install `run` executes the
     workspace's own `scripts/harness/`, which the sandbox can write too: use thin mode with `HARNESS_SANDBOX_START=on`. Agents can't change
     the definition, write the approvals or run `sandbox-approve`. **Upgrading:** approve a full install's sandbox once
     before turning `HARNESS_SANDBOX_START` on, and again after you or an update change it.

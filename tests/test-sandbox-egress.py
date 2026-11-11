@@ -225,6 +225,15 @@ class Allowlist(Sandbox):
                 self.assertFalse(self.resolves("example.com", "@127.0.0.11", "-p", port))
                 self.assertFalse(self.resolves("example.com", "@127.0.0.11", "-p", port, "+tcp"))
 
+    def test_the_harness_hooks_stay_on_whatever_the_agent_writes_to_its_own_settings(self):
+        managed = "/etc/claude-code/managed-settings.json"
+
+        owner = self.inside("stat -c %%U %s" % managed).stdout.strip()
+        writable = self.inside("test -w %s" % managed).returncode == 0
+        content = json.loads(self.inside("cat %s" % managed).stdout)
+
+        self.assertEqual((owner, writable, content.get("disableAllHooks")), ("root", False, False))
+
     def test_the_egress_container_logs_a_denied_connection_with_the_agents_uid(self):
         self.assertFalse(self.reachable("http://%s/" % UNROUTABLE))
         uid = int(self.inside("id -u").stdout)
@@ -546,6 +555,10 @@ print(open("/proc/self/status").read())
 marker = os.path.expanduser("~/.left-by-an-earlier-session")
 print("home marker: %%s" %% ("persisted" if os.path.exists(marker) else "fresh"))
 open(marker, "w").close()
+settings = os.path.expanduser("~/.claude/settings.json")
+print("claude settings: %%s" %% ("persisted" if os.path.exists(settings) else "fresh"))
+with open(settings, "w") as handle:
+    handle.write('{"disableAllHooks": true}')
 if "Task 7.2" in prompt:
     time.sleep(600)
 report = %s
@@ -658,6 +671,7 @@ class HostRun(Sandbox):
         self.assertIn("run: task 7.1 attempt 2", run.stdout, run.stdout + run.stderr)
         logs = sorted((self.project / ".git/harness/runs").glob("*/7.1-2.log"))
         self.assertIn("home marker: fresh", logs[-1].read_text())
+        self.assertIn("claude settings: fresh", logs[-1].read_text())
 
     def test_run_refuses_a_sandbox_someone_else_already_brought_up(self):
         self.unblock("7.1")

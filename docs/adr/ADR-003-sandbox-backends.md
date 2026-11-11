@@ -327,8 +327,20 @@ Still open after v1:
   `~/.agentic-harness`. Symlinks in the definition are refused, the Compose project is named by the harness (a `.env`
   in the workspace can't choose it), and the containers are removed after every session and recreated by the next
   `up`, so nothing an agent changes inside them persists; the isolation probe runs with `/usr/bin/python3` under
-  `env -i`. Named volumes do persist: an agent can write the shared Claude Code login volume's `~/.claude`, which
-  later sessions read.
+  `env -i`.
+  A fourth review found that the shared Claude Code login volume let an agent leave a `~/.claude/settings.json`
+  (`disableAllHooks`, an `env` with `PYTHONPATH`) that later sessions, in every project, would read. In the sandbox the
+  image now ships root-owned managed settings (`/etc/claude-code/managed-settings.json`, `disableAllHooks: false`),
+  which outrank user and project settings, and `run` replaces every named volume the agent's container writes to with
+  a tmpfs for the session, so nothing written under `~/.claude` outlives it; Claude Code's credentials then come from
+  the environment (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`), and `run` refuses without one. The engine side
+  (refusing agent writes to user-level agent configuration, doctor and session-start errors for `disableAllHooks`,
+  user hooks and `env`, and hooks run with `python3 -I`) is another change, made on main; until it lands, an agent can
+  still change `~/.claude` during its own session, and a sandbox opened in an editor still uses the shared login
+  volume. `run` also refuses a definition that reaches past its folder or the sandbox (`initializeCommand`, `mounts`,
+  `runArgs` and the like in `devcontainer.json`; `extends`, `include`, `env_file`, an outside build context,
+  `volumes_from`, privileges, host namespaces, extra capabilities, the docker socket and bind-device volumes in the
+  Compose file), and explains docker buildx's file entitlement failure when `devcontainer up` hits it.
   Limits: in a full install, `run` on the host executes the workspace's own `scripts/harness/`, which an agent in the
   sandbox can write too, so the approval protects thin installs, whose engine lives outside the project; use thin mode
   with `HARNESS_SANDBOX_START=on`. Other spellings of `harness.py sandbox-approve` in an agent's shell command (a
