@@ -9,7 +9,7 @@ Harness-owned. All hook logic lives in `scripts/harness/lib/harness.py`, which n
 | SessionStart | all | Shows the reading list, SETUP INCOMPLETE if FILL placeholders remain, the `[WIP]` task, and harness errors | Added to context |
 | PreToolUse | Bash | **Shell checks** (below) and `@bash` block rules: destructive git, recursive root/home delete, DROP/TRUNCATE, `--no-verify` | Command refused |
 | PreToolUse | Write, Edit, MultiEdit | Block rules for the path, the **orchestrator scope**, the **skill gate**, plus per file (see below) | Edit refused |
-| PreToolUse | every other tool except Read, Grep, Glob, LS and TodoWrite | Its **tool contract** (below): the file gates for the paths a write tool names, `confirm` and unknown tools refused in autonomous mode | Call refused, or a warning |
+| PreToolUse | every other tool except Read, Grep, Glob, LS and TodoWrite | Its **tool contract** (below): the file gates for the paths a write tool names, `confirm` and unknown tools refused in autonomous mode. The Skill tool: a skill that isn't admitted guidance, or that runs commands as it loads, is refused (**Third-party skills**, below) | Call refused, or a warning |
 | PostToolUse | Read, Skill | Records which skills the session has loaded (for the skill gate) | Silent |
 | PostToolUse | Write, Edit, MultiEdit | Warn rules; harness-owned file edited; spec readiness after a spec edit | Added to context |
 | PostToolUse | other tools with a non-read contract | Logs a `tool` event with the tool's class and paths | Silent |
@@ -30,6 +30,7 @@ Per-file checks in PreToolUse:
 | `backbone/.harness-lock.json` | Written only by the installer and `harness.py adopt` |
 | `backbone/escalations.md` | Written by `harness.py escalate`; resolved by the user |
 | `backbone/tools.conf` | The tool contracts are user-only; verify also refuses commits that change them |
+| `backbone/admissions.conf` | Admission records and revocations of third-party bundles are user-only; verify also refuses commits that change them (**Third-party skills**, below) |
 
 **Orchestrator scope** (`HARNESS_ORCHESTRATOR_SCOPE`, user-only, default `on`): the main session (a tool call without an `agent_id`) may edit only `backbone/` docs and configuration (not specs, ADRs or verdicts), `.claude/skills/` and `CLAUDE.md`. Specs, ADRs and code are written by the role agents.
 
@@ -333,6 +334,35 @@ The shell checks can't see what a script file does. The harness keeps a snapshot
 - **Supervised mode**: the user edits these files too, so the snapshot is also taken as each shell command starts, and only what changed while that command ran is reported, whether it succeeded or failed (`PostToolUseFailure`). Edits made between commands are not. While commands overlap, the snapshot from the first one's start stays until the last has finished, and the note names every command that was running. A command whose end never comes (interrupted) stops counting after its timeout plus 30 seconds. A background command (`run_in_background`) is checked when it is launched, not when it ends. The agent gets a note naming the command and the files, and the change is logged as `tamper` (it shows in `trace` and `report`); nothing is escalated, since the user is there. A file the user saves while an agent's command runs is reported too; the note names the command so they can tell.
 
 Restore a file with `git checkout -- <file>`.
+
+## Third-party skills and setup resources (`backbone/admissions.conf`, ADR-006)
+
+An SDK's setup prompt, a vendor's SKILL.md or plugin, and the pages they point to are **reference**: an agent may read them and propose from them, but they approve nothing, enable no tool and change no gate. Tool contracts, approvals, ADR acceptance and user-only settings stay the user's whatever a page says, and every tool call goes through the gates above whichever skills are loaded. A reviewed copy becomes **admitted guidance** only through a record the user writes in `backbone/admissions.conf`, which is user-only like `tools.conf`:
+
+```
+[admit vendor-sdk]
+path = .claude/skills/vendor-sdk
+decision = ADR-012
+source = https://github.com/vendor/skills
+revision = 4c1d2e8f0a9b7c6d5e4f3a2b1c0d9e8f7a6b5c4d (release v2.3.1)
+digest = sha256:<64 hex digits>
+purpose = set up the Vendor SDK client in the billing service
+compatible = vendor-sdk 2.3.x; Claude Code 2.1 or later
+dependencies = none
+data = api.vendor.example (test tenant only)
+license = Apache-2.0
+
+[revoke sha256:<64 hex digits>]
+reason = setup.sh sends the API key to a third-party host (ADR-013)
+```
+
+- **The record.** Every field is required; write `none`, or `unavailable: <why>` for a revision a mutable source can't give. `path` is the bundle, a folder (everything under it, scripts and references included) or one file, inside the repository and outside the harness's own files (`.claude/skills/<name>` for a skill). `decision` is an Accepted ADR that names the bundle. `harness.py admission digest <path>` prints the digest: sha256 over the lines `<sha256 of the file>  <path in the bundle>`, sorted by path. A symbolic link counts as the path it points to, so redirecting one changes the digest; a bundle with a link that leads out of it is not admissible, since the digest doesn't cover what it points at. `.DS_Store` is skipped. Lines starting with `#` are comments.
+- **Admitted** means: the record is complete, its ADR is Accepted and names the bundle, the bytes on disk have the recorded digest, no revocation names them, and no SKILL.md in it registers hooks, runs shell placeholders (`` !`...` ``, a ```` ```! ```` block) or pre-approves tools (`allowed-tools`). Admission grants no command or permission: an admitted skill loads and satisfies routes like any other skill, and its scripts and the tools it suggests go through the shell checks and tool contracts like anything else. `harness.py admission` shows each record's state; doctor and the session-start note report the problems.
+- **Not admitted** is reference. The Skill tool is refused for it; reading its SKILL.md doesn't count as loading it, and the agent is told to treat it as reference; an edit routed to it is refused until the user reviews it again or removes the route; a command that runs one of its files (`./<file>`, `sh <file>`, `source <file>`, an interpreter) is refused. Reading its files stays allowed.
+- **A change is a new review.** New bytes don't inherit the old verdict: an edited, added or removed file, or a redirected link, makes the bundle not admitted until the user records the new digest. verify refuses a commit whose admitted bundle doesn't match its record, and one that changes what `admissions.conf` decides (comments aside): the user commits it with `HARNESS_VERIFY=off`, and a pull request needs the `harness-change-approved` label. The harness never fetches, updates or installs a bundle, and `update.sh` doesn't touch one.
+- **Revocation** blocks those bytes wherever they are under `.claude/skills/`, under another folder name too, and even when an admission record matches them. verify refuses a commit that brings revoked bytes back (a rollback of the files, or of the files and their record) and one that removes a revocation, even with `--allow-user-changes`: a revoked bundle stays revoked, and the way back is a new reviewed version, with a new digest. To retire an admitted bundle, delete its files and its record in one commit.
+- **Any skill an agent invokes** through the Skill tool, admitted or not, is refused when its SKILL.md registers hooks or runs shell placeholders: Claude Code runs those as it loads the skill, outside every tool call the hooks see, and checks placeholders only against permission rules, which the skill's own `allowed-tools` can grant. The user can still invoke it (`/<name>`), and agents can read it. doctor names such skills.
+- **Limits.** Compatibility, dependencies, data destinations and the license are recorded, not checked: the harness can't read an SDK's or a host's version, and network access stays governed by the tool contracts and the sandbox allowlist (ADR-003). A digest identifies bytes, not their safety. Plugins (another plugin's skills, hooks and MCP servers) live in the CLI's plugin cache, outside the repository, where the harness can't digest them: their skills never satisfy a route, and enabling one is the user's settings change. A project skill that isn't under a record can still pre-approve tools with `allowed-tools`, skipping the permission prompt that a `confirm` contract relies on in supervised mode. Revoked bytes copied outside `.claude/skills/`, with no record naming that path, are not found.
 
 ## Event log, trace and report
 

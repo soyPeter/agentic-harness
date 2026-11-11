@@ -90,6 +90,7 @@ sandbox-evidence|receipt: the sandbox each judge pass ran in, and the runner's s
 plugin-packaging|plugin manifests and OpenCode adapter (ADR-001)
 thin-regressions|thin: skill overrides, rule provenance and CI engine assets
 agent-hooks|agents' own hooks record verdicts and keep write scopes
+admission|third-party bundles: admission records, revocation, skills that run as they load (ADR-006; properties need hypothesis)
 live-plugin|live: a plugin judge verdict is recorded (runs with HARNESS_E2E=1)
 sandbox-egress|live: the sandbox's allowlist, capabilities and evidence in a real container (runs with HARNESS_E2E=1)"
 PY_WORK="$WORK/py"
