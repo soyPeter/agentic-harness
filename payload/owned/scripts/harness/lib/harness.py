@@ -6375,11 +6375,9 @@ GIT_PUSHES = {"push": None, "send-pack": None, "http-push": None, "subtree": Non
 def external_refusal(command):
     """Why a command is refused to every agent under external delivery, or None: the factory pushes and talks to
     GitHub from its trusted clone, so the lane runs no gh write and no git push, by any name."""
-    if not re.search(r"(?<![\w.-])(git|gh)(?![\w.])", command):
-        return None
     for segment, words, why in gh_calls(command):
         prog = program(words[program_index(words):])
-        if why and re.search(r"(?<![\w.-])(git|gh)(?![\w.])", segment):
+        if why:
             return "%s (%s)" % (EXTERNAL_REFUSAL, why.rstrip("."))
         run, _ = runner_command(prog, words)
         if prog.startswith("git-") or (run and (program(run).startswith("git") or program(run) == "gh")):

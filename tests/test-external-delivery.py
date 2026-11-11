@@ -293,7 +293,9 @@ class ExternalDelivery(unittest.TestCase):
         refused = ("find . -maxdepth 0 -exec git push origin HEAD \\;", "git subtree push --prefix=x origin main",
                    "/usr/libexec/git-core/git-push origin HEAD", "git-push origin HEAD",
                    "git submodule foreach git push", "git lfs push origin HEAD", "echo HEAD | xargs git push origin",
-                   "sh -c 'git push origin HEAD'", "find . -maxdepth 0 -exec gh pr merge 9 \\;")
+                   "sh -c 'git push origin HEAD'", "find . -maxdepth 0 -exec gh pr merge 9 \\;",
+                   "gi''t push origin HEAD", "G=git; $G push origin HEAD", "\"git\" push origin HEAD",
+                   "g\\it push origin HEAD", "G=gh; $G pr merge 9")
         for agent in ("implementer", "deliverer", None):
             for command in refused:
                 with self.subTest(agent=agent, command=command):
