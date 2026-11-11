@@ -437,6 +437,25 @@ class TaskLock(unittest.TestCase):
         self.assertIn("task 3.2 attempt 1", result.stdout)
         self.assertNotIn("being run already", result.stdout)
 
+    def test_every_runner_path_takes_the_lock(self):
+        self.p.add_task("3.4", "Locked by another lane")
+        started, release, env = self.files("3.4")
+        first = self.run_in_background("3.4", env)
+        try:
+            self.wait_for(started, first)
+            _, done, other = self.files("other")
+            done.touch()
+            plain = self.p.harness("run", check=False, env=other)
+            orca = self.p.harness("orca", "--tasks", "3.4", check=False, env=other)
+        finally:
+            release.touch()
+            first.communicate(timeout=120)
+
+        self.assertIn("run: task 3.4 is being run already (pid %d)" % first.pid, plain.stdout)
+        self.assertNotIn("task 3.4 attempt", plain.stdout)
+        self.assertIn("orca: task(s) 3.4 are being run already; left out", orca.stdout)
+        self.assertIn("orca: no ready task", orca.stdout)
+
     def test_agents_may_not_write_the_lock(self):
         self.assertEqual(self.p.bash("echo '{}' > .git/harness/locks/task-3.3.lock", "implementer").returncode, 2)
 

@@ -4228,6 +4228,9 @@ def hook_pre_tool_use(data):
             deny("Harness blocked this command:\n%s\nIf the user really wants it, ask them to run it "
                  "themselves (in Claude Code: `! <command>`). Do not rephrase the command to get "
                  "around the rule." % "\n".join(problems))
+        if conf()["HARNESS_DELIVER"] == "external" and outward_actions(command):
+            deny("Harness blocked this command: %s" % EXTERNAL_REFUSAL.replace("the deliverer pushes", "no agent "
+                                                                                 "pushes"))
         log_outward(command, data.get("harness_role") or "session")
         if not autonomous():
             command_started(data)
@@ -6009,6 +6012,16 @@ def task_lock_acquire(task):
 TASK_LOCKS = {}
 
 
+def task_lock_release(task):
+    fd = TASK_LOCKS.pop(task, None)
+    if fd is not None:
+        try:
+            os.ftruncate(fd, 0)
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def orca_dir(create=False):
     """<git common dir>/harness: shared by the repository's worktrees. Reads don't create it."""
     common = git("rev-parse", "--path-format=absolute", "--git-common-dir").strip()
@@ -6240,6 +6253,14 @@ def orca_command(argv):
         print("orca: a backlog run is already going for this repository (pid %s); not starting another"
               % orca_lock_holder())
         return 1
+    held = [t for t in tasks if task_lock_acquire(t) is not None]
+    if held:
+        print("orca: task(s) %s are being run already; left out" % ", ".join(held))
+        tasks = [t for t in tasks if t not in held]
+    if not tasks:
+        orca_lock_release()
+        print("orca: no ready task that no other run holds")
+        return 0
     log_event("orca-start", tasks=tasks, agents=agents)
     lines = []
 
@@ -6756,7 +6777,7 @@ def run_command(argv):
         for task, title, state in queue:
             print("run: would %s task %s: %s" % ("resume" if state == "wip" else "start", task, title))
         return 0
-    if only:
+    if only and not queue:
         holder = task_lock_acquire(only)
         if holder is not None:
             print("run: task %s is being run already (pid %s); not starting a second run"
@@ -6773,6 +6794,12 @@ def run_command(argv):
     spent = 0.0
     for task, title, state in queue:
         retry_note, last_signature = "", None
+        holder = task_lock_acquire(task)
+        if holder is not None:
+            print("run: task %s is being run already (pid %s); not starting a second run"
+                  % (task, holder.get("pid") or "unknown"))
+            summary.append((task, "locked"))
+            continue
         if max_cost is not None and spent >= max_cost:
             print("run: budget reached ($%.2f of $%.2f); stopping before task %s" % (spent, max_cost, task))
             log_event("run-budget", scope="run", spent=spent, limit=max_cost)
@@ -6916,6 +6943,7 @@ def run_command(argv):
                          % (attempts, outcome, run_dir), "a look at the run logs and the task's state")
                 outcome = "escalated"
         summary.append((task, outcome))
+        task_lock_release(task)
         if outcome in ("halted", "agent-failed", "cap-hit"):
             break
     log_event("run-end", summary=summary)

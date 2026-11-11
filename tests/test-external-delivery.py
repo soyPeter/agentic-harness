@@ -242,6 +242,17 @@ class ExternalDelivery(unittest.TestCase):
         self.assertEqual(stop.returncode, 0, stop.stderr)
         self.assertEqual(len(self.p.events("deliver")), before)
 
+    def test_no_role_pushes_or_opens_a_pr_in_external_mode(self):
+        for agent in ("implementer", "scribe", None):
+            for command in ("git push -u origin HEAD", "gh pr create --base main --title t --body b",
+                            "gh pr edit 9 --add-label risk:low"):
+                with self.subTest(agent=agent, command=command):
+                    answer = self.p.bash(command, agent)
+
+                    self.assertEqual(answer.returncode, 2, answer.stderr)
+                    self.assertIn("HARNESS_DELIVER=external", answer.stderr)
+        self.assertEqual(self.p.bash("git status --short", "implementer").returncode, 0)
+
     def test_doctor_knows_the_delivery_modes(self):
         accepted = self.p.harness("doctor", check=False).stdout
         rejected = self.p.harness("doctor", check=False, env={"HARNESS_DELIVER": "factory"}).stdout
