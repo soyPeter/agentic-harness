@@ -136,6 +136,8 @@ pass stale.
 - **Coordinator API**: `state`, `next`, `questions`, `start` and `finish` let a coordinator (Orca, a script) drive
   tasks without knowing the workflow. `contract --json` states the versioned contract an outside runner (the agent
   software factory of ADR-008) relies on: those answers' JSON fields and the event kinds, each event carrying `v`.
+  `intake <request.json>` turns a request from the factory's doors into a task, with its provenance in a frozen
+  `## Source` section; an untrusted sender's task waits for a person.
 - **Knowledge source** (opt-in, user-only): in autonomous mode, griller questions `backbone/` can't answer are looked up
   in a read-only notes vault behind an MCP server (`knowledge`). Clear answers are recorded with a `vault:<path>`
   citation the harness checks; the rest are escalated.

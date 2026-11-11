@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Intake with provenance and the trusted-sender verdict (ADR-008, follow-up 2).** `harness.py intake <request.json>
+  [--json]` turns a request from an agent factory's doors (Slack, GitHub, Linear, the clock) into a pending task. It
+  allocates the id (`intake.<n>`) under a lock shared by the repository's worktrees, writes a draft spec whose frozen
+  `## Source` section records the contract version, door, channel, message, URL, sender, the factory's sender verdict,
+  when it arrived, the dedupe key and the text's SHA-256, quotes the request in Context as source material, adds the
+  task line and logs an `intake` event. The same `dedupe_key` returns the existing task and writes nothing. An
+  `untrusted` sender's task is escalated (kind `intake`) and, once a person resolves that, its Source counts as a risk,
+  so policy approval never reaches it. Request text is data from any sender: the quote is escaped so that a heading,
+  fence, comment, HTML or approval line in it stays text, and the title keeps only plain characters, so it can't mark
+  the task `(light)` or BLOCKED. The hooks refuse any change to a `## Source` section, and `verify` refuses one in a
+  range. `linear import` writes the same section (`--sender`, `--sender-verdict`; trusted by default, since the user
+  runs it) and keeps the same plain characters of a ticket's title: a ticket titled `... (light)` could put its task
+  on the light lane before. The analyst keeps Source and rewrites Context. Agents can't run `intake`.
+
 - **A spend cap per task that survives resumes (ADR-008, follow-up 3).** `HARNESS_TASK_BUDGET_USD` (user-only, set
   by the factory for the `run` process) is what one task may spend across all its sessions. Each runner session's cost
   goes to the task's ledger in the shared git directory (`.git/harness/costs/task-<id>.jsonl`), which outlives the run

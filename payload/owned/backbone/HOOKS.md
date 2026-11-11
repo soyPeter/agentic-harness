@@ -288,6 +288,18 @@ A coordinator asks the harness what a task needs instead of knowing the workflow
 
 Under an Orca coordinator (`HARNESS_ORCA_RUN` set), `escalate` also sends an `escalation` message to the Run's mailbox.
 
+## Intake (`harness.py intake`)
+
+`harness.py intake <request.json> [--json]` turns a request from one of an agent factory's doors into a pending task (the harness's ADR-008). The factory checks the sender against its trusted-sender list; the harness records the verdict. The request is a JSON object with `contract` (a version `contract --json` serves), `source` (`slack`, `github`, `linear` or `clock`), `channel`, `message_id`, `url`, `sender`, `sender_verdict` (`trusted` or `untrusted`), `received_at`, `dedupe_key` and `text`, and optionally `title`. `contract`, `source`, `sender_verdict`, `sender`, `dedupe_key` and `text` are required; anything else is refused and nothing is written. Intake:
+- allocates the task id, `intake.<n>`, under a lock in the shared git directory, past every id in the repository's worktrees, as `adr-number` does for ADRs;
+- writes a draft spec from the template, with a `## Source` section holding the provenance (each value on one line, without `<`, `>` or backticks) and the SHA-256 of `text`, and `text` quoted in Context as source material, not instructions. The quote is escaped so that it reads only as quoted text: a heading, fence, HTML tag, comment, setext underline or approval line in the request stays text. The title comes from `title` or the text's first line, keeping only letters, digits, spaces and plain punctuation, so it can't mark the task `(light)` or BLOCKED;
+- adds the task line, `- [ ] **Task intake.<n>: <title>** (spec: ...; intake: <source>)`, and logs an `intake` event with the provenance (not the text);
+- answers with `task`, `created`, `spec`, `escalated` and `dedupe_key` (`--json`).
+
+The same `dedupe_key` returns the task it made the first time, from any worktree of the repository, and writes nothing. An `untrusted` sender's task is escalated at once (kind `intake`, class `permission_denied`) and stays BLOCKED until a person resolves it; after that its `## Source` counts as a risk, so `approve` escalates it again: only a person's `Approved-by:` line lets it start. A trusted sender's request goes through the usual pipeline, where policy approval still reaches only low-risk `docs` and `refactor` specs.
+
+The `## Source` section is frozen from the start: an edit or write that adds, changes, hides or removes one is refused, whoever makes it, and `verify` refuses a change to the Source section of a spec the base already has (unless the user approves the change: `--allow-user-changes`). The analyst rewrites Context and keeps Source as it is. Agents can't run `intake`.
+
 ## Orca coordinator (`harness.py orca`)
 
 `python3 scripts/harness/lib/harness.py orca [--tasks 1.3,1.4] [--parallel 2] [--agents default=claude,judge=codex] [--trust] [--merge] [--dry-run]` drives ready tasks with [Orca](https://github.com/stablyai/orca) supervised workers. It needs autonomous mode and a running Orca.
@@ -394,7 +406,7 @@ It refuses a task without a judge pass on the current code. `harness.py run` sav
 - **EARS** (`HARNESS_REQ_STYLE=ears`): each requirement's pattern (ubiquitous, event-driven, state-driven, unwanted behaviour, optional feature, complex, or not an EARS pattern).
 - **Output:** stdout, or `DIR/traceability.reqif`, `DIR/needs.json` or `DIR/traceability.html` with `--out`. An `--out` inside the repository is refused unless git ignores it, since an untracked file counts as code and would make the judge's passes stale. The same repository state gives the same bytes.
 
-**Linear** (`harness.py linear`, user-only; agents may run only `--dry-run`). `linear import <ISSUE> --task <id> [--light] [--from <issue.json>]` writes a draft spec from the template, with a `Linear: <ISSUE> (<url>)` line and the ticket quoted in Context as source material. It also adds the pending task line, `(light)` when asked. `linear receipt <task> [--status <state>]` posts the receipt as a comment on the ticket. It refuses without a judge pass on the current code, and refuses a state that completes or cancels the ticket. Both need `LINEAR_API_KEY`; `HARNESS_LINEAR_URL` points them at another endpoint.
+**Linear** (`harness.py linear`, user-only; agents may run only `--dry-run`). `linear import <ISSUE> --task <id> [--light] [--from <issue.json>] [--sender <name>] [--sender-verdict trusted|untrusted]` writes a draft spec from the template, with a `Linear: <ISSUE> (<url>)` line, the ticket quoted in Context as source material and a `## Source` section as `intake` writes it (source `linear`, the issue as the message, `linear:<ISSUE>` as the dedupe key; the sender is `--sender`, else the issue's creator). The user runs the import, so the ticket is trusted unless `--sender-verdict untrusted` says otherwise, which escalates the task as `intake` does. It also adds the pending task line, `(light)` when asked; the ticket's title keeps only plain characters, as intake's do, so the ticket itself can't mark the task `(light)` or BLOCKED. `linear receipt <task> [--status <state>]` posts the receipt as a comment on the ticket. It refuses without a judge pass on the current code, and refuses a state that completes or cancels the ticket. Both need `LINEAR_API_KEY`; `HARNESS_LINEAR_URL` points them at another endpoint.
 
 ## Profiles (`HARNESS_PROFILE`)
 
