@@ -88,6 +88,7 @@ properties|properties: a plugin agent gets its role's decisions (needs hypothesi
 code-fingerprint|same-size edits within an index write's second or keeping the mtime; untracked, ignored, force-added files
 sandbox-evidence|receipt: the sandbox each judge pass ran in, and the runner's sandbox backend (ADR-003)
 sandbox-gate|the sandbox each Change-Class needs, at start, finish, verify and run (ADR-003; properties need hypothesis)
+egress-dns|the sandbox's DNS resolves allowlisted names only, and logs the rest (ADR-003; properties need hypothesis)
 plugin-packaging|plugin manifests and OpenCode adapter (ADR-001)
 thin-regressions|thin: skill overrides, rule provenance and CI engine assets
 agent-hooks|agents' own hooks record verdicts and keep write scopes

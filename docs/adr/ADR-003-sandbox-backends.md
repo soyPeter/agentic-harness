@@ -288,3 +288,9 @@ Still open after v1:
   targets denied most and the log's sha256. The receipt cites them, or says "not logged" for an `egress` container
   from before the log. The log restarts with the `egress` container, so it covers the container's lifetime, not one
   task.
+- **1. DNS: done (2026-11-11).** `egress.py` answers DNS on `127.0.0.1:53` in the shared network namespace and
+  resolves a name, over UDP or TCP, only when it is on the published allowlist (exactly, in any case), through the
+  `egress` container's own resolver; any other name gets NXDOMAIN without leaving and is logged as a denial.
+  `init-firewall.sh` redirects every DNS query from a process other than root to it (a `nat` rule), drops port 53 to
+  anywhere else, and drops traffic to Docker's resolver (`127.0.0.11`, on any port) from anyone but root; the agent's
+  container has no root. Still open: names resolve to addresses once, at start, and TLS and paths aren't inspected.

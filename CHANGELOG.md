@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **No data leaves the sandbox in DNS queries (ADR-003 follow-up 1).** `egress.py` now also answers DNS in the
+  `egress` container: it resolves a name, over UDP or TCP, only when it is on the published allowlist (exactly, in any
+  case), and answers NXDOMAIN otherwise, logging the name in the denial log. `init-firewall.sh` redirects every DNS
+  query a process other than root makes, to any resolver, to it, drops port 53 to anywhere else, and keeps everyone but
+  root away from Docker's resolver on `127.0.0.11`. `tests/test-egress-dns.py` checks the resolver's rule through its
+  command line, with a property check; `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`) checks it in the real sandbox,
+  against other resolvers and Docker's own. **Upgrading:** rebuild the sandbox; a tool that needs a host off the
+  allowlist now fails to resolve it instead of failing to connect, so add the host to `HARNESS_FIREWALL_ALLOW`.
+
 - **The sandbox logs what it denies, and the receipt cites it (ADR-003 follow-up 8).** Every outbound packet the
   `egress` container's rules drop is logged first (NFLOG, up to 50 a second), and the new `egress.py`, now the
   `egress` container's main process, appends one line per packet to `/run/harness-egress/denials.jsonl` (target

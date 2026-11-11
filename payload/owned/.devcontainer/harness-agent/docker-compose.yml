@@ -1,8 +1,8 @@
 # Agentic harness: the sandbox's two containers (harness-owned; devcontainer.json starts them).
 # The egress container applies the outbound allowlist (init-firewall.sh) in the network namespace the agent's container
-# joins, and logs what it denies (egress.py). The agent can't change those rules or the log: it holds neither NET_ADMIN
-# nor NET_RAW, has no sudo, shares no processes with the egress container and mounts its volume read-only. If the
-# egress container stops, the agent loses its network.
+# joins, answers its DNS for allowlisted names only, and logs what it denies (egress.py). The agent can't change those
+# rules or the log: it holds neither NET_ADMIN nor NET_RAW, has no sudo, shares no processes with the egress container
+# and mounts its volume read-only. If the egress container stops, the agent loses its network.
 services:
   egress:
     build: .

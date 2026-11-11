@@ -422,7 +422,7 @@ A profile is an organisation policy on top of the gates. Set it in `backbone/har
 | `scripts/harness/` | harness | Runtime (`lib/harness.py`), git hooks, core rules and routes, `doctor.sh` |
 | `.github/workflows/harness-verify.yml` | harness | CI: `verify --range` with the base branch's verifier on every pull request; on a push to the default branch, the verdict attestation, signed when `HARNESS_ATTEST_KEY` is set |
 | `.github/workflows/harness-judge.yml` | project | CI: an independent judge session re-judges tasks a pull request finishes (needs `ANTHROPIC_API_KEY`; add your toolchain) |
-| `.devcontainer/harness-agent/` | harness | Sandbox for unattended runs: an outbound allowlist enforced from a second container (the agent's has no NET_ADMIN or NET_RAW), a base image pinned by digest, a trusted workspace, no prompts. Checked in a real container by `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`); the earlier one-container version ran a real task end to end |
+| `.devcontainer/harness-agent/` | harness | Sandbox for unattended runs: an outbound allowlist enforced from a second container (the agent's has no NET_ADMIN or NET_RAW), DNS for allowlisted names only, a log of what it denied, a base image pinned by digest, a trusted workspace, no prompts. Checked in a real container by `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`); the earlier one-container version ran a real task end to end |
 | `.claude/settings.json` | shared | Merged: harness hook entries plus a few read-only permissions |
 
 Check the state of a task's definition with `python3 scripts/harness/lib/harness.py spec-check <id>`, and the harness with `scripts/harness/doctor.sh`.

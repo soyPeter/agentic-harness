@@ -5,6 +5,7 @@ minutes and needs the network.
 Each class bootstraps a throwaway project, brings its .devcontainer/harness-agent/ up with `devcontainer up` and checks
 from inside, as the agent (Restrictions needs only docker):
 - a host off the allowlist can't be reached, and an allowlisted one can;
+- only allowlisted names resolve, whichever resolver the agent asks, and a refused name is logged;
 - the agent's container holds neither NET_ADMIN nor NET_RAW, and nothing the agent runs changes the rules in force,
   the allowlist the evidence is taken from or the egress container's log of what it denied;
 - a denied connection is logged by the egress container, and the receipt cites the log;
@@ -170,6 +171,13 @@ class Sandbox(unittest.TestCase):
         listed = self.inside('cat "$HARNESS_EGRESS_ALLOWLIST"')
         return sorted(listed.stdout.split()) if listed.returncode == 0 else None
 
+    def resolves(self, name, *dig):
+        """Whether name gets an address in the agent's container: through its resolver, or with dig and its options."""
+        if not dig:
+            return self.inside("getent hosts %s" % name).returncode == 0
+        answer = self.inside("dig +short +time=3 +tries=1 %s %s" % (" ".join(dig), name)).stdout
+        return bool(re.search(r"(?m)^\d+\.\d+\.\d+\.\d+$", answer))
+
     def denials(self):
         """The records of the egress container's denial log, as the agent reads them."""
         log = self.inside("cat %s" % EGRESS_DENIALS)
@@ -183,6 +191,28 @@ class Allowlist(Sandbox):
 
     def test_an_allowlisted_host_is_reachable(self):
         self.assertTrue(self.reachable(ALLOWED))
+
+    def test_an_allowlisted_name_resolves(self):
+        self.assertTrue(self.resolves("api.github.com"))
+
+    def test_a_name_off_the_allowlist_does_not_resolve_and_the_egress_container_logs_it(self):
+        self.assertFalse(self.resolves("example.com"))
+
+        self.assertIn({"kind": "dns", "target": "example.com"},
+                      [{key: record.get(key) for key in ("kind", "target")} for record in self.denials()])
+
+    def test_no_other_resolver_answers_the_agent(self):
+        for resolver in (("@8.8.8.8",), ("@8.8.8.8", "+tcp"), ("@1.1.1.1",)):
+            with self.subTest(resolver=resolver):
+                self.assertFalse(self.resolves("example.com", *resolver))
+        ports = self.inside("python3 -c \"import sys; print(' '.join(str(int(line.split()[1].split(':')[1], 16)) for "
+                            "name in ('/proc/net/udp', '/proc/net/tcp') for line in open(name).read().splitlines()[1:] "
+                            "if line.split()[1].startswith('0B00007F:')))\"").stdout.split()
+        self.assertTrue(ports, "Docker's resolver listens on 127.0.0.11 in the shared network namespace")
+        for port in ports:
+            with self.subTest(dockers_resolver_port=port):
+                self.assertFalse(self.resolves("example.com", "@127.0.0.11", "-p", port))
+                self.assertFalse(self.resolves("example.com", "@127.0.0.11", "-p", port, "+tcp"))
 
     def test_the_egress_container_logs_a_denied_connection_with_the_agents_uid(self):
         self.assertFalse(self.reachable("http://%s/" % UNROUTABLE))
@@ -500,12 +530,14 @@ class Tamper(Sandbox):
     def test_nothing_the_agent_runs_changes_the_rules_in_force_or_the_published_allowlist(self):
         self.inside('HARNESS_FIREWALL_ALLOW="example.com" sudo -n /usr/local/bin/init-firewall.sh; '
                     "sudo -n iptables -P OUTPUT ACCEPT; iptables -P OUTPUT ACCEPT; ip6tables -P OUTPUT ACCEPT; "
+                    "iptables -t nat -F; iptables -F harness-deny; "
                     'echo example.com >> "$HARNESS_EGRESS_ALLOWLIST"; true')
 
         forged = self.inside('echo \'{"kind": "forged"}\' >> %s' % EGRESS_DENIALS)
 
         self.assertFalse(self.reachable(BLOCKED))
         self.assertTrue(self.reachable(ALLOWED))
+        self.assertFalse(self.inside("getent hosts example.com").returncode == 0)
         self.assertEqual(self.published_hosts(), DEFAULT_HOSTS)
         self.assertNotEqual(forged.returncode, 0)
         self.assertNotIn("forged", [record.get("kind") for record in self.denials()])
