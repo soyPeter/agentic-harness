@@ -7,6 +7,9 @@ for every change, whoever or whatever starts it, with people setting the rules.
 Solid shapes are built and enforced. Dashed ones are proposed, or outside the harness. The orange person marks each
 point where the harness waits for a human.
 
+[ADR-008](../adr/ADR-008-harness-inside-agent-factory.md) (Proposed) places this process inside each lane of an
+always-on agent software factory that brings work in from Slack, GitHub and Linear.
+
 ## 1. The factory at a glance
 
 ![The factory: signals, define, build, judge and deliver, merge and observe, with people setting the rules above](1-factory.svg)

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **The harness as the gate inside the agent software factory (ADR-008, Proposed; docs only).**
+  `docs/adr/ADR-008-harness-inside-agent-factory.md` decides how the harness sits inside an always-on factory that
+  takes work from Slack, GitHub and Linear. The factory owns the doors, the sender check, identity and keys, lanes,
+  the watchdog, the janitor and the clock. The harness owns everything inside a lane (spec, gates, verdicts, receipts,
+  delivery rules, memory) and stays the system of record for task state, running in thin mode at each project's pin.
+  It names the contract between them (`next`, `state` and `receipt --json`, the events, `STOP`), maps the factory's
+  roles and steps onto the harness's, and lists eleven follow-ups: a versioned contract surface, intake with
+  provenance and the trusted-sender verdict, per-task and per-day spend caps, delivery from a trusted clone, model
+  routing per role in `run`, a security lens that risk switches on, resuming on review comments, KB note drafts,
+  janitor lifecycle signals, a no-merge profile for lanes and lane sandbox evidence. No code changes.
+
 - **harness-verify's take step no longer fails at random on macOS.** It piped `git archive` into `tar -x`. bsdtar,
   macOS's tar, stops reading at the end-of-archive marker, so on a busy runner a `git archive` still writing the
   padding after it died of SIGPIPE: the step failed with "Cannot extract the base branch's verifier and required
