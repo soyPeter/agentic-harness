@@ -365,12 +365,13 @@ What was built, and where it reads this ADR one way among several:
 - **1, contract surface.** `contract --json` serves version 1. Besides the versions it declares the fields each answer
   of `next`, `state`, `receipt`, `escalations`, `intake` and `delivery-plan` always has, and the fields of each event
   kind, so the factory can check an engine before routing work to it; the tests pin version 1 against both the
-  declaration and the answers. `escalations --json` and `v` on every event as proposed. `outward` events are logged
-  by post-tool-use once a Bash call has run, with its `result` (`unknown` where the agent CLI doesn't say): a push, a pull request created or edited, a label
-  created or a GitHub API write, however it is spelled, with the agent's role as `via`; and the GitHub issue, push,
-  pull request and Linear comment the harness makes itself. `gh pr comment` and `ci-protect` are not covered. The
-  per-task lock is an OS lock in `.git/harness/locks/`, taken by every runner path: `run` with or without `--only`
-  (under `run --worktree`, the child run in the worktree), and `orca` for the tasks it drives.
+  declaration and the answers. `escalations --json` and `v` on every event as proposed. `outward` events are logged by
+  post-tool-use once a Bash call has run, with its `result` (`unknown` where the agent CLI doesn't say): a push, a pull
+  request created or edited, a label created or a GitHub API write, however it is spelled, with the agent's role as
+  `via`; and the GitHub issue, push, pull request and Linear comment the harness makes itself. `gh pr comment` and
+  `ci-protect` are not covered. The per-task lock is an OS lock in `.git/harness/locks/`, taken by every runner path:
+  `run` with or without `--only` (under `run --worktree`, the child run in the worktree), and `orca` for the tasks it
+  drives.
 - **10, no-merge profile.** `HARNESS_PROFILE="no-merge"` has the refusals of `triple` and nothing else.
   `enroll --profile no-merge` refuses `--automation` but allows `--protect`, since requiring `harness-verify` is part
   of a project joining the factory (section 1).
