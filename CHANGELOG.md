@@ -3,7 +3,8 @@
 ## Unreleased
 
 - **Outward events say what ran; a Source heading and a budget word say less.** `outward` events are logged by
-  post-tool-use, once the call has run, with `result` (`succeeded` or `failed`), and cover spellings the deliverer's
+  post-tool-use, once the call has run, with `result` (`succeeded`, `failed`, or `unknown` where the agent CLI doesn't
+  say: Codex, OpenCode's version 1 API; the OpenCode adapter now passes OpenCode's status), and cover spellings the deliverer's
   gate can't read (`command git push`) and GitHub API writes (`api-write`). A `## Source` section without a
   `- Sender verdict:` line is no longer taken for an untrusted request. The key proxy's refusal is recognised only
   from an HTTP 402 in the agent's own error report, not from any mention of a budget in the session's output.
@@ -25,7 +26,7 @@
   the range, head and exit status of the trusted clone's `verify --range`. `delivery-record` refuses it unless the
   verified head is the task's `HEAD` and the range ends there, and `delivered` needs verify to have passed. With
   `HARNESS_DELIVERY_KEY` set (a secret in the factory's environment, only for `delivery-record` and `next`), the
-  record is signed and `next` counts only signed records, so a line an agent's own code appends to the event log can't
+  record is signed and `next` counts only signed records, each for its own task, so a line an agent's own code appends to the event log can't
   mark a task delivered. `run` and `orca` refuse to start while the key is in their environment, since a session could read it from
   its parent process. Without the key, `next` trusts
   every record, as before.

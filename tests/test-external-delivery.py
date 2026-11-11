@@ -208,6 +208,22 @@ class ExternalDelivery(unittest.TestCase):
         self.assertEqual(signed_view["step"], "delivery-failed")
         self.assertEqual(unsigned_view["step"], "done")
 
+    def test_a_record_counts_only_for_its_own_task(self):
+        self.p.add_task("7.5", "Finished alongside", marker="x")
+        self.p.commit("chore: task 7.5 done")
+        head = self.p.command("git", "rev-parse", "HEAD").stdout.strip()
+        try:
+            recorded = self.record(self.delivered(head=head, verify={"range": "origin/main..%s" % head, "head": head,
+                                                                     "exit": 0}))
+            own = self.p.json("next", "7.1", "--json")
+            other = self.p.json("next", "7.5", "--json")
+        finally:
+            self.p.command("git", "reset", "-q", "--hard", self.head)
+
+        self.assertEqual(recorded.returncode, 0, recorded.stdout)
+        self.assertEqual(own["step"], "done")
+        self.assertEqual(other["step"], "deliver")
+
     def test_run_and_orca_refuse_to_start_with_the_delivery_key(self):
         seen = self.p.base / "session-started"
         agent = agent_script(self.p.base / "key-agent.sh", 'touch "%s"\necho \'{"type":"result","total_cost_usd":0,'

@@ -4514,6 +4514,21 @@ def shell_skills(command, cwd=None):
                     yield skill
 
 
+def tool_result(data):
+    """How a Bash call ended, as far as the agent CLI says: failed, succeeded or unknown. Claude Code sends failures to
+    PostToolUseFailure; the OpenCode adapter passes OpenCode's status (tool_status), which its v1 API doesn't give;
+    Codex says nothing either way."""
+    response = data.get("tool_response") if isinstance(data.get("tool_response"), dict) else {}
+    code = next((response[k] for k in ("exit_code", "exitCode", "returncode") if number(response.get(k))), None)
+    if (data.get("hook_event_name") == "PostToolUseFailure" or response.get("interrupted") is True
+            or data.get("tool_status") == "error" or code not in (None, 0)):
+        return "failed"
+    if code == 0 or data.get("tool_status") == "completed" or (
+            HOOK_SOURCE == "claude" and data.get("hook_event_name") == "PostToolUse"):
+        return "succeeded"
+    return "unknown"
+
+
 def post_tool_notes(data):
     tool = data.get("tool_name") or ""
     tool_input = data.get("tool_input") or {}
@@ -4557,9 +4572,7 @@ def post_tool_notes(data):
                       **{"class": contract["class"]})
     elif tool == "Bash":
         command = tool_input.get("command") or ""
-        response = data.get("tool_response") if isinstance(data.get("tool_response"), dict) else {}
-        failed = data.get("hook_event_name") == "PostToolUseFailure" or response.get("interrupted") is True
-        log_outward(command, data.get("harness_role") or "session", "failed" if failed else "succeeded")
+        log_outward(command, data.get("harness_role") or "session", tool_result(data))
         # Agents without a Read or Skill tool (Codex) load a skill by printing its SKILL.md.
         for skill in shell_skills(command, data.get("cwd")):
             remember_skill(data, skill)
@@ -5834,9 +5847,10 @@ def next_step(task, fingerprint=code_fingerprint):
     return dict(step, step="judge", role="judge", reason="no judge verdict on the current code")
 
 
-def latest_delivery(head, signed=False):
+def latest_delivery(head, signed=False, task=None):
     """The last deliverer report logged for commit head, or None. signed: only a record delivery-record signed with
-    HARNESS_DELIVERY_KEY counts."""
+    HARNESS_DELIVERY_KEY counts. task: only a record for that task (delivery-record names one; the deliverer's report
+    covers the branch)."""
     try:
         lines = events_file().read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -5847,6 +5861,8 @@ def latest_delivery(head, signed=False):
         except ValueError:
             continue
         if not isinstance(event, dict) or event.get("kind") != "deliver" or event.get("head") != head:
+            continue
+        if task is not None and event.get("task") != task:
             continue
         if signed and not hmac.compare_digest(str(event.get("mac") or ""), delivery_mac(event) or "-"):
             continue
@@ -5864,7 +5880,7 @@ def delivery_step(step):
         return dict(step, step="deliver", role=None, needed="the finished task committed (the deliverer pushes "
                                                              "only committed work)")
     if mode == "external":
-        last = latest_delivery(head, signed=bool(os.environ.get(DELIVERY_KEY)))
+        last = latest_delivery(head, signed=bool(os.environ.get(DELIVERY_KEY)), task=step["task"])
         if last and last.get("delivery") == "delivered":
             return dict(step, step="done", role=None, pr=last.get("pr"))
         if last:

@@ -9,6 +9,7 @@ would, through its commands, its hooks and its event log.
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import time
 import unittest
@@ -231,6 +232,44 @@ class Outward(unittest.TestCase):
         self.call("git push origin feat/x", "implementer", failed=True)
 
         self.assertEqual([(e["action"], e["result"]) for e in self.outward_since(before)], [("push", "failed")])
+
+    def test_a_push_through_opencode_is_recorded_with_the_status_opencode_gives(self):
+        if not shutil.which("node"):
+            self.skipTest("node is not installed")
+        script = """
+const api = process.env.API;
+const mod = (await import(process.env.PLUGIN)).default;
+const event = { tool: 'bash', input: { command: 'git push origin feat/x' }, sessionID: 's1', agent: 'implementer' };
+if (api === 'v1') {
+  const hooks = await mod({ directory: process.env.PROJECT });
+  await hooks['tool.execute.after']({ tool: 'bash', args: event.input, sessionID: 's1', agent: 'implementer' }, {});
+} else {
+  let after;
+  await mod.setup({ tool: { hook: async (name, callback) => { if (name === 'execute.after') after = callback;
+    return { dispose() {} }; } } });
+  await after({ ...event, cwd: process.env.PROJECT, status: api });
+}
+"""
+        results = {}
+        for api in ("error", "completed", "v1"):
+            before = len(self.p.events("outward"))
+            env = dict(self.p.env, API=api, PROJECT=str(self.p.path),
+                       PLUGIN=str(self.p.path / ".opencode/plugins/harness.js"),
+                       HARNESS_OPENCODE_PLUGIN_API="v1" if api == "v1" else "")
+            ran = subprocess.run(["node", "--input-type=module", "-e", script], cwd=str(self.p.path), env=env,
+                                 capture_output=True, text=True)
+            self.assertEqual(ran.returncode, 0, ran.stderr)
+            results[api] = [e["result"] for e in self.outward_since(before)]
+
+        self.assertEqual(results, {"error": ["failed"], "completed": ["succeeded"], "v1": ["unknown"]})
+
+    def test_codex_gives_no_status_so_the_result_is_unknown(self):
+        before = len(self.p.events("outward"))
+        self.p.harness("hook", "post-tool-use", "--from", "codex", input=json.dumps({
+            "session_id": "s1", "hook_event_name": "PostToolUse", "tool_name": "Bash",
+            "tool_input": {"command": "git push origin feat/x"}}))
+
+        self.assertEqual([e["result"] for e in self.outward_since(before)], ["unknown"])
 
     def test_github_api_writes_are_outward_events(self):
         for command in ("gh api repos/o/r/pulls -X POST -f title=t -f head=feat/x -f base=main",
