@@ -2,253 +2,29 @@
 and through the workflow's statement step, in throwaway projects.
 
 Signing, and checking a signature, are cosign's job. What the harness owns is the statement: that it exists only for a
-range that verifies, what it says about each finished task, and that the same commits give the same bytes. No cosign
-is needed here. The property checks need hypothesis (pip install -r tests/requirements.txt) and are skipped without it.
+range that verifies, what it says about each finished task, and that the same commits give the same bytes. The checks
+that run cosign skip without it. The property checks need hypothesis (pip install -r tests/requirements.txt) and are
+skipped without it.
 """
-import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
-import sys
 import tempfile
-import textwrap
 import unittest
 
+from attest_support import (APPROVAL, CHECK_ENVIRONMENT, CHECK_KEY, CHECK_PUSHED, CHECK_SIGNING, ENGINE,
+                            FIND_SETTINGS, HARNESS, INSTALL_COSIGN, LAUNCHER, LENSES, PREDICATE_TYPE, READ_APPROVAL,
+                            SEARCH, SIGN, SIGN_IN, SORT, STATEMENT_FILE, STATEMENT_TYPE, TAKE_BASE, TAKE_PUSHED, UPLOAD,
+                            VERIFIER, VERSION, WORKFLOW, WRITE, Project, fake_github, gh_calls, jobs, new_project,
+                            run, run_take, sha256, step_script, take_engine)
 from hypothesis_profiles import examples
 
 try:
     from hypothesis import HealthCheck, given, settings, strategies as st
 except ImportError:
     given = None
-
-
-HARNESS = Path(__file__).resolve().parents[1]
-ENGINE = HARNESS / "payload/owned/scripts/harness/lib/harness.py"
-LAUNCHER = HARNESS / "plugin/launcher.py"
-WORKFLOW = HARNESS / "payload/owned/.github/workflows/harness-verify.yml"
-VERSION = (HARNESS / "VERSION").read_text().strip()
-STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
-PREDICATE_TYPE = "https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1"
-VERIFIER = "https://github.com/soyPeter/agentic-harness"
-LENSES = ("correctness", "structure", "lean")
-APPROVAL = "Approved-by: Ana (2026-11-01)"
-STATEMENT_FILE = "harness-attestation/harness-verdicts.intoto.json"
-SPEC = """# Spec {task}: {title}
-
-Task: {task}
-PRD: none
-Change-Class: {change_class}
-
-## Context
-Support needs to find customers by name.
-
-## Requirements
-- REQ-{task}-1: The system shall return customers whose name contains the query, ignoring case.
-
-## Acceptance criteria
-- AC-{task}-1 (REQ-{task}-1): Given customers "Ana" and "Bob", when searching "an", then only "Ana" is returned.
-
-## Non-functional requirements
-- Search answers within 200 ms.
-
-## Architecture
-ADRs: ADR-001
-Tech requirements:
-- The code lives in src/.
-
-## Skills
-- code-quality: all code
-
-## Out of scope
-- Fuzzy matching.
-
-## Assumptions
-- none
-
-## Open questions
-- none
-
-## Approval
-"""
-SEARCH = {"src/search.py": "def search(names, query):\n    return [n for n in names if query.lower() in n.lower()]\n",
-          "tests/test_search.py": "def test_ac():  # AC-1.1-1\n    assert True\n"}
-# Rewrites src/search.py at another size, so the judge's fingerprint can't read a stale index entry.
-SORT = {"src/sort.py": "def by_name(names):\n    return sorted(names, key=str.lower)\n",
-        "src/search.py": "def search(names, query):\n    query = query.lower()\n"
-                         "    return [n for n in names if query in n.lower()]\n",
-        "tests/test_sort.py": "def test_ac():  # AC-1.2-1\n    assert True\n"}
-
-
-def environment(**settings):
-    env = {k: v for k, v in os.environ.items() if not k.startswith("HARNESS_") and k != "CLAUDE_PROJECT_DIR"}
-    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_AUTHOR_NAME="test",
-               GIT_AUTHOR_EMAIL="test@example.com", GIT_COMMITTER_NAME="test", GIT_COMMITTER_EMAIL="test@example.com",
-               PYTHONDONTWRITEBYTECODE="1", HARNESS_VERIFY="off", HARNESS_TEST_CMD="true")
-    env.update(settings)
-    return env
-
-
-def run(cwd, *args, input=None, check=True, **settings):
-    streams = {"input": input} if input is not None else {"stdin": subprocess.DEVNULL}
-    result = subprocess.run([str(a) for a in args], cwd=str(cwd), env=environment(**settings), capture_output=True,
-                            text=True, **streams)
-    if check and result.returncode:
-        raise AssertionError("%s failed (exit %d):\n%s%s" % (" ".join(map(str, args)), result.returncode,
-                                                             result.stdout, result.stderr))
-    return result
-
-
-def sha256(data):
-    return hashlib.sha256(data).hexdigest()
-
-
-TAKE_BASE = "Take the verifier from the base branch"
-TAKE_PUSHED = "Take the verifier from the commit before the push"
-CHECK_PUSHED = "Check the pushed range"
-CHECK_ENVIRONMENT = "Check the harness-attest environment"
-INSTALL_COSIGN = "Install cosign"
-CHECK_KEY = "Check the attestation key"
-
-
-def step_script(name, source=None):
-    """The shell script of the harness-verify step called name, with the harness repository's URL pointed at
-    source."""
-    step = WORKFLOW.read_text().split("      - name: %s\n" % name, 1)[1]
-    script = textwrap.dedent(re.split(r"\n(?=      - name:|  \S)", step.split("        run: |\n", 1)[1], maxsplit=1)[0])
-    return script.replace("https://github.com/soyPeter/agentic-harness.git", str(source)) if source else script
-
-
-# A stand-in for GitHub, the one service these checks can't reach: it answers a read (gh api <endpoint>, gh repo view)
-# with the JSON a test put under the exact command line in $FAKE_GH_ANSWERS, accepts every write, and logs every call
-# to $FAKE_GH_LOG. With $FAKE_GH_TOKEN set, it answers only a call made with GH_TOKEN equal to it.
-FAKE_GH = """#!%s
-import json, os, sys
-words = sys.argv[1:]
-with open(os.environ["FAKE_GH_LOG"], "a") as log:
-    log.write(" ".join(words) + "\\n")
-answers = json.load(open(os.environ["FAKE_GH_ANSWERS"]))
-if os.environ.get("FAKE_GH_TOKEN") and os.environ.get("GH_TOKEN") != os.environ["FAKE_GH_TOKEN"]:
-    sys.exit("fake gh: no token")
-if " ".join(words) in answers:
-    print(json.dumps(answers[" ".join(words)]))
-elif words[:2] == ["api", "-X"] or words[:1] in (["variable"], ["secret"]):
-    pass
-else:
-    sys.exit("fake gh: no answer for: gh " + " ".join(words))
-"""
-
-
-def fake_github(folder, answers):
-    """A bin folder holding the fake gh, and the settings that point it at answers."""
-    (folder / "bin").mkdir(parents=True, exist_ok=True)
-    (folder / "bin" / "gh").write_text(FAKE_GH % sys.executable)
-    (folder / "bin" / "gh").chmod(0o755)
-    (folder / "answers.json").write_text(json.dumps(answers))
-    return folder / "bin", dict(FAKE_GH_ANSWERS=str(folder / "answers.json"), FAKE_GH_LOG=str(folder / "gh.log"))
-
-
-def gh_calls(folder):
-    log = folder / "gh.log"
-    return log.read_text().splitlines() if log.exists() else []
-
-
-class Project:
-    """A throwaway repository holding an install of this checkout as its first commit, self.adopted. settings go
-    into the environment of every command run in it."""
-
-    def __init__(self, root, installer=None, **settings):
-        self.root = root
-        self.settings = settings
-        root.mkdir(parents=True)
-        self.git("init", "-q", "-b", "main")
-        if installer:
-            installer(self)
-        else:
-            self.run(HARNESS / "bootstrap.sh", root, "--name", "attest")
-        self.adopted = self.commit("chore: adopt the agentic harness")
-
-    @property
-    def engine(self):
-        return self.root / "scripts/harness/lib/harness.py"
-
-    def run(self, *args, **options):
-        return run(self.root, *args, **dict(self.settings, **options))
-
-    def git(self, *args):
-        return self.run("git", *args).stdout.strip()
-
-    def harness(self, *args, check=False, **settings):
-        return self.run("python3", "-B", self.engine, *args, check=check, **settings)
-
-    def attest(self, base, *flags, **settings):
-        return self.harness("attest", "--range", "%s..HEAD" % base, *flags, **settings)
-
-    def statement(self, base, *flags, **settings):
-        return json.loads(self.attest(base, *flags, check=True, **settings).stdout)
-
-    def hook(self, event, agent, report):
-        stop = {"hook_event_name": "SubagentStop", "agent_type": agent, "stop_hook_active": False,
-                "last_assistant_message": "Done.\n\n```json\n%s\n```" % json.dumps(report)}
-        self.run("python3", "-B", self.engine, "hook", event, CLAUDE_PROJECT_DIR=str(self.root), input=json.dumps(stop))
-
-    def write(self, name, text):
-        path = self.root / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-
-    def append(self, name, text):
-        with open(str(self.root / name), "a", encoding="utf-8") as handle:
-            handle.write(text)
-
-    def commit(self, message):
-        self.git("add", "-A")
-        self.git("commit", "-qm", message)
-        return self.git("rev-parse", "HEAD")
-
-    def set_marker(self, task, old, new):
-        # The seed's comment shows an example "- [ ] **Task 1.1:" line above the real ones.
-        head, line, tail = (self.root / "backbone/3-TASKS.md").read_text(encoding="utf-8").rpartition(
-            "- [%s] **Task %s:" % (old, task))
-        self.write("backbone/3-TASKS.md", head + line.replace("[%s]" % old, "[%s]" % new, 1) + tail)
-
-    def specify(self, task, title, change_class="feature"):
-        """task's spec, grilled and approved by the user, committed with its pending task line."""
-        self.write("backbone/specs/%s.md" % task, SPEC.format(task=task, title=title, change_class=change_class))
-        self.append("backbone/3-TASKS.md", "- [ ] **Task %s: %s** (spec: backbone/specs/%s.md)\n" % (task, title, task))
-        self.hook("grill-stop", "griller", {"verdict": "pass", "task": task, "questions": [], "summary": "s"})
-        self.append("backbone/specs/%s.md" % task, APPROVAL + "\n")
-        return self.commit("docs: spec for task %s" % task)
-
-    def build(self, task, files):
-        """task's change (files), judged and reviewed through every lens on that code, marked done and committed."""
-        self.set_marker(task, " ", "WIP")
-        for name, text in files.items():
-            self.write(name, text)
-        self.hook("judge-stop", "judge", {
-            "verdict": "pass", "task": task, "summary": "s", "findings": [],
-            "criteria": [{"id": "AC-%s-1" % task, "met": True, "evidence": "src", "tests": ["test_ac"]}],
-            "tests": {"command": "true", "result": "passed"}})
-        for lens in LENSES:
-            self.hook("review-stop", "reviewer", {"task": task, "lens": lens, "verdict": "pass", "findings": [],
-                                                  "summary": "s"})
-        self.set_marker(task, "WIP", "x")
-        return self.commit("feat: task %s" % task)
-
-    def finish(self, task, title, files, change_class="feature"):
-        self.specify(task, title, change_class)
-        return self.build(task, files)
-
-    def verdicts(self, task, kind):
-        return json.loads((self.root / ("backbone/.verdicts/%s.%s.json" % (task, kind))).read_text())["history"]
-
-
-def new_project(test):
-    temp = tempfile.TemporaryDirectory(prefix="attest ")
-    test.addCleanup(temp.cleanup)
-    return Project(Path(temp.name).resolve() / "project")
 
 
 class FinishedTask(unittest.TestCase):
@@ -286,7 +62,8 @@ class Statement(FinishedTask):
         verification = self.made["predicate"]["verification"]
 
         self.assertEqual({k: v for k, v in verification.items() if k != "settings"}, {
-            "base": self.project.adopted, "tip": self.tip, "result": "PASSED", "allowUserChanges": False})
+            "base": self.project.adopted, "tip": self.tip, "result": "PASSED", "allowUserChanges": False,
+            "approval": None})
         self.assertEqual(verification["settings"]["HARNESS_SPEC_GATE"], {"value": "on", "environment": False})
         self.assertEqual(verification["settings"]["HARNESS_JUDGE_GATE"], {"value": "on", "environment": False})
         self.assertEqual(verification["settings"]["HARNESS_REVIEW"], {"value": "on", "environment": False})
@@ -454,7 +231,31 @@ class Refusals(unittest.TestCase):
                 attest = self.project.harness("attest", *args)
 
                 self.assertEqual((attest.returncode, attest.stdout), (64, ""))
-                self.assertIn("usage: harness.py attest --range <base>..<tip> [--allow-user-changes]", attest.stderr)
+                self.assertIn("usage: harness.py attest --range <base>..<tip> [--allow-user-changes "
+                              "[--pull-request <number>]]", attest.stderr)
+
+    def test_the_approving_pull_request_is_recorded_with_the_allow_flag(self):
+        self.project.append("backbone/harness.conf", '\nHARNESS_REVIEW="off"\n')
+        self.project.commit("chore: switch the reviews off")
+
+        made = self.project.statement(self.project.adopted, "--allow-user-changes", "--pull-request", "42")
+        by_hand = self.project.statement(self.project.adopted, "--allow-user-changes")
+
+        self.assertEqual((made["predicate"]["verification"]["allowUserChanges"],
+                          made["predicate"]["verification"]["approval"]),
+                         (True, {"label": "harness-change-approved", "pullRequest": 42}))
+        self.assertEqual(by_hand["predicate"]["verification"]["approval"], None)
+
+    def test_a_pull_request_without_the_allow_flag_or_with_a_bad_number_is_a_usage_error(self):
+        for args in (("--pull-request", "42"), ("--allow-user-changes", "--pull-request"),
+                     ("--allow-user-changes", "--pull-request", "0"), ("--allow-user-changes", "--pull-request", "x"),
+                     ("--allow-user-changes", "--pull-request", "4 2"),
+                     ("--allow-user-changes", "--pull-request", "1", "--pull-request", "2")):
+            with self.subTest(args=args):
+                attest = self.project.attest(self.project.adopted, *args)
+
+                self.assertEqual((attest.returncode, attest.stdout), (64, ""))
+                self.assertIn("--pull-request <number>", attest.stderr)
 
 
 class AttestPublicKeyHooks(unittest.TestCase):
@@ -573,21 +374,10 @@ class Workflow(unittest.TestCase):
         return "origin/review-base"
 
     def take(self, project, ref, take=TAKE_PUSHED, source=None):
-        """The take step as its job runs it: (the step's result, runner's temp dir). The attest job's take step runs
-        with REFUSE_FIRST_INSTALL on, as the workflow sets it."""
-        runner = Path(tempfile.mkdtemp(prefix="runner ", dir=str(project.root.parent)))
-        ci = dict(BASE_REF=ref, RUNNER_TEMP=str(runner), GITHUB_ENV=str(runner / "github-env"))
-        if take == TAKE_PUSHED:
-            ci["REFUSE_FIRST_INSTALL"] = "true"
-        result = project.run("bash", "-e", "-o", "pipefail", "-c", step_script(take, source), check=False, **ci)
-        return result, runner
+        return run_take(project, ref, take, source)
 
     def take_engine(self, project, ref, take=TAKE_PUSHED, source=None):
-        """(runner's temp dir, the engine the take step leaves for the steps after it)."""
-        result, runner = self.take(project, ref, take, source)
-        if result.returncode:
-            raise AssertionError(result.stdout + result.stderr)
-        return runner, (runner / "github-env").read_text().strip().split("=", 1)[1]
+        return take_engine(project, ref, take, source)
 
     def verify_pull_request(self, project, engine, allow=""):
         return project.run("bash", "-e", "-c", step_script("Verify the pull request's commits"), check=False,
@@ -819,20 +609,15 @@ class Workflow(unittest.TestCase):
         engine = (runner / "github-env").read_text().strip().split("=", 1)[1]
         self.assertTrue(Path(engine).is_file())
 
-    def jobs(self):
-        """The workflow's jobs, by name, as text."""
-        parts = re.split(r"\n(?=  [a-z-]+:\n)", WORKFLOW.read_text().split("\njobs:\n", 1)[1])
-        return {part.split(":", 1)[0].strip(): part for part in parts}
-
     def test_the_pull_request_run_has_no_secret_no_environment_and_no_signing(self):
-        verify = self.jobs()["verify"]
+        verify = jobs()["verify"]
 
         self.assertIn("if: github.event_name == 'pull_request'\n", verify)
         for word in ("secrets.", "environment:", "cosign", "HARNESS_ATTEST", "upload-artifact", "attest"):
             self.assertNotIn(word, verify)
 
     def test_the_signing_job_runs_only_for_a_push_to_the_default_branch_in_its_protected_environment(self):
-        workflow, attest = WORKFLOW.read_text(), self.jobs()["attest"]
+        workflow, attest = WORKFLOW.read_text(), jobs()["attest"]
 
         self.assertIn("\non:\n  pull_request:\n", workflow)
         self.assertIn("\n  push:\n    branches: [main]\n", workflow)
@@ -840,25 +625,28 @@ class Workflow(unittest.TestCase):
         self.assertIn("environment: harness-attest\n", attest)
         self.assertIn("\npermissions:\n  contents: read\n", workflow)
         self.assertNotIn("pull_request_target", workflow)
-        self.assertIn("HARNESS_ATTEST_SIGN: ${{ secrets.HARNESS_ATTEST_KEY != '' }}\n", attest)
+        self.assertIn("ATTEST_KEY_SET: ${{ secrets.HARNESS_ATTEST_KEY != '' }}\n", attest)
         for word in ("continue-on-error", "always()", "failure()", "cancelled()", "needs:"):
             self.assertNotIn(word, workflow)
 
     def test_every_attestation_step_is_opt_in_and_the_statement_is_written_for_the_pushed_range_only(self):
-        attest = self.jobs()["attest"]
-        steps = attest.split("\n      - name: ")[1:]
+        attest = jobs()["attest"]
+        steps = {s.splitlines()[0]: s for s in attest.split("\n      - name: ")[1:]}
 
-        self.assertEqual([s.splitlines()[0] for s in steps], [
-            CHECK_PUSHED, TAKE_PUSHED, CHECK_ENVIRONMENT, INSTALL_COSIGN, CHECK_KEY,
-            "Write the verdict attestation", "Sign the verdict attestation", "Upload the verdict attestation"])
-        for step in steps:
-            self.assertIn("if: env.HARNESS_ATTEST_SIGN == 'true'\n", step)
-        write = steps[5]
-        self.assertIn('--range "$BEFORE..HEAD"', write)
-        self.assertNotIn("ALLOW", write)
+        self.assertEqual(list(steps), [
+            FIND_SETTINGS, CHECK_PUSHED, TAKE_PUSHED, CHECK_SIGNING, CHECK_ENVIRONMENT, INSTALL_COSIGN, SIGN_IN,
+            CHECK_KEY, READ_APPROVAL, WRITE, SIGN, UPLOAD])
+        self.assertNotIn("if:", steps[FIND_SETTINGS])
+        for name in (CHECK_PUSHED, TAKE_PUSHED, CHECK_SIGNING, CHECK_ENVIRONMENT, INSTALL_COSIGN, READ_APPROVAL, WRITE,
+                     SIGN, UPLOAD):
+            self.assertIn("if: env.ATTEST == 'true'\n", steps[name])
+        self.assertIn("if: env.ATTEST_MODE == 'kms'\n", steps[SIGN_IN])
+        self.assertIn("if: env.ATTEST_MODE == 'key' || env.ATTEST_MODE == 'kms'\n", steps[CHECK_KEY])
+        self.assertIn('--range "$BEFORE..HEAD" "${approval[@]}"', steps[WRITE])
+        self.assertIn('approval=(--allow-user-changes --pull-request "$ATTEST_PULL_REQUEST")', steps[WRITE])
 
     def test_the_push_takes_the_engine_from_the_commit_before_the_push_not_from_the_tip(self):
-        attest = self.jobs()["attest"]
+        attest = jobs()["attest"]
         take = attest.split("\n      - name: %s\n" % TAKE_PUSHED, 1)[1].split("\n      - name:", 1)[0]
 
         self.assertIn("        env:\n          BASE_REF: ${{ github.event.before }}\n", take)
@@ -867,7 +655,7 @@ class Workflow(unittest.TestCase):
         self.assertIn("ref: ${{ github.sha }}", attest)
 
     def test_the_attest_key_is_checked_against_the_public_key_on_the_previous_tip_before_anything_is_written(self):
-        attest = self.jobs()["attest"]
+        attest = jobs()["attest"]
         step = attest.split("\n      - name: %s\n" % CHECK_KEY, 1)[1].split("\n      - name:", 1)[0]
 
         self.assertIn("        env:\n          BEFORE: ${{ github.event.before }}\n", step)
@@ -878,7 +666,7 @@ class Workflow(unittest.TestCase):
         self.assertNotIn("${{", step.split("        run: |\n", 1)[1])
 
     def test_secrets_and_untrusted_event_data_reach_no_run_block(self):
-        for job in self.jobs().values():
+        for job in jobs().values():
             for run in re.findall(r"^        run: \|\n((?:(?: {10}.*)?\n)*)", job, re.M):
                 self.assertNotIn("${{", run)
                 self.assertNotIn("secrets.", run)
@@ -1021,12 +809,12 @@ class Workflow(unittest.TestCase):
                 self.assertNotIn("attest mode: recorded branch", result.stdout)
 
     def test_the_environment_is_checked_after_the_engine_is_taken_and_before_anything_is_written_or_signed(self):
-        attest = self.jobs()["attest"]
+        attest = jobs()["attest"]
         names = [s.splitlines()[0] for s in attest.split("\n      - name: ")[1:]]
 
         self.assertLess(names.index(TAKE_PUSHED), names.index(CHECK_ENVIRONMENT))
         self.assertLess(names.index(CHECK_ENVIRONMENT), names.index(CHECK_KEY))
-        self.assertLess(names.index(CHECK_KEY), names.index("Write the verdict attestation"))
+        self.assertLess(names.index(CHECK_KEY), names.index(WRITE))
         step = attest.split("\n      - name: %s\n" % CHECK_ENVIRONMENT, 1)[1].split("\n      - name:", 1)[0]
         self.assertIn("        env:\n          POLICY_TOKEN: ${{ secrets.HARNESS_ATTEST_POLICY_TOKEN }}\n", step)
         self.assertIn("RECORDED_BRANCH: ${{ vars.HARNESS_ATTEST_BRANCH }}", step)

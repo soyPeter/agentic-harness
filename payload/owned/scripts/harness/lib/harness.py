@@ -17,9 +17,16 @@ Usage:
   harness.py adopt <pack>[,<pack>] --adr ADR-NNN --with <opts> --without <opts> [--dry-run]
   harness.py adopt --remove <pack>[,<pack>] [--dry-run]
   harness.py verify [--range <base>..<tip>] [--allow-user-changes]   (gates on the staged change, or a CI range)
-  harness.py attest --range <base>..<tip> [--allow-user-changes]     (in-toto statement of a verified range, ADR-005)
+  harness.py attest --range <base>..<tip> [--allow-user-changes [--pull-request <n>]]
+                                                                  (in-toto statement of a verified range, ADR-005)
+  harness.py attest verify <statement> <bundle> (--key <key> | --certificate-identity <id> --certificate-oidc-issuer
+             <url>) (--commit <id> | --tree <id>)... [--type <uri>]... [--require NAME=VALUE]... [--accept-user-changes]
+                                                                  (a signed statement: cosign, then a policy)
+  harness.py attest policy <statement> (--commit <id> | --tree <id>)... [...]   (the policy alone, no signature)
   harness.py environment-check <environment.json> <policies.json> <branch>   (CI: the attest environment's rule, ADR-005)
   harness.py repository-check <secrets.json> <variables.json>    (CI: no repository-level attest secrets, ADR-005)
+  harness.py approval-check <pulls.json> <base>..<tip> <branch>   (CI: the merged pull request's approval, ADR-005)
+  harness.py signing-check <commit> <true|false>                  (CI: the attest job's signing mode, ADR-005)
   harness.py approve <task-id>                                    (autonomous mode: policy approval of a low-risk spec)
   harness.py escalate <task-id> --reason <text> [--kind <k>] [--class <failure class>] [--needed <text>]
   harness.py escalations                                          (open escalations for the user)
@@ -38,6 +45,7 @@ Usage:
                                                                   (the harness-attest environment: default branch only)
   harness.py doctor
 """
+import base64
 import fnmatch
 import hashlib
 import json
@@ -135,7 +143,8 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
                   "HARNESS_TESTER", "HARNESS_ACCEPTANCE_PATHS", "HARNESS_ORCA_AGENTS", "HARNESS_ORCA_LAUNCH",
                   "HARNESS_SPEC_MAX_ITEMS", "HARNESS_LIGHT_LANE", "HARNESS_LIGHT_MAX_ITEMS", "HARNESS_LIGHT_MAX_FILES",
                   "HARNESS_REVIEW", "HARNESS_DELIVER", "HARNESS_PROFILE", "HARNESS_REQ_STYLE",
-                  "HARNESS_SANDBOX_BACKEND")
+                  "HARNESS_SANDBOX_BACKEND", "HARNESS_ATTEST_SIGNING", "HARNESS_ATTEST_KMS_KEY",
+                  "HARNESS_ATTEST_KMS_IDENTITY")
 # Organisation profiles (HARNESS_PROFILE, user-only). "triple": a supervised pilot where only a human merges, so the
 # coordinator's --merge and --trust and the scheduled backlog run are refused.
 PROFILES = ("", "triple")
@@ -2983,9 +2992,19 @@ def verify_command(argv):
 # --------------------------------------------------------------------------- attestation (ADR-005)
 
 STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
-VERDICTS_PREDICATE = "https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1"
+# v1 is v0.1 plus verification.approval, and the first type a release carries: from v1 on, a breaking change gets a new
+# type, and the readers (attest verify, attest policy) keep reading every type the engine ever wrote.
+VERDICTS_PREDICATE = "https://github.com/soyPeter/agentic-harness/attestation/verdicts/v1"
+VERDICTS_PREDICATES = ("https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1", VERDICTS_PREDICATE)
 VERIFIER_ID = "https://github.com/soyPeter/agentic-harness"
-ATTEST_USAGE = "usage: harness.py attest --range <base>..<tip> [--allow-user-changes]\n"
+APPROVAL_LABEL = "harness-change-approved"
+ATTEST_USAGE = (
+    "usage: harness.py attest --range <base>..<tip> [--allow-user-changes [--pull-request <number>]]\n"
+    "usage: harness.py attest verify <statement> <bundle> (--key <public key or KMS reference> | "
+    "--certificate-identity <identity> --certificate-oidc-issuer <issuer>) <policy>\n"
+    "usage: harness.py attest policy <statement> <policy>\n"
+    "  <policy>: (--commit <full commit id> | --tree <full tree id>)... [--type <predicate type>]... "
+    "[--require NAME=VALUE]... [--accept-user-changes]\n")
 
 
 def verdict_brief(history):
@@ -3050,8 +3069,9 @@ def verification_settings():
     return {key: {"value": values[key], "environment": key in os.environ} for key in sorted(values)}
 
 
-def attest_statement(base_ref, tip_ref, allow_user_changes=False):
-    """(in-toto Statement, []) for a range that passes verify, checked out at its tip; else (None, problems)."""
+def attest_statement(base_ref, tip_ref, allow_user_changes=False, pull_request=None):
+    """(in-toto Statement, []) for a range that passes verify, checked out at its tip; else (None, problems).
+    pull_request is the merged pull request whose approval label allowed the user changes."""
     commits_of = {}
     for ref in (base_ref, tip_ref):
         commits_of[ref] = git("rev-parse", "-q", "--verify", ref + "^{commit}").strip()
@@ -3081,27 +3101,228 @@ def attest_statement(base_ref, tip_ref, allow_user_changes=False):
         "predicate": {
             "verifier": {"id": VERIFIER_ID, "engineSha256": sha256(__file__), "baseLock": base_lock(base)},
             "verification": {"base": base, "tip": tip, "result": "PASSED", "allowUserChanges": allow_user_changes,
+                             "approval": {"label": APPROVAL_LABEL, "pullRequest": pull_request} if pull_request
+                             else None,
                              "settings": verification_settings()},
             "tasks": [attested_task(task, commits, tip) for task in finished],
         },
     }, []
 
 
+def command_options(argv, valued, flags=()):
+    """(positional words, {option: [values]}, {flags}) of argv; None when an option is unknown or lacks its value."""
+    positional, values, seen = [], {}, set()
+    words = iter(argv)
+    for word in words:
+        if word in flags:
+            seen.add(word)
+        elif word in valued:
+            value = next(words, None)
+            if value is None:
+                return None
+            values.setdefault(word, []).append(value)
+        elif word.startswith("--"):
+            return None
+        else:
+            positional.append(word)
+    return positional, values, seen
+
+
 def attest_command(argv):
-    """Print the in-toto Statement of a verified range; nothing on stdout when the range doesn't verify."""
-    allow = "--allow-user-changes" in argv
-    args = [a for a in argv if a != "--allow-user-changes"]
-    if args[:1] != ["--range"] or len(args) != 2 or ".." not in args[1] or args[1].startswith(".."):
+    """Print the in-toto Statement of a verified range; nothing on stdout when the range doesn't verify. attest verify
+    and attest policy check one instead."""
+    if argv[:1] == ["verify"]:
+        return attest_verify_command(argv[1:])
+    if argv[:1] == ["policy"]:
+        return attest_policy_command(argv[1:])
+    parsed = command_options(argv, ("--range", "--pull-request"), ("--allow-user-changes",))
+    positional, values, flags = parsed or ([], {}, set())
+    ranges, pulls = values.get("--range", []), values.get("--pull-request", [])
+    allow = "--allow-user-changes" in flags
+    if parsed is None or positional or len(ranges) != 1 or ".." not in ranges[0] or ranges[0].startswith("..") \
+            or len(pulls) > 1 or (pulls and not (allow and re.fullmatch(r"[1-9][0-9]{0,9}", pulls[0]))):
         sys.stderr.write(ATTEST_USAGE)
         return 64
-    base, _, tip = args[1].partition("..")
-    statement, problems = attest_statement(base, tip or "HEAD", allow)
+    base, _, tip = ranges[0].partition("..")
+    statement, problems = attest_statement(base, tip or "HEAD", allow, int(pulls[0]) if pulls else None)
     for problem in problems:
         sys.stderr.write("attest: %s\n" % problem)
     if problems:
         return 1
     sys.stdout.write(json.dumps(statement, indent=2, sort_keys=True) + "\n")
     return 0
+
+
+POLICY_GATES = {"HARNESS_SPEC_GATE": "on", "HARNESS_JUDGE_GATE": "on", "HARNESS_REVIEW": "on"}
+POLICY_OPTIONS = ("--commit", "--tree", "--type", "--require")
+OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def attest_policy(values, flags):
+    """A consumer's policy from the options of attest verify or attest policy; None when it names no commit or code
+    to check, or an option is malformed."""
+    commits, trees = values.get("--commit", []), values.get("--tree", [])
+    if not commits + trees or not all(OBJECT_ID.fullmatch(name) for name in commits + trees):
+        return None
+    required = dict(POLICY_GATES)
+    for item in values.get("--require", []):
+        name, equals, value = item.partition("=")
+        if not equals or not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+            return None
+        required[name] = value
+    return {"commits": commits, "trees": trees, "types": values.get("--type") or list(VERDICTS_PREDICATES),
+            "required": required, "accept_user_changes": "--accept-user-changes" in flags}
+
+
+def shown(value):
+    return "'%s'" % value if isinstance(value, str) else "missing" if value is None else json.dumps(value)
+
+
+def member(value, key):
+    """value[key] when value is an object and holds one, else None: statements are read as untrusted JSON."""
+    return value.get(key) if isinstance(value, dict) else None
+
+
+def policy_problems(statement, policy):
+    """(problems, a summary of what was checked) of a verdict statement, v0.1 or v1, against a consumer's policy."""
+    if member(statement, "_type") != STATEMENT_TYPE:
+        return ["not an in-toto Statement v1 (_type is %s)" % shown(member(statement, "_type"))], None
+    problems = []
+    kind = statement.get("predicateType")
+    if not isinstance(kind, str) or kind not in policy["types"]:
+        problems.append("the predicate type %s is not one the policy accepts (%s)" % (kind, ", ".join(policy["types"])))
+    subjects = statement.get("subject") if isinstance(statement.get("subject"), list) else []
+    for wanted, name, algorithm in [(c, "commit", "gitCommit") for c in policy["commits"]] + \
+            [(t, "code", "gitTree") for t in policy["trees"]]:
+        if wanted not in [member(member(s, "digest"), algorithm) for s in subjects if member(s, "name") == name]:
+            problems.append("no %s subject is %s" % (name, wanted))
+    verification = member(member(statement, "predicate"), "verification")
+    if member(verification, "result") != "PASSED":
+        problems.append("verify's result is %s, not PASSED" % (
+            member(verification, "result") if isinstance(member(verification, "result"), str)
+            else shown(member(verification, "result"))))
+    settings = member(verification, "settings")
+    for name, value in sorted(policy["required"].items()):
+        found = member(member(settings, name), "value")
+        if found != value:
+            problems.append("%s is %s; the policy requires '%s'" % (name, shown(found), value))
+    allowed, approval = member(verification, "allowUserChanges"), member(verification, "approval")
+    by = "approved by pull request #%s" % member(approval, "pullRequest") if member(approval, "pullRequest") \
+        else "no approval recorded"
+    if allowed is True and not policy["accept_user_changes"]:
+        problems.append("the range was verified with --allow-user-changes (%s): it may change the harness or its "
+                        "user-only settings. Pass --accept-user-changes to accept such a change" % by)
+    elif allowed is not True and allowed is not False:
+        problems.append("allowUserChanges is %s, not true or false" % shown(allowed))
+    if problems:
+        return problems, None
+    return [], "ok: " + ", ".join(
+        [kind] + ["commit %s" % c for c in policy["commits"]] + ["code %s" % t for t in policy["trees"]]
+        + ["verify PASSED", " ".join("%s=%s" % item for item in sorted(policy["required"].items()))]
+        + (["user changes accepted (%s)" % by] if allowed is True else []))
+
+
+def report_policy(label, statement, policy):
+    problems, summary = policy_problems(statement, policy)
+    for problem in problems:
+        print("%s: %s" % (label, problem))
+    if not problems:
+        print("%s: %s" % (label, summary))
+    return 1 if problems else 0
+
+
+def attest_policy_command(argv):
+    """attest policy: a consumer's policy on a statement, without its signature (attest verify checks that)."""
+    parsed = command_options(argv, POLICY_OPTIONS, ("--accept-user-changes",))
+    policy = attest_policy(parsed[1], parsed[2]) if parsed and len(parsed[0]) == 1 else None
+    if policy is None:
+        sys.stderr.write(ATTEST_USAGE)
+        return 64
+    try:
+        statement = json.loads(Path(parsed[0][0]).read_text(encoding="utf-8"))
+    except OSError:
+        print("attest policy: can't read %s" % parsed[0][0])
+        return 1
+    except ValueError as exc:
+        print("attest policy: the statement doesn't parse: %s" % exc)
+        return 1
+    print("attest policy: no signature checked (attest verify checks it)")
+    return report_policy("attest policy", statement, policy)
+
+
+def bundle_statement(data):
+    """(the in-toto statement a Sigstore bundle's DSSE envelope carries, None), or (None, why not)."""
+    try:
+        envelope = member(json.loads(data.decode("utf-8")), "dsseEnvelope")
+        if member(envelope, "payloadType") != "application/vnd.in-toto+json":
+            return None, "no DSSE envelope of an in-toto payload"
+        return json.loads(base64.b64decode(envelope.get("payload") or "", validate=True).decode("utf-8")), None
+    except ValueError as exc:
+        return None, "it doesn't decode: %s" % exc
+
+
+def cosign_check(cosign, bundle, statement, policy, signer):
+    """(ok, cosign's last words) of cosign verify-blob-attestation on bundle (its bytes): the signature, the predicate
+    type and the first commit (or code) the policy names. cosign reads a copy, so it checks the bytes read here."""
+    digest = (policy["commits"][0], "gitCommit") if policy["commits"] else (policy["trees"][0], "gitTree")
+    with tempfile.TemporaryDirectory(prefix="harness-attest-") as folder:
+        copy = Path(folder) / "bundle.sigstore.json"
+        copy.write_bytes(bundle)
+        words = [cosign, "verify-blob-attestation", "--bundle", str(copy), "--type",
+                 str(member(statement, "predicateType")), "--digest", digest[0], "--digestAlg", digest[1]] + signer
+        try:
+            result = subprocess.run(words, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return False, "cosign took longer than 120 s"
+    said = [line for line in (result.stderr + result.stdout).splitlines() if line.strip()
+            and not line.startswith(("WARNING", "Verified OK"))]
+    return result.returncode == 0, said[-1] if said else "cosign exited with %d" % result.returncode
+
+
+def attest_verify_command(argv):
+    """attest verify: cosign checks the bundle's signature, then the consumer's policy is applied to the statement the
+    bundle signs, which must be the statement file's."""
+    parsed = command_options(argv, POLICY_OPTIONS + ("--key", "--certificate-identity", "--certificate-oidc-issuer"),
+                             ("--accept-user-changes",))
+    positional, values, flags = parsed or ([], {}, set())
+    keys, identities = values.get("--key", []), values.get("--certificate-identity", [])
+    issuers = values.get("--certificate-oidc-issuer", [])
+    policy = attest_policy(values, flags) if parsed else None
+    if policy is None or len(positional) != 2 or max(len(keys), len(identities), len(issuers)) > 1 \
+            or bool(keys) == bool(identities or issuers) or bool(identities) != bool(issuers):
+        sys.stderr.write(ATTEST_USAGE)
+        return 64
+    try:
+        text, bundle = Path(positional[0]).read_text(encoding="utf-8"), Path(positional[1]).read_bytes()
+    except OSError as exc:
+        print("attest verify: can't read %s" % exc.filename)
+        return 1
+    signed, problem = bundle_statement(bundle)
+    if problem:
+        print("attest verify: %s is not a Sigstore bundle of an in-toto statement (%s)" % (positional[1], problem))
+        return 1
+    try:
+        same = json.loads(text) == signed
+    except ValueError:
+        same = False
+    if not same:
+        print("attest verify: the statement is not the one the bundle signs (the bundle carries its own)")
+        return 1
+    cosign = shutil.which("cosign")
+    if not cosign:
+        print("attest verify: cosign is not installed (https://docs.sigstore.dev/cosign/system_config/installation/); "
+              "attest policy checks the statement without its signature")
+        return 1
+    # A key-signed bundle from the attest job has no transparency log entry, by design (ADR-005); a keyless one has.
+    signer = ["--key", keys[0], "--insecure-ignore-tlog"] if keys else \
+        ["--certificate-identity", identities[0], "--certificate-oidc-issuer", issuers[0]]
+    ok, said = cosign_check(cosign, bundle, signed, policy, signer)
+    if not ok:
+        print("attest verify: the signature doesn't verify: %s" % said)
+        return 1
+    print("attest verify: signature: ok (cosign, %s)" % (
+        "key %s" % keys[0] if keys else "certificate of %s from %s" % (identities[0], issuers[0])))
+    return report_policy("attest verify", signed, policy)
 
 
 ATTEST_ENVIRONMENT = "harness-attest"
@@ -3181,6 +3402,181 @@ def repository_check_command(argv):
     if not copies:
         print("repository-check: no repository-level %s" % " or ".join(ATTEST_SECRETS))
     return 1 if copies else 0
+
+
+def merged_approval(pulls, base, tip, branch):
+    """(the number of the pull request that approved the push base..tip, None), or (None, why not), from GitHub's
+    list of tip's pull requests (GET repos/<r>/commits/<tip>/pulls). Exactly one is merged into branch with tip as its
+    merge commit, it carries the approval label, and the push is that merge alone: one commit on base (a squash, or the
+    rebase of one commit) or a merge commit of base and the pull request's head. More in the push would pass under a
+    label that never saw it."""
+    if not isinstance(pulls, list):
+        return None, "GitHub's answer is not a list of pull requests"
+    merged = [p for p in pulls if isinstance(p, dict) and p.get("merged_at") and p.get("merge_commit_sha") == tip
+              and member(p.get("base"), "ref") == branch and type(p.get("number")) is int and p["number"] > 0]
+    if not merged:
+        return None, "no pull request merged into %s has %s as its merge commit" % (branch, tip[:12])
+    if len(merged) > 1:
+        return None, "pull requests %s and #%d %s name %s as their merge commit" % (
+            ", ".join("#%d" % p["number"] for p in merged[:-1]), merged[-1]["number"],
+            "both" if len(merged) == 2 else "all", tip[:12])
+    number = merged[0]["number"]
+    parents = git("rev-list", "--parents", "-n", "1", tip).split()[1:]
+    if parents != [base] and not (len(parents) == 2 and parents[0] == base
+                                  and parents[1] == member(merged[0].get("head"), "sha")):
+        return None, ("the push is more than pull request #%d's merge: %s is neither one commit on %s nor a merge of "
+                      "%s and the pull request's head" % (number, tip[:12], base[:12], base[:12]))
+    if APPROVAL_LABEL not in [member(label, "name") for label in merged[0].get("labels") or []]:
+        return None, "pull request #%d doesn't carry %s" % (number, APPROVAL_LABEL)
+    return number, None
+
+
+def approval_check_command(argv):
+    """harness-verify's attest job: the pull request that approved the pushed range, from GitHub's JSON (ADR-005).
+    Prints its number; exit 1 and nothing on stdout when no pull request approved the whole push."""
+    if len(argv) != 3 or argv[1].count("..") != 1 or argv[1].startswith("..") or argv[1].endswith(".."):
+        sys.stderr.write("usage: harness.py approval-check <pulls.json> <base>..<tip> <branch>\n")
+        return 64
+    commits = []
+    for ref in argv[1].split(".."):
+        commits.append(git("rev-parse", "-q", "--verify", ref + "^{commit}").strip())
+        if not commits[-1]:
+            sys.stderr.write("approval-check: %s is not a commit\n" % ref)
+            return 1
+    try:
+        pulls = json.loads(read(argv[0]) or "null")
+    except ValueError as exc:
+        sys.stderr.write("approval-check: GitHub's answer doesn't parse: %s\n" % exc)
+        return 1
+    number, problem = merged_approval(pulls, commits[0], commits[1], argv[2])
+    if problem:
+        sys.stderr.write("approval-check: %s\n" % problem)
+        return 1
+    sys.stderr.write("approval-check: pull request #%d, merged into %s as %s, carries %s\n" % (
+        number, argv[2], commits[1][:12], APPROVAL_LABEL))
+    print(number)
+    return 0
+
+
+SIGNING_MODES = ("key", "kms", "keyless")
+KMS_SETTINGS = ("HARNESS_ATTEST_KMS_KEY", "HARNESS_ATTEST_KMS_IDENTITY")
+# (cloud, key reference, identity the job's OIDC token logs in as, what that identity is). An AWS key is named by its
+# ARN because the ARN names the region the SDK must call.
+KMS_CLOUDS = (
+    ("gcp", r"gcpkms://projects/[^/\s]+/locations/[^/\s]+/keyRings/[^/\s]+/cryptoKeys/[^/\s]+"
+            r"(?:/(?:cryptoKeyVersions|versions)/[^/\s]+)?",
+     r"(projects/[0-9]+/locations/global/workloadIdentityPools/[^/\s]+/providers/[^/\s]+)"
+     r"(?: ([^\s@]+@[^\s@]+\.iam\.gserviceaccount\.com))?",
+     "a workload identity provider (projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/"
+     "<provider>), optionally followed by the email of the service account to act as"),
+    ("aws", r"awskms://[^/\s]*/arn:aws[a-z-]*:kms:([a-z0-9-]+):[0-9]{12}:(?:key|alias)/\S+",
+     r"(arn:aws[a-z-]*:iam::[0-9]{12}:role/\S+)", "the ARN of the IAM role to assume"),
+    ("azure", r"azurekms://[^/\s]+/[^/\s]+(?:/[^/\s]+)?", r"([0-9a-f-]{36}) ([0-9a-f-]{36})",
+     "the tenant ID and the client ID of the app registration, separated by a space"),
+    ("vault", r"hashivault://[^/\s]+", r"(https://[^/\s]+) (\S+)",
+     "the Vault address (https://<host>[:<port>]) and the role of its JWT login, separated by a space"),
+)
+
+
+def kms_login(key, identity):
+    """({the attest job's variables}, None) for signing with the KMS key reference key, logged in through the job's
+    OIDC token as identity; or (None, why not)."""
+    for cloud, key_pattern, identity_pattern, wanted in KMS_CLOUDS:
+        named = re.fullmatch(key_pattern, key)
+        if not named:
+            continue
+        login = re.fullmatch(identity_pattern, identity)
+        if not login:
+            return None, "HARNESS_ATTEST_KMS_IDENTITY for %s %s key is %s" % (
+                "an" if cloud[0] in "aeiou" else "a", cloud, wanted)
+        found = {"ATTEST_KMS_KEY": key, "ATTEST_KMS_CLOUD": cloud}
+        if cloud == "gcp":
+            found.update(ATTEST_OIDC_AUDIENCE="https://iam.googleapis.com/" + login.group(1),
+                         ATTEST_GCP_PROVIDER=login.group(1), ATTEST_GCP_SERVICE_ACCOUNT=login.group(2) or "")
+        elif cloud == "aws":
+            found.update(ATTEST_OIDC_AUDIENCE="sts.amazonaws.com", ATTEST_AWS_ROLE=login.group(1),
+                         ATTEST_AWS_REGION=named.group(1))
+        elif cloud == "azure":
+            found.update(ATTEST_OIDC_AUDIENCE="api://AzureADTokenExchange", ATTEST_AZURE_TENANT=login.group(1),
+                         ATTEST_AZURE_CLIENT=login.group(2))
+        else:
+            found.update(ATTEST_OIDC_AUDIENCE=login.group(1), ATTEST_VAULT_ADDR=login.group(1),
+                         ATTEST_VAULT_ROLE=login.group(2))
+        return found, None
+    return None, ("HARNESS_ATTEST_KMS_KEY %s a gcpkms://, awskms:// (with the key's ARN), azurekms:// or hashivault:// "
+                  "key reference, which kms signing needs" % ("%s is not" % shown(key) if key else "is not set: it is"))
+
+
+def signing_settings(values, key_configured):
+    """({the attest job's signing variables}, []) from the signing settings in values (harness.conf at the commit the
+    push starts from) and whether the HARNESS_ATTEST_KEY secret is set; or (None, problems). One signing source at a
+    time, and keyless only when HARNESS_ATTEST_SIGNING says keyless: it publishes the workflow's identity for good."""
+    mode = values.get("HARNESS_ATTEST_SIGNING")
+    kms = sorted(name for name in KMS_SETTINGS if name in values)
+    if mode is None and not kms and not key_configured:
+        return None, ["no signing is configured: no HARNESS_ATTEST_KEY in %s, and no HARNESS_ATTEST_SIGNING in "
+                      "harness.conf" % ATTEST_ENVIRONMENT]
+    mode = "key" if mode is None else mode
+    if mode not in SIGNING_MODES:
+        return None, ["HARNESS_ATTEST_SIGNING is %s: it is key (the default), kms or keyless" % shown(mode)]
+    problems = []
+    if mode != "kms" and kms:
+        problems.append("harness.conf sets %s, but HARNESS_ATTEST_SIGNING is %s: set it to kms, or remove them"
+                        % (" and ".join(kms), mode))
+    if mode == "key" and not key_configured:
+        problems.append("HARNESS_ATTEST_SIGNING is key, but there is no HARNESS_ATTEST_KEY in %s" % ATTEST_ENVIRONMENT)
+    if mode != "key" and key_configured:
+        problems.append("HARNESS_ATTEST_KEY is set, but HARNESS_ATTEST_SIGNING is %s: delete the secret, so that one "
+                        "key signs" % mode)
+    found = {"ATTEST_MODE": mode}
+    if mode == "kms":
+        login, problem = kms_login(values.get("HARNESS_ATTEST_KMS_KEY", ""),
+                                   values.get("HARNESS_ATTEST_KMS_IDENTITY", ""))
+        problems += [problem] if problem else []
+        found.update(login or {})
+    return (None, problems) if problems else (found, [])
+
+
+def signing_check_command(argv):
+    """harness-verify's attest job: its signing mode, from harness.conf at the commit the push starts from (a push
+    can't choose how it is signed) and whether the key secret is set, as lines for $GITHUB_ENV (ADR-005)."""
+    if len(argv) != 2 or argv[1] not in ("true", "false"):
+        sys.stderr.write("usage: harness.py signing-check <commit> <true|false>   (true: HARNESS_ATTEST_KEY is set)\n")
+        return 64
+    commit = git("rev-parse", "-q", "--verify", argv[0] + "^{commit}").strip()
+    if not commit:
+        sys.stderr.write("signing-check: %s is not a commit\n" % argv[0])
+        return 1
+    found, problems = signing_settings(parse_conf(show(commit, CONF_FILE.relative_to(ROOT).as_posix()) or ""),
+                                       argv[1] == "true")
+    for problem in problems:
+        sys.stderr.write("signing-check: %s\n" % problem)
+    if problems:
+        return 1
+    sys.stderr.write("signing-check: %s\n" % signing_description(found, commit[:12]))
+    sys.stdout.write("".join("%s=%s\n" % item for item in found.items()))
+    return 0
+
+
+def signing_description(found, where):
+    if found["ATTEST_MODE"] == "kms":
+        return "kms: %s, logged in through the job's OIDC token (%s)" % (found["ATTEST_KMS_KEY"],
+                                                                         found["ATTEST_KMS_CLOUD"])
+    if found["ATTEST_MODE"] == "keyless":
+        return ("keyless (HARNESS_ATTEST_SIGNING at %s): a Fulcio certificate for the workflow's identity, written to "
+                "the public Rekor log for good" % where)
+    return "key: HARNESS_ATTEST_KEY in %s" % ATTEST_ENVIRONMENT
+
+
+def signing_line(default):
+    """(the signing the attest job takes from the default branch's harness.conf, as ci-protect states it, whether it
+    needs harness-attest.pub)."""
+    values = parse_conf(show(default, CONF_FILE.relative_to(ROOT).as_posix()) or "")
+    mode = values.get("HARNESS_ATTEST_SIGNING", "key")
+    found, problems = signing_settings(values, mode == "key")
+    if problems:
+        return "signing on %s: the job refuses to sign (%s)" % (default, "; ".join(problems)), True
+    return "signing on %s: %s" % (default, signing_description(found, default)), mode != "keyless"
 
 
 def attest_repository(name):
@@ -3268,7 +3664,10 @@ def ci_protect_attest(name, default, dry_run, recorded=False, delete_copies=Fals
         print("ci-protect --attest: attest mode with %s in %s: %s" % (
             ATTEST_POLICY_SECRET, ATTEST_ENVIRONMENT, attest_mode(True, recorded)))
         print("ci-protect --attest: attest mode without it: %s" % attest_mode(False, recorded))
-        print("ci-protect --attest: %s" % public_key_line(default))
+        signing, needs_key = signing_line(default)
+        print("ci-protect --attest: %s" % signing)
+        if needs_key:
+            print("ci-protect --attest: %s" % public_key_line(default))
         return 0 if dry_run else 1
     _, _, copies = attest_repository(name)
     if copies is None:
@@ -3322,7 +3721,10 @@ def ci_protect_attest(name, default, dry_run, recorded=False, delete_copies=Fals
               ATTEST_POLICY_SECRET))
     print("ci-protect --attest: attest mode: %s" % attest_mode(
         None if names is None else ATTEST_POLICY_SECRET in names, recorded))
-    print("ci-protect --attest: %s" % public_key_line(default))
+    signing, needs_key = signing_line(default)
+    print("ci-protect --attest: %s" % signing)
+    if needs_key:
+        print("ci-protect --attest: %s" % public_key_line(default))
     return 0
 
 
@@ -8023,6 +8425,10 @@ def main(argv):
         return environment_check_command(argv[2:])
     if argv[1:2] == ["repository-check"]:
         return repository_check_command(argv[2:])
+    if argv[1:2] == ["approval-check"]:
+        return approval_check_command(argv[2:])
+    if argv[1:2] == ["signing-check"]:
+        return signing_check_command(argv[2:])
     if len(argv) == 3 and argv[1] == "approve":
         return approve_command(argv[2])
     if argv[1:2] == ["escalate"]:

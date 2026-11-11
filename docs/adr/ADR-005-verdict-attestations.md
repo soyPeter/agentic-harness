@@ -4,7 +4,8 @@
 Accepted
 
 ## Date
-2026-11-07, revised 2026-11-08 (signing moved to the default branch's push; see "Revision")
+2026-11-07, revised 2026-11-08 (signing moved to the default branch's push; see "Revision"); follow-ups 2026-11-11
+(see "Follow-up status")
 
 ## Context
 The harness already proves things about a change, inside the repository:
@@ -68,15 +69,17 @@ request to edit into a signature.
   checks its own change. The statement's check is `verify --range` with the same flags, and for a range without
   `--allow-user-changes` it refuses any change in the range to the engine (`scripts/harness/`), to the workflows
   (`.github/workflows/harness-*`), to the lock, to the tool contracts and to user-only settings. So the statement is
-  written by the verifier that was in force before the push, and a push that changes the harness gets no statement.
+  written by the verifier that was in force before the push, and a push that changes the harness gets no statement
+  unless a labelled pull request made it (see "The merged pull request's label").
 - **The previous tip must hold a verifier.** It has a harness, or a thin pin that names the release `v<version>` and
   resolves to the pinned commit (the job fetches that tag and compares it). Otherwise the job refuses, and it never
   falls back to the checked-out copy. The pull request check keeps that fallback for a first install; the attest job
   has none. So a push that deletes the harness, followed by a push that restores a doctored harness, gets no statement:
   the second push's previous tip has no verifier.
-- **No label in CI.** The job never passes `--allow-user-changes`. A push that changes the harness, even one a
-  maintainer approved with `harness-change-approved`, gets no statement: the job fails and says why. Reading the
-  merged pull request's label to allow that case is a follow-up.
+- **The merged pull request's label (follow-up 1).** The job passes `--allow-user-changes` only when the pull request
+  that made the push carries `harness-change-approved`, as its check did, and the push is that pull request's merge
+  alone; the statement then names the pull request (`approval`). Any other push that changes the harness gets no
+  statement: the job fails and says why. See "Follow-up status".
 - **A first or forced push gets no statement.** The `Check the pushed range` step refuses an all-zero
   `github.event.before` (a first push) and a previous tip that isn't an ancestor of the pushed commit (a forced push),
   before any engine is taken.
@@ -99,9 +102,9 @@ request to edit into a signature.
 | Field | Value |
 |---|---|
 | `subject` | `{"name": "commit", "digest": {"gitCommit": <tip>}}` and `{"name": "code", "digest": {"gitTree": <tip's tree without backbone/>}}`. The second is the code fingerprint the judge and the reviewers pass, so it also matches the same code on another commit. |
-| `predicateType` | `https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1` |
+| `predicateType` | `https://github.com/soyPeter/agentic-harness/attestation/verdicts/v1` (follow-up 6; v0.1 is read, no longer written) |
 | `predicate.verifier` | `id` (this repository's URL), `engineSha256` (the `harness.py` that ran), `baseLock` (the mode, version and, in thin mode, commit that the base commit's `backbone/.harness-lock.json` names; null without one) |
-| `predicate.verification` | the `base` and `tip` commits, `result: "PASSED"`, `allowUserChanges`, and `settings`: every setting the engine resolves through `conf()` (the defaults and `backbone/harness.conf`, overridden by the environment), each as `{"value", "environment"}`, where `environment` is true when the environment set it |
+| `predicate.verification` | the `base` and `tip` commits, `result: "PASSED"`, `allowUserChanges`, `approval` (v1: `null`, or `{"label": "harness-change-approved", "pullRequest": <number>}` when a merged pull request's label allowed the user changes), and `settings`: every setting the engine resolves through `conf()` (the defaults and `backbone/harness.conf`, overridden by the environment), each as `{"value", "environment"}`, where `environment` is true when the environment set it |
 | `predicate.tasks` | one entry per task finished in the range, sorted by id |
 
 Each task entry carries the task's verdict chain:
@@ -119,9 +122,10 @@ Each task entry carries the task's verdict chain:
 A judge fingerprint that differs from the `code` subject means a later commit in the range changed the code after the
 task was finished. The statement shows it rather than hiding it; a consumer's policy decides what it accepts.
 
-No SLSA level is claimed anywhere, and this is neither a SLSA provenance nor a VSA. The `v0.1` in the type says the
-schema may still change. v0.1 has not shipped in a release, so its shape changes in place; once a release carries it,
-a breaking change gets a new type.
+No SLSA level is claimed anywhere, and this is neither a SLSA provenance nor a VSA. The type is versioned (follow-up
+6): v1 is the first a release carries, so its shape no longer changes in place. A field may be added to v1 when a
+reader that ignores it loses nothing; removing, renaming or changing the meaning of a field gets a new type, and the
+readers (`attest verify`, `attest policy`) keep accepting every type the engine wrote.
 
 ### Keys
 In order of preference:
@@ -148,11 +152,12 @@ In order of preference:
    **The public key is an enforcement file.** `harness-attest.pub` is the trust anchor of that check, so it is guarded
    like the harness's own files: a pull request that adds or changes it fails `verify --range` unless a maintainer
    adds the `harness-change-approved` label, agents may not write it (the implementer's scope, and the shell and code
-   checks of the hooks refuse it), and a push that changes it gets no statement, like any harness change. The user
+   checks of the hooks refuse it), and a push that changes it is attested only as an approved harness change. The user
    publishes it as a harness change: through a pull request with the label, or with their own
    `HARNESS_VERIFY=off git push`, since the pre-push check refuses it otherwise. To rotate: publish the new public key
-   that way (that push gets no statement), then replace the two secrets in the environment; the next push is signed
-   with the new key.
+   that way (merged from a labelled pull request, that push is signed with the old key, which the previous tip still
+   publishes; pushed by the user, it gets no statement), then replace the two secrets in the environment; the next push
+   is signed with the new key.
 
    **Reading the rule.** The job checks that the environment admits only the default branch. It reads the rule live in
    its own step, with a fine-grained token in the environment secret `HARNESS_ATTEST_POLICY_TOKEN` that has read access
@@ -172,17 +177,27 @@ In order of preference:
    the maintainer opted into the recorded branch, and logs which: `repository copies: checked` or `not checked (opted
    in)`. Without the token the opt-in is the only way to sign, and then a copy goes unnoticed: the key check still
    refuses any key other than the published one. Keep the two secrets in the environment only.
-2. **A cloud KMS key (follow-up).** `--key gcpkms://…`, `awskms://…`, `azurekms://…` or `hashivault://…`, with the
+2. **A cloud KMS key (follow-up 2).** `--key gcpkms://…`, `awskms://…`, `azurekms://…` or `hashivault://…`, with the
    workflow authenticating through OIDC federation. The key can't be copied out of the KMS, which logs every use.
-   Preferred for regulated profiles such as `triple`.
-3. **Keyless (explicit opt-in, follow-up).** A Fulcio certificate for the workflow's OIDC identity and an entry in
+   Preferred for regulated profiles such as `triple`. Configured in `backbone/harness.conf` (user-only settings):
+   `HARNESS_ATTEST_SIGNING="kms"`, `HARNESS_ATTEST_KMS_KEY` and `HARNESS_ATTEST_KMS_IDENTITY`. See "Follow-up status".
+3. **Keyless (explicit opt-in, follow-up 3).** A Fulcio certificate for the workflow's OIDC identity and an entry in
    the public Rekor log. Only for a project that accepts publishing its repository and workflow identity for good;
-   never the default.
+   never the default: only `HARNESS_ATTEST_SIGNING="keyless"` turns it on.
 
 ### How a verifier checks it
+`harness.py attest verify` (follow-up 5) runs both halves:
+
+```sh
+harness.py attest verify harness-verdicts.intoto.json harness-verdicts.sigstore.json --key harness-attest.pub \
+  --commit "$(git rev-parse <commit>)"
+```
+
+It is the cosign call below plus a policy on the statement the bundle signs. By hand:
+
 ```sh
 cosign verify-blob-attestation --key harness-attest.pub --bundle harness-verdicts.sigstore.json \
-  --type https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1 \
+  --type https://github.com/soyPeter/agentic-harness/attestation/verdicts/v1 \
   --digest "$(git rev-parse <commit>)" --digestAlg gitCommit --insecure-ignore-tlog
 ```
 
@@ -216,7 +231,7 @@ same engine's `attest` on the same commits and compare bytes.
 ### What a signature proves, and what it doesn't
 - It proves that a holder of the key signed the statement's bytes. The bundle carries no run, workflow or time, so it
   does not say which run made the statement. The run is in GitHub's record of the push; a keyless signature (follow-up
-  3) would carry its identity.
+  3) carries its identity.
 - The job signs only a statement of a range that changed no harness file (see "The engine is the one at the tip"),
   because it never passes `--allow-user-changes`. So the workflow that signed is the one the default branch had before
   the push. Anyone holding the key can sign a statement made by hand, so consumers check the content, not only the
@@ -236,8 +251,9 @@ same engine's `attest` on the same commits and compare bytes.
 - **Timing.** The statement exists when the push's job has finished. A deploy gate that runs earlier has to wait for
   the artifact (or, later, the release asset).
 - **Not covered.** A compromised engine, runner or GitHub account, and a merge a reviewer should have refused: the
-  statement records what `verify` found, not whether the merge was wise. Changes approved with the label have no
-  statement from CI in v1.
+  statement records what `verify` found, not whether the merge was wise. A change approved with the label is attested
+  with `allowUserChanges: true` and the pull request that approved it; whether that approval was wise is the
+  maintainer's call, which `attest verify` refuses unless the consumer passes `--accept-user-changes`.
 - **Pull requests.** A pull request's `verify` runs the workflow file as the pull request has it, so a pull request
   can edit its own check. That is the label's job (a maintainer approves such a change), and the attestation doesn't
   rely on it: the push's job runs the workflow the default branch has after the merge, and the range check above
@@ -300,8 +316,8 @@ A further re-review found two more:
   - The engine stays standard-library Python; cosign runs only in CI, and only on a push to the default branch.
   - Pull requests carry no secrets and no signing, and signing can't turn a failing `verify` into a pass.
 - **Harder**:
-  - The statement exists only after the merge. A deploy gate waits for it, and a harness change approved with the label
-    gets none in v1.
+  - The statement exists only after the merge, and a deploy gate waits for it. A harness change gets one only when a
+    labelled pull request's merge made the push (follow-up 1).
   - The project manages a key and an environment: setting the deployment-branch rule before the secrets, rotating the
     key, publishing the public key, and revoking by policy (a signature made with an old key stays valid until
     verifiers stop trusting that key).
@@ -310,8 +326,8 @@ A further re-review found two more:
   - The job reads the environment's rule with a read-only token the project creates and rotates, or the maintainer
     opts into the recorded branch, which trusts the setup-time record. Either way the mode in force is stated.
   - The public key is a file on the default branch: it's committed before the first signing as a harness change (a
-    pull request with the label, or the user's own push), and a rotation takes two pushes (publish the new key, which gets no
-    statement, then replace the secrets).
+    pull request with the label, or the user's own push), and a rotation takes two pushes (publish the new key, then
+    replace the secrets).
 - **Unchanged**:
   - What `verify` checks and how it gates.
   - Projects without the key.
@@ -322,3 +338,75 @@ A further re-review found two more:
   4. Durable storage: release assets, then OCI.
   5. A helper that runs the cosign check and a predicate policy.
   6. Predicate `v1` once the schema settles.
+
+## Follow-up status
+Recorded 2026-11-11. Follow-ups 1, 5 and 6 are done; 2 and 3 are configured and implemented in the workflow but not run
+end to end; 4 is deferred. Everything below was built and tested locally only (no CI run, no push): with real git,
+real cosign 3.1.4 where cosign is involved, and stand-ins for GitHub's API (a fake `gh`) and for its OIDC token
+endpoint and a Vault login (a local HTTP server). No cloud KMS, Vault or Sigstore service was reached.
+
+1. **Done: the merged pull request's label.** A new step, `Read the merged pull request's approval`, asks GitHub for
+   the pull requests of the pushed commit (`GET repos/<r>/commits/<sha>/pulls`, with the job's token and
+   `pull-requests: read`). The engine the push starts from judges the answer (`harness.py approval-check
+   <pulls.json> <before>..<sha> <branch>`). It approves only when exactly one pull request is merged into the pushed
+   branch with the pushed commit as its merge commit, carries `harness-change-approved`, and the push is that merge
+   alone: one commit on the previous tip (a squash, or the rebase of one commit), or a merge commit of the previous
+   tip and the pull request's head. Then the statement step passes `--allow-user-changes --pull-request <number>`, and
+   the statement records `approval`. The engine is still the previous tip's.
+   - Not approved, so a harness change in them still gets no statement: a rebase merge of several commits, a merge
+     queue that lands several pull requests in one push, a direct push, and any failure to read GitHub (logged as a
+     warning; a push without a harness change is attested as before).
+   - The label is read when the job runs, not as it was at the merge: on a rerun, a label added after the merge counts
+     and one removed is withdrawn. The pull request's own check needed the label to pass, so this matters only for a
+     merge that bypassed the check.
+   - Tested: `approval-check` on real commits of each shape, with property checks that other listed pull requests and
+     their order change nothing; the step with a fake `gh`; an approved change to `harness.py` attested by the
+     previous tip's engine. Not tested: GitHub's live answer (the fields used, `merged_at`, `merge_commit_sha`,
+     `base.ref`, `head.sha` and `labels`, are those of GitHub's REST reference) and the token's permission.
+2. **Implemented, not run end to end: KMS keys.** `HARNESS_ATTEST_SIGNING="kms"`, `HARNESS_ATTEST_KMS_KEY` (a
+   `gcpkms://`, `awskms://` with the key's ARN, `azurekms://` or `hashivault://` reference) and
+   `HARNESS_ATTEST_KMS_IDENTITY` (what the job logs in as: a GCP workload identity provider and optionally a service
+   account; an AWS role ARN; an Azure tenant and client ID; a Vault address and JWT role), in `backbone/harness.conf`.
+   They are user-only settings, so a range that changes them needs the label, and the job reads them at the commit
+   the push starts from (`harness.py signing-check <before> <key set>`), so a push can't choose how it is signed.
+   - Refusal rules: one signing source at a time (the key secret, a KMS key, or keyless), a KMS key reference and an
+     identity of the same cloud, and settings that name another mode are refused.
+   - The job gets `id-token: write`. `Sign in to the KMS` fetches the job's OIDC token for the cloud's audience and
+     leaves it where that cloud's SDK reads it: a GCP external-account credential file, `AWS_ROLE_ARN` with
+     `AWS_WEB_IDENTITY_TOKEN_FILE`, `AZURE_FEDERATED_TOKEN_FILE`, or a Vault token from Vault's JWT login. The key
+     check derives the public key from the KMS and compares it with `harness-attest.pub`, as for the key secret.
+     Signing uses the reference with the services-less signing config, after fetching a fresh token.
+   - Bind the cloud's trust to the job's OIDC subject `repo:<owner>/<repo>:environment:harness-attest`, so only the
+     protected environment's job can use the key.
+   - Tested: the settings' decision table (property checks), the token request and each cloud's credential file or
+     variables against the stand-ins, and the key check and signing with a key file standing in for the reference
+     (cosign reads both through `--key`). Not tested: any cloud or Vault accepting the token, cosign's KMS clients
+     reading those credentials, and the OIDC subject GitHub issues.
+3. **Implemented, not run end to end: keyless signing.** Only `HARNESS_ATTEST_SIGNING="keyless"` at the commit the
+   push starts from turns it on: never by default, never with the key secret or a KMS setting also present, and a
+   misspelt value refuses. The signing step then runs `cosign attest-blob` without a key, on Sigstore's public
+   services (a Fulcio certificate for the workflow's identity, a Rekor entry for good). The key and KMS branches keep
+   the services-less signing config, so cosign can't fall back to keyless signing there (checked: with no key it
+   finds no certificate authority and fails). `ci-protect --attest` states the signing mode, and for keyless that the
+   identity goes to the public log. `attest verify` takes `--certificate-identity` and `--certificate-oidc-issuer`
+   instead of `--key`. Tested: the opt-in rules, the refusals and the branches' commands. Not tested: a keyless
+   signature or its verification, which need GitHub's OIDC token, Fulcio and Rekor.
+4. **Deferred: durable storage.** Release assets need the workflow to find the push run's artifact and upload it on a
+   release, with `contents: write`, a permission the harness-owned workflow doesn't hold today; OCI needs a registry.
+   Both happen on GitHub or a registry, so they can't be exercised without network, and widening the workflow's
+   permissions is the maintainer's decision. The workflow artifact (90 days) stays the store.
+5. **Done: the verify helper.** `harness.py attest verify <statement> <bundle> --key <public key or KMS reference>
+   <policy>` checks that the statement file is the statement the bundle signs, has cosign check the signature, the
+   predicate type and the commit (or code) subject on a copy of the bundle, then applies the policy to the signed
+   statement. `harness.py attest policy <statement> <policy>` applies the policy alone and says that no signature was
+   checked. The policy: an in-toto Statement v1, a verdict predicate type (v0.1 or v1 unless `--type` narrows it), a
+   subject for each `--commit` and `--tree`, `result: "PASSED"`, `HARNESS_SPEC_GATE`, `HARNESS_JUDGE_GATE` and
+   `HARNESS_REVIEW` on (`--require NAME=VALUE` adds or changes one), and `allowUserChanges` false unless
+   `--accept-user-changes`. Tested with cosign 3.1.4 on bundles the workflow's own signing step made: the right key,
+   another key, another commit, an edited payload, a statement file that isn't the signed one, a v0.1 statement, and
+   a property check that changing any field the policy reads refuses. Not tested: `--key` with a KMS reference and the
+   keyless flags (see 2 and 3).
+6. **Done: predicate v1.** `https://github.com/soyPeter/agentic-harness/attestation/verdicts/v1`: v0.1's fields, plus
+   `verification.approval` (see "The statement"). v0.1 never shipped in a release, so `attest` writes only v1; the
+   readers accept both, tested against a statement the v0.1 engine wrote (`tests/fixtures/attest/`). From v1 on, a
+   breaking change gets a new type.

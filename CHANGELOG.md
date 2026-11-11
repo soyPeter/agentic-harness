@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- **Attestations: approved harness changes, a verify helper, predicate v1, KMS and keyless signing (ADR-005,
+  follow-ups).** Built and tested locally; the cloud and Sigstore paths are not run end to end yet (the ADR's
+  "Follow-up status" says what was and wasn't tested).
+  - A push merged from a pull request labelled `harness-change-approved` now gets a statement, as the pull request's
+    check passed with the label. The `attest` job reads the pull requests of the pushed commit, and the engine the push
+    starts from (`harness.py approval-check`) approves only the one merged as that commit, carrying the label, whose
+    merge is the whole push (a squash, the rebase of one commit, or a merge commit of the previous tip and its head).
+    The statement says `allowUserChanges: true` and names the pull request. The job needs `pull-requests: read`.
+  - `harness.py attest verify <statement> <bundle> --key <key> --commit <id>` has cosign check the signature, then
+    checks a policy on the statement the bundle signs: the predicate type, the commit (or `--tree`, the code) subject,
+    `result: "PASSED"`, the spec, judge and review gates on (`--require NAME=VALUE` for more), and no
+    `--allow-user-changes` unless `--accept-user-changes`. `harness.py attest policy` applies the policy alone.
+  - The predicate type is now `https://github.com/soyPeter/agentic-harness/attestation/verdicts/v1`: v0.1 (never
+    released) plus `verification.approval`. `attest` writes v1; `attest verify` and `attest policy` read both. A
+    breaking change to v1 gets a new type.
+  - Signing modes in `backbone/harness.conf`, user-only and read at the commit the push starts from:
+    `HARNESS_ATTEST_SIGNING` is `key` (the default, the secret as before), `kms` (`HARNESS_ATTEST_KMS_KEY`, a
+    `gcpkms://`, `awskms://`, `azurekms://` or `hashivault://` key, used through the job's OIDC token as
+    `HARNESS_ATTEST_KMS_IDENTITY`) or `keyless` (Sigstore's public Fulcio and Rekor, an explicit opt-in that publishes
+    the workflow's identity for good). One source at a time; a misspelt mode refuses; the key and KMS paths can't fall
+    back to keyless. `harness.py signing-check` decides, and `ci-protect --attest` states the mode. The job gets
+    `id-token: write`.
+  - Durable storage (release assets, OCI) is deferred.
+  **Upgrading:** the `attest` job's first step now decides whether there is anything to sign with, so a project
+  without a key and without signing settings still does nothing. A deploy gate that checks the type by hand
+  (`cosign verify-blob-attestation --type`) moves to `verdicts/v1`.
+
 - **The harness as the gate inside the agent software factory (ADR-008, Proposed; docs only).**
   `docs/adr/ADR-008-harness-inside-agent-factory.md` decides how the harness sits inside an always-on factory that
   takes work from Slack, GitHub and Linear. The factory owns the doors, the sender check, identity and keys, lanes,

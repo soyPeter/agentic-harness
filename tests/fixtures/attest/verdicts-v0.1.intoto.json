@@ -1,0 +1,343 @@
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "predicate": {
+    "tasks": [
+      {
+        "changeClass": {
+          "class": "feature",
+          "declared": true,
+          "problem": null
+        },
+        "finishedIn": "73a321eb1c893dff925023457c02a093c015ed83",
+        "grill": {
+          "at": "2026-11-11T19:37:35+0100",
+          "fingerprint": "89cd7b5e967a5ba97203198bc1e53221d71b29fff9742b58be743cec691d66d7",
+          "rounds": 1,
+          "verdict": "pass"
+        },
+        "judge": {
+          "at": "2026-11-11T19:37:36+0100",
+          "fingerprint": "32ccd100f43762ae5031f37d7cc024cf984b4426",
+          "rounds": 1,
+          "testRun": {
+            "command": "true",
+            "exit": 0,
+            "outputSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "verdict": "pass"
+        },
+        "receipt": {
+          "approvalNeeded": [],
+          "notVerified": [
+            "NFR not covered by any acceptance criterion: Search answers within 200 ms."
+          ],
+          "verified": [
+            "HARNESS_TEST_CMD (true) run by the harness: exit 0 in 0.0s",
+            "AC-1.1-1 (REQ-1.1-1): met; tests: test_ac; evidence: src; test files: tests/test_search.py"
+          ]
+        },
+        "reviews": {
+          "correctness": {
+            "at": "2026-11-11T19:37:36+0100",
+            "fingerprint": "32ccd100f43762ae5031f37d7cc024cf984b4426",
+            "rounds": 1,
+            "verdict": "pass"
+          },
+          "lean": {
+            "at": "2026-11-11T19:37:36+0100",
+            "fingerprint": "32ccd100f43762ae5031f37d7cc024cf984b4426",
+            "rounds": 1,
+            "verdict": "pass"
+          },
+          "structure": {
+            "at": "2026-11-11T19:37:36+0100",
+            "fingerprint": "32ccd100f43762ae5031f37d7cc024cf984b4426",
+            "rounds": 1,
+            "verdict": "pass"
+          }
+        },
+        "risk": {
+          "labels": [
+            "risk:elevated",
+            "class:feature"
+          ],
+          "reasons": [
+            "Change-Class feature: the user approves it, not policy"
+          ]
+        },
+        "spec": {
+          "approval": [
+            "Approved-by: Ana (2026-11-01)"
+          ],
+          "fingerprint": "89cd7b5e967a5ba97203198bc1e53221d71b29fff9742b58be743cec691d66d7",
+          "path": "backbone/specs/1.1.md"
+        },
+        "task": "1.1",
+        "title": "Customer search"
+      }
+    ],
+    "verification": {
+      "allowUserChanges": false,
+      "base": "2c7e3c73f4fa437f43e990a41383d3afeaad2ced",
+      "result": "PASSED",
+      "settings": {
+        "HARNESS_ACCEPTANCE_PATHS": {
+          "environment": false,
+          "value": "(^|/)acceptance([/._-]|$)"
+        },
+        "HARNESS_AGENT_CMD": {
+          "environment": false,
+          "value": "claude -p --permission-mode acceptEdits --output-format json"
+        },
+        "HARNESS_ALLOW_PARALLEL_WIP": {
+          "environment": false,
+          "value": "0"
+        },
+        "HARNESS_AUTONOMY": {
+          "environment": false,
+          "value": "supervised"
+        },
+        "HARNESS_AUTO_APPROVE": {
+          "environment": false,
+          "value": "low"
+        },
+        "HARNESS_BUILD_CMD": {
+          "environment": false,
+          "value": ""
+        },
+        "HARNESS_CI_JUDGE_CMD": {
+          "environment": false,
+          "value": "claude -p --agent judge --dangerously-skip-permissions --output-format json"
+        },
+        "HARNESS_COMMIT_NUDGE": {
+          "environment": false,
+          "value": "8"
+        },
+        "HARNESS_COMMIT_TYPES": {
+          "environment": false,
+          "value": "feat|fix|refactor|perf|test|docs|build|ci|chore|style|revert"
+        },
+        "HARNESS_CONTAINER_ENGINE": {
+          "environment": false,
+          "value": ""
+        },
+        "HARNESS_CROSS_SCOPES": {
+          "environment": false,
+          "value": "deps|build|ci|docs|backbone|harness|release|config|tests?"
+        },
+        "HARNESS_DEBUGGER": {
+          "environment": false,
+          "value": "on"
+        },
+        "HARNESS_DECISION_ADR": {
+          "environment": false,
+          "value": ""
+        },
+        "HARNESS_DECISION_CMD": {
+          "environment": false,
+          "value": ""
+        },
+        "HARNESS_DECISION_MODE": {
+          "environment": false,
+          "value": "off"
+        },
+        "HARNESS_DECISION_MODEL": {
+          "environment": false,
+          "value": ""
+        },
+        "HARNESS_DECISION_PROVIDER": {
+          "environment": false,
+          "value": "none"
+        },
+        "HARNESS_DECISION_TIMEOUT": {
+          "environment": false,
+          "value": "20"
+        },
+        "HARNESS_DECISION_URL": {
+          "environment": false,
+          "value": ""
+        },
+        "HARNESS_DELIVER": {
+          "environment": false,
+          "value": "on"
+        },
+        "HARNESS_DOC_PATHS": {
+          "environment": false,
+          "value": "(?i)^(?!(.*/)?CMakeLists\\.txt$|.*(requirements|constraints)[^.]*\\.txt$)(.*/)?([^/]+\\.(md|mdx|markdown|rst|adoc|asciidoc|txt)|README|CHANGELOG|CHANGES|HISTORY|LICEN[CS]E|NOTICE|CONTRIBUTING|AUTHORS|COPYING)$"
+        },
+        "HARNESS_ESCALATE_GH": {
+          "environment": false,
+          "value": "off"
+        },
+        "HARNESS_GRILL_MAX_ROUNDS": {
+          "environment": false,
+          "value": "3"
+        },
+        "HARNESS_HOOK_SLOW": {
+          "environment": false,
+          "value": "5"
+        },
+        "HARNESS_JUDGE_GATE": {
+          "environment": false,
+          "value": "on"
+        },
+        "HARNESS_JUDGE_MAX_ROUNDS": {
+          "environment": false,
+          "value": "2"
+        },
+        "HARNESS_KNOWLEDGE_PATHS": {
+          "environment": false,
+          "value": ""
+        },
+        "HARNESS_KNOWLEDGE_ROOT": {
+          "environment": false,
+          "value": ""
+        },
+        "HARNESS_KNOWLEDGE_TOOLS": {
+          "environment": false,
+          "value": "^((search|read|get|list|find|query|lookup|fetch)\\w*|note_meta|batch_read|backlinks|hub_children|decisions_status|pending_questions)$"
+        },
+        "HARNESS_LIGHT_LANE": {
+          "environment": false,
+          "value": "off"
+        },
+        "HARNESS_LIGHT_MAX_FILES": {
+          "environment": false,
+          "value": "3"
+        },
+        "HARNESS_LIGHT_MAX_ITEMS": {
+          "environment": false,
+          "value": "3"
+        },
+        "HARNESS_ORCA_AGENTS": {
+          "environment": false,
+          "value": "default=claude"
+        },
+        "HARNESS_ORCA_LAUNCH": {
+          "environment": false,
+          "value": "codex=codex --dangerously-bypass-hook-trust -c check_for_update_on_startup=false"
+        },
+        "HARNESS_ORCHESTRATOR_SCOPE": {
+          "environment": false,
+          "value": "on"
+        },
+        "HARNESS_PROFILE": {
+          "environment": false,
+          "value": ""
+        },
+        "HARNESS_PROJECT_NAME": {
+          "environment": false,
+          "value": "attest"
+        },
+        "HARNESS_REQ_STYLE": {
+          "environment": false,
+          "value": "plain"
+        },
+        "HARNESS_REVIEW": {
+          "environment": false,
+          "value": "on"
+        },
+        "HARNESS_RISK_MAX_FILES": {
+          "environment": false,
+          "value": "20"
+        },
+        "HARNESS_RISK_PATHS": {
+          "environment": false,
+          "value": "(?i)(^|/)(auth|security|migrations?|db/migration|infra|deploy|\\.github)/|openapi|swagger|Dockerfile|(^|/)(pom\\.xml|build\\.gradle(\\.kts)?|settings\\.gradle(\\.kts)?|package\\.json|go\\.mod|Cargo\\.toml|requirements[^/]*\\.txt|pyproject\\.toml)$"
+        },
+        "HARNESS_RISK_TERMS": {
+          "environment": false,
+          "value": "(?i)\\b(auth(entication|orization)?|logins?|passwords?|secrets?|tokens?|credentials?|encrypt\\w*|access control|RBAC|role-based|(user|admin) roles?|permission (model|check|system)s?|payments?|billing|personal data|PII|GDPR|migrations?|schema changes?|breaking changes?|public API|deletes? (all|every))\\b"
+        },
+        "HARNESS_RUN_ATTEMPTS": {
+          "environment": false,
+          "value": "2"
+        },
+        "HARNESS_RUN_MAX_COST": {
+          "environment": false,
+          "value": ""
+        },
+        "HARNESS_RUN_TASK_TIMEOUT": {
+          "environment": false,
+          "value": "3600"
+        },
+        "HARNESS_SANDBOX_BACKEND": {
+          "environment": false,
+          "value": "devcontainer"
+        },
+        "HARNESS_SCOPE_CHECK": {
+          "environment": false,
+          "value": "on"
+        },
+        "HARNESS_SKILL_GATE": {
+          "environment": false,
+          "value": "on"
+        },
+        "HARNESS_SKILL_MAX_AGE": {
+          "environment": false,
+          "value": "180"
+        },
+        "HARNESS_SPEC_GATE": {
+          "environment": false,
+          "value": "on"
+        },
+        "HARNESS_SPEC_MAX_ITEMS": {
+          "environment": false,
+          "value": "30"
+        },
+        "HARNESS_STOP_MODE": {
+          "environment": false,
+          "value": "remind"
+        },
+        "HARNESS_SUBJECT_MAX": {
+          "environment": false,
+          "value": "72"
+        },
+        "HARNESS_TESTER": {
+          "environment": false,
+          "value": "off"
+        },
+        "HARNESS_TEST_CMD": {
+          "environment": true,
+          "value": "true"
+        },
+        "HARNESS_TEST_PATHS": {
+          "environment": false,
+          "value": "(^|/)(tests?|__tests__|spec|it)/|(^|/)test_[^/]*$|[._-](test|spec|it)\\.[A-Za-z0-9]+$|(Test|Tests|IT|Spec)\\.[A-Za-z0-9]+$"
+        },
+        "HARNESS_TEST_TIMEOUT": {
+          "environment": false,
+          "value": "900"
+        },
+        "HARNESS_VERIFY": {
+          "environment": true,
+          "value": "off"
+        }
+      },
+      "tip": "73a321eb1c893dff925023457c02a093c015ed83"
+    },
+    "verifier": {
+      "baseLock": {
+        "mode": "full",
+        "version": "0.30.0"
+      },
+      "engineSha256": "1f844ce5cc79dc32806858dcf549326e5056eb9f60fb28869bce82d6174b0bc0",
+      "id": "https://github.com/soyPeter/agentic-harness"
+    }
+  },
+  "predicateType": "https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1",
+  "subject": [
+    {
+      "digest": {
+        "gitCommit": "73a321eb1c893dff925023457c02a093c015ed83"
+      },
+      "name": "commit"
+    },
+    {
+      "digest": {
+        "gitTree": "32ccd100f43762ae5031f37d7cc024cf984b4426"
+      },
+      "name": "code"
+    }
+  ]
+}
