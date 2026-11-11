@@ -203,6 +203,40 @@ def normalized(recorded):
     return renamed
 
 
+def required_isolation(setting, change_class, ladder):
+    """(the isolation class work of change_class needs, None) under HARNESS_SANDBOX_REQUIRE, or (None, why the setting
+    can't be read). The setting is space-separated <class>=<isolation class> pairs; a pair holds for its class and every
+    class above it on the ladder, so work never needs less isolation than the work below it."""
+    named = {}
+    known = {name.lower(): name for name in ISOLATION_CLASSES}
+    for entry in setting.split():
+        cls, sep, level = entry.lower().partition("=")
+        if not sep or cls not in ladder or level not in known:
+            return None, ("'%s' is not <class>=<isolation class>, with a class among %s and an isolation class among %s"
+                          % (entry, ", ".join(ladder), ", ".join(ISOLATION_CLASSES)))
+        if cls in named:
+            return None, "%s is named twice" % cls
+        named[cls] = known[level]
+    reach = ladder[:ladder.index(change_class) + 1]
+    return max((named.get(cls, "none") for cls in reach), key=ISOLATION_CLASSES.index), None
+
+
+def shortfall(evidence, required):
+    """Why the sandbox evidence doesn't reach the required isolation class, or None. Missing evidence, and a class this
+    harness doesn't know, reach nothing above none."""
+    if required == "none":
+        return None
+    if not evidence:
+        return "recorded no sandbox (the judge pass predates sandbox evidence)"
+    recorded = evidence.get("isolation_class")
+    if recorded not in ISOLATION_CLASSES:
+        return "has isolation_class %s, which this harness doesn't know" % recorded
+    if ISOLATION_CLASSES.index(recorded) >= ISOLATION_CLASSES.index(required):
+        return None
+    reason = evidence.get("isolation_reason")
+    return "has isolation_class %s%s" % (recorded, " (%s)" % reason if reason else "")
+
+
 def problem(name):
     """Why HARNESS_SANDBOX_BACKEND can't be used, or None."""
     if name in BACKENDS:

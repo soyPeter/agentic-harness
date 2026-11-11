@@ -135,7 +135,7 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
                   "HARNESS_TESTER", "HARNESS_ACCEPTANCE_PATHS", "HARNESS_ORCA_AGENTS", "HARNESS_ORCA_LAUNCH",
                   "HARNESS_SPEC_MAX_ITEMS", "HARNESS_LIGHT_LANE", "HARNESS_LIGHT_MAX_ITEMS", "HARNESS_LIGHT_MAX_FILES",
                   "HARNESS_REVIEW", "HARNESS_DELIVER", "HARNESS_PROFILE", "HARNESS_REQ_STYLE",
-                  "HARNESS_SANDBOX_BACKEND")
+                  "HARNESS_SANDBOX_BACKEND", "HARNESS_SANDBOX_REQUIRE")
 # Organisation profiles (HARNESS_PROFILE, user-only). "triple": a supervised pilot where only a human merges, so the
 # coordinator's --merge and --trust and the scheduled backlog run are refused.
 PROFILES = ("", "triple")
@@ -346,6 +346,7 @@ DEFAULTS = {
     "HARNESS_RUN_ATTEMPTS": "2",
     "HARNESS_RUN_MAX_COST": "",
     "HARNESS_SANDBOX_BACKEND": "devcontainer",
+    "HARNESS_SANDBOX_REQUIRE": "schema=container",
     "HARNESS_CI_JUDGE_CMD": "claude -p --agent judge --dangerously-skip-permissions --output-format json",
     "HARNESS_SKILL_MAX_AGE": "180",
     "HARNESS_HOOK_SLOW": "5",
@@ -2644,11 +2645,47 @@ def start_problems(task):
     return None
 
 
+def sandbox_required(task):
+    """(the isolation class task's Change-Class needs under HARNESS_SANDBOX_REQUIRE, None), or (None, why the setting
+    can't be read)."""
+    return sandbox.required_isolation(conf()["HARNESS_SANDBOX_REQUIRE"], change_class(read(spec_path(task)))[0],
+                                      CHANGE_CLASSES)
+
+
+def sandbox_refusal(task, evidence, doing, whose, remedy):
+    """Why the sandbox evidence (whose: the sandbox it describes) doesn't allow task's work, or None."""
+    required, invalid = sandbox_required(task)
+    if invalid:
+        return ("Task %s %s: HARNESS_SANDBOX_REQUIRE can't be read (%s); until the user fixes it in "
+                "backbone/harness.conf, no task may start or finish." % (task, doing, invalid))
+    why = sandbox.shortfall(evidence, required)
+    if why is None:
+        return None
+    return ("Task %s %s: Change-Class %s work needs a sandbox of at least %s isolation (HARNESS_SANDBOX_REQUIRE), and "
+            "%s %s. %s, or ask the user to lower HARNESS_SANDBOX_REQUIRE in backbone/harness.conf."
+            % (task, doing, change_class(read(spec_path(task)))[0], required, whose, why, remedy))
+
+
+def sandbox_start_problem(task):
+    """Why task can't start in the sandbox this process runs in, or None. A start is checked where it happens, so CI's
+    verify, which runs elsewhere, never checks it."""
+    return sandbox_refusal(task, sandbox.evidence(conf()["HARNESS_SANDBOX_BACKEND"]), "cannot start here",
+                           "this session's sandbox", "Start it inside the .devcontainer/harness-agent/ sandbox")
+
+
+def sandbox_finish_problem(task, judged):
+    """Why the sandbox recorded with the judge pass judged doesn't allow finishing task, or None."""
+    return sandbox_refusal(task, sandbox.normalized(judged.get("sandbox")), "cannot finish", "its judge pass",
+                           "Run the judge again inside the .devcontainer/harness-agent/ sandbox")
+
+
 def start_gate(before, after):
-    """Starting a task requires a valid spec, a current griller pass and the user's approval."""
+    """Starting a task requires a valid spec, a current griller pass and the user's approval, in a sandbox its
+    Change-Class allows."""
     if not gate_on("HARNESS_SPEC_GATE"):
         return None
-    problems = [p for p in (start_problems(task) for task in started_tasks(before, after)) if p]
+    started = started_tasks(before, after)
+    problems = [p for task in started for p in (start_problems(task), sandbox_start_problem(task)) if p]
     return "\n".join("  - " + p for p in problems) if problems else None
 
 
@@ -2675,6 +2712,9 @@ def judge_problems(task, current, max_rounds):
     rederived, why = effective_judge(task, report)
     if rederived != "pass":
         return "The recorded judge pass for task %s does not hold up: %s." % (task, "; ".join(why)[:400])
+    isolated = sandbox_finish_problem(task, last)
+    if isolated:
+        return isolated
     review = review_problems(task, current, max_rounds)
     if review:
         return review
@@ -3425,6 +3465,10 @@ def health():
     unusable = sandbox.problem(values["HARNESS_SANDBOX_BACKEND"])
     if unusable:
         issues.append(("error", unusable))
+    _, unreadable = sandbox.required_isolation(values["HARNESS_SANDBOX_REQUIRE"], CHANGE_CLASSES[0], CHANGE_CLASSES)
+    if unreadable:
+        issues.append(("error", "HARNESS_SANDBOX_REQUIRE can't be read: %s; no task may start or finish until it is "
+                                "fixed" % unreadable))
     unpublished = sandbox.unpublished_allowlist()
     if unpublished:
         issues.append(("error", unpublished))
@@ -6385,8 +6429,17 @@ def run_command(argv):
         queue = [t for t in queue if t[0] == only]
     if max_tasks:
         queue = queue[:max_tasks]
+    # A session could neither start nor finish such a task: skip it before paying for one.
+    unsandboxed = {task: sandbox_refusal(task, sandbox.evidence(values["HARNESS_SANDBOX_BACKEND"]), "can't run here",
+                                         "the sandbox its sessions would run in",
+                                         "Run harness.py run inside the .devcontainer/harness-agent/ sandbox")
+                   for task, _, _ in queue}
+    unsandboxed = {task: why for task, why in unsandboxed.items() if why}
+    queue = [t for t in queue if t[0] not in unsandboxed]
+    for task, why in unsandboxed.items():
+        print("run: %s task %s: %s" % ("would skip" if dry_run else "skipped", task, why))
     if "--worktree" in argv and not dry_run:
-        return run_worktrees(queue, "--pr" in argv)
+        return run_worktrees(queue, "--pr" in argv) or (1 if unsandboxed else 0)
     if dry_run:
         for task, title, state in queue:
             print("run: would %s task %s: %s" % ("resume" if state == "wip" else "start", task, title))
@@ -6395,7 +6448,7 @@ def run_command(argv):
     attempts = int(values["HARNESS_RUN_ATTEMPTS"]) if values["HARNESS_RUN_ATTEMPTS"].isdigit() else 2
     run_dir = events_file().parent / "runs" / time.strftime("%Y%m%d-%H%M%S")
     log_event("run-start", tasks=[t for t, _, _ in queue])
-    summary = []
+    summary = [(task, "sandbox") for task in unsandboxed]
     max_cost = float(values["HARNESS_RUN_MAX_COST"]) if re.match(r"^\d+(\.\d+)?$", values["HARNESS_RUN_MAX_COST"]) else None
     spent = 0.0
     for task, title, state in queue:
@@ -7296,6 +7349,7 @@ def receipt_data(task, base=None, code=None):
         "rounds": {"grill": len(grills), "judge": len(judge), "debug": len(verdict_history(task, "debug"))},
         "judged_at": passed.get("at"),
         "sandbox": sandbox.normalized(passed.get("sandbox")),
+        "sandbox_required": receipt_sandbox_required(task, passed),
         "approval": approval_lines(approval_section(spec_text) or ""),
         "approval_needed": approval_needed,
     }
@@ -7303,7 +7357,20 @@ def receipt_data(task, base=None, code=None):
     return data, None
 
 
-def sandbox_lines(evidence):
+def receipt_sandbox_required(task, passed):
+    """The isolation class task's Change-Class needs, and whether the sandbox recorded with its judge pass has it."""
+    return {"isolation_class": sandbox_required(task)[0], "met": sandbox_finish_problem(task, passed) is None}
+
+
+def sandbox_lines(evidence, change_class_name, required):
+    lines = sandbox_evidence_lines(evidence)
+    lines.append("required for Change-Class %s (HARNESS_SANDBOX_REQUIRE): %s; %s" % (
+        change_class_name, required["isolation_class"] or "the setting can't be read", "met" if required["met"]
+        else "NOT met"))
+    return lines
+
+
+def sandbox_evidence_lines(evidence):
     if not evidence:
         return ["not recorded: the judge pass predates sandbox evidence (ADR-003); judge the task again to record it"]
     evidence = sandbox.normalized(evidence)
@@ -7329,7 +7396,8 @@ def receipt_text(d):
         lines.append("  backbone: %s" % ", ".join(c["path"] for c in d["backbone_changed"]))
     sections = (("VERIFIED (judge pass %s, re-checked by the harness)" % d["judged_at"], d["verified"]),
                 ("NOT VERIFIED", d["not_verified"] or ["nothing outside the acceptance criteria"]),
-                ("SANDBOX (where the judge pass was recorded)", sandbox_lines(d["sandbox"])),
+                ("SANDBOX (where the judge pass was recorded)", sandbox_lines(d["sandbox"], d["change_class"],
+                                                                              d["sandbox_required"])),
                 ("DECISIONS", ["follows %s" % a for a in d["decisions"]["governing_adrs"]] +
                  ["ADR changed: %s" % a for a in d["decisions"]["adrs_changed"]] +
                  ["assumption %s" % a for a in d["decisions"]["assumptions"]]),

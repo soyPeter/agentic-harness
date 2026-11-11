@@ -259,3 +259,14 @@ Still open after v1:
   7. A first isolated backend, behind its own ADR, passing the egress parity checks.
   8. Egress denials logged and cited by the receipt.
   9. The sandbox for thin installs.
+
+## Follow-up status
+- **4. Gate on the evidence: done (2026-11-11).** `HARNESS_SANDBOX_REQUIRE` (user-only, default `schema=container`)
+  names the isolation class each Change-Class needs, as `<class>=<isolation class>` pairs. A pair holds for its class
+  and every class above it on ADR-002's ladder. A task of such a class starts only in a session whose own sandbox has
+  that class (`start`, an edit of `3-TASKS.md`), and finishes only when its latest judge pass recorded one (`finish`, an
+  edit, and `verify`, so the pre-commit hook and CI check the recorded evidence, never their own sandbox). It fails
+  closed: a judge pass recorded before the evidence, an unknown isolation class or backend, and a setting that can't be
+  read all refuse, and the last is a doctor error. `run` skips such a task before starting a session for it, and the
+  receipt says what the class requires and whether the judge pass met it. The evidence stays a record of the sandbox;
+  the gate is what refuses.

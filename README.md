@@ -81,6 +81,11 @@ only).
   receipt suggests: `risk:low` (`docs`, `refactor`), `risk:elevated` (`feature`, or `docs`/`refactor` with other risks)
   or `risk:high` (`schema`, or `feature` with other risks). Whatever the class, a person approves every spec in
   supervised mode and merges the pull request.
+- **The sandbox each class needs** ([ADR-003](docs/adr/ADR-003-sandbox-backends.md), user-only
+  `HARNESS_SANDBOX_REQUIRE`, default `schema=container`): such work starts only in a session running in that sandbox,
+  and finishes only with a judge pass recorded in one, which `verify` and CI check from the recorded evidence. A
+  requirement covers the classes above it too, and anything the harness can't read or doesn't know counts as no
+  isolation.
 - **Autonomous mode** (opt-in, user-only): no human in the loop. The harness approves low-risk specs by policy, from
   the spec and later the diff; only a `docs` or `refactor` spec can be low-risk, so `feature` and `schema` work always
   waits for the user's approval. Everything else, including repeated griller or judge failures, is escalated: the task
@@ -100,7 +105,8 @@ pass stale.
   user. It is built from the spec, the verdicts and the diff, and goes into the pull requests the runner and the Orca
   coordinator open. It shows the sandbox the judge pass was recorded in (backend, isolation class, base image digest,
   allowlist hash, region, control plane, credential mode; [ADR-003](docs/adr/ADR-003-sandbox-backends.md), Proposed),
-  so a run that wasn't isolated shows it. It also suggests pull request labels for triage: one `risk:*` label and
+  so a run that wasn't isolated shows it, and whether that met the sandbox the task's Change-Class needs. It also
+  suggests pull request labels for triage: one `risk:*` label and
   `class:<class>`. The deliverer applies them; a label never approves or merges.
 - **Verify**: the pre-commit hook re-checks the gates on the staged state, the pre-push hook (full installs) the
   commits being pushed, and CI the pull request's commits (`harness.py verify --range`) with the **base branch's**

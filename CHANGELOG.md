@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Schema work needs the sandbox (ADR-003 follow-up 4).** A new user-only setting, `HARNESS_SANDBOX_REQUIRE`
+  (default `schema=container`), names the isolation class each Change-Class needs, as space-separated
+  `<class>=<isolation class>` pairs; a pair also covers the classes above it on the ladder. A task of such a class
+  starts only in a session whose own sandbox has that class, and finishes only when its latest judge pass recorded one:
+  `start`, `finish`, an agent's edit of `3-TASKS.md` and `verify` (pre-commit and CI, from the recorded evidence) all
+  refuse otherwise. A judge pass recorded before the evidence, an unknown isolation class or backend, and a value that
+  can't be read refuse too; the last is a doctor error. `run` skips such a task before starting a session for it
+  (exit 1), and `receipt` says what the class requires and whether the judge pass met it (`sandbox_required` in
+  `--json`). **Upgrading:** schema work now has to run in `.devcontainer/harness-agent/`. The Orca coordinator's
+  workers run on the host and can't do it; set `HARNESS_SANDBOX_REQUIRE=""` in `backbone/harness.conf` to keep the
+  earlier behaviour. `tests/test-sandbox-gate.py` drives the gate through every entry point, with a property check of
+  the ladder; `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`) starts and judges schema work in the real image and
+  finishes it on the host.
+
 - **The harness as the gate inside the agent software factory (ADR-008, Proposed; docs only).**
   `docs/adr/ADR-008-harness-inside-agent-factory.md` decides how the harness sits inside an always-on factory that
   takes work from Slack, GitHub and Linear. The factory owns the doors, the sender check, identity and keys, lanes,

@@ -9,7 +9,8 @@ from inside, as the agent (Restrictions needs only docker):
   the allowlist the evidence is taken from;
 - a judge pass recorded inside records that sandbox, and the receipt shows it on the host.
 Restrictions runs the harness-agent image directly, with the agent's restrictions and each one left out: the sandbox is
-recorded as a container only with all of them and the published allowlist at /run/harness-egress/allowlist.
+recorded as a container only with all of them and the published allowlist at /run/harness-egress/allowlist. Schema work,
+which needs a container by default (HARNESS_SANDBOX_REQUIRE), starts and is judged there and then finishes on the host.
 The containers, images and volumes a class created are removed afterwards. The harness-agent-claude-config volume,
 which every project's sandbox shares, is left alone.
 """
@@ -74,6 +75,11 @@ Tech requirements:
 JUDGE_PASS = {"verdict": "pass", "task": "7.1", "summary": "s", "findings": [],
               "criteria": [{"id": "AC-7.1-1", "met": True, "evidence": "src/search.py:2", "tests": ["test_contains"]}],
               "tests": {"command": "true", "result": "passed"}}
+
+
+SCHEMA_SPEC = SPEC.replace("7.1", "7.2").replace("PRD: none\n", "PRD: none\nChange-Class: schema\n")
+SCHEMA_JUDGE_PASS = dict(JUDGE_PASS, task="7.2", criteria=[{"id": "AC-7.2-1", "met": True, "evidence": "src/search.py:2",
+                                                             "tests": ["test_contains"]}])
 
 
 def stop_input(agent, report):
@@ -248,20 +254,24 @@ class Restrictions(unittest.TestCase):
         cls.host("git", "commit", "-qm", "chore: adopt agentic harness")
         (cls.project / "backbone/specs").mkdir(parents=True, exist_ok=True)
         (cls.project / "backbone/specs/7.1.md").write_text(SPEC)
+        (cls.project / "backbone/specs/7.2.md").write_text(SCHEMA_SPEC)
         tasks = cls.project / "backbone/3-TASKS.md"
-        tasks.write_text(tasks.read_text() + "- [ ] **Task 7.1: Customer search** (spec: backbone/specs/7.1.md)\n")
+        tasks.write_text(tasks.read_text() + "- [ ] **Task 7.1: Customer search** (spec: backbone/specs/7.1.md)\n"
+                         "- [ ] **Task 7.2: Customer table** (spec: backbone/specs/7.2.md)\n")
         cls.host("git", "add", "-A")
-        cls.host("git", "commit", "-qm", "docs: spec for task 7.1")
-        cls.host("python3", "-B", str(cls.project / "scripts/harness/lib/harness.py"), "hook", "grill-stop",
-                 input=stop_input("griller", {"verdict": "pass", "task": "7.1", "questions": [], "summary": "s"}))
-        spec = cls.project / "backbone/specs/7.1.md"
-        spec.write_text(spec.read_text() + "Approved-by: Ana (2026-11-01)\n")
+        cls.host("git", "commit", "-qm", "docs: specs for tasks 7.1 and 7.2")
+        for task in ("7.1", "7.2"):
+            cls.host("python3", "-B", str(cls.project / "scripts/harness/lib/harness.py"), "hook", "grill-stop",
+                     input=stop_input("griller", {"verdict": "pass", "task": task, "questions": [], "summary": "s"}))
+            spec = cls.project / ("backbone/specs/%s.md" % task)
+            spec.write_text(spec.read_text() + "Approved-by: Ana (2026-11-01)\n")
         tasks.write_text(tasks.read_text().replace("- [ ] **Task 7.1", "- [WIP] **Task 7.1"))
         (cls.project / "src").mkdir(exist_ok=True)
         (cls.project / "src/search.py").write_text(
             "def search(names, q):  # AC-7.1-1\n    return [n for n in names if q.lower() in n.lower()]\n")
         (cls.project / "tests").mkdir(exist_ok=True)
-        (cls.project / "tests/test_search.py").write_text("def test_contains():  # AC-7.1-1\n    assert True\n")
+        (cls.project / "tests/test_search.py").write_text(
+            "def test_contains():  # AC-7.1-1 AC-7.2-1\n    assert True\n")
         cls.image = "harness-restrictions-test:%d" % os.getpid()
         cls.addClassCleanup(docker, "rmi", "-f", cls.image)
         cls.host("docker", "build", "-q", "-t", cls.image, str(cls.project / ".devcontainer/harness-agent"),
@@ -297,6 +307,12 @@ class Restrictions(unittest.TestCase):
         receipt = self.host("python3", "-B", str(self.project / "scripts/harness/lib/harness.py"), "receipt", "7.1",
                             "--json")
         return json.loads(receipt.stdout)["sandbox"]
+
+    def restricted(self):
+        """The flags and environment the agent's container runs with (docker-compose.yml)."""
+        flags = ["--user", "agent", "--security-opt", "no-new-privileges", "--cap-drop=NET_ADMIN",
+                 "--cap-drop=NET_RAW", "-v", "%s:/run/harness-egress:ro" % self.egress]
+        return flags, {"HARNESS_SANDBOX_IMAGE": self.image_reference(), "HARNESS_EGRESS_ALLOWLIST": EGRESS_ALLOWLIST}
 
     def sandbox(self, *, drop=(), add=(), allowlist=EGRESS_ALLOWLIST, mounted=True):
         flags = ["--user", "agent", "--security-opt", "no-new-privileges"]
@@ -339,13 +355,30 @@ class Restrictions(unittest.TestCase):
         self.assertEqual(sandbox["allowlist_hash"], "none")
 
     def test_doctor_inside_the_sandbox_passes_with_the_published_allowlist(self):
-        flags = ["--user", "agent", "--security-opt", "no-new-privileges", "--cap-drop=NET_ADMIN",
-                 "--cap-drop=NET_RAW", "-v", "%s:/run/harness-egress:ro" % self.egress]
-        result = self.run_in_container(flags, ["doctor"], {"HARNESS_SANDBOX_IMAGE": self.image_reference(),
-                                                           "HARNESS_EGRESS_ALLOWLIST": EGRESS_ALLOWLIST})
+        flags, environment = self.restricted()
+        result = self.run_in_container(flags, ["doctor"], environment)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("ERROR", result.stdout)
+
+    def test_schema_work_starts_and_is_judged_in_the_sandbox_then_finishes_on_the_host(self):
+        flags, environment = self.restricted()
+        environment["HARNESS_ALLOW_PARALLEL_WIP"] = "1"
+        harness = ["python3", "-B", str(self.project / "scripts/harness/lib/harness.py")]
+
+        on_the_host = subprocess.run(harness + ["start", "7.2"], cwd=self.project, env=self.env, capture_output=True,
+                                     text=True)
+        started = self.run_in_container(flags, ["start", "7.2"], environment)
+        judged = self.run_in_container(flags, ["hook", "judge-stop"], environment,
+                                       input=stop_input("judge", SCHEMA_JUDGE_PASS))
+        finished = subprocess.run(harness + ["finish", "7.2"], cwd=self.project, env=self.env, capture_output=True,
+                                  text=True)
+
+        self.assertEqual(on_the_host.returncode, 1, on_the_host.stdout + on_the_host.stderr)
+        self.assertIn("at least container", on_the_host.stdout)
+        self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
 
 
 class Tamper(Sandbox):
