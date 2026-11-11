@@ -354,52 +354,71 @@ Every case fails closed: no work starts, and nothing is pushed or merged that th
 
 ## Implementation notes (2026-11-11)
 Follow-ups 1, 2, 3, 4 and 10, the ones Consequences requires before the factory takes real work, are built in the
-harness on branch `soyPeter/adr008-prereqs` (not merged). The Status stays Proposed: accepting the decision is the
-maintainer's call. The factory's runtime isn't in this repository, so each follow-up is tested from the harness's side
-only, through its commands, hooks and event log: `tests/test-factory-contract.py`, `test-no-merge-profile.py`,
-`test-task-budget.py`, `test-intake.py` and `test-external-delivery.py`.
+harness on branch `soyPeter/adr008-prereqs` (pull request #90), with the fixes an independent review of that pull
+request asked for. The Status stays Proposed: accepting the decision is the maintainer's call. The factory's runtime
+isn't in this repository, so each follow-up is tested from the harness's side only, through its commands, hooks and
+event log: `tests/test-factory-contract.py`, `test-no-merge-profile.py`, `test-task-budget.py`, `test-intake.py` and
+`test-external-delivery.py`.
 
 What was built, and where it reads this ADR one way among several:
 
 - **1, contract surface.** `contract --json` serves version 1. Besides the versions it declares the fields each answer
   of `next`, `state`, `receipt`, `escalations`, `intake` and `delivery-plan` always has, and the fields of each event
   kind, so the factory can check an engine before routing work to it; the tests pin version 1 against both the
-  declaration and the answers. `escalations --json` and `v` on every event as proposed. `outward` events cover a Bash
-  call the hooks let through that pushes, creates or edits a pull request or creates a label (logged before the call
-  runs, with the agent's role as `via`), and the GitHub issue, push, pull request and Linear comment the harness makes
-  itself; `gh pr comment` and `ci-protect` are not covered. The per-task lock is an OS lock in
-  `.git/harness/locks/`, taken by `run --only`; under `run --worktree` the child run in the worktree takes it.
+  declaration and the answers. `escalations --json` and `v` on every event as proposed. `outward` events are logged
+  by post-tool-use once a Bash call has run, with its `result`: a push, a pull request created or edited, a label
+  created or a GitHub API write, however it is spelled, with the agent's role as `via`; and the GitHub issue, push,
+  pull request and Linear comment the harness makes itself. `gh pr comment` and `ci-protect` are not covered. The
+  per-task lock is an OS lock in `.git/harness/locks/`, taken by every runner path: `run` with or without `--only`
+  (under `run --worktree`, the child run in the worktree), and `orca` for the tasks it drives.
 - **10, no-merge profile.** `HARNESS_PROFILE="no-merge"` has the refusals of `triple` and nothing else.
   `enroll --profile no-merge` refuses `--automation` but allows `--protect`, since requiring `harness-verify` is part
   of a project joining the factory (section 1).
 - **3, spend per task.** `HARNESS_TASK_BUDGET_USD` is read as the task's whole cap, not what remains of it: the ledger
   (`.git/harness/costs/task-<id>.jsonl`) holds what the task spent across runs and resumes, so the factory sets the
-  same value on every run of a task. Reaching it escalates the task (`budget`) and the run goes on with other tasks.
-  The proxy's refusal is recognised only while a budget is set, as a session that ends in an error naming HTTP 402 or
-  a budget, spend or cost cap; the proxy must refuse that way (assumed). It escalates `budget` and stops the run,
-  since the day's cap may refuse the next task too. The escalation's class is `permission_denied`. A session whose
-  agent reports no price (Codex) adds nothing, so the ledger is a floor; the proxy stays the enforcement point.
+  same value on every run of a task. Each session is reserved before it starts, for what remains of the budget, and
+  settled when it ends, so a session whose run was killed counts as all it could have spent. A ledger that can't be
+  read or written, or is corrupt, stops the task (`budget`) instead of reading as nothing. Reaching the cap escalates
+  the task (`budget`) and the run goes on with other tasks. The proxy's refusal is recognised only while a budget is
+  set, as an HTTP 402 in the agent's own error report; the proxy must refuse that way (assumed). It escalates
+  `budget` and stops the run, since the day's cap may refuse the next task too. The escalation's class is
+  `permission_denied`. A session whose agent reports no price (Codex) adds nothing, so the ledger is a floor; the
+  proxy stays the enforcement point.
 - **2, intake.** Task ids are `intake.<n>`. The dedupe index is in the shared git directory, with the Source sections
   of the checkout's specs as a fallback. An untrusted request is escalated (`intake`) at once and, once a person
   resolves that, its Source is a risk reason, so `approve` escalates it again and only a person's `Approved-by:` line
-  lets it start. The quoted text is escaped (headings, fences, HTML, comments, setext lines), and titles keep plain
-  characters only. That title rule now applies to `linear import` too: a ticket titled `... (light)` could put its
-  task on the light lane, and one with `- BLOCKED:` made it look blocked. The hooks refuse any change to a Source
-  section, `verify` refuses one in a range (unless the user approves it with `--allow-user-changes`), and the
-  analyst's instructions say to keep it. `linear import` trusts the ticket by default, since the user runs it; the
-  factory passes `--sender-verdict`.
+  lets it start. A Source section counts only with a `- Sender verdict:` line, and the heading is reserved. The quoted
+  text is escaped (headings, fences, HTML, comments, setext lines), and titles keep plain characters only. That title
+  rule now applies to `linear import` too: a ticket titled `... (light)` could put its task on the light lane, and
+  one with `- BLOCKED:` made it look blocked. The hooks refuse any change to a Source section, `verify` refuses one in
+  a range (unless the user approves it with `--allow-user-changes`), and the analyst's instructions say to keep it.
+  `linear import` trusts the ticket by default, since the user runs it; the factory passes `--sender-verdict`. The
+  user-only commands (`intake`, `delivery-record`, and `run`, `linear` and the others that were refused only in one
+  spelling before) are refused to agents however the engine is started, and `intake` and `linear import` leave the
+  out-of-band snapshot alone, so if an agent runs them anyway their writes show as tampering.
 - **4, delivery from a trusted clone.** The lane can't read the pull request's labels, so the factory passes them to
-  `delivery-plan` (`--pr-labels`) and gets the labels to add and remove. In external mode a deliverer that runs in the
-  lane anyway is refused its pushes, pull request calls and label creates, and its report isn't recorded: only
-  `delivery-record` writes the `deliver` event `next` reads. `harness.py orca` was not adapted: it leaves such a task
-  waiting at the deliver step and starts no deliverer.
+  `delivery-plan` (`--pr-labels`) and gets the labels to add and remove. `delivery-record` takes the trusted clone's
+  `verify` result and refuses a report whose verified head or range isn't the task's `HEAD`, or a `delivered` one
+  whose verify failed. In external mode no agent pushes, opens or edits a pull request or creates a label, and a
+  deliverer's report isn't recorded: only `delivery-record` writes the `deliver` event `next` reads. With
+  `HARNESS_DELIVERY_KEY`, a secret the factory sets for `delivery-record` and `next` only (`run` and `orca` drop it
+  before starting sessions), records are signed and `next` counts only signed ones. `harness.py orca` was not
+  otherwise adapted: it leaves such a task waiting at the deliver step and starts no deliverer.
+- **Agents write nothing in the git directory**, with the file tools or the shell, by a relative or an absolute path,
+  from the checkout or a linked worktree: the event log, the cost ledgers and the run locks live there.
+
+What remains open, plainly: the lane's agents can run code the hooks don't read (a test or a script they write and
+run). Such code can still append to the event log, change the cost ledger or delete a run lock in `.git/harness/`.
+Signed delivery records (`HARNESS_DELIVERY_KEY`) keep a forged delivery from counting, the out-of-band snapshot
+catches changes to `backbone/`, and the key proxy enforces spend whatever the ledger says; without the key, `next`
+trusts every delivery record, as it trusts the deliverer's own report today.
 
 Not built, and why:
 
 - Follow-ups 5 to 9 and 11: not among the prerequisites above, so left for their own changes.
 - The per-day cap and booking each call before it goes out: the key proxy's (section 2).
 - The factory's side of each step (the adapter that checks `contract`, the sender check, the proxy, the trusted
-  clone's fetch, verify, push and pull request calls) and the GitHub settings of section 6: they are not in this
-  repository.
+  clone's fetch, verify, push and pull request calls, keeping `HARNESS_DELIVERY_KEY`) and the GitHub settings of
+  section 6: they are not in this repository.
 - Intake de-duplication across clones: the index is per clone, and a fresh clone finds earlier intakes only through
   the Source sections its checkout holds. The factory's inbox drops repeats before intake.
