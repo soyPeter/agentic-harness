@@ -18,8 +18,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         python: ["3.10", "3.13"]
     runs-on: ${{ matrix.os }}
-    # The suite usually takes a few minutes; this bounds the intermittent stall.
-    timeout-minutes: 30
+    # The suite takes about 10 minutes on macOS; this bounds the intermittent stall and leaves room for a slow runner.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -29,3 +29,6 @@ jobs:
         run: python -m pip install -r tests/requirements.txt
       - name: Run the self-test
         run: tests/run-tests.sh
+        env:
+          # Properties that start a process per example run a quarter of their examples; nightly.yml runs them all.
+          HYPOTHESIS_PROFILE: ci

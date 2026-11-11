@@ -1,0 +1,33 @@
+# Runs the self-test every night with every property check at its full example count (the thorough Hypothesis
+# profile), the depth the pull request jobs trade for speed. It runs only on schedule or by hand, so it is never one
+# of a pull request's checks.
+name: nightly
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  thorough:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.10", "3.13"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install the test-only tools
+        run: python -m pip install -r tests/requirements.txt
+      - name: Run the self-test with every property example
+        run: tests/run-tests.sh
+        env:
+          HYPOTHESIS_PROFILE: thorough

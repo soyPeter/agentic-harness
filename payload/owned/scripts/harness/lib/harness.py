@@ -202,16 +202,54 @@ FENCE_RUN = re.compile(r"`{3,}|~{3,}")
 ATX_HEADING = re.compile(r"#{1,6}(?:[ \t]|$)")
 SETEXT_UNDERLINE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
 CONTAINER = re.compile(r"(?:>|(?:[-*+]|\d{1,9}[.)])(?=[ \t]|$))[ \t]*")
-HTML_START = re.compile(r"<(?!!--)[A-Za-z/!?]")
-HTML_PRE = re.compile(r"<(?:pre|script|style|textarea)(?=[\s>]|$)", re.I)
-HTML_PRE_END = re.compile(r"</(?:pre|script|style|textarea)>", re.I)
+# CommonMark's HTML blocks (types 1, 3, 4, 5: they end at the line holding their end condition, blank lines included;
+# types 6 and 7: they end at a blank line, and only 7 may not interrupt a paragraph). Type 2 is a comment, see
+# blank_comments_in_line.
+# '<!-->' and '<!--->' are whole comments (CommonMark 0.31), and a '-->' may share its dashes with the '<!--' before it:
+# the alternatives are tried in order, so each of these is matched whole and its '-->' is not missed.
+COMMENT_MARK = re.compile(r"<!--->|<!-->|<!--|-->")
+INLINE_COMMENT = re.compile(r"<!---?>|<!--.*?-->")
+HTML_BLOCKS = (
+    (re.compile(r"<(?:pre|script|style|textarea)(?=[ \t>]|$)", re.I),
+     re.compile(r"</(?:pre|script|style|textarea)>", re.I)),
+    (re.compile(r"<\?"), re.compile(r"\?>")),
+    (re.compile(r"<![A-Za-z]"), re.compile(r">")),
+    (re.compile(r"<!\[CDATA\["), re.compile(r"\]\]>")),
+)
+HTML_TAG_BLOCK = re.compile(
+    r"</?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|"
+    r"dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|"
+    r"menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|"
+    r"tr|track|ul)(?=[ \t>]|/>|$)", re.I)
+_ATTRIBUTE = r"[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*(?:[^\"'=<>`\x00-\x20]+|'[^']*'|\"[^\"]*\"))?"
+HTML_TAG_ALONE = re.compile(
+    r"(?:<[A-Za-z][A-Za-z0-9-]*(?:%s)*[ \t]*/?>|</[A-Za-z][A-Za-z0-9-]*[ \t]*>)[ \t]*$" % _ATTRIBUTE, re.I)
+# Indented code starts with 4 spaces or a tab, so anything else after 0-3 spaces is text, a non-breaking space included.
+PLAIN_INDENT = re.compile(r" {0,3}[^ \t]")
+THEMATIC_BREAK = re.compile(r" {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
 FENCE_REASON = ("the spec has a code fence indented 4 or more columns, or with a tab: keep fences at column 0, so every "
                 "reader ends them where the gates do")
 STRUCTURE_REASON = ("the spec has a heading or code fence that is indented, follows a list or quote marker, or sits in an "
                     "HTML block: keep headings and fences at column 0, outside HTML blocks")
+HTML_REASON = ("the spec has a tag alone on a line right after a list or quote paragraph or a link reference definition: "
+               "a reader may take it for text or for an HTML block; put a blank line before it")
+NESTED_HTML_REASON = ("the spec has an HTML block inside a list item or quote, or indented, that a reader may end where the "
+                      "item or quote ends: start a pre, script, style or textarea block, a '<?', a '<!' declaration or a "
+                      "CDATA block at column 0, and put a blank line after an indented tag")
 SETEXT_REASON = "the spec has a setext heading (text over a line of = or -): write headings as '## Title'"
-COMMENT_REASON = ("the spec has an HTML comment a reader may not end where the gates do: a comment that starts after text, "
-                  "or 4 or more columns in, must close on its own line")
+LINE_BREAK_REASON = ("the spec has a line break character a reader may take for a line end (a vertical tab, form feed, NEL, "
+                     "or a Unicode line or paragraph separator): remove it")
+UNUSUAL_SPACE_REASON = ("the spec has an unusual space or control character on a line with a tag, heading or fence: use a "
+                        "plain space or tab there")
+LINE_BREAKS = re.compile(r"[\x0b\x0c\x1c-\x1e\x85\u2028\u2029]")
+UNUSUAL_SPACES = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\xa0\u1680\u2000-\u200f\u2028\u2029\u202f\u205f\u2060\u3000\ufeff]")
+# A backtick or tilde matters only in a fence marker; inline code may hold any space.
+STRUCTURE_CHARS = re.compile(r"[<#]|^[^A-Za-z`~]*(?:`{3}|~{3})")
+# A paragraph starting like this may be a link reference definition, which is no paragraph to CommonMark: a tag alone on
+# the next line may start an HTML block.
+LINK_DEFINITION_START = re.compile(r" {0,3}\[")
+COMMENT_REASON = ("the spec has an HTML comment a reader may not end where the gates do: a comment that doesn't start at "
+                  "column 0 must close on its own line")
 USER_APPROVED_CLASSES = ("feature", "schema")
 CLASS_GATES = {
     "docs": "policy may approve it when nothing is risky; a change to anything but documentation is a risk",
@@ -452,28 +490,58 @@ def slug(text):
     return re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-.")[:60] or "task"
 
 
+def line_endings(text):
+    """text with CRLF and lone CR line ends read as LF, which is how a Markdown reader reads them and how read() loads
+    a file. A hook must compare and parse proposed text in this form too."""
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def blank(text):
     """text with every character but its line breaks replaced by a space, so an offset in it is one in text."""
     return re.sub(r"[^\n]", " ", text)
 
 
+def blank_line(line):
+    """CommonMark's blank line: spaces and tabs only. str.strip() also takes a non-breaking space, which is text."""
+    return line.strip(" \t") == ""
+
+
+def blank_text(text):
+    return text.strip(" \t\r\n") == ""
+
+
+def character_reason(body, fenced):
+    """Why a line's characters could be read differently from the gates, or ''. A line break a reader or splitlines takes
+    for one is refused anywhere. An unusual space or control character is refused beside a tag, heading or fence, where
+    a reader would start a block, and is ordinary text elsewhere."""
+    if LINE_BREAKS.search(body):
+        return LINE_BREAK_REASON
+    if not fenced and UNUSUAL_SPACES.search(body) and STRUCTURE_CHARS.search(body):
+        return UNUSUAL_SPACE_REASON
+    return ""
+
+
 def blank_comments_in_line(line, inside):
     """(line with its HTML comment text blanked, whether a comment is still open at its end, whether a comment on the
-    line is one a reader may not end where the gates do). A comment that starts a line at 0-3 spaces runs to its '-->',
-    across lines, as a Markdown HTML block does. One that starts after text, or 4 or more columns in, must close on its
-    line: a reader would take it for an inline comment that ends with its paragraph, or for code. A '<!--' inside a
-    comment opens nothing."""
+    line is one a reader may not end where the gates do). A comment that starts at column 0 runs to its '-->', across
+    lines, as a Markdown HTML block does; '<!-->' and '<!--->' are whole comments. Any other comment must close on its
+    line: after text a reader takes it for an inline comment that ends with its paragraph, indented for one in a list
+    item that ends with the item, or for code. A '<!--' inside a comment opens nothing."""
     pieces, pos, ambiguous, must_close = [], 0, False, False
-    for m in re.finditer(r"<!--|-->", line):
-        if inside and m.group(0) == "-->":
+    for m in COMMENT_MARK.finditer(line):
+        if inside and m.group(0).endswith("-->"):
             pieces.append(blank(line[pos:m.end()]))
             pos, inside, must_close = m.end(), False, False
-        elif not inside and m.group(0) == "<!--":
+        elif not inside and m.group(0).startswith("<!--"):
             lead = line[:m.start()]
-            pieces.append(lead)
-            pos, inside = m.start(), True
+            pieces.append(line[pos:m.start()])
             ambiguous = ambiguous or (lead.strip() == "" and not re.fullmatch(r" {0,3}", lead))
-            must_close = not re.fullmatch(r" {0,3}", lead)
+            if m.group(0) == "<!--":
+                pos, inside = m.start(), True
+                must_close = lead != ""
+            else:
+                pieces.append(blank(m.group(0)))
+                pos = m.end()
     pieces.append(blank(line[pos:]) if inside else line[pos:])
     return "".join(pieces), inside, ambiguous or (inside and must_close)
 
@@ -492,47 +560,102 @@ def block_start(body):
         rest, nested = rest[m.end():], True
 
 
+def setext_underline(body):
+    """Whether body, or what it holds after any of its list and quote markers, is a setext underline. A lone '-' after
+    paragraph text is an underline, not an empty list item, since an empty item may not interrupt a paragraph."""
+    rest = body
+    while not (SETEXT_UNDERLINE.match(rest) or SETEXT_UNDERLINE.match(rest.lstrip(" \t"))):
+        m = CONTAINER.match(rest.lstrip(" \t"))
+        if not m:
+            return False
+        rest = rest.lstrip(" \t")[m.end():]
+    return True
+
+
+def html_block(rest, interrupts):
+    """How a line whose text (after its indentation) is rest opens an HTML block: the pattern its block ends at, 'blank'
+    for a block a blank line ends, or None when it opens none. interrupts: the line directly follows paragraph text."""
+    for start, end in HTML_BLOCKS:
+        if start.match(rest):
+            return end
+    if HTML_TAG_BLOCK.match(rest):
+        return "blank"
+    if not interrupts and HTML_TAG_ALONE.match(rest):
+        return "blank"
+    return None
+
+
 def scan_lines(text):
     """(line, fenced, commentless, reason) for each line of text, read the way Markdown reads its blocks. A fence opens
     at column 0 and closes with a run of its character, at least as long, at 0-3 spaces with nothing after it. A comment
     doesn't open inside a fence, and a fence marker inside a comment opens nothing. fenced: the line is a fence or in one.
     commentless: the line with its comment text blanked, code kept. reason: why a reader could read the line differently
     from the gates, or ''. Only column-0 headings and fences are read: an indented one, one after a list or quote marker,
-    one in an HTML block and a setext heading are refused, since Markdown may read them as text or code. An HTML block
-    runs to a blank line, or to its closing tag for pre, script, style and textarea."""
-    fence, comment, html, prev_text = None, False, None, False
+    one in an HTML block and a setext heading are refused, since Markdown may read them as text or code. HTML blocks
+    start and end as html_block says; one a reader may end with its list item or quote is refused unless it ends on its
+    line or at the blank line after it. A line break or an unusual space or control character a reader may read differently
+    is refused too (character_reason)."""
+    fence, comment, html, prev_text, prev_doubtful, loose_html, prev_code = None, False, None, False, False, False, False
     for line in re.findall(r"[^\n]*\n|[^\n]+\Z", text or ""):
         body = line.rstrip("\r\n")
         if fence is not None:
             wide = WIDE_FENCE.match(body)
             close = FENCE_CLOSE.match(body)
-            yield line, True, line, FENCE_REASON if wide and closes_fence(wide.group(1), fence) else ""
+            yield line, True, line, character_reason(body, True) or (
+                FENCE_REASON if wide and closes_fence(wide.group(1), fence) else "")
             if close and closes_fence(close.group(1), fence):
                 fence = None
-            prev_text = False
+            prev_text = prev_code = False
             continue
-        if html == "blank" and not body.strip():
-            html = None
+        in_html = html is not None
+        if html == "blank" and blank_line(body):
+            html, in_html = None, False
         rest, nested = block_start(body)
-        off_column = nested or body[:1] in (" ", "\t") or html is not None
+        off_column = nested or body[:1] in (" ", "\t") or in_html
         reason = ""
         if not comment and off_column and (FENCE_RUN.match(rest) or ATX_HEADING.match(rest)):
             reason = STRUCTURE_REASON
-        elif not comment and prev_text and SETEXT_UNDERLINE.match(body):
+        # Indented code after a list item may be the item's text instead, which an underline makes a heading.
+        elif not comment and (prev_text or prev_code) and setext_underline(body):
             reason = SETEXT_REASON
+        elif not comment and not in_html and prev_text and prev_doubtful and not nested and HTML_TAG_ALONE.match(rest):
+            reason = HTML_REASON
+        reason = character_reason(body, False) or reason
+        if loose_html and not blank_line(body):
+            reason = reason or NESTED_HTML_REASON
+        loose_html = False
         opening = None if comment or reason or off_column else FENCE_OPEN.match(body)
         if opening and not ("`" in opening.group(2) and opening.group(1)[0] == "`"):
             fence = opening.group(1)
             yield line, True, line, ""
-            prev_text = False
+            prev_text = prev_code = False
             continue
-        if not comment and not reason and html is None and HTML_START.match(rest):
-            html = "pre" if HTML_PRE.match(rest) else "blank"
-        commentless, comment, ambiguous = blank_comments_in_line(line, comment)
-        if html == "pre" and HTML_PRE_END.search(body):
+        started = None
+        if not comment and not reason and not in_html and PLAIN_INDENT.match(body):
+            started = html_block(rest, prev_text or nested)
+        # A block in a list item or quote ends with the item or quote, so it isn't carried to the next line: that line is
+        # in the container too, nested or indented and refused wherever it matters, or past the container's end. An
+        # indented block may be in a list item, or not: only a blank line after it ends it in both readings.
+        if started is not None and (nested or body[:1] == " ") and started != "blank":
+            reason = NESTED_HTML_REASON
+        elif started is not None and not nested:
+            html, loose_html = started, body[:1] == " "
+        block_comment = comment or bool(PLAIN_INDENT.match(body) and body.lstrip(" ").startswith("<!--"))
+        if (in_html or started is not None) and not comment:
+            commentless, ambiguous = line, False
+        else:
+            commentless, comment, ambiguous = blank_comments_in_line(line, comment)
+        if html not in (None, "blank") and html.search(body):
             html = None
         yield line, False, commentless, COMMENT_REASON if ambiguous else reason
-        prev_text = bool(body.strip()) and not ATX_HEADING.match(body)
+        code = not prev_text and not blank_line(body) and not PLAIN_INDENT.match(body)
+        # Only '---' after text is a setext underline (refused above); '***' and '___' end the paragraph.
+        thematic = bool(THEMATIC_BREAK.match(body))
+        doubtful = nested or (not prev_text and LINK_DEFINITION_START.match(body))
+        prev_text = (not blank_line(body) and not ATX_HEADING.match(body) and not in_html and started is None
+                     and not code and not block_comment and not thematic)
+        prev_doubtful = prev_text and bool(doubtful or prev_doubtful)
+        prev_code = code
 
 
 def comment_free(text):
@@ -702,13 +825,13 @@ def adr_file(adr_id):
 
 
 def adr_status(text):
-    lines = [line.strip() for line in (md_section(text, "Status") or "").splitlines() if line.strip()]
+    lines = [line.strip() for line in (md_section(text, "Status") or "").splitlines() if not blank_line(line)]
     return lines[0] if lines else ""
 
 
 def validate_adr(text, name):
     problems = ["%s: section '## %s' is missing or empty" % (name, title)
-                for title in ADR_SECTIONS if not (md_section(text, title) or "").strip()]
+                for title in ADR_SECTIONS if blank_text(md_section(text, title) or "")]
     return problems + stubs(name, comment_free(text))
 
 
@@ -718,7 +841,7 @@ def approval_heading_problem(text):
     and the freeze don't end."""
     for line, fenced, commentless, _ in scan_lines(text):
         body = line.rstrip("\r\n")
-        if not (APPROVAL_HEADING.match(body) or APPROVAL_HEADING.match(re.sub(r"<!--.*?-->", "", body))):
+        if not (APPROVAL_HEADING.match(body) or APPROVAL_HEADING.match(INLINE_COMMENT.sub("", body))):
             continue
         if not fenced and APPROVAL_HEADING.match(commentless.rstrip("\r\n")):
             continue
@@ -770,7 +893,7 @@ def top_level_items(section):
     for line in (section or "").splitlines():
         if re.match(r"^[-*]\s+\S", line):
             items.append(re.sub(r"^[-*]\s+", "", line).strip())
-        elif items and line.strip():
+        elif items and not blank_line(line):
             items[-1] += " " + line.strip()
     return items
 
@@ -904,7 +1027,7 @@ def class_label(text):
 
 def validate_spec(task, text=None):
     text = read(spec_path(task)) if text is None else text
-    if not text.strip():
+    if blank_text(text):
         return ["no spec at %s (the analyst agent writes it)" % spec_rel(task)]
     body = comment_free(text)
     problems = []
@@ -2642,6 +2765,7 @@ def judge_gate(before, after):
 def spec_guard(before, after):
     """Approval lines are the user's alone, and an approved spec is frozen. Approval lines are read from outline(), the
     text approved() reads, so a line that only a comment hides is no way round it."""
+    before, after = line_endings(before), line_endings(after)
     if approval_lines(outline(before)) != approval_lines(outline(after)) or approved(before) != approved(after):
         return "  - Only the user may add, change or remove 'Approved-by:' lines."
     if approved(before) and frozen_text(before) != frozen_text(after):
@@ -2907,7 +3031,7 @@ def attested_task(task, commits, tip):
         "title": task_title(task),
         "finishedIn": finished_in,
         "spec": {"path": spec_rel(task),
-                 "fingerprint": spec_fingerprint(task, spec_text) if spec_text.strip() else None,
+                 "fingerprint": spec_fingerprint(task, spec_text) if not blank_text(spec_text) else None,
                  "approval": approval_lines(md_section(spec_text, "Approval") or "")},
         "changeClass": {"class": cls, "declared": declared, "problem": problem},
         "grill": verdict_brief(verdict_history(task, "grill")),
@@ -3839,20 +3963,20 @@ def deny(reason, kind="block"):
 
 def added_text(tool, tool_input):
     if tool == "Write":
-        return tool_input.get("content") or ""
+        return line_endings(tool_input.get("content"))
     if tool == "Edit":
-        return tool_input.get("new_string") or ""
-    return "\n".join((edit or {}).get("new_string") or "" for edit in tool_input.get("edits") or [])
+        return line_endings(tool_input.get("new_string"))
+    return "\n".join(line_endings((edit or {}).get("new_string")) for edit in tool_input.get("edits") or [])
 
 
 def resulting_text(tool, tool_input, path_str):
     if tool == "Write":
-        return tool_input.get("content") or ""
+        return line_endings(tool_input.get("content"))
     path = Path(path_str)
     current = read(path if path.is_absolute() else ROOT / path)
     edits = [tool_input] if tool == "Edit" else (tool_input.get("edits") or [])
     for edit in edits:
-        old, new = edit.get("old_string") or "", edit.get("new_string") or ""
+        old, new = line_endings(edit.get("old_string")), line_endings(edit.get("new_string"))
         if not old:
             continue
         current = current.replace(old, new) if edit.get("replace_all") else current.replace(old, new, 1)
@@ -4376,13 +4500,45 @@ GIT_EXEC_REFUSAL = "--exec, --upload-pack and --receive-pack run a command the h
 PUSH_ALL_REFUSAL = "--all and --mirror push every branch, the default one included: push the branch by name."
 PUSH_DEFAULT_REFUSAL = ("it pushes only its own branch; the default branch changes through the PR, when the user "
                         "merges it.")
+PUSH_AFTER_SWITCH_REFUSAL = ("it doesn't push in a command that changes the branch (git checkout, switch): the harness "
+                             "checks a push against the branch the checkout is on now. Push in a command of its own.")
+REBASE_BRANCH_REFUSAL = ("git rebase with a branch argument checks that branch out first, and fast-forwards it: the "
+                         "deliverer rebases only its own branch onto an upstream (git rebase origin/main).")
+INTERACTIVE_REBASE_REFUSAL = ("an interactive rebase (-i, --interactive, --edit-todo, pull --rebase=interactive) waits "
+                              "for an editor the deliverer can't drive: rebase with no -i (git rebase origin/main).")
+# Short flags that take the rest of their cluster as a value, so an i after them is that value, not -i.
+REBASE_VALUE_FLAGS = {"rebase": "sXxCS", "pull": "sXjSo"}
 COPY_PROGRAMS = ("ln", "link", "cp", "mv", "install", "rsync", "ditto", "hash")
 CODE_PROGRAMS = ("awk", "gawk", "mawk", "nawk", "sed", "osascript", "fish", "csh", "tcsh", "tclsh", "pwsh", "lua", "php",
-                 "expect", "busybox")
+                 "expect", "busybox", "jshell", "jrunscript", "Rscript", "julia", "runghc", "scala", "groovy", "swift",
+                 "ed", "ex", "vi", "vim", "nvim", "emacs", "less", "more", "man")
+# pytest loads any module as a plugin (-p code) and imports the conftest.py files it finds.
+TEST_RUNNERS = ("pytest", "py.test")
 LATER_PROGRAMS = ("coproc", "trap")
-INLINE_CODE = re.compile(r"^-(?!-)[A-Za-z]*[cepEmi]|^--(eval|print|command|interactive)$")
+RUNTIMES = re.compile(r"(?:python|perl|ruby|node|nodejs|bun|deno|tsx|ts-node)[\d.]*")
+# uv, pipx and poetry run a package, a script or an interpreter with whatever arguments follow.
+REGISTRY_RUNNERS = ("npx", "bunx", "pnpx", "uvx", "uv", "pipx", "poetry")
+PACKAGE_MANAGERS = ("npm", "pnpm", "yarn", "bun", "deno")
+REGISTRY_SUBCOMMANDS = ("x", "exec", "dlx", "create", "eval", "repl")
+MAKE_LIKE = ("make", "gmake", "just", "task", "ninja")
+# Build and task files a tool reads from the working directory as code, when a command writes one of them.
+IMPLICIT_READERS = MAKE_LIKE + ("npm", "pnpm", "yarn", "bun", "deno")
+VERSION_FLAGS = ("--version", "-V", "--help", "-h")
+# Node's and Bun's -v is their version; Python's and Ruby's is verbose mode, which then reads stdin.
+SHORT_VERSION_FLAG = ("node", "nodejs", "bun", "deno", "perl")
+INLINE_CODE = re.compile(r"^-(?!-)[A-Za-z]*[cepEmi]|^--(eval|print|command|interactive)(=|$)")
+PERL_MODULE = re.compile(r"[A-Za-z_][\w:]*(?:=[\w.,:/+-]*)?")
+# A URL, a registry or JSR package, or a data: URL is code from outside the repo.
+URL_WORD = re.compile(r"data:|://|^(npm|jsr):")
+# A stdin path or a file descriptor a program reads a file from: -, /dev/stdin, /dev/fd/N, /proc/self/fd/N.
+STDIN_FILE = re.compile(r"(?:^|=|-[A-Za-z])(?:/dev/stdin|/dev/fd/\d+|/proc/self/fd/\d+|-)$")
+WRITE_REDIRECTION = re.compile(r"(?:&>>?|>>?\|?)\s*")
+# The options that name the file a download writes.
+OUTPUT_OPTIONS = {"curl": ("-o", "--output"), "wget": ("-O", "--output-document")}
 SYSTEM_PREFIXES = ("/usr/", "/bin/", "/sbin/", "/opt/", "/Library/", "/System/", "/Applications/", "/nix/")
 GITHUB_REPO = re.compile(r"github\.com[/:]([^/\s]+/[^/\s#?]+?)(?:\.git)?(?:[/#?\s]|$)")
+# The git commands that change which branch HEAD names, so a push after one pushes a branch the gate didn't check.
+BRANCH_CHANGES = ("checkout", "switch", "symbolic-ref", "bisect", "worktree")
 REF_COMMANDS = ("checkout", "switch", "merge", "rebase", "reset", "branch", "fetch", "pull", "update-ref",
                 "symbolic-ref", "restore", "cherry-pick", "revert", "am", "worktree", "push")
 # Matched on command_view, the command without a PR's title and body. Heredoc bodies stay in the text, so a merge named
@@ -4398,8 +4554,24 @@ COPY_REFUSAL = ("it copies or links a program, which can run gh or git under ano
 CODE_REFUSAL = ("%s runs the code or commands its arguments name, which the harness doesn't read; the deliverer runs no "
                 "%s.")
 LATER_REFUSAL = "%s runs a command later, which the harness doesn't read; run the command where it's written."
-INLINE_REFUSAL = "%s runs code from its arguments (-c, -e, -p, -m, -i), which the harness doesn't read: run a script file."
+INLINE_REFUSAL = "%s runs code from its arguments (-c, -e, -p, -i), which the harness doesn't read: run a script file."
 STDIN_REFUSAL = "%s reads its code from stdin, which the harness doesn't read: run a script file."
+MODULE_REFUSAL = ("%s runs a module that can run any code it's given (pty and pdb run what they're given, unittest "
+                  "imports what it names, pytest loads any plugin): the deliverer runs no tests and no modules.")
+PERL_MODULE_REFUSAL = "perl -M runs the code its argument holds, which the harness doesn't read: name a module."
+URL_REFUSAL = ("%s loads code from a URL, a package or a data: URL, which the harness doesn't read: run a script file "
+               "in the repo.")
+REGISTRY_REFUSAL = ("%s runs a package from the registry, or the code its arguments hold, which the harness doesn't "
+                    "read: the deliverer runs no packages.")
+JAVA_REFUSAL = ("java --source, or - for its code, runs Java the harness doesn't read: run a compiled class or a jar "
+                "the repo has.")
+GO_REFUSAL = ("go run -exec runs a command, and a stdin, /dev/ path, module@version or URL runs code from outside the "
+              "repo: run a .go file or a package the repo has.")
+MAKE_REFUSAL = "%s reads its file from stdin or from an expansion, which the harness doesn't read: name a file the repo has."
+WRITES_RUN_REFUSAL = ("the command writes %s and runs %s: the harness reads what the command writes as text, not what "
+                      "it runs; that's the user's call.")
+IMPLICIT_RUN_REFUSAL = ("the command writes %s and runs %s, which reads its build or test files as code: the harness "
+                        "can't read what they run.")
 PATH_REFUSAL = ("it runs %s by path: the deliverer runs gh, git and the shell by name, and a program from a system "
                 "directory; a file it wrote itself can be another program.")
 NAME_REFUSAL = "it runs a gh or git binary under another name, which the harness reads by the name it's given."
@@ -4678,31 +4850,98 @@ def real_name(prog):
     return os.path.basename(os.path.realpath(path)) if path else ""
 
 
+def first_operand(words):
+    """The first word that isn't an option, or ""."""
+    return next((w for w in words if not w.startswith("-")), "")
+
+
+def value_options(base):
+    """The options a runtime takes a separate value for: read as the value, not as the script."""
+    if base.startswith("python"):
+        return ("-W", "-X")
+    if base.startswith("perl"):
+        return ("-I",)
+    if base.startswith("ruby"):
+        return ("-I", "-r", "-C", "-E")
+    if base.startswith("deno"):
+        return ("--import-map", "--config", "-L", "--lock", "--env-file")
+    if base.startswith("bun"):
+        return ("--preload", "-r", "--conditions", "--env-file")
+    return ("-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type",
+            "--env-file", "--title")
+
+
+def interpreter_refusal(base, rest):
+    """Why a runtime's arguments run code the harness doesn't read, or "": inline code (-c, -e, -p, -i), a module other
+    than the test runners, code from stdin, a URL or data: URL, or a perl -M argument that holds code. A version or
+    help flag alone runs nothing; a script file is read by its name."""
+    short = base.startswith(SHORT_VERSION_FLAG)
+    if len(rest) == 1 and rest[0] in VERSION_FLAGS + (("-v",) if short else ()):
+        return ""
+    value_flags, k = value_options(base), 0
+    while k < len(rest) and rest[k].startswith("-") and rest[k] != "-":
+        word = rest[k]
+        if base.startswith("python") and re.match(r"-[A-Za-z]*m", word):
+            return MODULE_REFUSAL % (base + " -m")
+        if base.startswith("perl") and word[:2] in ("-M", "-m"):
+            value = word[2:] or (rest[k + 1] if k + 1 < len(rest) else "")
+            if not PERL_MODULE.fullmatch(value):
+                return PERL_MODULE_REFUSAL
+            k += 1 if len(word) > 2 else 2
+            continue
+        if INLINE_CODE.match(word):
+            return INLINE_REFUSAL % base
+        if URL_WORD.search(word):
+            return URL_REFUSAL % base
+        if word in value_flags:
+            if k + 1 < len(rest) and URL_WORD.search(rest[k + 1]):
+                return URL_REFUSAL % base
+            k += 2
+            continue
+        k += 1
+    if k >= len(rest) or STDIN_FILE.search(rest[k]) or REDIRECTION.match(rest[k]):
+        return STDIN_REFUSAL % base
+    if URL_WORD.search(rest[k]):
+        return URL_REFUSAL % base
+    return ""
+
+
 def program_refusal(words):
     """Why the deliverer may not run the program a segment runs, or "": a program that copies or links another, runs
-    code or commands from its arguments or stdin, runs a command later, or runs gh or git by a path or name that isn't
-    theirs."""
+    code or commands from its arguments or stdin, a registry package, a make-style tool reading stdin, runs a command
+    later, or runs gh or git by a path or name that isn't theirs."""
     at = program_index(words)
     if at >= len(words):
         return ""
     prog = words[at]
     base = prog.rsplit("/", 1)[-1]
+    rest = words[at + 1:]
     if base in COPY_PROGRAMS:
         return COPY_REFUSAL
+    if base in TEST_RUNNERS:
+        return MODULE_REFUSAL % base
     if base in CODE_PROGRAMS:
         return CODE_REFUSAL % (base, base)
     if base in LATER_PROGRAMS:
         return LATER_REFUSAL % base
-    if base in INTERPRETERS:
-        rest = words[at + 1:]
-        k = 0
-        while k < len(rest) and rest[k].startswith("-") and rest[k] != "-":
-            if INLINE_CODE.match(rest[k]):
-                return INLINE_REFUSAL % base
-            k += 1
-        if k >= len(rest) or rest[k] == "-" or REDIRECTION.match(rest[k]):
-            return STDIN_REFUSAL % base
-    if "/" in prog and (base not in ("gh", "git") + SHELLS + INTERPRETERS
+    if base in REGISTRY_RUNNERS or (base in PACKAGE_MANAGERS and first_operand(rest) in REGISTRY_SUBCOMMANDS):
+        return REGISTRY_REFUSAL % base
+    if base in MAKE_LIKE and any(w == "-" or STDIN_FILE.search(w) or re.search(r"[$`]|^[<>]\(", w) for w in rest):
+        return MAKE_REFUSAL % base
+    if base == "java" and ("-" in rest or any(w == "--source" or w.startswith("--source=") for w in rest)):
+        return JAVA_REFUSAL
+    if base == "go" and "run" in rest:
+        after = rest[rest.index("run") + 1:]
+        if any(w in ("-exec", "--exec") or w.startswith(("-exec=", "/dev/", "--exec=")) or w == "-" or "@" in w
+               or "://" in w for w in after):
+            return GO_REFUSAL
+    if RUNTIMES.fullmatch(base):
+        if base.startswith(("bun", "deno")) and first_operand(rest) == "run":
+            rest = rest[rest.index("run") + 1:]
+        why = interpreter_refusal(base, rest)
+        if why:
+            return why
+    if "/" in prog and ((base not in ("gh", "git") + SHELLS and not RUNTIMES.fullmatch(base))
                         or not os.path.realpath(prog).startswith(SYSTEM_PREFIXES)):
         return PATH_REFUSAL % prog
     real = real_name(prog)
@@ -4711,11 +4950,58 @@ def program_refusal(words):
     return ""
 
 
+ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.S)
+ANSI_C_ESCAPE = re.compile(r"\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|[0-7]{1,3}|.)", re.S)
+ANSI_C_SIMPLE = {"a": " ", "b": " ", "e": " ", "E": " ", "f": " ", "n": " ", "r": " ", "t": " ", "v": " "}
+# A heredoc whose body is a PR's body or a commit message, which the shell reads as text.
+TEXT_BODY_FILE = re.compile(r"\bgh\s+(?:-\S+\s+)*pr\s+(?:create|new|edit)\b.*--body-file(?:=|\s+)-(?=\s|$)"
+                            r"|\bgit\b.*\bcommit\b.*(?:-[A-Za-z]*F|--file)(?:=|\s+)-(?=\s|$)")
+
+
+def decode_ansi_c(match):
+    key = match.group(1)
+    if len(key) > 1 and key[0] in "xu":
+        return chr(int(key[1:], 16))
+    if key[0] in "01234567":
+        return chr(int(key, 8))
+    return ANSI_C_SIMPLE.get(key, key)
+
+
+def ansi_c_view(command):
+    """The command with each $'...' string read as the characters its escapes name: a \\t or \\n is a blank, so a
+    command after one is a word of its own."""
+    return ANSI_C.sub(lambda m: ANSI_C_ESCAPE.sub(decode_ansi_c, m.group(1)), command)
+
+
+def text_bodies_removed(command):
+    """The command with the bodies of heredocs that carry a PR's body (--body-file -) or a commit message (-F -) taken
+    out. The opening line stays, so a call on it is still read."""
+    lines, out, i = command.split("\n"), [], 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        match = HEREDOC.search(line)
+        if match and TEXT_BODY_FILE.search(line):
+            while i < len(lines) and lines[i].strip() != match.group(2):
+                i += 1
+    return "\n".join(out)
+
+
 def command_view(command):
-    """The command with a PR's title and body taken out: the text of gh pr create and edit is text, not a call."""
-    if not re.search(r"\bgh\s+(?:-\S+\s+)*pr\s+(?:create|new|edit)\b", command):
-        return command
-    return PR_TEXT_VALUE.sub("", command)
+    """The command as the text check reads it: its $'...' strings decoded, a PR's title and body and a commit message
+    taken out, and the bodies of heredocs that carry a PR body or commit message removed. The text of these is text,
+    not calls."""
+    view = text_bodies_removed(ansi_c_view(command))
+    if re.search(r"\bgh\s+(?:-\S+\s+)*pr\s+(?:create|new|edit)\b", view):
+        view = PR_TEXT_VALUE.sub("", view)
+    parts = []
+    for segment, op in split_segments(view):
+        _, words = shell_words(segment)
+        if program(words) == "git" and "commit" in words[1:]:
+            segment = COMMIT_MESSAGE.sub(lambda m: m.group(1) + "''", segment)
+        parts.append(segment + op)
+    return "".join(parts)
 
 
 def gh_parts(words):
@@ -4954,6 +5240,31 @@ def names_default(word, targets):
     return False
 
 
+def writes_default(word, targets):
+    """Whether a refspec's destination (src:dst) is the default branch, or a wildcard that could be (+main:refs/heads/main,
+    refs/heads/*:refs/heads/*). A source alone writes nothing."""
+    if ":" not in word:
+        return False
+    dst = word.lstrip("+").split(":", 1)[1]
+    if "*" in dst:
+        return True
+    for prefix in ("refs/heads/", "heads/"):
+        if dst.startswith(prefix):
+            dst = dst[len(prefix):]
+            break
+    return dst in targets
+
+
+def git_subcommand(words):
+    """The subcommand of a git call, past git's own options, or None."""
+    if program(words) != "git":
+        return None
+    i = 1
+    while i < len(words) and words[i].startswith("-"):
+        i += 2 if words[i] == "-C" else 1
+    return words[i] if i < len(words) else None
+
+
 def git_refusal(segment, words, targets, on_default):
     """Why the deliverer may not run this git call, or None. git runs the commands its configuration names, and a ref
     command may move the default branch, by name or by the branch it's on."""
@@ -4978,6 +5289,16 @@ def git_refusal(segment, words, targets, on_default):
     if sub in REF_COMMANDS:
         if "$" in segment or "`" in segment:
             return GIT_EXPANSION_REFUSAL
+        if sub in ("fetch", "pull", "rebase"):
+            if on_default and sub in ("pull", "rebase"):
+                return DEFAULT_BRANCH_REFUSAL
+            if sub in ("pull", "rebase") and interactive_rebase(sub, rest):
+                return INTERACTIVE_REBASE_REFUSAL
+            if sub == "rebase" and rebase_branch(rest):
+                return REBASE_BRANCH_REFUSAL
+            if any(writes_default(w, targets) for w in rest if not w.startswith("-")):
+                return DEFAULT_BRANCH_REFUSAL
+            return None
         for word in rest:
             if word == "-" or "@{-" in word:
                 return DEFAULT_BRANCH_REFUSAL
@@ -4993,6 +5314,87 @@ def git_refusal(segment, words, targets, on_default):
     return None
 
 
+def interactive_rebase(sub, rest):
+    """Whether a git rebase or pull rebases interactively, however git reads the flag: an unambiguous prefix of the long
+    option (--inter), a short flag in a cluster (-ki), or pull's --rebase value (--reb=i, -ri)."""
+    for word in rest:
+        if word == "--":
+            break
+        name, _, value = word.partition("=")
+        if sub == "rebase" and ((name.startswith("--in") and "--interactive".startswith(name))
+                                or (name.startswith("--edi") and "--edit-todo".startswith(name))):
+            return True
+        if sub == "pull" and name.startswith("--reb") and "--rebase".startswith(name) and value in ("i", "interactive"):
+            return True
+        if word.startswith("-") and not word.startswith("--"):
+            for at, letter in enumerate(word[1:], 1):
+                if sub == "rebase" and letter == "i":
+                    return True
+                if sub == "pull" and letter == "r":
+                    return word[at + 1:] in ("i", "interactive")
+                if letter in REBASE_VALUE_FLAGS[sub]:
+                    break
+    return False
+
+
+def rebase_branch(rest):
+    """Whether a git rebase names the branch to rebase (git rebase <upstream> <branch>, --root <branch>), which it
+    checks out first."""
+    operands, i = [], 0
+    while i < len(rest):
+        word = rest[i]
+        if word in ("--onto", "-s", "--strategy", "-X", "--strategy-option", "-x", "--exec", "-C"):
+            i += 2
+            continue
+        if not word.startswith("-"):
+            operands.append(word)
+        i += 1
+    return len(operands) > ("--root" not in rest)
+
+
+def written_files(command):
+    """The names of the files a command writes: redirection targets, tee's files, the last operand of cp, mv, install
+    and ln, dd's of= and a download's -o or -O. Each is read as the shell reads it (quotes and backslashes removed),
+    by its last path component. A /dev/ path, a file descriptor and stdout aren't files."""
+    kept = split_heredocs(command)[0]
+    paths = []
+    for segment, _ in split_segments(kept):
+        for match in WRITE_REDIRECTION.finditer(segment):
+            target = shell_split(segment[match.end():])[:1]
+            paths += [re.split(r"[<>()]", target[0])[0]] if target else []
+        words = run_words(shell_split(segment))[0]
+        words = words[program_index(words):]
+        prog = program(words)
+        if prog == "tee":
+            paths += [w for w in words[1:] if not w.startswith("-")]
+        elif prog in ("cp", "mv", "install", "ln") and len(words) > 2:
+            paths.append(words[-1])
+        elif prog == "dd":
+            paths += [w[3:] for w in words[1:] if w.startswith("of=")]
+        elif prog in OUTPUT_OPTIONS:
+            flags = gh_flags(words[1:], OUTPUT_OPTIONS[prog])[0]
+            paths += [value for name, value in flags if name in OUTPUT_OPTIONS[prog]]
+    return {os.path.basename(os.path.normpath(p)) for p in paths if p and not p.startswith(("/dev/", "&", "-"))}
+
+
+def written_run_refusal(words, written):
+    """Why a call that runs a file the same command writes, or a tool that reads its build or test files from the
+    directory, is refused, or None. Files are compared by name, whatever directory the call spells: an expansion or a
+    glob could name any of them. The harness reads the text a command writes, not what the file will run."""
+    if not written:
+        return None
+    prog = program(words)
+    runs_operands = RUNTIMES.fullmatch(prog) or prog in IMPLICIT_READERS
+    named = [words[0]] + [w for w in words[1:] if runs_operands and not w.startswith("-")]
+    unread = [w for w in named if EXPANSION.search(w) or any(ch in w for ch in "*?[")]
+    ran = sorted({os.path.basename(os.path.normpath(w)) for w in named if w} & written) or unread
+    if ran:
+        return WRITES_RUN_REFUSAL % (", ".join(sorted(written)), ran[0])
+    if prog in IMPLICIT_READERS:
+        return IMPLICIT_RUN_REFUSAL % (", ".join(sorted(written)), prog)
+    return None
+
+
 def role_command_refusal(agent, command, cwd=None):
     """Why agent may not run command, or None. The deliverer reaches GitHub, but the decisions there stay the user's."""
     if agent != "deliverer":
@@ -5000,9 +5402,14 @@ def role_command_refusal(agent, command, cwd=None):
     risk_added = set()
     targets = {b for b in ("main", "master", default_branch()) if b}
     on_default = git("rev-parse", "--abbrev-ref", "HEAD").strip() in targets
-    for segment, words, why in gh_calls(command):
+    written = written_files(command)
+    calls = gh_calls(command)
+    switches = any(git_subcommand(words) in BRANCH_CHANGES for _, words, _ in calls)
+    for segment, words, why in calls:
         refusal = (why or program_refusal(words) or gh_refusal(segment, words, cwd, risk_added)
-                   or git_refusal(segment, words, targets, on_default))
+                   or git_refusal(segment, words, targets, on_default) or written_run_refusal(words, written))
+        if not refusal and switches and git_subcommand(words) == "push":
+            refusal = PUSH_AFTER_SWITCH_REFUSAL
         if refusal:
             return refusal
     if FORBIDDEN_TEXT.search(command_view(command)):

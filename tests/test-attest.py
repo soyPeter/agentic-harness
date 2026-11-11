@@ -17,6 +17,8 @@ import tempfile
 import textwrap
 import unittest
 
+from hypothesis_profiles import examples
+
 try:
     from hypothesis import HealthCheck, given, settings, strategies as st
 except ImportError:
@@ -1154,7 +1156,7 @@ class Workflow(unittest.TestCase):
 
 if given is not None:
     class StatementProperties(FinishedTask):
-        @settings(max_examples=8, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+        @settings(max_examples=examples(8), deadline=None, suppress_health_check=[HealthCheck.too_slow])
         @given(place=st.text(st.sampled_from("abcXYZ09 -_.ñé"), min_size=1, max_size=12),
                zone=st.sampled_from(("UTC", "Asia/Kathmandu", "America/St_Johns", "Pacific/Kiritimati")),
                locale=st.sampled_from(("C", "en_US.UTF-8", "de_DE.UTF-8")))
@@ -1167,7 +1169,7 @@ if given is not None:
 
             self.assertEqual(again.stdout, self.output)
 
-        @settings(max_examples=10, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+        @settings(max_examples=examples(10), deadline=None, suppress_health_check=[HealthCheck.too_slow])
         @given(name=st.from_regex(r"(backbone/|src/|tests/|\.github/|)[a-z][a-z0-9_-]{0,8}\.(txt|py|md|json)",
                                   fullmatch=True))
         def test_any_file_outside_the_commit_stops_it(self, name):

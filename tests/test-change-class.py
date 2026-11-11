@@ -21,6 +21,8 @@ import subprocess
 import tempfile
 import unittest
 
+from hypothesis_profiles import examples
+
 try:
     from hypothesis import assume, example, given, settings, strategies as st
 except ImportError:
@@ -680,7 +682,7 @@ class FenceRules(unittest.TestCase):
                 self.assertEqual(FENCE_INDENT in out, misplaced, out)
 
     if given is not None:
-        @settings(max_examples=25, deadline=None)
+        @settings(max_examples=examples(25), deadline=None)
         @given(opener=st.sampled_from(("```", "~~~")), indent=st.integers(0, 8), same=st.booleans(),
                length=st.integers(3, 5))
         def test_a_closer_closes_at_up_to_three_spaces_and_a_deeper_one_is_misplaced(
@@ -733,7 +735,7 @@ class CommentApproval(unittest.TestCase):
         junk = st.text(alphabet=" \nx-", max_size=6).filter(lambda text: "-->" not in text)
         gap = st.text(alphabet=" \t", max_size=3)
 
-        @settings(max_examples=25, deadline=None)
+        @settings(max_examples=examples(25), deadline=None)
         @given(lead=junk, gap=gap)
         def test_no_agent_edit_writes_an_approval_behind_a_comment(self, lead, gap):
             task = "54.%d" % next(self.ids)
@@ -824,9 +826,10 @@ COMMENT_AMBIGUOUS = "an HTML comment a reader may not end where the gates do"
 
 
 class CommentReach(unittest.TestCase):
-    """A comment a reader ends where the gates do: one that starts a line at 0-3 spaces, which a reader takes as an HTML
-    block ending at its '-->'. One that starts after text, or 4 or more columns in, may end with its paragraph for a
-    reader, or be code, so the spec is invalid rather than read one way or the other."""
+    """A comment a reader ends where the gates do: one that starts at column 0, which a reader takes as an HTML block
+    ending at its '-->'. One that starts after text may end with its paragraph for a reader, one indented 1-3 columns
+    with a list item, and one 4 or more columns in may be code, so the spec is invalid rather than read one way or the
+    other."""
     # context above the Requirements, text appended after the spec, ambiguous?
     TABLE = (
         ("A change. <!-- note\n\n", "-->\n", True),
@@ -835,7 +838,8 @@ class CommentReach(unittest.TestCase):
         ("A change.\n\n\t<!-- note -->\n", "", True),
         ("A change. <!-- note -->\n", "", False),
         ("A change.\n\n<!--\nnote\n\n-->\n", "", False),
-        ("A change.\n\n   <!-- note\n-->\n", "", False),
+        ("A change.\n\n   <!-- note\n-->\n", "", True),
+        ("A change.\n\n   <!-- note -->\n", "", False),
     )
 
     def setUp(self):
@@ -1049,7 +1053,7 @@ class Properties(unittest.TestCase):
             st.lists(st.booleans(), min_size=len(name), max_size=len(name)), st.sampled_from(("", " ", "\t", "  ")))
             .map(lambda case: case[1] + "".join(c.upper() if up else c for c, up in zip(name, case[0])) + case[1]))
 
-        @settings(max_examples=60, deadline=None)
+        @settings(max_examples=examples(60), deadline=None)
         @given(value=st.one_of(line_text, any_case))
         def test_spec_check_takes_exactly_one_class_name_in_any_case(self, value):
             task = "8.%d" % next(self.ids)
@@ -1060,7 +1064,7 @@ class Properties(unittest.TestCase):
             self.assertEqual("is not one of docs, refactor, feature, schema" in out,
                              value.strip().lower() not in CLASSES, out)
 
-        @settings(max_examples=25, deadline=None)
+        @settings(max_examples=examples(25), deadline=None)
         @given(context=st.lists(st.sampled_from(SENTENCES), max_size=3),
                change_class=st.sampled_from((None,) + CLASSES))
         def test_no_class_hides_what_the_risk_checks_find(self, context, change_class):
@@ -1093,7 +1097,7 @@ class SpecProperties(unittest.TestCase):
             st.sampled_from(("`", "~")), st.integers(3, 5), st.sampled_from(("", "text", "yaml")),
             st.lists(st.sampled_from(CLASSES + ("chore", "")), min_size=1, max_size=3))
 
-        @settings(max_examples=25, deadline=None)
+        @settings(max_examples=examples(25), deadline=None)
         @given(above=around, below=around, old=st.sampled_from(CLASSES), new=st.sampled_from(CLASSES))
         @example(above=["<!--\n## Approval\n-->\n"], below=[], old="feature", new="refactor")
         def test_the_class_read_changes_only_with_the_grill_fingerprint(self, above, below, old, new):
@@ -1107,7 +1111,7 @@ class SpecProperties(unittest.TestCase):
 
             self.assertTrue(state["change_class"] == graded or not state["grill"]["current"], (graded, state))
 
-        @settings(max_examples=20, deadline=None)
+        @settings(max_examples=examples(20), deadline=None)
         @given(above=around, below=around, old=st.sampled_from(CLASSES), new=st.sampled_from(CLASSES))
         @example(above=["<!--\n## Approval\n-->\n"], below=[], old="docs", new="refactor")
         def test_no_agent_edit_changes_the_class_of_an_approved_spec(self, above, below, old, new):
@@ -1124,7 +1128,7 @@ class SpecProperties(unittest.TestCase):
             self.assertTrue(code == 2 or not approved["approved"] or state["change_class"] == approved["change_class"],
                             (out, approved, state))
 
-        @settings(max_examples=20, deadline=None)
+        @settings(max_examples=examples(20), deadline=None)
         @given(change_class=st.sampled_from(CLASSES), above=st.lists(fenced, max_size=2),
                below=st.lists(fenced, max_size=2))
         @example(change_class="refactor", above=[], below=["```\nChange-Class: schema\n```\n"])
@@ -1164,7 +1168,7 @@ class SpecProperties(unittest.TestCase):
                                   "" if above_class else "\n" + example)
             return task
 
-        @settings(max_examples=25, deadline=None)
+        @settings(max_examples=examples(25), deadline=None)
         @given(example=approval_example, above_class=st.booleans(), data=st.data())
         def test_an_edit_below_a_fenced_approval_heading_stales_the_grill_or_invalidates_the_spec(
                 self, example, above_class, data):
@@ -1176,7 +1180,7 @@ class SpecProperties(unittest.TestCase):
 
             self.assertTrue(not state["grill"]["current"] or state["spec_problems"], state)
 
-        @settings(max_examples=25, deadline=None)
+        @settings(max_examples=examples(25), deadline=None)
         @given(example=approval_example, above_class=st.booleans(), data=st.data())
         def test_an_agent_edit_below_a_fenced_approval_heading_is_frozen_or_invalidates_the_spec(
                 self, example, above_class, data):
@@ -1207,7 +1211,7 @@ class ChangeProperties(unittest.TestCase):
     if given is not None:
         folders = st.lists(st.sampled_from(FOLDERS), max_size=2)
 
-        @settings(max_examples=15, deadline=None)
+        @settings(max_examples=examples(15), deadline=None)
         @given(folders=folders, stem=st.sampled_from(STEMS), extension=st.sampled_from(
             ("py", "ts", "js", "sh", "rb", "go", "yml", "toml", "json", "html", "css", "png")))
         @example(folders=["docs"], stem="conf", extension="py")
@@ -1218,7 +1222,7 @@ class ChangeProperties(unittest.TestCase):
 
             self.assertIn(MISMATCH % path, risks)
 
-        @settings(max_examples=15, deadline=None)
+        @settings(max_examples=examples(15), deadline=None)
         @given(folders=folders, name=st.one_of(
             st.tuples(st.sampled_from(STEMS), st.sampled_from(("md", "mdx", "markdown", "rst", "adoc", "asciidoc", "txt")))
             .map(lambda parts: "%s.%s" % parts),
@@ -1231,7 +1235,7 @@ class ChangeProperties(unittest.TestCase):
 
             self.assertEqual(risks, [])
 
-        @settings(max_examples=10, deadline=None)
+        @settings(max_examples=examples(10), deadline=None)
         @given(source=st.sampled_from(("src/app.py", "src/auth/session.py", "docs/guide.md", "db/migrations/001.sql")),
                folder=st.sampled_from(("docs", "src", "src/auth", "archive")), suffix=st.sampled_from(("", ".md")),
                change_class=st.sampled_from(("docs", "refactor")))
