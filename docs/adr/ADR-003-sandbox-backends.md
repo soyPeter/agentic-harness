@@ -266,7 +266,11 @@ Still open after v1:
   `egress` container's own resolver; any other name gets NXDOMAIN without leaving and is logged as a denial.
   `init-firewall.sh` redirects every DNS query from a process other than root to it (a `nat` rule), drops port 53 to
   anywhere else, and drops traffic to Docker's resolver (`127.0.0.11`, on any port) from anyone but root; the agent's
-  container has no root. Still open: names resolve to addresses once, at start, and TLS and paths aren't inspected.
+  container has no root. After review, a name with a label no host name has (a dot inside it, a space, a control
+  byte) gets FORMERR, and the query for a listed name is rebuilt from the name alone (lower case, a fresh id, no other
+  section), so an EDNS option or the id the agent chose doesn't leave. Still open: names resolve to addresses once, at
+  start; TLS and paths aren't inspected, so DNS over HTTPS to an allowlisted host that offers it, or domain fronting
+  through an allowlisted CDN, would still carry data out.
 - **2. Credentials brokered at egress: deferred (2026-11-11).** Keeping the API credential out of the agent's
   container needs a broker in the `egress` container that adds it to the agent's requests: either TLS interception
   with a CA the agent's container trusts, or an Anthropic API relay the agent reaches through `ANTHROPIC_BASE_URL`, and

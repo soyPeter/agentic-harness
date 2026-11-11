@@ -30,7 +30,10 @@
   `egress` container: it resolves a name, over UDP or TCP, only when it is on the published allowlist (exactly, in any
   case), and answers NXDOMAIN otherwise, logging the name in the denial log. `init-firewall.sh` redirects every DNS
   query a process other than root makes, to any resolver, to it, drops port 53 to anywhere else, and keeps everyone but
-  root away from Docker's resolver on `127.0.0.11`. `tests/test-egress-dns.py` checks the resolver's rule through its
+  root away from Docker's resolver on `127.0.0.11`. The query sent upstream for a listed name is rebuilt from the name
+  alone (lower case, a fresh id, no EDNS or other section), and a name with a label no host name has (a dot inside it,
+  a space, a control byte) gets FORMERR. DNS over HTTPS to an allowlisted host, and domain fronting through an
+  allowlisted CDN, remain possible: TLS isn't inspected. `tests/test-egress-dns.py` checks the resolver's rule through its
   command line, with a property check; `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`) checks it in the real sandbox,
   against other resolvers and Docker's own. **Upgrading:** rebuild the sandbox; a tool that needs a host off the
   allowlist now fails to resolve it instead of failing to connect, so add the host to `HARNESS_FIREWALL_ALLOW`.

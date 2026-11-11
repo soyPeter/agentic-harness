@@ -6,7 +6,13 @@ makes, and resolves only the names on the published allowlist.
   the final dot, over UDP or TCP
   any other name (a subdomain of a listed one,  NXDOMAIN, with the query's  {"kind": "dns", "target": <name>}
   a name that contains a listed one)            id and question
-  a query that isn't one                        FORMERR                     {"kind": "dns", "target": "(malformed)"}
+  a query that isn't one, or a name with a      FORMERR                     {"kind": "dns", "target": "(malformed)"}
+  label no host name has (a dot, a control
+  byte, a space)
+
+What reaches the upstream resolver for a listed name is rebuilt from the name alone: the question in lower case, with a
+fresh id, recursion desired and no other section, so nothing else the agent put in its query (an EDNS option, other
+records, its id or flags) leaves. The agent gets its own id and question back.
 
 These checks run .devcontainer/harness-agent/egress.py on the host through its command line, as the DNS server alone
 (--no-packets: the packet log needs Linux and CAP_NET_ADMIN), in front of a stand-in upstream resolver that answers
@@ -62,6 +68,7 @@ class Upstream:
         self.tcp.bind(("127.0.0.1", self.port))
         self.tcp.listen(8)
         self.asked = 0
+        self.received = []
         for serve in (self.serve_udp, self.serve_tcp):
             threading.Thread(target=serve, daemon=True).start()
 
@@ -72,6 +79,7 @@ class Upstream:
             except OSError:
                 return
             self.asked += 1
+            self.received.append(data)
             self.udp.sendto(answered(data), peer)
 
     def serve_tcp(self):
@@ -83,7 +91,9 @@ class Upstream:
             with connection:
                 size, = struct.unpack(">H", read_exactly(connection, 2))
                 self.asked += 1
-                reply = answered(read_exactly(connection, size))
+                data = read_exactly(connection, size)
+                self.received.append(data)
+                reply = answered(data)
                 connection.sendall(struct.pack(">H", len(reply)) + reply)
 
     def close(self):
@@ -182,6 +192,35 @@ class Resolver(unittest.TestCase):
 
         self.assertEqual((rcode, addresses, ident), (FORMERR, [], b"\x00\x07"))
         self.assertIn("(malformed)", self.denied())
+
+    def test_a_name_whose_labels_no_host_name_has_is_never_forwarded_or_logged_as_is(self):
+        dotted = struct.pack(">HHHHHH", 7, 0x0100, 1, 0, 0, 0) + b"\x0dapi.anthropic\x03com\x00" + struct.pack(">HH", 1, 1)
+        names = {"a dot inside a label (api.anthropic + com)": dotted,
+                 "a newline": query("leak\nAPPROVED.example"), "a space": query("a b.example"),
+                 "a control byte": query("x\x01y.example")}
+        for case, data in names.items():
+            with self.subTest(case=case):
+                before = self.upstream.asked
+
+                rcode, addresses, _, _ = self.ask(data)
+
+                self.assertEqual((rcode, addresses), (FORMERR, []))
+                self.assertEqual(self.upstream.asked, before)
+        self.assertFalse([name for name in self.denied() if "\n" in name or " " in name or "\x01" in name])
+
+    def test_only_the_question_rebuilt_from_the_listed_name_reaches_the_upstream_resolver(self):
+        for tcp in (False, True):
+            with self.subTest(tcp=tcp):
+                opt = b"\x00" + struct.pack(">HHIH", 41, 4096, 0, 8) + struct.pack(">HH", 65001, 4) + b"leak"
+                asked = (struct.pack(">HHHHHH", 0x4242, 0x0130, 1, 0, 0, 1) + query("Api.Anthropic.COM")[12:] + opt)
+
+                rcode, addresses, ident, question = self.ask(asked, tcp=tcp)
+                sent = self.upstream.received[-1]
+
+                self.assertEqual((rcode, addresses, ident), (NOERROR, [ANSWER], b"\x42\x42"))
+                self.assertEqual(question[:len(query("Api.Anthropic.COM")) - 12], query("Api.Anthropic.COM")[12:])
+                self.assertEqual(sent[2:], struct.pack(">HHHHH", 0x0100, 1, 0, 0, 0) + query("api.anthropic.com")[12:])
+                self.assertNotEqual(sent[:2], b"\x42\x42")
 
     def test_the_log_starts_with_when_it_started(self):
         self.assertIn("started", json.loads(self.log.read_text().splitlines()[0]))

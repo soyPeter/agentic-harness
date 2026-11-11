@@ -5,8 +5,9 @@ Runs as root in the egress container once init-firewall.sh has put the rules in 
 the container stops and the agent loses its network.
 
 - DNS: it answers on 127.0.0.1:53, where init-firewall.sh redirects every DNS query the agent's processes make. A name
-  on the published allowlist (exactly, in any case) is resolved by the container's own resolver; any other name gets
-  NXDOMAIN and never leaves, so no data goes out in DNS queries.
+  on the published allowlist (exactly, in any case) is resolved by the container's own resolver, with a query rebuilt
+  from the name alone; any other name gets NXDOMAIN and never leaves, and a name whose labels no host name has gets
+  FORMERR. So nothing the agent chooses goes out in DNS queries but the listed names themselves.
 - The denial log: every outbound packet the rules drop goes to an NFLOG group first (init-firewall.sh), which it reads
   over netlink. Each denied packet and each refused name becomes one JSON line in /run/harness-egress/denials.jsonl, on
   the volume the agent's container mounts read-only; the first line says when the log started. Each judge pass in the
@@ -19,6 +20,7 @@ from datetime import datetime, timezone
 import errno
 import json
 import os
+import re
 import socket
 import socketserver
 import struct
@@ -30,6 +32,10 @@ LOG = "/run/harness-egress/denials.jsonl"
 GROUP = 7   # init-firewall.sh logs to this group
 MAX_RECORDS = 20000
 FORMERR, NXDOMAIN, SERVFAIL = 1, 3, 2
+RECURSION_DESIRED = 0x0100
+# What a label of a host name holds (underscore for service names like _dmarc); anything else, a dot inside a label
+# included, is no name to resolve.
+LABEL = re.compile(rb"^[A-Za-z0-9_-]{1,63}$")
 # linux/netlink.h, linux/netfilter/nfnetlink.h, linux/netfilter/nfnetlink_log.h
 NETLINK_NETFILTER = 12
 NLMSG_ERROR = 2
@@ -72,7 +78,7 @@ class DenialLog(object):
 
 def question(data):
     """(the queried name, lower-case and without the final dot, where the question ends) of a DNS query, or (None,
-    None) when it isn't a query for one name. A query's name has no compression pointers."""
+    None) when it isn't a query for one host name. A query's name has no compression pointers."""
     if len(data) < 12 or data[2] & 0x80 or struct.unpack(">H", data[4:6])[0] != 1:
         return None, None
     labels, at = [], 12
@@ -80,10 +86,12 @@ def question(data):
         size = data[at]
         if size == 0:
             end = at + 5
-            return (".".join(labels).lower(), end) if labels and end <= len(data) else (None, None)
-        if size > 63:
+            name = ".".join(labels).lower()
+            return (name, end) if labels and end <= len(data) and len(name) <= 253 else (None, None)
+        label = data[at + 1:at + 1 + size]
+        if not LABEL.match(label):
             return None, None
-        labels.append(data[at + 1:at + 1 + size].decode("ascii", "replace"))
+        labels.append(label.decode("ascii"))
         at += 1 + size
     return None, None
 
@@ -107,23 +115,30 @@ class Resolver(object):
         if name not in self.allowed:
             self.log.add("dns", name)
             return reply(data, end, NXDOMAIN)
+        asked = data[12:end]
+        # The name in lower case and its type and class: the labels' length bytes are below 64, so lower() leaves them.
+        canonical = asked[:-4].lower() + asked[-4:]
+        ident = os.urandom(2)
         try:
-            return self.ask_upstream(data, tcp)
+            answer = self.ask_upstream(ident + struct.pack(">HHHHH", RECURSION_DESIRED, 1, 0, 0, 0) + canonical, tcp)
         except (OSError, ValueError):
             return reply(data, end, SERVFAIL)
+        if answer[:2] != ident or answer[12:end].lower() != canonical.lower():
+            return reply(data, end, SERVFAIL)
+        return data[:2] + answer[2:12] + asked + answer[end:]
 
-    def ask_upstream(self, data, tcp):
+    def ask_upstream(self, query, tcp):
         if tcp:
             with socket.create_connection(self.upstream, timeout=5) as connection:
-                connection.sendall(struct.pack(">H", len(data)) + data)
+                connection.sendall(struct.pack(">H", len(query)) + query)
                 size, = struct.unpack(">H", read_exactly(connection, 2))
                 return read_exactly(connection, size)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
             client.settimeout(5)
-            client.sendto(data, self.upstream)
+            client.sendto(query, self.upstream)
             while True:
                 answer, _ = client.recvfrom(65535)
-                if answer[:2] == data[:2]:
+                if answer[:2] == query[:2]:
                     return answer
 
 
