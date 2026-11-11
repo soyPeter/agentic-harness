@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **The traceability matrix comes with each pull request, and the export can be archived and signed (ADR-004,
+  follow-ups).** `harness-verify` writes the HTML matrix of a pull request that verifies with the base branch's
+  engine, the one that verified it, so the pull request can't change what describes it, and uploads it as the
+  artifact `harness-traceability`. An engine from before `trace export` writes none and the check still passes.
+  `trace export --format reqifz` writes a ReqIF archive: the ReqIF document plus `receipts/<task>.txt`, the receipt of
+  each task whose judge pass is on the current code, named from the task with an `xhtml:object`. In ReqIF, a
+  criterion's result and the judge's verdict are now enumerations (`Harness.Result`, `Harness.Verdict`) instead of
+  strings, so ALM tools can filter on them. `harness.py trace link <matrix-url> [--task ID]` prints the comment that
+  links a matrix and names its commit; the deliverer adds it to the pull request's body once CI passes, and
+  `linear receipt <task> --matrix <url>` adds it to the ticket's receipt comment. With the ADR-005 attest key, the push
+  job also writes the `.reqifz` with the engine the push starts from, signs it with the same key (`cosign sign-blob`)
+  and uploads it as `harness-traceability-signed`.
+  **Upgrading:** a ReqIF import mapping that read `Harness.Result` or `Harness.Verdict` as text now gets enumerations
+  with the same names and values.
+
 - **The harness as the gate inside the agent software factory (ADR-008, Proposed; docs only).**
   `docs/adr/ADR-008-harness-inside-agent-factory.md` decides how the harness sits inside an always-on factory that
   takes work from Slack, GitHub and Linear. The factory owns the doors, the sender check, identity and keys, lanes,
