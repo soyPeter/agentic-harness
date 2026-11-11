@@ -248,6 +248,36 @@ assert h['decisions'].load_definitions(str(h['DECISIONS_FILE']))['decisions']
         self.assertIn("Using pinned engine %s from HEAD" % commit, result.stdout)
         self.assertTrue((trusted / "payload/owned/scripts/harness/lib/harness.py").is_file())
 
+    @unittest.skipUnless(os.environ.get("HARNESS_STRESS") == "1",
+                         "stress check (a few minutes, every CPU busy): set HARNESS_STRESS=1")
+    def test_ci_extraction_holds_on_a_busy_runner(self):
+        self.install()
+        self.commit_base()
+        stop = self.work / "stop"
+        # A loaded macOS runner: short-lived processes, as the suite's shell sections start them (the scheduler would
+        # demote a CPU-bound loop below a woken git archive), beside niced long-lived workers, as it runs a test file.
+        busy = [subprocess.Popen(["sh", "-c", 'while [ ! -e "$1" ]; do "$2"; done', "_", str(stop),
+                                  shutil.which("true")]) for _ in range(2 * os.cpu_count() + 4)]
+
+        def release():
+            stop.touch()
+            for process in busy:
+                process.wait()
+        self.addCleanup(release)
+        take = r'''for ((run = 0; run < 200; run++)); do
+  runner=$(mktemp -d "$1/runner.XXXXXX")
+  RUNNER_TEMP=$runner GITHUB_ENV=$runner/github-env bash -e -o pipefail -c "$2" > "$runner/out" 2>&1 \
+    && grep -q "Using the harness from origin/review-base." "$runner/out" || cat "$runner/out"
+  rm -rf "$runner"
+done'''
+        workers = [subprocess.Popen(["nice", "-n", "10", "bash", "-c", take, "_", str(self.work),
+                                     self.extraction_script()], cwd=self.project,
+                                    env=dict(self.env, BASE_REF="origin/review-base"),
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                   for _ in range(max(2, os.cpu_count() // 2))]
+        failed = "".join(worker.communicate()[0] for worker in workers)
+        self.assertEqual(failed.count("::error::"), 0, failed)
+
 
 if __name__ == "__main__":
     unittest.main()
