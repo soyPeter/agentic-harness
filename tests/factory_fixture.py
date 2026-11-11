@@ -115,8 +115,10 @@ class Project(object):
         return self.hook("pre-tool-use", data, env=env)
 
     def file_tool(self, tool, path, agent="analyst", **tool_input):
-        data = {"session_id": "s1", "agent_id": "a1", "agent_type": agent, "tool_name": tool,
-                "tool_input": dict(tool_input, file_path=str(self.path / path))}
+        """The pre-tool-use hook's answer to a file tool call from agent's subagent (None: the main session)."""
+        data = {"session_id": "s1", "tool_name": tool, "tool_input": dict(tool_input, file_path=str(self.path / path))}
+        if agent:
+            data.update(agent_id="a1", agent_type=agent)
         return self.hook("pre-tool-use", data)
 
     def commit(self, message):

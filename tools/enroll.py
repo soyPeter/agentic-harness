@@ -2,7 +2,7 @@
 """Put a project under the agentic harness for every agent and, optionally, in Orca.
 
   enroll.sh <target> [--name NAME] [--orca] [--automation SCHEDULE] [--agents "default=claude judge=codex"]
-            [--protect] [--profile triple] [--dry-run]
+            [--protect] [--profile triple|no-merge] [--dry-run]
 
 1. Installs the harness when <target> has none, otherwise updates it (bootstrap.sh / update.sh).
 2. Runs the target's doctor and shows its errors and warnings.
@@ -16,6 +16,9 @@
 --profile triple sets HARNESS_PROFILE="triple" (a supervised pilot where only a human merges). Under that profile,
 from the flag, the target's harness.conf or the environment (HARNESS_PROFILE=triple, TRIPLE_MODE=1), enroll refuses
 --automation (its run merges unattended) and --protect (branch protection changes need the owner), before doing anything.
+--profile no-merge sets HARNESS_PROFILE="no-merge": the same merge refusals, not tied to Triple (an agent factory's
+lanes, ADR-008). Under it enroll refuses --automation only: requiring the harness checks (--protect) is what such a
+project needs.
 
 --dry-run prints every action and changes nothing. enroll never pushes and never deletes.
 """
@@ -30,7 +33,10 @@ from pathlib import Path
 HARNESS = Path(__file__).resolve().parent.parent
 LOCK = "backbone/.harness-lock.json"
 CONF = "backbone/harness.conf"
-PROFILES = ("triple",)
+PROFILES = ("triple", "no-merge")
+# What each profile refuses, and why.
+PROFILE_REFUSALS = {"triple": (("--automation", "--protect"), "only a human merges and changes branch protection"),
+                    "no-merge": (("--automation",), "only a human merges, and the scheduled run merges unattended")}
 # Orca 1.4 runs "repo-defined setup hooks" on each new worktree, but its CLI has no command to set one (repo set only
 # changes worktree visibility; project setup-update only the setup policy). So enroll prints the step instead.
 SETUP_HINT = ("Orca has no CLI to set a repository's setup hook. In Orca's settings for this repository, set the "
@@ -248,10 +254,11 @@ def main(argv):
         sys.stderr.write("enroll: unknown --profile %s (known: %s)\n" % (requested, ", ".join(PROFILES)))
         return 64
     name = target_profile(target, requested)
-    refused = [flag for flag in ("--automation", "--protect") if flag in args] if name else []
+    flags, why = PROFILE_REFUSALS.get(name, ((), ""))
+    refused = [flag for flag in flags if flag in args]
     if refused:
-        sys.stderr.write("enroll: %s refused under HARNESS_PROFILE=%s: only a human merges and changes branch "
-                         "protection; nothing was changed\n" % (" and ".join(refused), name))
+        sys.stderr.write("enroll: %s refused under HARNESS_PROFILE=%s: %s; nothing was changed\n"
+                         % (" and ".join(refused), name, why))
         return 2
     project = value("--name") or target.name
     print("Enrolling %s%s" % (target, " (dry run)" if dry_run else ""))

@@ -382,14 +382,16 @@ A profile is an organisation policy on top of the gates. Set it in `backbone/har
 
 ```sh
 ./enroll.sh /path/to/repo --profile triple      # writes HARNESS_PROFILE="triple"
+./enroll.sh /path/to/repo --profile no-merge    # writes HARNESS_PROFILE="no-merge"
 ```
 
 | Profile | Effect |
 |---|---|
 | (empty) | The default: no extra policy |
 | `triple` | A supervised pilot where only a human merges. `harness.py orca` refuses `--merge` and `--trust` (use `--pr`, which opens pull requests and never merges), `orca-nightly` refuses to start, and `enroll` refuses `--automation` and `--protect` before changing anything. Its catalog pack, `triple`, adds the Linear, EARS and Disputes/PCI layers (see `catalog/triple/README.md`). |
+| `no-merge` | The merge refusals of `triple` for any organisation, such as an agent factory's lanes (ADR-008), without Triple's catalog pack. `enroll` refuses `--automation` and allows `--protect`. |
 
-`HARNESS_PROFILE=triple` or `TRIPLE_MODE=1` in the environment adds the profile to any project. Unlike other keys, the environment can't lift a profile that `harness.conf` sets: `HARNESS_PROFILE=` in a shell leaves it in force. Doctor reports an unknown profile.
+`HARNESS_PROFILE=triple`, `HARNESS_PROFILE=no-merge` or `TRIPLE_MODE=1` in the environment adds the profile to any project. Unlike other keys, the environment can't lift a profile that `harness.conf` sets: `HARNESS_PROFILE=` in a shell leaves it in force. Doctor reports an unknown profile.
 
 ## What gets installed
 

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **A no-merge profile not tied to Triple (ADR-008, follow-up 10).** `HARNESS_PROFILE="no-merge"` (user-only, or added
+  by the environment, which can't lift it) brings the `triple` profile's merge refusals to any project, such as the
+  agent software factory's lanes, without Triple's catalog pack: the shell gate refuses `gh pr merge` and GitHub's
+  merge API for every agent, the tool gate refuses merge tools, `orca` refuses `--merge` and `--trust`, and
+  `orca-nightly` refuses to start. `enroll --profile no-merge` writes it and refuses `--automation`, whose schedule
+  merges unattended, but allows `--protect`, which requires the harness checks. Doctor accepts it.
+  `tests/test-no-merge-profile.py` runs the whole decision table: each merge path, for each profile in `harness.conf`
+  and in the environment.
+
 - **A versioned contract for an outside runner (ADR-008, follow-up 1).** `harness.py contract [--json]` states the
   contract versions the engine serves (version 1) and declares what a runner such as the agent software factory may
   rely on: the fields `next`, `state`, `receipt` and `escalations` always answer with, the steps `next` returns, and

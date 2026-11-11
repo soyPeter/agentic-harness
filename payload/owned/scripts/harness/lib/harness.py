@@ -138,9 +138,10 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
                   "HARNESS_REVIEW", "HARNESS_DELIVER", "HARNESS_PROFILE", "HARNESS_REQ_STYLE",
                   "HARNESS_SANDBOX_BACKEND")
 # Organisation profiles (HARNESS_PROFILE, user-only). "triple": a supervised pilot where only a human merges, so the
-# coordinator's --merge and --trust and the scheduled backlog run are refused.
-PROFILES = ("", "triple")
-NO_MERGE_PROFILES = ("triple",)
+# coordinator's --merge and --trust and the scheduled backlog run are refused. "no-merge": the same refusals for any
+# organisation, such as an agent factory's lanes (ADR-008), without Triple's catalog pack.
+PROFILES = ("", "triple", "no-merge")
+NO_MERGE_PROFILES = ("triple", "no-merge")
 MERGE_ENDPOINT = re.compile(r"/pulls/\d+/merge\b|/merges\b")
 MERGE_TOOL = re.compile(r"^mcp__.*merge", re.I)
 # The knowledge source: an MCP server registered as "knowledge" (claude mcp add) over a folder of notes, that the
