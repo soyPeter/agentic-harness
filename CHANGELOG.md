@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **A versioned contract for an outside runner (ADR-008, follow-up 1).** `harness.py contract [--json]` states the
+  contract versions the engine serves (version 1) and declares what a runner such as the agent software factory may
+  rely on: the fields `next`, `state`, `receipt` and `escalations` always answer with, the steps `next` returns, and
+  the event kinds with their fields. Within a version fields are only added. `harness.py escalations --json` lists the
+  open escalations with `task`, `kind`, `class`, `playbook`, `reason`, `needed`, `status` and `at`, and the count per
+  failure class. Every event in `.git/harness/events.jsonl` carries `v`, the contract version. A new `outward` event
+  records each outward write: a push, a pull request created or edited, or a label created by a Bash call the hooks let
+  through (with the agent's role), and the GitHub issue, push, pull request and Linear comment the harness makes
+  itself. `run --only <id>` holds a per-task lock in the shared git directory, so a second run of the same task from
+  any worktree is refused (`run: locked`). `tests/test-factory-contract.py` pins the version 1 fields.
+
 - **The harness as the gate inside the agent software factory (ADR-008, Proposed; docs only).**
   `docs/adr/ADR-008-harness-inside-agent-factory.md` decides how the harness sits inside an always-on factory that
   takes work from Slack, GitHub and Linear. The factory owns the doors, the sender check, identity and keys, lanes,

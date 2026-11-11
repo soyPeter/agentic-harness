@@ -193,7 +193,7 @@ Logs go to `.git/harness/runs/<timestamp>/<task>-<attempt>.log`. Agents can't st
   - A done task's branch is delivered by its own session (the deliver step, when `HARNESS_DELIVER` is on). With `--pr`, a blocked or escalated task's branch is pushed and a pull request opened too, for a person to look at.
   - A task that already has a branch is skipped; delete the branch to retry.
   - Tasks run independently of each other, so `3-TASKS.md` may need a rebase between their pull requests.
-- **`--only <id>`** runs one task.
+- **`--only <id>`** runs one task. It holds a lock on that task in the shared git directory (`.git/harness/locks/task-<id>.lock`) while it runs, so a second `run --only` of the same task, from any worktree of the repository, is refused (`run: locked`). The lock is the operating system's: a run that ends or is killed releases it, and a file left behind holds nothing.
 - **An agent that cannot start** (not logged in, bad API key: it fails at no cost) stops the run. Retrying or moving to the next task can't help, so no task is escalated for it, and the task stays ready.
 - **Keep the machine awake.** A sleeping laptop suspends the run, so wall time grows while nothing happens. On macOS, start the runner with `caffeinate -i python3 scripts/harness/lib/harness.py run`.
 
@@ -280,6 +280,10 @@ A coordinator asks the harness what a task needs instead of knowing the workflow
 | `harness.py next <id> [--json]` | `progress` is a fingerprint of the whole checkout, specs and verdicts included: the same step with the same `progress` means the last worker changed nothing. `change_class` is the spec's class (`feature` when it declares none). The next step and who does it: `define` (analyst or architect), `grill` (griller), `answer` (the griller's questions, routed; `needs_user` says whether any must go to the user), `approve`, `start`, `test` (tester), `implement`, `judge`, `diagnose` (debugger), `fix` (implementer, with the debugger's brief or the reviews' must-fix findings), `review` (one reviewer per lens in `lenses`, in parallel), `finish` (scribe, then `finish`), `deliver` (deliverer, after the commit), `delivery-failed`, `blocked`, `done` |
 | `harness.py questions <id> [--json]` | The griller's open questions, each routed: design questions to the architect, the rest to the analyst. A question marked `apply` (a non-blocker with the griller's recommendation) is applied by that role without asking |
 | `harness.py start <id>` / `finish <id>` | Mark the task `[WIP]` / `[x]` through the same gates as an edit of `3-TASKS.md` (start: spec, grill, approval, one `[WIP]`; finish: a current judge pass) |
+| `harness.py escalations [--json]` | The open escalations. `--json`: `escalations`, one entry per open escalation with `task`, `kind`, `class`, `playbook`, `reason`, `needed`, `status` and `at`, and `by_class`, the count of every escalation (open or resolved) per failure class |
+| `harness.py contract [--json]` | The contract versions this engine serves (below) |
+
+**The contract** (the harness's ADR-008): an outside runner, such as an agent software factory, may rely on the commands, JSON fields and event kinds that `contract --json` declares. It is version 1. Within a version, fields are only added; removing a field or changing its meaning is a new version. `contract --json` gives `contract` (the newest version), `versions` (every version served), `engine` (the engine release), `commands` (for `next`, `state`, `receipt` and `escalations`, the fields each answer always has; for `next`, the steps and the fields a step adds) and `events` (the fields every event has, and those of each kind). Agents may read it. `run --only <id>` is how a runner drives one task, and the outcome is read from `next`, not from `run`'s exit code.
 
 Under an Orca coordinator (`HARNESS_ORCA_RUN` set), `escalate` also sends an `escalation` message to the Run's mailbox.
 
@@ -343,7 +347,13 @@ Blocks, verify refusals, verdicts, approvals, escalations and run attempts are a
 - `tests-run`: every run of `HARNESS_TEST_CMD` by the harness, with its exit code and time;
 - `hook-slow`: a hook call that took `HARNESS_HOOK_SLOW` seconds or more (default 5; 0 = off).
 
-Each event carries the task in progress and, inside a hook, the session and agent. `harness.py trace <id> [--json]` prints a task's events in order, so a failed run can be followed step by step.
+Each event carries `v`, the contract version (1), the task in progress and, inside a hook, the session and agent. `harness.py trace <id> [--json]` prints a task's events in order, so a failed run can be followed step by step.
+
+An `outward` event records each outward write the harness lets through or makes itself, with `action` and `via`:
+- a Bash call that passes the hooks and pushes (`push`), creates or edits a pull request (`pr-create`, `pr-edit`) or creates a label (`label-create`), with `via` the agent's role (or `session`) and the `command`. It is logged when the call is let through, before it runs, so it says what was allowed, not that it succeeded;
+- the GitHub issue `escalate` opens (`issue-create`), the push and pull request of `run --worktree --pr` (`push`, `pr-create`), and the Linear comment and state change of `linear receipt` (`linear-comment`, `linear-state`), with `via` `harness`.
+
+Other writes (`gh pr comment`, `ci-protect`'s branch protection) are not `outward` events. Logging never fails its caller, so a missing event is a gap in the log, not evidence that nothing happened.
 
 `harness.py report [--days N]` summarises the log (`--json` for machines):
 - tasks finished;

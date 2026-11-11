@@ -1,0 +1,310 @@
+"""The contract between the harness and the agent software factory (ADR-008, follow-up 1), from the factory's side:
+the commands, flags, JSON fields and event kinds it reads.
+
+Version 1 is pinned here, field by field. Within a version fields are only added, so each answer must hold at least
+these fields, and `contract --json` must declare at least them; a field taken out of an answer, or out of the
+declaration, fails here. The factory runtime isn't in this repository: these tests run the harness as the factory
+would, through its commands, its hooks and its event log.
+"""
+import json
+import os
+import subprocess
+import time
+import unittest
+
+from factory_fixture import Project, agent_script
+
+# Version 1, as ADR-008 section 2 names it.
+NEXT_FIELDS = ("task", "title", "state", "change_class", "step", "role", "progress")
+NEXT_STEPS = ("define", "grill", "answer", "approve", "start", "test", "implement", "judge", "diagnose", "fix",
+              "review", "finish", "deliver", "delivery-failed", "blocked", "done")
+STATE_FIELDS = ("autonomous", "tasks", "halted")
+STATE_TASK_FIELDS = ("task", "title", "state", "spec", "change_class", "spec_problems", "grill", "approved", "judge",
+                     "escalations")
+RECEIPT_FIELDS = ("task", "title", "objective", "base", "changed", "backbone_changed", "requirements", "verified",
+                  "not_verified", "decisions", "change_class", "change_class_problem", "risks", "rounds", "judged_at",
+                  "sandbox", "approval", "approval_needed", "suggested_labels")
+ESCALATION_FIELDS = ("task", "kind", "class", "reason", "needed", "status", "at")
+EVENT_FIELDS = ("at", "kind", "v")
+EVENT_KINDS = {
+    "task-start": ("task",), "task-finish": ("task",), "verdict": ("task", "agent", "verdict"),
+    "review": ("task", "lens", "verdict"), "approval": ("task", "rule"),
+    "escalation": ("task", "escalation", "failure_class", "reason"), "proposal": ("failure_class",),
+    "deliver": ("delivery", "head", "pr", "checks", "findings", "owners"), "run-start": ("tasks",),
+    "run-attempt": ("task", "attempt", "exit", "state", "cost_usd"), "run-budget": ("spent", "limit"),
+    "run-halt": (), "run-agent-failed": ("task", "error"), "run-end": ("summary",), "tamper": ("files",),
+    "block": ("reason",), "gate": ("gate",), "linear-import": ("task", "issue"), "outward": ("action", "via"),
+}
+FAKE_GH = """#!/bin/sh
+case "$*" in
+  "issue create"*) echo "https://github.com/o/r/issues/12" ;;
+  "pr view"*"--json labels"*) echo '{"labels": []}' ;;
+  *) echo "fake gh: no answer for: gh $*" >&2; exit 1 ;;
+esac
+"""
+
+
+class FactoryProject(unittest.TestCase):
+    """Task 1.1 has no spec yet, 1.2 is escalated, 7.1 is judged on its current code."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.p = Project("factory contract ")
+        cls.p.add_task("1.1", "Not defined yet")
+        cls.p.add_task("1.2", "Needs a decision")
+        cls.p.commit("chore: tasks")
+        cls.p.harness("escalate", "1.2", "--reason", "needs a product decision", "--kind", "decision",
+                      "--needed", "the user picks the wording")
+        cls.p.judged_task("7.1")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.p.cleanup()
+
+
+class Contract(FactoryProject):
+    def test_contract_names_the_versions_it_serves(self):
+        data = self.p.json("contract", "--json")
+
+        self.assertEqual(data["contract"], 1)
+        self.assertIn(1, data["versions"])
+        self.assertEqual(self.p.harness("contract").stdout.strip().splitlines()[0],
+                         "contract: version 1 (serves 1)")
+
+    def test_contract_declares_every_version_1_field(self):
+        commands = self.p.json("contract", "--json")["commands"]
+        events = self.p.json("contract", "--json")["events"]
+
+        self.assertLessEqual(set(NEXT_FIELDS), set(commands["next"]["fields"]))
+        self.assertLessEqual(set(NEXT_STEPS), set(commands["next"]["steps"]))
+        self.assertLessEqual(set(STATE_FIELDS), set(commands["state"]["fields"]))
+        self.assertLessEqual(set(STATE_TASK_FIELDS), set(commands["state"]["task_fields"]))
+        self.assertLessEqual(set(RECEIPT_FIELDS), set(commands["receipt"]["fields"]))
+        self.assertLessEqual(set(ESCALATION_FIELDS), set(commands["escalations"]["entry_fields"]))
+        self.assertLessEqual(set(EVENT_FIELDS), set(events["fields"]))
+        for kind, fields in EVENT_KINDS.items():
+            with self.subTest(kind=kind):
+                self.assertLessEqual(set(fields), set(events["kinds"][kind]))
+
+    def test_agents_may_read_the_contract(self):
+        self.assertEqual(self.p.bash("python3 scripts/harness/lib/harness.py contract --json", "implementer")
+                         .returncode, 0)
+
+
+class Answers(FactoryProject):
+    def test_next_answers_carry_the_declared_fields(self):
+        declared = self.p.json("contract", "--json")["commands"]["next"]
+        for task, step in (("1.1", "define"), ("1.2", "blocked"), ("7.1", "finish")):
+            with self.subTest(task=task):
+                answer = self.p.json("next", task, "--json")
+
+                self.assertEqual(answer["step"], step)
+                self.assertLessEqual(set(declared["fields"]), set(answer))
+                self.assertLessEqual(set(declared["step_fields"].get(step, ())), set(answer))
+
+    def test_a_blocked_task_names_its_escalation(self):
+        answer = self.p.json("next", "1.2", "--json")
+
+        self.assertEqual(len(answer["escalations"]), 1)
+        self.assertIn("Task 1.2: decision", answer["escalations"][0])
+
+    def test_state_carries_the_declared_fields_for_every_task(self):
+        declared = self.p.json("contract", "--json")["commands"]["state"]
+        answer = self.p.json("state", "--json")
+
+        self.assertLessEqual(set(declared["fields"]), set(answer))
+        self.assertEqual({t["task"] for t in answer["tasks"]} >= {"1.1", "1.2", "7.1"}, True, answer["tasks"])
+        for task in answer["tasks"]:
+            with self.subTest(task=task["task"]):
+                self.assertLessEqual(set(declared["task_fields"]), set(task))
+
+    def test_the_receipt_carries_the_declared_fields(self):
+        declared = self.p.json("contract", "--json")["commands"]["receipt"]
+
+        self.assertLessEqual(set(declared["fields"]), set(self.p.json("receipt", "7.1", "--json")))
+
+    def test_escalations_json_lists_the_open_ones_with_kind_class_reason_and_needed(self):
+        data = self.p.json("escalations", "--json")
+        entry = next(e for e in data["escalations"] if e["task"] == "1.2")
+
+        self.assertLessEqual(set(self.p.json("contract", "--json")["commands"]["escalations"]["entry_fields"]),
+                             set(entry))
+        self.assertEqual((entry["kind"], entry["class"], entry["reason"], entry["needed"], entry["status"]),
+                         ("decision", "missing_context", "needs a product decision", "the user picks the wording",
+                          "open"))
+        self.assertEqual(data["by_class"]["missing_context"], 1)
+
+    def test_escalations_json_leaves_out_resolved_ones(self):
+        p = Project("escalations resolved ")
+        try:
+            p.add_task("2.1", "Done with")
+            p.add_task("2.2", "Still open")
+            p.harness("escalate", "2.1", "--reason", "first", "--kind", "decision")
+            p.harness("escalate", "2.2", "--reason", "second", "--kind", "runner")
+            p.write("backbone/escalations.md", p.read("backbone/escalations.md").replace("- Status: open",
+                                                                                          "- Status: resolved", 1))
+            data = p.json("escalations", "--json")
+        finally:
+            p.cleanup()
+
+        self.assertEqual([(e["task"], e["kind"]) for e in data["escalations"]], [("2.2", "runner")])
+        self.assertEqual(sum(data["by_class"].values()), 2)
+
+
+class Events(FactoryProject):
+    def test_every_event_carries_the_contract_version(self):
+        self.p.bash("git push --force origin main", "implementer")   # a refusal, logged as a block
+        events = self.p.events()
+
+        self.assertTrue(events)
+        for event in events:
+            with self.subTest(kind=event.get("kind")):
+                self.assertLessEqual(set(EVENT_FIELDS), set(event))
+                self.assertEqual(event["v"], 1)
+
+    def test_events_of_a_declared_kind_carry_its_fields(self):
+        self.p.bash("git push --force origin main", "implementer")
+        declared = self.p.json("contract", "--json")["events"]["kinds"]
+        seen = set()
+        for event in self.p.events():
+            if event["kind"] in declared:
+                seen.add(event["kind"])
+                with self.subTest(kind=event["kind"]):
+                    self.assertLessEqual(set(declared[event["kind"]]), set(event))
+
+        self.assertLessEqual({"escalation", "verdict", "block"}, seen)
+
+
+class Outward(unittest.TestCase):
+    """An outward write the harness lets through, or makes itself, is an `outward` event."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.p = Project("factory outward ")
+        cls.p.command("git", "remote", "add", "origin", "git@github.com:o/r.git")
+        cls.p.command("git", "checkout", "-q", "-b", "feat/x")
+        cls.bin = cls.p.base / "bin"
+        cls.bin.mkdir()
+        (cls.bin / "gh").write_text(FAKE_GH)
+        (cls.bin / "gh").chmod(0o755)
+        cls.p.env["PATH"] = str(cls.bin) + os.pathsep + os.environ["PATH"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.p.cleanup()
+
+    def outward_since(self, count):
+        return self.p.events("outward")[count:]
+
+    def test_the_deliverers_push_and_pr_calls_are_outward_events(self):
+        for command, action in (("git push -u origin HEAD", "push"),
+                                ("gh pr create --base main --title t --body b --label risk:low", "pr-create"),
+                                ("gh pr edit 7 --add-label risk:low", "pr-edit"),
+                                ("gh label create risk:low --color 0E8A16", "label-create")):
+            with self.subTest(command=command):
+                before = len(self.p.events("outward"))
+                answer = self.p.bash(command, "deliverer")
+                found = self.outward_since(before)
+
+                self.assertEqual(answer.returncode, 0, answer.stderr)
+                self.assertEqual([(e["action"], e["via"]) for e in found], [(action, "deliverer")])
+                self.assertEqual(found[0]["command"], command)
+
+    def test_a_refused_call_is_no_outward_event(self):
+        before = len(self.p.events("outward"))
+        answer = self.p.bash("gh pr merge 7", "deliverer")
+
+        self.assertEqual(answer.returncode, 2)
+        self.assertEqual(self.outward_since(before), [])
+
+    def test_reads_are_no_outward_events(self):
+        before = len(self.p.events("outward"))
+        for command in ("git status --porcelain", "gh pr checks 7", "git fetch origin"):
+            self.assertEqual(self.p.bash(command, "deliverer").returncode, 0, command)
+
+        self.assertEqual(self.outward_since(before), [])
+
+    def test_a_push_from_another_role_is_an_outward_event_too(self):
+        before = len(self.p.events("outward"))
+        self.p.bash("git push origin feat/x", "implementer")
+
+        self.assertEqual([(e["action"], e["via"]) for e in self.outward_since(before)], [("push", "implementer")])
+
+    def test_the_escalation_issue_the_harness_opens_is_an_outward_event(self):
+        self.p.add_task("5.1", "Escalated to GitHub")
+        before = len(self.p.events("outward"))
+        self.p.harness("escalate", "5.1", "--reason", "needs a decision", env={"HARNESS_ESCALATE_GH": "on"})
+        found = self.outward_since(before)
+
+        self.assertEqual([(e["action"], e["via"], e["task"], e["url"]) for e in found],
+                         [("issue-create", "harness", "5.1", "https://github.com/o/r/issues/12")])
+
+
+class TaskLock(unittest.TestCase):
+    """Two lanes on one task: `run --only` holds a lock in the shared git directory while it drives the task."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.p = Project("factory task lock ")
+        for task in ("3.1", "3.2", "3.3"):
+            cls.p.add_task(task, "Locked task %s" % task)
+        cls.p.commit("chore: tasks")
+        cls.env = dict(HARNESS_AUTONOMY="autonomous", HARNESS_VERIFY="block", HARNESS_RUN_ATTEMPTS="1",
+                       HARNESS_AGENT_CMD=agent_script(cls.p.base / "agent.sh", (
+                           'touch "$LOCK_STARTED"\ni=0\n'
+                           'while [ ! -f "$LOCK_RELEASE" ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done\n'
+                           'echo \'{"type":"result","total_cost_usd":0.1,"num_turns":1,"result":"ok"}\'\n')))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.p.cleanup()
+
+    def files(self, task):
+        """The agent's signal that its session started, and the file that lets it end, for task's runs."""
+        started, release = self.p.base / ("started-" + task), self.p.base / ("release-" + task)
+        return started, release, dict(self.env, LOCK_STARTED=str(started), LOCK_RELEASE=str(release))
+
+    def run_in_background(self, task, env):
+        command = ["python3", "-B", str(self.p.path / "scripts/harness/lib/harness.py"), "run", "--only", task]
+        return subprocess.Popen(command, cwd=str(self.p.path), env=dict(self.p.env, **env),
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    def wait_for(self, path, process):
+        deadline = time.time() + 60
+        while not path.exists() and process.poll() is None and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(path.exists(), "the first run's agent session never started")
+
+    def test_a_second_run_of_the_same_task_is_refused_while_the_first_holds_it(self):
+        started, release, env = self.files("3.1")
+        first = self.run_in_background("3.1", env)
+        try:
+            self.wait_for(started, first)
+            second = self.p.harness("run", "--only", "3.1", check=False, env=env)
+        finally:
+            release.touch()
+            output = first.communicate(timeout=120)[0]
+
+        self.assertEqual(second.returncode, 1, second.stdout)
+        self.assertIn("run: task 3.1 is being run already (pid %d)" % first.pid, second.stdout)
+        self.assertIn("run: locked       task 3.1", second.stdout)
+        self.assertIn("task 3.1 attempt 1", output)
+        self.assertNotIn("task 3.1 attempt 1", second.stdout)
+
+    def test_a_lock_left_by_a_run_that_ended_holds_nothing(self):
+        locks = self.p.path / ".git/harness/locks"
+        locks.mkdir(parents=True, exist_ok=True)
+        (locks / "task-3.2.lock").write_text(json.dumps({"pid": 1, "started": "2026-11-11T00:00:00+0000"}))
+        _, release, env = self.files("3.2")
+        release.touch()
+        result = self.p.harness("run", "--only", "3.2", check=False, env=env)
+
+        self.assertIn("task 3.2 attempt 1", result.stdout)
+        self.assertNotIn("being run already", result.stdout)
+
+    def test_agents_may_not_write_the_lock(self):
+        self.assertEqual(self.p.bash("echo '{}' > .git/harness/locks/task-3.3.lock", "implementer").returncode, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

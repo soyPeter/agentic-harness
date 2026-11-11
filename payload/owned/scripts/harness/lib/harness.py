@@ -22,7 +22,8 @@ Usage:
   harness.py repository-check <secrets.json> <variables.json>    (CI: no repository-level attest secrets, ADR-005)
   harness.py approve <task-id>                                    (autonomous mode: policy approval of a low-risk spec)
   harness.py escalate <task-id> --reason <text> [--kind <k>] [--class <failure class>] [--needed <text>]
-  harness.py escalations                                          (open escalations for the user)
+  harness.py escalations [--json]                                 (open escalations for the user)
+  harness.py contract [--json]                                    (the factory contract versions served, ADR-008)
   harness.py risk <task-id>
   harness.py run [--max-tasks N] [--only <task>] [--worktree [--pr]] [--dry-run]   (autonomous, unattended)
   harness.py report [--days N] [--json | --rules]                 (events: verdicts, gates, rules, lift, candidates)
@@ -2217,6 +2218,8 @@ def escalate(task, kind, reason, needed=None, cls=None):
                                  "--body", entry.strip(), "--label", "harness-escalation"],
                                 cwd=str(ROOT), capture_output=True, text=True)
         issue = result.stdout.strip() if result.returncode == 0 else None
+        if issue:
+            log_event("outward", action="issue-create", via="harness", task=task, url=issue)
     notify_coordinator("escalation", "Task %s: %s" % (task, kind), entry.strip(), task)
     return issue
 
@@ -2319,7 +2322,25 @@ def escalate_command(argv):
     return 0
 
 
-def escalations_command():
+def escalation_entries():
+    """Every entry of escalations.md as the contract's fields, oldest first."""
+    found = []
+    for entry in re.split(r"(?m)^## ", read(ESCALATIONS))[1:]:
+        head = re.match(r"(\S+ \S+) Task (\S+): (.*)$", entry.splitlines()[0])
+        fields = dict((k.lower(), v.strip()) for k, v in re.findall(r"(?m)^- (Status|Class|Playbook|Reason|Needed):"
+                                                                     r"[ \t]*(.*)$", entry))
+        found.append({"task": head.group(2) if head else None, "kind": head.group(3).strip() if head else None,
+                      "class": fields.get("class"), "playbook": fields.get("playbook"), "reason": fields.get("reason"),
+                      "needed": fields.get("needed"), "status": fields.get("status"),
+                      "at": head.group(1) if head else None})
+    return found
+
+
+def escalations_command(argv=()):
+    if "--json" in argv:
+        entries = [e for e in escalation_entries() if (e["status"] or "").lower() == "open"]
+        print(json.dumps({"escalations": entries, "by_class": class_counts()}, indent=2))
+        return 0
     items = open_escalations()
     for item in items:
         print("open  %s" % item)
@@ -3939,7 +3960,7 @@ def log_event(kind, **fields):
     try:
         path = events_file()
         path.parent.mkdir(parents=True, exist_ok=True)
-        entry = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": kind}
+        entry = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": kind, "v": CONTRACT_VERSION}
         entry.update({k: v for k, v in HOOK_CONTEXT.items() if v})
         if "task" not in fields:
             tasks = wip_task_ids()
@@ -4100,6 +4121,7 @@ def hook_pre_tool_use(data):
             deny("Harness blocked this command:\n%s\nIf the user really wants it, ask them to run it "
                  "themselves (in Claude Code: `! <command>`). Do not rephrase the command to get "
                  "around the rule." % "\n".join(problems))
+        log_outward(command, data.get("harness_role") or "session")
         if not autonomous():
             command_started(data)
         return
@@ -5742,6 +5764,104 @@ def questions_command(argv):
     return 0
 
 
+# --------------------------------------------------------------------------- the factory contract (ADR-008)
+# What an outside runner (the agent software factory) may rely on: these commands, their JSON fields and the event
+# kinds. Within a version fields are only added; removing one or changing its meaning is a new version.
+CONTRACT_VERSION = 1
+CONTRACT_VERSIONS = (1,)
+CONTRACT_COMMANDS = {
+    "next": {"command": "next <task> --json",
+             "fields": ["task", "title", "state", "change_class", "step", "role", "progress"],
+             "steps": ["define", "grill", "answer", "approve", "start", "test", "implement", "judge", "diagnose",
+                       "fix", "review", "finish", "deliver", "delivery-failed", "blocked", "done", "unknown"],
+             "step_fields": {"blocked": ["escalations", "needed"], "answer": ["questions", "roles", "needs_user"],
+                             "review": ["lenses"], "fix": ["findings"],
+                             "delivery-failed": ["delivery", "pr", "findings", "owners", "needed"]}},
+    "state": {"command": "state --json", "fields": ["autonomous", "tasks", "halted"],
+              "task_fields": ["task", "title", "state", "spec", "change_class", "spec_problems", "grill", "approved",
+                              "judge", "escalations"]},
+    "receipt": {"command": "receipt <task> --json",
+                "fields": ["task", "title", "objective", "base", "changed", "backbone_changed", "requirements",
+                           "verified", "not_verified", "decisions", "change_class", "change_class_problem", "risks",
+                           "rounds", "judged_at", "sandbox", "approval", "approval_needed", "suggested_labels"]},
+    "escalations": {"command": "escalations --json", "fields": ["escalations", "by_class"],
+                    "entry_fields": ["task", "kind", "class", "playbook", "reason", "needed", "status", "at"]},
+    "run": {"command": "run --only <task>"},
+    "trace": {"command": "trace <task> --json"},
+    "report": {"command": "report --json"},
+    "contract": {"command": "contract --json"},
+}
+CONTRACT_EVENTS = {
+    "task-start": ["task"], "task-finish": ["task"], "verdict": ["task", "agent", "verdict", "claimed"],
+    "review": ["task", "lens", "verdict"], "approval": ["task", "rule", "base"],
+    "escalation": ["task", "escalation", "failure_class", "reason"], "proposal": ["failure_class"],
+    "deliver": ["delivery", "branch", "base", "head", "pr", "checks", "findings", "owners"],
+    "run-start": ["tasks"], "run-attempt": ["task", "attempt", "exit", "seconds", "state", "cost_usd", "turns"],
+    "run-budget": ["spent", "limit"], "run-halt": [], "run-agent-failed": ["task", "error"], "run-end": ["summary"],
+    "tamper": ["files", "command"], "block": ["reason", "detail"], "gate": ["gate"],
+    "linear-import": ["task", "issue"], "outward": ["action", "via"],
+}
+
+
+def contract_command(argv):
+    engine = lock().get("harness_version") or lock().get("version") or "unknown"
+    if "--json" in argv:
+        print(json.dumps({"contract": CONTRACT_VERSION, "versions": list(CONTRACT_VERSIONS), "engine": engine,
+                          "commands": CONTRACT_COMMANDS,
+                          "events": {"file": ".git/harness/events.jsonl", "fields": ["at", "kind", "v"],
+                                     "kinds": CONTRACT_EVENTS}}, indent=2))
+        return 0
+    print("contract: version %d (serves %s)" % (CONTRACT_VERSION, ", ".join(str(v) for v in CONTRACT_VERSIONS)))
+    print("engine: %s" % engine)
+    return 0
+
+
+OUTWARD_GH = {("pr", "create"): "pr-create", ("pr", "new"): "pr-create", ("pr", "edit"): "pr-edit",
+              ("label", "create"): "label-create"}
+
+
+def log_outward(command, via):
+    """An outward event for each push, PR create or edit and label create in a command the hooks let through. It is
+    logged before the command runs: the factory's own audit log has what came of it."""
+    if not re.search(r"(?<![\w.-])(git|gh)(?![\w.-])", command):
+        return
+    try:
+        for _, words, why in gh_calls(command):
+            if why:
+                continue
+            action = "push" if git_subcommand(words) == "push" else (
+                OUTWARD_GH.get(gh_parts(words)[:2]) if program(words) == "gh" else None)
+            if action:
+                log_event("outward", action=action, via=via, command=" ".join(words)[:500])
+    except Exception:   # the audit trail never fails the call it describes
+        pass
+
+
+def task_lock_acquire(task):
+    """One run per task across the repository's worktrees: an exclusive OS lock on locks/task-<id>.lock in the shared
+    git directory, held until the process ends. Returns None once held, else what the holder recorded."""
+    import fcntl
+    folder = orca_dir(create=True) / "locks"
+    folder.mkdir(exist_ok=True)
+    fd = os.open(str(folder / ("task-%s.lock" % slug(task))), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            holder = json.loads(os.read(fd, 4096).decode("utf-8") or "{}")
+        except ValueError:
+            holder = {}
+        os.close(fd)
+        return holder if isinstance(holder, dict) else {}
+    os.ftruncate(fd, 0)
+    os.write(fd, json.dumps({"pid": os.getpid(), "started": time.strftime("%Y-%m-%dT%H:%M:%S%z")}).encode("utf-8"))
+    TASK_LOCKS[task] = fd
+    return None
+
+
+TASK_LOCKS = {}
+
+
 def orca_dir(create=False):
     """<git common dir>/harness: shared by the repository's worktrees. Reads don't create it."""
     common = git("rev-parse", "--path-format=absolute", "--git-common-dir").strip()
@@ -6246,6 +6366,8 @@ def run_worktrees(queue, open_prs):
                                cwd=str(tree), capture_output=True, text=True, env=dict(os.environ, HARNESS_VERIFY="block"))
             pushed = subprocess.run(["git", "push", "-q", "-u", "origin", branch], cwd=str(tree),
                                     capture_output=True, text=True)
+            if pushed.returncode == 0:
+                log_event("outward", action="push", via="harness", task=task, branch=branch)
             if pushed.returncode == 0 and shutil.which("gh"):
                 state = "ready for review" if outcome == "done" else "BLOCKED, see backbone/escalations.md"
                 body = "Opened by harness.py run: task %s is %s.\n\nThe harness-verify check re-checks the gates." \
@@ -6259,6 +6381,8 @@ def run_worktrees(queue, open_prs):
                                     cwd=str(tree), capture_output=True, text=True)
                 print("run: task %s: %s" % (task, pr.stdout.strip() or pr.stderr.strip()))
                 log_event("run-pr", task=task, branch=branch, url=pr.stdout.strip())
+                if pr.returncode == 0:
+                    log_event("outward", action="pr-create", via="harness", task=task, url=pr.stdout.strip())
             else:
                 print("run: task %s: branch %s kept locally (push failed or gh missing)" % (task, branch))
         subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=str(ROOT), capture_output=True)
@@ -6391,6 +6515,13 @@ def run_command(argv):
         for task, title, state in queue:
             print("run: would %s task %s: %s" % ("resume" if state == "wip" else "start", task, title))
         return 0
+    if only:
+        holder = task_lock_acquire(only)
+        if holder is not None:
+            print("run: task %s is being run already (pid %s); not starting a second run"
+                  % (only, holder.get("pid") or "unknown"))
+            print("run: %-12s task %s" % ("locked", only))
+            return 1
     timeout = int(values["HARNESS_RUN_TASK_TIMEOUT"]) if values["HARNESS_RUN_TASK_TIMEOUT"].isdigit() else 3600
     attempts = int(values["HARNESS_RUN_ATTEMPTS"]) if values["HARNESS_RUN_ATTEMPTS"].isdigit() else 2
     run_dir = events_file().parent / "runs" / time.strftime("%Y%m%d-%H%M%S")
@@ -7414,9 +7545,12 @@ def linear_receipt(task, status, base, dry_run):
         issue = linear.fetch_issue(m.group(1))
         state = linear.target_state(issue, status) if status else None
         url = linear.post_comment(issue["id"], body)
+        log_event("outward", action="linear-comment", via="harness", task=task, issue=m.group(1), url=url)
         print("linear: posted the receipt on %s %s" % (m.group(1), url))
         if state:
-            print("linear: moved %s to '%s'" % (m.group(1), linear.move_issue(issue, state)))
+            moved = linear.move_issue(issue, state)
+            log_event("outward", action="linear-state", via="harness", task=task, issue=m.group(1), state=moved)
+            print("linear: moved %s to '%s'" % (m.group(1), moved))
     except linear.LinearError as exc:
         raise HarnessError("linear: %s" % exc)
     log_event("linear-receipt", task=task, issue=m.group(1), status=status)
@@ -8027,8 +8161,10 @@ def main(argv):
         return approve_command(argv[2])
     if argv[1:2] == ["escalate"]:
         return escalate_command(argv[2:])
-    if argv[1:] == ["escalations"]:
-        return escalations_command()
+    if argv[1:2] == ["escalations"]:
+        return escalations_command(argv[2:])
+    if argv[1:2] == ["contract"]:
+        return contract_command(argv[2:])
     if argv[1:2] == ["run"]:
         return run_command(argv[2:])
     if argv[1:2] == ["state"]:
