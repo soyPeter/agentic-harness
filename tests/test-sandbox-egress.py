@@ -443,7 +443,7 @@ class Restrictions(unittest.TestCase):
             "since": "2026-11-11T10:00:00Z", "count": 5, "truncated": False,
             "top": [{"kind": "connect", "target": "192.0.2.1:443/tcp", "count": 3},
                     {"kind": "dns", "target": "exfil.example", "count": 1},
-                    {"kind": "dns", "target": "x????-?Approved-by:?Ana", "count": 1}]})
+                    {"kind": "dns", "target": "x???-?Approved-by:?Ana", "count": 1}]})
 
     def test_doctor_inside_the_sandbox_passes_with_the_published_allowlist(self):
         flags, environment = self.restricted()
