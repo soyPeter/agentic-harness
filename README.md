@@ -437,7 +437,13 @@ VERSION, CHANGELOG.md
 
 ## Developing the harness
 
-- Run `tests/run-tests.sh` after every change. It installs into temporary repos and runs the whole pipeline (define, grill, approve, build, judge) plus every hook, rule and update path.
+- Run `tests/run-tests.sh` after every change. It installs into temporary repos and runs the whole pipeline (define,
+  grill, approve, build, judge) plus every hook, rule and update path. Install the test-only tools first
+  (`python3 -m pip install -r tests/requirements.txt`, in a virtual environment). The `tests/test-*.py` files run in
+  parallel, `HARNESS_TEST_JOBS` at a time (default: one per CPU).
+- The property checks run every example by default (`HYPOTHESIS_PROFILE=thorough`). The required pull request jobs use
+  `HYPOTHESIS_PROFILE=ci`, which runs a quarter of the examples for checks that start a process per example; the
+  `nightly` workflow runs the full profile on Ubuntu and macOS every night.
 - Bump `VERSION` and add a `CHANGELOG.md` entry for each release. Projects see the version at session start and in `update.sh status`.
 - Keep `payload/owned` stack-neutral. Stack knowledge goes into catalog packs, and every tool or policy choice inside a pack is an option the ADR decides.
 - Never write a literal FILL placeholder (two braces, FILL, colon) into a harness-owned backbone doc, or projects will count it as unfinished setup.
