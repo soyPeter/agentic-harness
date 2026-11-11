@@ -47,12 +47,13 @@ The constraints:
 ### Command (v1)
 
 ```
-harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]
+harness.py trace export --format reqif|reqifz|needs|html [--out DIR] [--task ID]
+harness.py trace link <matrix-url> [--task ID]
 ```
 
 - It exports every task that has a spec in `backbone/specs/`, or only `--task ID`. A task without a spec is refused.
 - Without `--out`, the document goes to stdout. With `--out DIR`, it goes to `DIR/traceability.reqif`,
-  `DIR/needs.json` or `DIR/traceability.html`.
+  `DIR/traceability.reqifz`, `DIR/needs.json` or `DIR/traceability.html`.
 - An `--out` inside the repository is refused unless git ignores the file, and so is stdout redirected to such a file
   (`> trace.html`). An untracked file there counts as code, so writing it would make every judge pass stale. The
   refusal goes to stderr, so it can't land in the file. CI writes to the runner's temporary folder and keeps the file
@@ -74,7 +75,8 @@ harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]
 | a test file that mentions an AC id | `TEST-<task>-<first 12 hex digits of the SHA-256 of its path>` | `SPEC-OBJECT` of type Test | need of type `test` |
 | a criterion proves a requirement (the spec's `(REQ-…)` list) | | `SPEC-RELATION` Verifies, from the AC to the requirement | link field `verifies` |
 | a test file mentions a criterion | | `SPEC-RELATION` Tests, from the test to the AC | link field `tests` |
-| verdicts, fingerprints, commits | | string attributes `Harness.*` | fields `harness_*` |
+| verdicts, fingerprints, commits | | enumerations `Harness.Result` and `Harness.Verdict`, string attributes `Harness.*` for the rest | fields `harness_*` |
+| a task's receipt (`.reqifz` only) | `receipts/<task>.txt` | XHTML attribute `Harness.Receipt` on the task, an `xhtml:object` naming the file | |
 
 - **Ids.** Requirement, NFR and criterion ids are the spec's own, unchanged in every format (`ReqIF.ForeignID`, the
   need's `id`, the HTML row). An auditor can search for them in the spec, the tests, the verdicts and the receipt.
@@ -119,10 +121,13 @@ harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]
 - **ReqIF 1.2** (OMG `formal/16-07-01`):
   - It is written with `xml.etree`, in the namespace `http://www.omg.org/spec/ReqIF/20110401/reqif.xsd` that ReqIF
     1.0.1 to 1.2 share, with `REQ-IF-VERSION` `1.0`, the value the schema fixes.
-  - It uses one string datatype, the attribute names of the ReqIF Implementation Guide where they fit
-    (`ReqIF.ForeignID`, `ReqIF.Name`, `ReqIF.Text`) and `Harness.*` for the rest.
-  - ReqIF has no notion of a test result, a verdict or a code fingerprint. They are plain strings whose meaning this
-    ADR defines.
+  - It uses one string datatype, two enumerations and one XHTML datatype, the attribute names of the ReqIF
+    Implementation Guide where they fit (`ReqIF.ForeignID`, `ReqIF.Name`, `ReqIF.Text`) and `Harness.*` for the rest.
+  - ReqIF has no notion of a test result, a verdict or a code fingerprint. A criterion's result (`Harness.Result`:
+    met, not met, not evaluated, not judged) and the judge's verdict (`Harness.Verdict`: pass on the current code, pass
+    on earlier code, fail, not judged) are single-valued enumerations (`AH-D-RESULT` and `AH-D-VERDICT`; values
+    `AH-E-RESULT-NOT-MET` and the like, the value in capitals with dashes, `KEY` in the order above), so a tool can
+    filter on them; the rest are plain strings. This ADR defines what they mean.
   - The tests check the output against the schema's required elements and attributes, element order, references and
     id rules, with a minimal check vendored from `reqif.xsd`. They download nothing.
 - **Sphinx-Needs `needs.json`, format 1**:
@@ -133,13 +138,21 @@ harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]
     options `verifies` and `tests` and the `harness_*` fields, and sets a `needs_id_regex` that accepts dots and
     dashes.
   - Sphinx-Needs (Python 3.11 or later) stays outside the engine: the harness only writes JSON.
+- **ReqIF archive (`.reqifz`)**: a ZIP archive, as the prostep ivip ReqIF Recommendation (PSI 18) describes one,
+  holding the ReqIF document as `traceability.reqif` at its top level and `receipts/<task>.txt` for each task with a
+  judge pass on the current code: the bytes `harness.py receipt <task>` prints. The task's `Harness.Receipt` names the
+  file with an `xhtml:object` (`data`, `type="text/plain"`), the way the ReqIF Implementation Guide exchanges files. The
+  document is the `reqif` export plus those references. The entries are stored, not deflated, and dated from `HEAD`'s
+  committer date, so the archive is byte-identical wherever it is made. The tests check that every named file is in the
+  archive and that the document meets the vendored schema check, extended from `reqif.xsd` for enumerations and XHTML.
 - **HTML matrix**:
   - One self-contained file: inline CSS, no script, no external resource. Every string from the spec or the verdicts
     is escaped.
   - A section per task gives its verdict, commits, test run, grill, approval and reviews. A row per requirement and
     criterion gives the requirement, the criterion, the test files, the judge's result and the commits that carry the
     judged code. The gaps follow.
-  - CI can attach it to a pull request as an artifact.
+  - `harness-verify` attaches it to each pull request that verifies, as the artifact `harness-traceability` (see
+    follow-up 1).
 
 ### EARS specs (`HARNESS_REQ_STYLE=ears`)
 - A requirement's text is its EARS sentence, and its pattern is exported with it (`Harness.EARSPattern`,
@@ -164,8 +177,9 @@ For the commit an export was made at, they can show:
 
 They cannot claim:
 
-- **A record.** The export is a copy. It isn't signed, and anyone can edit the file. Where it disagrees with
-  `backbone/` and git, those win: regenerate it from the commit instead of trusting a file.
+- **A record.** The export is a copy, and anyone can edit a file. Where it disagrees with `backbone/` and git, those
+  win: regenerate it from the commit instead of trusting a file. The `.reqifz` the push job signs (follow-up 4) shows
+  only that the project's attest key signed those bytes; the commit is the one its header names.
 - **That the requirement text is the ticket's.** The requirements and criteria are the spec's, in `backbone/specs/`.
   The `triple` pilot names Linear as its system of record (`catalog/triple/`), and its Analyst writes the spec from the
   ticket, but the export traces the spec's text. A change to the ticket changes nothing here until the spec changes.
@@ -196,7 +210,7 @@ They cannot claim:
   code, so a project-wide export would leave out every task finished before. The export shares the receipt's evidence
   and helpers instead, and says for each task whether its pass is current.
 - **ReqIF enumerations for results** instead of strings: better filters in some tools, but more importer edge cases.
-  Strings come first.
+  Strings came first; follow-up 3 made results and verdicts enumerations before v1 shipped in a release.
 
 ## Consequences
 - **Easier**:
@@ -220,3 +234,36 @@ They cannot claim:
   2. Posting a link to the matrix in the pull request and on its Linear ticket.
   3. `.reqifz` with the receipt attached, and ReqIF enumerations for results.
   4. Signed exports, once verdicts are signed.
+
+## Follow-up status
+2026-11-11, built and tested locally only (no CI run, nothing pushed):
+
+1. **Done.** `harness-verify`'s pull request job runs `Write the traceability matrix` after `verify --range` passes,
+   with the engine the take step took from the base branch (`$ENGINE_SCRIPT`), not the checkout's, and `Upload the
+   traceability matrix` keeps it as the artifact `harness-traceability`. The matrix is written to `$RUNNER_TEMP`,
+   outside the checkout. It isn't a gate: an engine from before `trace export` writes no file and the step warns, and a
+   failing export warns too, since a derived view must not block a merge. A pull request that fails `verify` gets no
+   matrix: the workflow runs no step after a failure (`always()` is kept out of it). Tested by running the take and
+   write steps on a pull request that rewrites the exporter: the matrix is the base engine's.
+2. **Done, without a call from CI.** `harness.py trace link <matrix-url> [--task ID]` prints the comment: the link,
+   the commit the matrix describes, and that it is derived. It refuses a link that isn't https or holds characters that
+   would break the Markdown. The pull request job holds only `contents: read` and no secrets, so it posts nothing.
+   Once CI passes, the deliverer finds the artifact (`gh run list`, then a `gh api` read) and adds the comment to the
+   pull request's body with `gh pr edit --body`, which its gate already allows; `gh pr comment` stays refused. The
+   Linear ticket gets it from the user: `harness.py linear receipt <task> --matrix <url>` adds it to the receipt
+   comment, and agents may run that only with `--dry-run`. Tested through the command, `--dry-run` and the
+   deliverer's gate, without GitHub or Linear.
+3. **Done.** `--format reqifz`, and results and verdicts as ReqIF enumerations (described under Formats). The export
+   had not shipped in a release, so the change is in place: the attribute identifiers stay, now with enumeration
+   definitions. Checked against the vendored schema check and the archive check; a property test drives the judge's
+   report through the decision table (met, not met, not evaluated) and compares the three formats.
+4. **Done, for the `.reqifz` of a push.** ADR-005's attest job already signs on a push to the default branch, with a
+   key checked against `harness-attest.pub`. After it uploads the verdict attestation, it writes the `.reqifz` with the
+   same engine (the one the push starts from), signs it with `cosign sign-blob` and the same key and signing config
+   (no transparency log), and uploads the archive and its bundle as `harness-traceability-signed`. A verifier runs
+   `cosign verify-blob --key harness-attest.pub --bundle traceability.reqifz.sigstore.json --insecure-ignore-tlog
+   traceability.reqifz`, then regenerates the archive at the commit with the same engine and compares bytes. Tested
+   locally with a key made for the test: the signature verifies, a changed byte fails, and a fresh clone regenerates
+   the same archive. Not done: the pull request's matrix isn't signed (a pull request job holds no key, by ADR-005),
+   and an in-toto statement naming the archive as a subject, which would tie it to the commit inside the signature,
+   is left to ADR-005's predicate `v1`.

@@ -111,6 +111,9 @@ READ_APPROVAL = "Read the merged pull request's approval"
 WRITE = "Write the verdict attestation"
 SIGN = "Sign the verdict attestation"
 UPLOAD = "Upload the verdict attestation"
+WRITE_EXPORT = "Write the traceability export"
+SIGN_EXPORT = "Sign the traceability export"
+UPLOAD_EXPORT = "Upload the signed traceability export"
 
 
 def step_script(name, source=None):

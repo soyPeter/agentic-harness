@@ -36,9 +36,14 @@ You are the **deliverer**. Every task on this branch has passed its judge and it
      - Write each gh command out, label names included: the harness refuses what it can't read, such as gh behind `xargs`, a label or flag in a variable, a gh alias or a shell alias.
      - A label you can't create or add (no permission, as from a fork) doesn't hold delivery; say so in the summary.
 4. **CI.** Watch the checks with `gh pr checks --watch --fail-fast`, giving it a timeout of at most 30 minutes. `gh pr checks` is the source of truth, not a single workflow's status.
-   - All passed: report `delivered`. No checks configured: report `delivered` with `checks: "none"`.
+   - All passed: link the matrix (step 5), then report `delivered`. No checks configured: report `delivered` with `checks: "none"`.
    - Any failed: read the failing logs (`gh run view <run-id> --log-failed`), find the cause, and report `ci-failed` with one finding per cause, each with its owner and fix. Don't re-run a job to get a flaky one to pass; if it is flaky, say so and make the owner `user`.
    - Still pending at the timeout: report `ci-failed` with `checks: "pending"` and list the checks still running.
+5. **Matrix link.** For a pull request that verifies, `harness-verify` uploads the traceability matrix as the artifact `harness-traceability`, written by the base branch's engine (ADR-004).
+   - Find the check's run for the pushed commit, `gh run list --workflow harness-verify.yml --commit <head> --json databaseId --limit 1`, then the matrix in it, `gh api repos/{owner}/{repo}/actions/runs/<run-id>/artifacts --jq '.artifacts[] | select(.name == "harness-traceability") | .id'`.
+   - Run `python3 scripts/harness/lib/harness.py trace link https://github.com/<owner>/<repo>/actions/runs/<run-id>/artifacts/<artifact-id>` and add its output at the end of the PR body (`gh pr edit --body`, with the whole body).
+   - No run or no matrix (the base branch's engine predates it): skip this step and say so in the summary. It never holds delivery.
+   - Posting the link on a Linear ticket is the user's call: for each task whose spec has a `Linear:` line, give them `python3 scripts/harness/lib/harness.py linear receipt <id> --matrix <url>` in the summary.
 
 ## Rules
 

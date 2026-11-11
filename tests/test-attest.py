@@ -14,11 +14,11 @@ import shutil
 import tempfile
 import unittest
 
-from attest_support import (APPROVAL, CHECK_ENVIRONMENT, CHECK_KEY, CHECK_PUSHED, CHECK_SIGNING, ENGINE,
-                            FIND_SETTINGS, HARNESS, INSTALL_COSIGN, LAUNCHER, LENSES, PREDICATE_TYPE, READ_APPROVAL,
-                            SEARCH, SIGN, SIGN_IN, SORT, STATEMENT_FILE, STATEMENT_TYPE, TAKE_BASE, TAKE_PUSHED, UPLOAD,
-                            VERIFIER, VERSION, WORKFLOW, WRITE, Project, fake_github, gh_calls, jobs, new_project,
-                            run, run_take, sha256, step_script, take_engine)
+from attest_support import (APPROVAL, CHECK_ENVIRONMENT, CHECK_KEY, CHECK_PUSHED, CHECK_SIGNING, ENGINE, FIND_SETTINGS,
+                            HARNESS, INSTALL_COSIGN, LAUNCHER, LENSES, PREDICATE_TYPE, READ_APPROVAL, SEARCH, SIGN,
+                            SIGN_EXPORT, SIGN_IN, SORT, STATEMENT_FILE, STATEMENT_TYPE, TAKE_BASE, TAKE_PUSHED, UPLOAD,
+                            UPLOAD_EXPORT, VERIFIER, VERSION, WORKFLOW, WRITE, WRITE_EXPORT, Project, fake_github,
+                            gh_calls, jobs, new_project, run, run_take, sha256, step_script, take_engine)
 from hypothesis_profiles import examples
 
 try:
@@ -613,7 +613,7 @@ class Workflow(unittest.TestCase):
         verify = jobs()["verify"]
 
         self.assertIn("if: github.event_name == 'pull_request'\n", verify)
-        for word in ("secrets.", "environment:", "cosign", "HARNESS_ATTEST", "upload-artifact", "attest"):
+        for word in ("secrets.", "environment:", "cosign", "HARNESS_ATTEST", "attest"):
             self.assertNotIn(word, verify)
 
     def test_the_signing_job_runs_only_for_a_push_to_the_default_branch_in_its_protected_environment(self):
@@ -635,10 +635,10 @@ class Workflow(unittest.TestCase):
 
         self.assertEqual(list(steps), [
             FIND_SETTINGS, CHECK_PUSHED, TAKE_PUSHED, CHECK_SIGNING, CHECK_ENVIRONMENT, INSTALL_COSIGN, SIGN_IN,
-            CHECK_KEY, READ_APPROVAL, WRITE, SIGN, UPLOAD])
+            CHECK_KEY, READ_APPROVAL, WRITE, SIGN, UPLOAD, WRITE_EXPORT, SIGN_EXPORT, UPLOAD_EXPORT])
         self.assertNotIn("if:", steps[FIND_SETTINGS])
         for name in (CHECK_PUSHED, TAKE_PUSHED, CHECK_SIGNING, CHECK_ENVIRONMENT, INSTALL_COSIGN, READ_APPROVAL, WRITE,
-                     SIGN, UPLOAD):
+                     SIGN, UPLOAD, WRITE_EXPORT, SIGN_EXPORT, UPLOAD_EXPORT):
             self.assertIn("if: env.ATTEST == 'true'\n", steps[name])
         self.assertIn("if: env.ATTEST_MODE == 'kms'\n", steps[SIGN_IN])
         self.assertIn("if: env.ATTEST_MODE == 'key' || env.ATTEST_MODE == 'kms'\n", steps[CHECK_KEY])

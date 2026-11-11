@@ -1,11 +1,13 @@
 """`harness.py trace export` (ADR-004): the trace chain requirement -> acceptance criterion -> test -> verdict -> commit
-as ReqIF 1.2, Sphinx-Needs needs.json (format 1) and an HTML matrix, checked through the command in a throwaway
-project whose verdicts are recorded by the harness's own hooks.
+as ReqIF 1.2, a ReqIF archive (.reqifz) with the receipts, Sphinx-Needs needs.json (format 1) and an HTML matrix,
+checked through the command in a throwaway project whose verdicts are recorded by the harness's own hooks. Also
+`trace link`, the comment that links a matrix from a pull request or a Linear ticket.
 
 The ReqIF output is checked against a minimal subset of the OMG schema vendored in tests/reqif_check.py, offline. The
 property checks need hypothesis (pip install -r tests/requirements.txt); the rest runs without it.
 """
 import hashlib
+import io
 from html.parser import HTMLParser
 import json
 import os
@@ -16,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import reqif_check  # noqa: E402
@@ -113,6 +116,11 @@ TASKS = """
 """
 
 
+RESULTS = ["met", "not met", "not evaluated", "not judged"]
+VERDICTS = ["pass on the current code", "pass on earlier code", "fail", "not judged"]
+MATRIX_URL = "https://github.com/o/r/actions/runs/12/artifacts/34"
+
+
 def final_message(report):
     return "Done.\n\n```json\n%s\n```" % json.dumps(report)
 
@@ -162,6 +170,10 @@ class Matrix(HTMLParser):
     def row(self, task, first):
         """The first row of task's tables whose first cell starts with first."""
         return next((r for r in self.sections["task-" + task]["rows"] if r and r[0].startswith(first)), None)
+
+    def results(self, task):
+        """The result cell of each criterion's row in task's matrix (plain style), in order."""
+        return [r[3] for r in self.sections["task-" + task]["rows"] if len(r) == 6 and r[1].startswith("AC-")]
 
     def facts(self, task):
         """The task section's two-cell rows: {label: value}."""
@@ -319,6 +331,14 @@ class TracedProject(Project):
     def needs(self, *args, env=None):
         return self.needs_at(self.project, *args, env=env)
 
+    def archive(self, *args, root=None, env=None):
+        """The .reqifz export's bytes, written with --out to a new folder outside the repository."""
+        root = root or self.project
+        out = Path(tempfile.mkdtemp(prefix="reqifz ", dir=str(self.outside)))
+        self.command("python3", "-B", str(root / "scripts/harness/lib/harness.py"), "trace", "export", "--format",
+                     "reqifz", "--out", str(out), *args, cwd=root, env=env)
+        return (out / "traceability.reqifz").read_bytes()
+
     def needs_at(self, root, *args, env=None):
         data = json.loads(self.export_at(root, "needs", *args, env=env))
         return data["versions"][data["current_version"]]["needs"]
@@ -412,6 +432,114 @@ class ReqIF(TracedProject):
         self.assertEqual(reqif_check.relations(document), [("Verifies", "AC-7.3-1", "REQ-7.3-1")])
         self.assertIn("AC-7.3-2 references REQ-7.3-9, which the spec doesn't define",
                       reqif_check.objects(document)["7.3"]["Harness.Gaps"].splitlines())
+
+    def test_results_and_verdicts_are_enumerations_of_their_closed_values(self):
+        types = reqif_check.attribute_types(self.export("reqif"))
+
+        self.assertEqual(types["Acceptance criterion"]["Harness.Result"], ("ENUMERATION", RESULTS))
+        self.assertEqual(types["Acceptance criterion"]["Harness.Verdict"], ("ENUMERATION", VERDICTS))
+        self.assertEqual(types["Task"]["Harness.Verdict"], ("ENUMERATION", VERDICTS))
+        self.assertEqual(types["Acceptance criterion"]["Harness.Evidence"], ("STRING", []))
+
+    def test_each_criterion_and_task_takes_the_value_its_verdict_gives(self):
+        objects = reqif_check.objects(self.export("reqif"))
+
+        self.assertEqual({ident: (objects[ident]["Harness.Result"], objects[ident]["Harness.Verdict"])
+                          for ident in ("AC-7.1-1", "AC-7.2-1", "AC-7.3-1")},
+                         {"AC-7.1-1": ("met", "pass on earlier code"), "AC-7.2-1": ("met", "pass on the current code"),
+                          "AC-7.3-1": ("not judged", "not judged")})
+        self.assertEqual([objects[task]["Harness.Verdict"] for task in ("7.1", "7.2", "7.3")],
+                         ["pass on earlier code", "pass on the current code", "not judged"])
+
+    def test_the_vendored_check_finds_an_enumeration_value_that_breaks_the_rules(self):
+        document = self.export("reqif", "--task", "7.1")
+        ref = re.compile(r"<ENUM-VALUE-REF>AH-E-RESULT-MET</ENUM-VALUE-REF>")
+
+        unflagged = reqif_check.problems(document.replace(' MULTI-VALUED="false"', "", 1))
+        foreign = reqif_check.problems(ref.sub("<ENUM-VALUE-REF>AH-E-VERDICT-FAIL</ENUM-VALUE-REF>", document, 1))
+        doubled = reqif_check.problems(ref.sub(lambda m: m.group(0) * 2, document, 1))
+
+        self.assertTrue(any("attribute MULTI-VALUED is required" in p for p in unflagged), unflagged)
+        self.assertTrue(any("names AH-E-VERDICT-FAIL, which is not a value of its datatype AH-D-RESULT" in p
+                            for p in foreign), foreign)
+        self.assertTrue(any("holds 2 values; its definition isn't MULTI-VALUED" in p for p in doubled), doubled)
+
+
+def zipped(files):
+    """A ZIP archive holding files ({name: bytes})."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as handle:
+        for name, data in files.items():
+            handle.writestr(name, data)
+    return buffer.getvalue()
+
+
+class ReqIFArchive(TracedProject):
+    def test_it_holds_the_document_and_the_receipt_of_each_task_whose_pass_is_on_the_current_code(self):
+        files = reqif_check.archive(self.archive())
+
+        self.assertEqual(sorted(files), ["receipts/7.2.txt", "traceability.reqif"])
+        self.assertEqual(files["receipts/7.2.txt"].decode("utf-8"), self.harness("receipt", "7.2").stdout)
+
+    def test_it_meets_the_vendored_checks_and_the_task_names_its_receipt(self):
+        data = self.archive()
+        document = reqif_check.archive(data)["traceability.reqif"]
+
+        self.assertEqual(reqif_check.archive_problems(data), [])
+        self.assertEqual(reqif_check.attachments(document), {"7.2": [("receipts/7.2.txt", "text/plain")]})
+        self.assertEqual(reqif_check.attribute_types(document)["Task"]["Harness.Receipt"], ("XHTML", []))
+
+    def test_its_document_is_the_reqif_export_with_the_receipt_named(self):
+        document = reqif_check.archive(self.archive())["traceability.reqif"]
+        plain = self.export("reqif")
+        inside = reqif_check.objects(document)
+        receipt = inside["7.2"].pop("Harness.Receipt")
+
+        self.assertEqual(inside, reqif_check.objects(plain))
+        self.assertEqual(receipt, "Receipt of task 7.2")
+        self.assertEqual(reqif_check.relations(document), reqif_check.relations(plain))
+        self.assertEqual(reqif_check.hierarchy(document), reqif_check.hierarchy(plain))
+
+    def test_task_limits_it_to_that_task_and_its_receipt(self):
+        self.assertEqual(sorted(reqif_check.archive(self.archive("--task", "7.1"))), ["traceability.reqif"])
+        self.assertEqual(sorted(reqif_check.archive(self.archive("--task", "7.2"))),
+                         ["receipts/7.2.txt", "traceability.reqif"])
+
+    def test_the_same_repository_state_gives_the_same_bytes_on_stdout_too(self):
+        first = self.archive()
+        redirected = self.outside / "stdout.reqifz"
+        with open(redirected, "wb") as out:
+            subprocess.run(["python3", "-B", str(self.project / "scripts/harness/lib/harness.py"), "trace", "export",
+                            "--format", "reqifz"], cwd=self.project, env=dict(self.env, TZ="Asia/Tokyo"), stdout=out,
+                           check=True)
+
+        self.assertEqual(self.archive(env={"TZ": "Pacific/Kiritimati"}), first)
+        self.assertEqual(redirected.read_bytes(), first)
+
+    def test_a_repository_without_a_commit_gets_an_archive_dated_as_early_as_zip_allows(self):
+        root = self.outside / "no-commit"
+        root.mkdir()
+        self.command("git", "init", "-q", "-b", "main", cwd=root)
+        self.command(str(ROOT / "bootstrap.sh"), str(root), "--name", "fresh", cwd=root)
+        (root / "backbone/specs").mkdir(exist_ok=True)
+        shutil.copy(str(self.project / "backbone/specs/7.3.md"), str(root / "backbone/specs/7.3.md"))
+
+        data = self.archive(root=root)
+
+        self.assertEqual(reqif_check.archive_problems(data), [])
+        with zipfile.ZipFile(io.BytesIO(data)) as handle:
+            self.assertEqual({info.date_time for info in handle.infolist()}, {(1980, 1, 1, 0, 0, 0)})
+
+    def test_the_vendored_check_finds_a_missing_receipt_or_document(self):
+        files = reqif_check.archive(self.archive())
+
+        missing = reqif_check.archive_problems(zipped({"traceability.reqif": files["traceability.reqif"]}))
+        empty = reqif_check.archive_problems(zipped({"receipts/7.2.txt": files["receipts/7.2.txt"]}))
+
+        self.assertEqual(missing, ["traceability.reqif: 7.2's xhtml:object names receipts/7.2.txt, which the archive "
+                                   "doesn't hold"])
+        self.assertEqual(empty, ["no .reqif document at the archive's top level"])
+        self.assertTrue(reqif_check.archive_problems(files["traceability.reqif"])[0].startswith("not a ZIP archive"))
 
 
 class NeedsJson(TracedProject):
@@ -730,12 +858,73 @@ class Command(TracedProject):
                 result = self.harness("trace", "export", *args, check=False)
 
                 self.assertEqual(result.returncode, 64, result.stdout)
-                self.assertIn("usage: harness.py trace export --format reqif|needs|html", result.stderr)
+                self.assertIn("usage: harness.py trace export --format reqif|reqifz|needs|html", result.stderr)
 
     def test_trace_of_a_task_still_prints_its_events(self):
         result = self.harness("trace", "7.1")
 
         self.assertTrue(result.stdout.startswith("trace: task 7.1, "), result.stdout)
+
+
+class MatrixLink(TracedProject):
+    def link(self, *args, root=None, check=True):
+        root = root or self.project
+        return self.command("python3", "-B", str(root / "scripts/harness/lib/harness.py"), "trace", "link", *args,
+                            cwd=root, check=check)
+
+    def test_the_comment_links_the_matrix_and_names_the_commit_it_describes(self):
+        comment = self.link(MATRIX_URL).stdout
+
+        self.assertEqual(comment.splitlines()[0], "**Traceability matrix** (ADR-004): %s" % MATRIX_URL)
+        self.assertIn("for every task with a spec at commit %s" % self.second, comment)
+        self.assertIn("derived from backbone/ and git, not the record", comment)
+        self.assertIn("`harness.py trace export --format html`", comment)
+
+    def test_task_names_the_task_in_the_comment(self):
+        self.assertIn("for task 7.2 at commit %s" % self.second, self.link(MATRIX_URL, "--task", "7.2").stdout)
+
+    def test_a_task_without_a_spec_is_refused(self):
+        refused = self.link(MATRIX_URL, "--task", "9.9", check=False)
+
+        self.assertEqual((refused.returncode, refused.stdout), (1, ""))
+        self.assertIn("no spec at backbone/specs/9.9.md", refused.stderr)
+
+    def test_a_link_the_comment_cannot_carry_as_written_is_refused(self):
+        for url in ("http://github.com/o/r/actions/runs/12/artifacts/34", "javascript:alert(1)", "github.com/o/r",
+                    "https://github.com/o/r/a b", "https://github.com/o/r/a)[x](https://evil.example",
+                    "https://github.com/o/r/<b>", "https://github.com/o/r/`x`", "https://", "https://x.example/\n"):
+            with self.subTest(url=url):
+                refused = self.link(url, check=False)
+
+                self.assertEqual((refused.returncode, refused.stdout), (1, ""))
+                self.assertIn("is not an https link", refused.stderr)
+
+    def test_a_wrong_call_prints_the_usage(self):
+        for args in ((), ("--task", "7.2"), (MATRIX_URL, "--task"), (MATRIX_URL, MATRIX_URL),
+                     (MATRIX_URL, "--colour", "red")):
+            with self.subTest(args=args):
+                result = self.link(*args, check=False)
+
+                self.assertEqual(result.returncode, 64, result.stdout)
+                self.assertIn("harness.py trace link <matrix-url> [--task ID]", result.stderr)
+
+    def test_the_linear_comment_carries_the_receipt_and_the_matrix_link(self):
+        root = self.clone("linear")
+        spec = root / "backbone/specs/7.2.md"
+        spec.write_text(spec.read_text().replace(
+            "PRD: none\n", "PRD: none\nLinear: DIS-142 (https://linear.app/x/issue/DIS-142)\n", 1))
+        harness = str(root / "scripts/harness/lib/harness.py")
+
+        preview = self.command("python3", "-B", harness, "linear", "receipt", "7.2", "--matrix", MATRIX_URL,
+                               "--dry-run", cwd=root).stdout
+        refused = self.command("python3", "-B", harness, "linear", "receipt", "7.2", "--matrix", "javascript:x",
+                               "--dry-run", cwd=root, check=False)
+
+        self.assertTrue(preview.startswith("Would comment on DIS-142:\n"), preview)
+        self.assertIn("Receipt: Task 7.2: Search by email", preview)
+        self.assertIn("\n\n" + self.link(MATRIX_URL, "--task", "7.2", root=root).stdout.strip(), preview)
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("is not an https link", refused.stderr)
 
 
 def tearDownModule():
@@ -783,6 +972,46 @@ if given is not None:
                 self.assertIn(" ".join(text.split()), matrix.row("9.1", "REQ-9.1-1")[0 if item[0] == "R" else 1])
             self.assertEqual([r for _, s, t in reqif_check.relations(documents["reqif"]) for r in (s, t)],
                              ["AC-9.1-1", "REQ-9.1-1"])
+
+        @classmethod
+        def judged_task(cls):
+            """Task 9.2, grilled, approved and in progress, so each example records a judge verdict on it."""
+            if not (cls.project / "backbone/specs/9.2.md").exists():
+                cls.write_spec("9.2", title="Judged", context="Generated text.", nfrs="- none",
+                               requirements="- REQ-9.2-1: The system shall work.",
+                               criteria="\n".join("- AC-9.2-%d (REQ-9.2-1): Given %d, when it runs, then it works."
+                                                  % (n, n) for n in (1, 2, 3)))
+                grilled = cls.hook("grill-stop", {"verdict": "pass", "task": "9.2", "questions": [], "summary": "s"})
+                assert "PASS" in grilled, grilled
+                spec = cls.project / "backbone/specs/9.2.md"
+                spec.write_text(spec.read_text() + "Approved-by: Ana (2026-11-01)\n")
+                tasks = cls.project / "backbone/3-TASKS.md"
+                tasks.write_text(tasks.read_text() + "\n- [WIP] **Task 9.2: Judged** (spec: backbone/specs/9.2.md)\n")
+
+        # The judge's "met" for a criterion ("absent": the report leaves it out) -> its result, as ADR-004 defines it.
+        RESULT_OF = {True: "met", False: "not met", None: "not met", "yes": "not met", "absent": "not evaluated"}
+
+        @settings(max_examples=examples(15), deadline=None)
+        @given(reported=st.lists(st.sampled_from(sorted(RESULT_OF, key=str)), min_size=3, max_size=3))
+        def test_each_criterion_s_result_follows_the_judge_s_report_in_every_format(self, reported):
+            self.judged_task()
+            self.hook("judge-stop", {
+                "verdict": "fail", "task": "9.2", "summary": "s", "findings": [],
+                "criteria": [{"id": "AC-9.2-%d" % n, "met": met, "evidence": "e", "tests": []}
+                             for n, met in enumerate(reported, 1) if met != "absent"],
+                "tests": {"command": "true", "result": "failed"}})
+            expected = [self.RESULT_OF[met] for met in reported]
+
+            objects = reqif_check.objects(self.export("reqif", "--task", "9.2"))
+            data = json.loads(self.export("needs", "--task", "9.2"))
+            needs = data["versions"][data["current_version"]]["needs"]
+            matrix = Matrix(self.export("html", "--task", "9.2"))
+
+            for n, result in enumerate(expected, 1):
+                ident = "AC-9.2-%d" % n
+                self.assertEqual((objects[ident]["Harness.Result"], needs[ident]["harness_result"]), (result, result))
+                self.assertEqual(objects[ident]["Harness.Verdict"], "fail")
+            self.assertEqual(matrix.results("9.2"), expected)
 
         @settings(max_examples=examples(15), deadline=None)
         @given(requirement=printable)
