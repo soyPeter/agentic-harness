@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **delivery-record checks the trusted clone's verify, and can sign the record.** The report now carries `verify`:
+  the range, head and exit status of the trusted clone's `verify --range`. `delivery-record` refuses it unless the
+  verified head is the task's `HEAD` and the range ends there, and `delivered` needs verify to have passed. With
+  `HARNESS_DELIVERY_KEY` set (a secret in the factory's environment, only for `delivery-record` and `next`), the
+  record is signed and `next` counts only signed records, so a line an agent's own code appends to the event log can't
+  mark a task delivered. `run` and `orca` drop the key before starting agent sessions. Without the key, `next` trusts
+  every record, as before.
+
 - **Agents write nothing in the git directory.** The file tools could write `.git/harness/events.jsonl` or a task's
   cost ledger (the implementer's scope didn't cover `.git/`), and from a linked worktree the shell could delete the
   ledger in the shared git directory by its absolute path. Every agent and the main session are now refused any write

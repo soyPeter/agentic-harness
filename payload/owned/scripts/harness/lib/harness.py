@@ -45,6 +45,7 @@ Usage:
 """
 import fnmatch
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -5748,8 +5749,9 @@ def next_step(task, fingerprint=code_fingerprint):
     return dict(step, step="judge", role="judge", reason="no judge verdict on the current code")
 
 
-def latest_delivery(head):
-    """The last deliverer report logged for commit head, or None."""
+def latest_delivery(head, signed=False):
+    """The last deliverer report logged for commit head, or None. signed: only a record delivery-record signed with
+    HARNESS_DELIVERY_KEY counts."""
     try:
         lines = events_file().read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -5759,8 +5761,11 @@ def latest_delivery(head):
             event = json.loads(line)
         except ValueError:
             continue
-        if event.get("kind") == "deliver" and event.get("head") == head:
-            return event
+        if not isinstance(event, dict) or event.get("kind") != "deliver" or event.get("head") != head:
+            continue
+        if signed and not hmac.compare_digest(str(event.get("mac") or ""), delivery_mac(event) or "-"):
+            continue
+        return event
     return None
 
 
@@ -5774,7 +5779,7 @@ def delivery_step(step):
         return dict(step, step="deliver", role=None, needed="the finished task committed (the deliverer pushes "
                                                              "only committed work)")
     if mode == "external":
-        last = latest_delivery(head)
+        last = latest_delivery(head, signed=bool(os.environ.get(DELIVERY_KEY)))
         if last and last.get("delivery") == "delivered":
             return dict(step, step="done", role=None, pr=last.get("pr"))
         if last:
@@ -5919,7 +5924,8 @@ CONTRACT_COMMANDS = {
                       "fields": ["contract", "task", "ready", "needed", "branch", "base", "head", "title", "body",
                                  "draft", "labels", "escalations"]},
     "delivery-record": {"command": "delivery-record <task> <report.json>",
-                        "report_fields": ["delivery", "branch", "base", "head", "pr", "checks", "findings"]},
+                        "report_fields": ["delivery", "branch", "base", "head", "pr", "checks", "findings",
+                                          "verify"]},
     "run": {"command": "run --only <task>"},
     "trace": {"command": "trace <task> --json"},
     "report": {"command": "report --json"},
@@ -6169,6 +6175,7 @@ def task_dependencies():
 
 def orca_command(argv):
     """harness.py orca: drive ready tasks with Orca supervised workers (scripts/harness/lib/coordinator.py)."""
+    os.environ.pop(DELIVERY_KEY, None)   # the workers this starts must never hold it
     import coordinator
     valued = ("--agents", "--tasks", "--parallel", "--run", "--wait-ms", "--timeout")
     flags = ("--here", "--dry-run", "--trust", "--merge", "--pr")
@@ -6686,6 +6693,7 @@ def run_agent(prompt, log_path, timeout):
 
 
 def run_command(argv):
+    os.environ.pop(DELIVERY_KEY, None)   # the sessions this starts must never hold it
     max_tasks = 0
     dry_run = "--dry-run" in argv
     only = argv[argv.index("--only") + 1] if "--only" in argv and argv.index("--only") + 1 < len(argv) else None
@@ -8046,6 +8054,19 @@ def intake_command(argv):
 # trusted clone. The harness still decides what is delivered (delivery-plan) and records what came of it
 # (delivery-record), which next reads as it reads the deliverer's own report.
 DELIVER_MODES = ("on", "off", "external")
+# A secret the factory sets only when it runs delivery-record and next, never for run (which drops it from the agent
+# sessions anyway): the lane's agents can run code, so a record they could write unsigned proves nothing.
+DELIVERY_KEY = "HARNESS_DELIVERY_KEY"
+SIGNED_FIELDS = ("task", "delivery", "head", "pr", "checks", "findings_detail", "verify")
+
+
+def delivery_mac(event):
+    """HMAC-SHA256 of a deliver event's fields under HARNESS_DELIVERY_KEY, or None without the key."""
+    key = os.environ.get(DELIVERY_KEY, "")
+    if not key:
+        return None
+    fields = json.dumps({k: event.get(k) for k in SIGNED_FIELDS}, sort_keys=True, default=str)
+    return hmac.new(key.encode("utf-8"), fields.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def plan_labels(suggested, current):
@@ -8143,6 +8164,19 @@ def delivery_record(task, report):
     if not isinstance(findings, list):
         problems.append("findings must be a list")
         findings = []
+    verify = report.get("verify")
+    if not isinstance(verify, dict):
+        problems.append("verify is required: the range, head and exit of the trusted clone's harness.py verify --range")
+        verify = {}
+    elif git("rev-parse", "-q", "--verify", str(verify.get("head") or "-") + "^{commit}").strip() != head:
+        problems.append("verify ran on %s, not the task's HEAD %s" % (str(verify.get("head"))[:12], head[:12]))
+    elif git("rev-parse", "-q", "--verify", str(verify.get("range") or "").partition("..")[2] + "^{commit}").strip() \
+            != head:
+        problems.append("the verified range doesn't end at the task's HEAD %s: %s" % (head[:12], verify.get("range")))
+    elif not isinstance(verify.get("exit"), int) or isinstance(verify.get("exit"), bool):
+        problems.append("verify's exit must be its exit status, a number")
+    if outcome == "delivered" and verify.get("exit") not in (0, None):
+        problems.append("verify exited %s: record a hold with its findings" % verify.get("exit"))
     if outcome == "delivered":
         if git("status", "--porcelain").strip():
             problems.append("there are uncommitted changes, so the PR doesn't hold what was reviewed")
@@ -8154,9 +8188,11 @@ def delivery_record(task, report):
     if problems:
         return problems
     owners = sorted({str(f.get("owner")) for f in findings})
-    log_event("deliver", task=task, delivery=outcome, branch=report.get("branch"), base=report.get("base"), head=head,
-              pr=report.get("pr"), checks=report.get("checks"), findings=len(findings), owners=owners,
-              findings_detail=findings[:20], problems=None, via="external")
+    event = dict(task=task, delivery=outcome, branch=report.get("branch"), base=report.get("base"), head=head,
+                 pr=report.get("pr"), checks=report.get("checks"), findings=len(findings), owners=owners,
+                 findings_detail=findings[:20], problems=None, via="external",
+                 verify={"range": verify.get("range"), "head": head, "exit": verify.get("exit")})
+    log_event("deliver", mac=delivery_mac(event), **event)
     return []
 
 

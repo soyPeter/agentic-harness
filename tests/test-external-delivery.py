@@ -63,8 +63,9 @@ class ExternalDelivery(unittest.TestCase):
         return self.p.harness("delivery-record", task, str(path), check=False)
 
     def delivered(self, **report):
+        verify = {"range": "origin/main..%s" % self.head, "head": self.head, "exit": 0}
         return dict(dict(delivery="delivered", branch="harness/task-7.1", base="main", head=self.head,
-                         pr="https://github.com/o/r/pull/9", checks="passed", findings=[]), **report)
+                         pr="https://github.com/o/r/pull/9", checks="passed", findings=[], verify=verify), **report)
 
     def deliver_events(self):
         return [e for e in self.p.events("deliver") if e.get("task") == "7.1"]
@@ -145,6 +146,15 @@ class ExternalDelivery(unittest.TestCase):
             "a hold without findings": (self.delivered(delivery="hold", findings=[]), "lists the findings"),
             "a finding without an owner": (self.delivered(delivery="ci-failed", checks="failed",
                                                           findings=[{"issue": "lint"}]), "each with an owner"),
+            "no verify result": (self.delivered(verify=None), "verify is required"),
+            "verify of another head": (self.delivered(verify={"range": "origin/main..%s" % ("0" * 40),
+                                                              "head": "0" * 40, "exit": 0}),
+                                       "verify ran on 000000000000, not the task's HEAD"),
+            "verify of another range": (self.delivered(verify={"range": "origin/main..main", "head": self.head,
+                                                               "exit": 0}), "the verified range doesn't end at"),
+            "a failed verify, delivered": (self.delivered(verify={"range": "origin/main..%s" % self.head,
+                                                                  "head": self.head, "exit": 1}),
+                                           "verify exited 1"),
         }
         for case, (report, message) in cases.items():
             with self.subTest(case=case):
@@ -168,6 +178,51 @@ class ExternalDelivery(unittest.TestCase):
         self.assertEqual(delivered.returncode, 0, delivered.stdout)
         self.assertEqual((after_delivery["step"], after_delivery["pr"]), ("done", "https://github.com/o/r/pull/9"))
         self.assertEqual((event["via"], event["head"], event["checks"]), ("external", self.head, "passed"))
+
+    def test_a_failed_verify_is_recorded_as_a_hold(self):
+        held = self.record(self.delivered(delivery="hold", checks="none", verify={
+            "range": "origin/main..%s" % self.head, "head": self.head, "exit": 1},
+            findings=[{"issue": "verify: the judge pass is stale", "owner": "judge"}]))
+        step = self.p.json("next", "7.1", "--json")
+        self.record(self.delivered())
+
+        self.assertEqual(held.returncode, 0, held.stdout)
+        self.assertEqual((step["step"], step["owners"]), ("delivery-failed", ["judge"]))
+
+    def test_with_a_delivery_key_next_trusts_only_signed_records(self):
+        key = {"HARNESS_DELIVERY_KEY": "factory-secret"}
+        events = self.p.path / ".git/harness/events.jsonl"
+        failed = self.delivered(delivery="ci-failed", checks="failed", findings=[{"issue": "red", "owner": "implementer"}])
+        path = self.p.base / "signed.json"
+        path.write_text(json.dumps(failed))
+        self.p.harness("delivery-record", "7.1", str(path), env=key)
+        forged = dict(json.loads(events.read_text().splitlines()[-1]), delivery="delivered", checks="passed",
+                      findings=0, owners=[], findings_detail=[])
+        with events.open("a") as log:
+            log.write(json.dumps(forged) + "\n")
+
+        signed_view = self.p.json("next", "7.1", "--json", env=key)
+        unsigned_view = self.p.json("next", "7.1", "--json")
+        self.record(self.delivered())
+
+        self.assertEqual(signed_view["step"], "delivery-failed")
+        self.assertEqual(unsigned_view["step"], "done")
+
+    def test_agent_sessions_never_see_the_delivery_key(self):
+        seen = self.p.base / "env.txt"
+        agent = agent_script(self.p.base / "env-agent.sh", 'printf %%s "${HARNESS_DELIVERY_KEY:-unset}" > "%s"\n'
+                                                          'echo \'{"type":"result","total_cost_usd":0,"num_turns":1,'
+                                                          '"result":"ok"}\'\n' % seen)
+        self.p.add_task("7.4", "Looks at its environment")
+        try:
+            self.p.harness("run", "--only", "7.4", check=False, env=dict(
+                HARNESS_AUTONOMY="autonomous", HARNESS_VERIFY="block", HARNESS_RUN_ATTEMPTS="1",
+                HARNESS_AGENT_CMD=agent, HARNESS_DELIVERY_KEY="factory-secret"))
+        finally:
+            self.p.command("git", "checkout", "-q", "--", "backbone/")
+            self.p.command("git", "clean", "-qfd", "backbone/")
+
+        self.assertEqual(seen.read_text(), "unset")
 
     def test_agents_may_plan_but_not_record_a_delivery(self):
         self.assertEqual(self.p.bash("python3 scripts/harness/lib/harness.py delivery-plan 7.1 --json",
@@ -199,7 +254,7 @@ class ExternalDelivery(unittest.TestCase):
 
         self.assertLessEqual({"ready", "task", "branch", "base", "head", "title", "body", "draft", "labels"},
                              set(commands["delivery-plan"]["fields"]))
-        self.assertLessEqual({"delivery", "head", "checks", "findings"},
+        self.assertLessEqual({"delivery", "head", "checks", "findings", "verify"},
                              set(commands["delivery-record"]["report_fields"]))
 
 
