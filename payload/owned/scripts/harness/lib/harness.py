@@ -6242,7 +6242,8 @@ def task_dependencies():
 
 def orca_command(argv):
     """harness.py orca: drive ready tasks with Orca supervised workers (scripts/harness/lib/coordinator.py)."""
-    os.environ.pop(DELIVERY_KEY, None)   # the workers this starts must never hold it
+    if delivery_key_refusal("orca"):
+        return 1
     import coordinator
     valued = ("--agents", "--tasks", "--parallel", "--run", "--wait-ms", "--timeout")
     flags = ("--here", "--dry-run", "--trust", "--merge", "--pr")
@@ -6799,8 +6800,19 @@ def run_agent(prompt, log_path, timeout):
     return code, round(time.time() - started, 1)
 
 
+def delivery_key_refusal(command):
+    """Refuse to start agents while the delivery key is in this environment: a process can read its parent's (ps
+    eww, /proc/<pid>/environ), so dropping it here wouldn't hide it."""
+    if not os.environ.get(DELIVERY_KEY):
+        return False
+    print("%s: HARNESS_DELIVERY_KEY is set in this environment, and the agent sessions this would start could read it "
+          "from this process. Set it only for delivery-record and next, never for %s." % (command, command))
+    return True
+
+
 def run_command(argv):
-    os.environ.pop(DELIVERY_KEY, None)   # the sessions this starts must never hold it
+    if delivery_key_refusal("run"):
+        return 1
     max_tasks = 0
     dry_run = "--dry-run" in argv
     only = argv[argv.index("--only") + 1] if "--only" in argv and argv.index("--only") + 1 < len(argv) else None

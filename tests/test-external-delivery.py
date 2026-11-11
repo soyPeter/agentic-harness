@@ -208,21 +208,21 @@ class ExternalDelivery(unittest.TestCase):
         self.assertEqual(signed_view["step"], "delivery-failed")
         self.assertEqual(unsigned_view["step"], "done")
 
-    def test_agent_sessions_never_see_the_delivery_key(self):
-        seen = self.p.base / "env.txt"
-        agent = agent_script(self.p.base / "env-agent.sh", 'printf %%s "${HARNESS_DELIVERY_KEY:-unset}" > "%s"\n'
-                                                          'echo \'{"type":"result","total_cost_usd":0,"num_turns":1,'
-                                                          '"result":"ok"}\'\n' % seen)
-        self.p.add_task("7.4", "Looks at its environment")
-        try:
-            self.p.harness("run", "--only", "7.4", check=False, env=dict(
-                HARNESS_AUTONOMY="autonomous", HARNESS_VERIFY="block", HARNESS_RUN_ATTEMPTS="1",
-                HARNESS_AGENT_CMD=agent, HARNESS_DELIVERY_KEY="factory-secret"))
-        finally:
-            self.p.command("git", "checkout", "-q", "--", "backbone/")
-            self.p.command("git", "clean", "-qfd", "backbone/")
+    def test_run_and_orca_refuse_to_start_with_the_delivery_key(self):
+        seen = self.p.base / "session-started"
+        agent = agent_script(self.p.base / "key-agent.sh", 'touch "%s"\necho \'{"type":"result","total_cost_usd":0,'
+                                                          '"num_turns":1,"result":"ok"}\'\n' % seen)
+        env = dict(HARNESS_AUTONOMY="autonomous", HARNESS_VERIFY="block", HARNESS_RUN_ATTEMPTS="1",
+                   HARNESS_AGENT_CMD=agent, HARNESS_DELIVERY_KEY="factory-secret")
+        run = self.p.harness("run", check=False, env=env)
+        orca = self.p.harness("orca", "--pr", check=False, env=env)
 
-        self.assertEqual(seen.read_text(), "unset")
+        for name, result in (("run", run), ("orca", orca)):
+            with self.subTest(command=name):
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("%s: HARNESS_DELIVERY_KEY is set in this environment" % name, result.stdout)
+                self.assertNotIn("factory-secret", result.stdout)
+        self.assertFalse(seen.exists())
 
     def test_agents_may_plan_but_not_record_a_delivery(self):
         self.assertEqual(self.p.bash("python3 scripts/harness/lib/harness.py delivery-plan 7.1 --json",

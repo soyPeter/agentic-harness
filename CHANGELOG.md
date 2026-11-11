@@ -24,7 +24,8 @@
   verified head is the task's `HEAD` and the range ends there, and `delivered` needs verify to have passed. With
   `HARNESS_DELIVERY_KEY` set (a secret in the factory's environment, only for `delivery-record` and `next`), the
   record is signed and `next` counts only signed records, so a line an agent's own code appends to the event log can't
-  mark a task delivered. `run` and `orca` drop the key before starting agent sessions. Without the key, `next` trusts
+  mark a task delivered. `run` and `orca` refuse to start while the key is in their environment, since a session could read it from
+  its parent process. Without the key, `next` trusts
   every record, as before.
 
 - **Agents write nothing in the git directory.** The file tools could write `.git/harness/events.jsonl` or a task's
