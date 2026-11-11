@@ -323,6 +323,35 @@ class Admission(unittest.TestCase):
                 self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command}), "revoked")
         self.assertEqual(self.project.hook("pre-tool-use", "Bash", {"command": "cat %s" % SCRIPT}).returncode, 0)
 
+    def test_a_blocked_bundles_script_does_not_run_however_the_shell_is_given_it(self):
+        self.project.admit()
+        before = self.project.commit("feat: admit vendor-sdk")
+        self.project.revoke(self.project.digest())
+        self.project.commit("fix: revoke vendor-sdk")
+        other_case = SCRIPT.replace(".claude", ".CLAUDE")
+        for command in ("sh < %s" % SCRIPT, "bash -s < %s" % SCRIPT, "sh 0<%s" % SCRIPT, "cat %s | sh" % SCRIPT,
+                        "cat %s | tr a a | bash -s" % SCRIPT, "python3 - < %s" % SCRIPT, "timeout 5 sh %s" % SCRIPT,
+                        "nice -n 5 sh %s" % SCRIPT, "env -i PATH=/bin sh %s" % SCRIPT, "sh -o errexit %s" % SCRIPT,
+                        "bash --init-file %s -i" % SCRIPT, "exec -a x sh %s" % SCRIPT) + (
+                ("sh %s" % other_case, "./%s" % other_case) if (self.project.root / other_case).exists() else ()):
+            with self.subTest(command=command):
+                self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command}), "revoked")
+        self.assertRefused(self.project.hook("pre-tool-use", "Bash", {
+            "command": "timeout 5 git checkout %s -- backbone/admissions.conf" % before}), "backbone/admissions.conf")
+        for command in ("sh $(echo %s)" % SCRIPT, "sh .claude/skills/*/scripts/setup.sh", "sh <(cat %s)" % SCRIPT,
+                        "eval \"$(cat %s)\"" % SCRIPT, "bash -c \"$(cat %s)\"" % SCRIPT, "cat $F | sh",
+                        "sh \"$S\""):
+            with self.subTest(unreadable=command):
+                self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command}))
+        for command in ("cat $F | sh", "sh \"$S\"", "$RUN"):
+            with self.subTest(unreadable=command):
+                self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command}), "can't tell")
+        for command in ("cat %s" % SCRIPT, "echo date | sh", "timeout 5 sh build.sh", "head %s | grep echo" % SCRIPT,
+                        "nice -n 5 make test", "sh -c 'echo hi'"):
+            with self.subTest(allowed=command):
+                result = self.project.hook("pre-tool-use", "Bash", {"command": command})
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_a_revoked_bundle_copied_under_another_name_is_blocked(self):
         self.project.admit()
         self.project.revoke(self.project.digest())

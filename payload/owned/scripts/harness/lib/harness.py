@@ -1438,6 +1438,29 @@ def program(words):
     return words[0].rsplit("/", 1)[-1] if words else ""
 
 
+CODE_RUNNERS = SHELLS + INTERPRETERS + ("source", ".", "eval", "git")
+
+
+def unwrap_runners(words):
+    """(assignments a runner sets, the command it runs): timeout 5 sh f, nice -n 5 sh f, env -i A=1 sh f and
+    exec -a x sh f run sh f after the runner's own options and values. The command is the first word after them that
+    is a shell, an interpreter, git or a file; a runner whose command can't be found that way is left as it is. A
+    leading option is what shell_words left of a wrapper it dropped (nice -n 5)."""
+    assignments = []
+    while words and (words[0].rsplit("/", 1)[-1] in RUNNERS + WRAPPERS or words[0].startswith("-")):
+        for j in range(1, len(words)):
+            word = words[j]
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", word):
+                assignments.append(word)
+            elif program(words[j:]) in CODE_RUNNERS + RUNNERS + WRAPPERS or (
+                    "/" in word and os.path.isfile(os.path.expanduser(word))):
+                words = words[j:]
+                break
+        else:
+            break
+    return assignments, words
+
+
 def short_flags(words):
     return {c for w in words if w.startswith("-") and not w.startswith("--") for c in w[1:]}
 
@@ -1870,6 +1893,8 @@ def shell_findings(command, cwd=None, depth=0):
     segments = split_segments(command)
     for index, (segment, op) in enumerate(segments):
         assignments, words = shell_words(segment)
+        more, words = unwrap_runners(words)
+        assignments += more
         for assignment in assignments:
             if SETTING_ASSIGNMENT.match(assignment):
                 found.append("Setting %s from the shell overrides a harness setting or skips a check; only the user "
@@ -1878,7 +1903,10 @@ def shell_findings(command, cwd=None, depth=0):
         if prog == "cd" and len(words) > 1:
             cwd = os.path.join(cwd or str(ROOT), os.path.expanduser(words[1]))
             continue
-        found.extend(blocked_bundle_runs(prog, words, cwd))
+        piped = []
+        while index - len(piped) > 0 and segments[index - len(piped) - 1][1] == "|":
+            piped.insert(0, segments[index - len(piped) - 1][0])
+        found.extend(blocked_bundle_runs(segment, words, cwd, piped))
         script = next((i for i, w in enumerate(words[:4]) if w.rsplit("/", 1)[-1] in INSTALL_SCRIPTS), None)
         if script is not None and words[script + 1:script + 2] == ["pin"]:
             found.append("pin moves the engine release this project pins, and with it every gate; only the user does "
@@ -4398,34 +4426,110 @@ def skill_tool_gate(tool_input):
              "invoke it themselves (/%s) or remove that part." % (name, "; ".join(runs), name))
 
 
-def blocked_bundle_runs(prog, words, cwd):
-    """A command that runs a file of a bundle that isn't usable now: changed since its review, or revoked."""
+UNREADABLE_WORD = re.compile(r"[$`*?\[]|^<\(|^>\(")
+STDIN_SCRIPT = re.compile(r"(?:^|[^<0-9&])0?<(?![<(&])\s*('[^']*'|\"[^\"]*\"|[^\s;|&<>]+)")
+
+
+def code_files(segment, words, piped):
+    """(words that name what the command runs as code, whether some of it can't be read). A shell, an interpreter,
+    source or eval runs its script operand, its options' file values (--init-file f), a file on its stdin (sh < f)
+    or what the pipe before it prints (cat f | sh); any other command runs itself when it is a path."""
+    prog = program(words)
+    if not words:
+        return [], False
+    if UNREADABLE_WORD.search(words[0]) and words[0] not in ("[", "[["):
+        return [], True
+    if prog not in SHELLS + INTERPRETERS + ("source", ".", "eval"):
+        return ([words[0]] if "/" in words[0] else []), False
+    operands, i, code_string = [], 1, False
+    while i < len(words):
+        word = words[i]
+        if word in ("-c", "-e", "-E") or (prog in SHELLS and re.match(r"^-[a-zA-Z]*c[a-zA-Z]*$", word)):
+            code_string = True
+            i += 2
+            continue
+        if word.startswith("--") and "=" in word:
+            operands.append(word.split("=", 1)[1])
+        elif word.startswith(("-", "+")) and word not in ("-", "--"):
+            pass
+        elif word != "--":
+            operands.append(word)
+        i += 1
+    stdin = [m.strip("'\"") for m in STDIN_SCRIPT.findall(segment)]
+    names = operands + stdin
+    unreadable = prog == "eval" and any(UNREADABLE_WORD.search(w) for w in words[1:])
+    unreadable |= bool(names[:1] and UNREADABLE_WORD.search(names[0])) or "<(" in segment
+    reads_stdin = not code_string and (not operands or operands[0] in ("-", "/dev/stdin") or
+                                       (prog in SHELLS and any(re.match(r"^-[a-zA-Z]*s", w) for w in words[1:])))
+    if reads_stdin and not stdin and piped:
+        for producer in piped:
+            _, producer_words = shell_words(producer)
+            names += producer_words[1:]
+            unreadable |= any(UNREADABLE_WORD.search(w) for w in producer_words)
+    return names, unreadable
+
+
+def true_case(path):
+    """path with each part spelled as the directory spells it, where it exists: on a case-insensitive file system
+    .CLAUDE/skills is .claude/skills."""
+    parts = Path(path).parts
+    fixed = Path(parts[0])
+    for part in parts[1:]:
+        if not (fixed / part).exists():
+            return str(fixed.joinpath(*parts[len(fixed.parts):]))
+        try:
+            entries = os.listdir(str(fixed))
+        except OSError:
+            entries = []
+        fixed = fixed / (part if part in entries else next((e for e in entries if e.lower() == part.lower()), part))
+    return str(fixed)
+
+
+def blocked_bundle_of(name):
+    """(the bundle that the repository path name is in, why it isn't usable now) or None."""
     records, revocations, _ = admissions()
-    if not (records or revocations) or not words:
-        return []
-    if prog in SHELLS + INTERPRETERS + ("source", "."):
-        target = next((w for w in words[1:] if not w.startswith("-")), None)
-    else:
-        target = words[0] if "/" in words[0] else None
-    if not target:
-        return []
-    full = os.path.realpath(os.path.join(cwd or str(ROOT), os.path.expanduser(target)))
-    root = os.path.realpath(str(ROOT))
-    if not full.startswith(root + os.sep):
-        return []
-    name = os.path.relpath(full, root).replace(os.sep, "/")
     for record, fields in sorted(records.items()):
         bundle = admission.bundle_path(fields.get("path"))
         if bundle and (name == bundle or name.startswith(bundle + "/")):
             problems = admission_problems(record, fields)
             if problems:
-                return ["%s belongs to %s, which isn't admitted now (%s); its scripts don't run until the user reviews "
-                        "it again in backbone/admissions.conf (ADR-006)." % (target, record, "; ".join(problems))]
+                return record, "it isn't admitted now (%s)" % "; ".join(problems)
     folder = skill_folder(name)
     if revocations and folder:
         now = bundle_digest(folder)
         if now in revocations:
-            return ["%s belongs to %s, and %s (ADR-006)." % (target, folder, revoked_message(now, revocations))]
+            return folder, revoked_message(now, revocations)
+    return None
+
+
+def any_blocked_bundle():
+    records, revocations, _ = admissions()
+    if any(admission_problems(record, fields) for record, fields in records.items()):
+        return True
+    return bool(revocations) and any(folder and bundle_digest(folder) in revocations
+                                     for folder in skill_documents().values())
+
+
+def blocked_bundle_runs(segment, words, cwd, piped=()):
+    """A command that runs a file of a bundle that isn't usable now (changed since its review, or revoked), or runs
+    code the harness can't read while such a bundle is in the repository."""
+    records, revocations, _ = admissions()
+    if not (records or revocations) or not words:
+        return []
+    names, unreadable = code_files(segment, words, piped)
+    root = os.path.realpath(str(ROOT))
+    for target in names:
+        full = true_case(os.path.realpath(os.path.join(cwd or str(ROOT), os.path.expanduser(target))))
+        if not full.startswith(root + os.sep):
+            continue
+        blocked = blocked_bundle_of(os.path.relpath(full, root).replace(os.sep, "/"))
+        if blocked:
+            return ["%s belongs to %s, and %s; its scripts don't run until the user reviews it again in "
+                    "backbone/admissions.conf (ADR-006)." % (target, blocked[0], blocked[1])]
+    if unreadable and any_blocked_bundle():
+        return ["The harness can't tell which file this command runs (an expansion, a glob or a substitution), and "
+                "a bundle in the repository isn't usable now (harness.py admission); write the file's path out "
+                "(ADR-006)."]
     return []
 
 
