@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **ADR-003's follow-ups have a dated status.** Follow-ups 1 (DNS), 4 (the gate), 5 (`run` starting the sandbox),
+  8 (denial log) and 9 (thin installs) are done, each in its own entry below. Deferred, with the reason in the ADR:
+  2 (brokered credentials: a broker means TLS interception or an API relay, a trust decision of its own), 3 (pinning
+  the whole image: needs a registry and a signed publishing workflow), 6 (Orca's workers in the sandbox: Orca launches
+  them on the host, and worktrees' git metadata lies outside what the sandbox mounts) and 7 (a first isolated backend:
+  needs its own ADR, a vendor account and the egress parity checks).
+
 - **`run` on the host can bring the sandbox up itself (ADR-003 follow-up 5).** With the new user-only
   `HARNESS_SANDBOX_START=on` (default `off`), `run` brings `.devcontainer/harness-agent/` up with the devcontainer CLI
   before each session, has the harness inside run `doctor`, and refuses every session when either fails. Each session

@@ -261,6 +261,23 @@ Still open after v1:
   9. The sandbox for thin installs.
 
 ## Follow-up status
+- **1. DNS: done (2026-11-11).** `egress.py` answers DNS on `127.0.0.1:53` in the shared network namespace and
+  resolves a name, over UDP or TCP, only when it is on the published allowlist (exactly, in any case), through the
+  `egress` container's own resolver; any other name gets NXDOMAIN without leaving and is logged as a denial.
+  `init-firewall.sh` redirects every DNS query from a process other than root to it (a `nat` rule), drops port 53 to
+  anywhere else, and drops traffic to Docker's resolver (`127.0.0.11`, on any port) from anyone but root; the agent's
+  container has no root. Still open: names resolve to addresses once, at start, and TLS and paths aren't inspected.
+- **2. Credentials brokered at egress: deferred (2026-11-11).** Keeping the API credential out of the agent's
+  container needs a broker in the `egress` container that adds it to the agent's requests: either TLS interception
+  with a CA the agent's container trusts, or an Anthropic API relay the agent reaches through `ANTHROPIC_BASE_URL`, and
+  the same for git's GitHub token. Either one changes what the agent's container trusts and what the `egress`
+  container can read, and whether a subscription token may be relayed that way is unverified. That is a decision of
+  its own, to take with its threat model before any code; `credential_mode: brokered` stays reserved for it.
+- **3. Pin the whole built image: deferred (2026-11-11).** Pinning the built image, not just its base, means
+  publishing it to a registry the harness controls, from a reviewed workflow that signs it, and having
+  `docker-compose.yml` name it by digest; a project that adds its toolchain then needs an image of its own published
+  the same way. There is no registry for this yet, and none of it can be built or checked locally, so it waits for that
+  registry and its own change. Until then `base_image_digest` covers the base only, as the evidence says.
 - **4. Gate on the evidence: done (2026-11-11).** `HARNESS_SANDBOX_REQUIRE` (user-only, default `schema=container`)
   names the isolation class each Change-Class needs, as `<class>=<isolation class>` pairs. A pair holds for its class
   and every class above it on ADR-002's ladder. A task of such a class starts only in a session whose own sandbox has
@@ -270,30 +287,6 @@ Still open after v1:
   read all refuse, and the last is a doctor error. `run` skips such a task before starting a session for it, and the
   receipt says what the class requires and whether the judge pass met it. The evidence stays a record of the sandbox;
   the gate is what refuses.
-- **9. The sandbox for thin installs: done (2026-11-11).** `init --thin`, `pin` and `update.sh --to-thin` install
-  `.devcontainer/harness-agent/` from the pinned release; `pin` and `--to-thin` update the files nobody edited and keep
-  an edited one with the release's copy beside it (`<file>.harness-new`), by the hashes the lock records under `kept`,
-  as `update.sh` does. When the container starts, `thin-engine.py` fetches the pinned release into the launcher's engine
-  cache, refuses it unless it is the pinned commit with no local changes, and links it into the folder
-  `CLAUDE_CODE_PLUGIN_DIRS` names, so every Claude Code session in the sandbox loads the pinned plugin and its hooks,
-  and judge passes record the same evidence as a full install's. Inside the image, `doctor` reports an error, so `run`
-  and `orca` refuse to start, unless the sessions would load exactly the pinned plugin. Codex and OpenCode sessions in
-  a thin project's sandbox get no plugin from this; the image runs Claude Code.
-- **8. Egress denials logged and cited by the receipt: done (2026-11-11).** `init-firewall.sh` sends every packet
-  its rules drop to NFLOG group 7 first (rate-limited to 50 a second; the rest are still dropped). `egress.py`, the
-  `egress` container's main process, reads the group over netlink (standard library only) and appends one JSON line per
-  packet to `/run/harness-egress/denials.jsonl` (target address, port and protocol, and the sending uid), on the volume
-  the agent mounts read-only; its health check waits for the log, and if it stops the agent loses its network. Each
-  judge pass in a container records `egress_denials`: since when the log runs, how many packets were denied, the ten
-  targets denied most and the log's sha256. The receipt cites them, or says "not logged" for an `egress` container
-  from before the log. The log restarts with the `egress` container, so it covers the container's lifetime, not one
-  task.
-- **1. DNS: done (2026-11-11).** `egress.py` answers DNS on `127.0.0.1:53` in the shared network namespace and
-  resolves a name, over UDP or TCP, only when it is on the published allowlist (exactly, in any case), through the
-  `egress` container's own resolver; any other name gets NXDOMAIN without leaving and is logged as a denial.
-  `init-firewall.sh` redirects every DNS query from a process other than root to it (a `nat` rule), drops port 53 to
-  anywhere else, and drops traffic to Docker's resolver (`127.0.0.11`, on any port) from anyone but root; the agent's
-  container has no root. Still open: names resolve to addresses once, at start, and TLS and paths aren't inspected.
 - **5. `run` on the host starting the sandbox: done (2026-11-11).** With `HARNESS_SANDBOX_START=on` (user-only,
   default `off`), the `devcontainer` backend's `create` brings `.devcontainer/harness-agent/` up with the devcontainer
   CLI when the runner isn't already in it, has the harness inside run `doctor` and refuses every session when either
@@ -304,3 +297,33 @@ Still open after v1:
   because a worktree's git metadata lies outside what the sandbox mounts. The default stays `off`: turning it on needs
   Docker and the devcontainer CLI on every machine that runs `run`. The Compose project is named after the sandbox's
   folder, so one project's sandbox runs per machine at a time.
+- **6. Orca's workers inside a backend's sandbox: deferred (2026-11-11).** Orca starts each worker itself, on the host,
+  in the task's worktree. Running workers in the sandbox needs Orca to launch them through the sandbox (a launch command
+  per agent that goes through `devcontainer exec`) and worktrees whose git metadata the sandbox can see: a worktree's
+  `.git` points into the main checkout, outside the folder the sandbox mounts, which is also why `run --worktree` is
+  refused with `HARNESS_SANDBOX_START=on`. That needs a design for mounting the repository's git metadata, and checking
+  it needs a live Orca run, which this change doesn't start. Until then a worker can't start work whose class needs a
+  container (follow-up 4): the start gate refuses it on the host and says why.
+- **7. A first isolated backend: deferred (2026-11-11).** As decided above, each vendor backend gets its own ADR and must
+  pass the egress parity checks before it can be selected. That needs a choice among the candidates, an account, and
+  the vendor's sandbox to run the parity checks against, none of which a local change has. The interface it plugs into
+  is in place: `create` may now raise `SandboxError`, and `exec` passes the harness settings in, as the host-started
+  devcontainer does.
+- **8. Egress denials logged and cited by the receipt: done (2026-11-11).** `init-firewall.sh` sends every packet
+  its rules drop to NFLOG group 7 first (rate-limited to 50 a second; the rest are still dropped). `egress.py`, the
+  `egress` container's main process, reads the group over netlink (standard library only) and appends one JSON line per
+  packet to `/run/harness-egress/denials.jsonl` (target address, port and protocol, and the sending uid), on the volume
+  the agent mounts read-only; its health check waits for the log, and if it stops the agent loses its network. Each
+  judge pass in a container records `egress_denials`: since when the log runs, how many packets were denied, the ten
+  targets denied most and the log's sha256. The receipt cites them, or says "not logged" for an `egress` container
+  from before the log. The log restarts with the `egress` container, so it covers the container's lifetime, not one
+  task.
+- **9. The sandbox for thin installs: done (2026-11-11).** `init --thin`, `pin` and `update.sh --to-thin` install
+  `.devcontainer/harness-agent/` from the pinned release; `pin` and `--to-thin` update the files nobody edited and keep
+  an edited one with the release's copy beside it (`<file>.harness-new`), by the hashes the lock records under `kept`,
+  as `update.sh` does. When the container starts, `thin-engine.py` fetches the pinned release into the launcher's engine
+  cache, refuses it unless it is the pinned commit with no local changes, and links it into the folder
+  `CLAUDE_CODE_PLUGIN_DIRS` names, so every Claude Code session in the sandbox loads the pinned plugin and its hooks,
+  and judge passes record the same evidence as a full install's. Inside the image, `doctor` reports an error, so `run`
+  and `orca` refuse to start, unless the sessions would load exactly the pinned plugin. Codex and OpenCode sessions in
+  a thin project's sandbox get no plugin from this; the image runs Claude Code.
