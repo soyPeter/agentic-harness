@@ -6628,38 +6628,71 @@ def dollars(value):
     return float(value) if re.match(r"^\d+(\.\d+)?$", value) else None
 
 
+class LedgerError(Exception):
+    pass
+
+
 def cost_ledger(task):
-    """The task's cost ledger, one line per runner session, in the shared git directory: it outlives the worktree
-    and the run, so a resumed task counts what it spent before (ADR-008)."""
+    """The task's cost ledger in the shared git directory: it outlives the worktree and the run, so a resumed task
+    counts what it spent before (ADR-008). A session is reserved before it starts and settled when it ends."""
     return orca_dir() / "costs" / ("task-%s.jsonl" % slug(task))
 
 
-def record_cost(task, attempt, cost, turns, log_path):
+def write_ledger(task, entry):
     path = cost_ledger(task)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "task": task, "attempt": attempt,
-                                 "cost_usd": cost, "turns": turns, "log": str(log_path)}, sort_keys=True) + "\n")
+        handle.write(json.dumps(dict(entry, at=time.strftime("%Y-%m-%dT%H:%M:%S%z"), task=task), sort_keys=True)
+                     + "\n")
+
+
+def cost_or_none(task):
+    try:
+        return (task_cost(task) or {}).get("total_usd")
+    except LedgerError:
+        return None
+
+
+def number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def task_cost(task):
-    """{total_usd, sessions, sessions_without_cost} from the task's ledger, or None when no session is recorded. A
-    session whose agent reported no cost (Codex prices nothing) counts as nothing."""
-    entries = []
-    for line in read(cost_ledger(task)).splitlines():
+    """{total_usd, sessions, sessions_without_cost, unsettled_sessions} from the task's ledger, or None when it has
+    none. A session reserved and never settled (its run was killed) counts as the budget it reserved, and a session
+    whose agent reported no cost (Codex prices nothing) as nothing. Raises LedgerError when the ledger can't be
+    read."""
+    path = cost_ledger(task)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise LedgerError("the cost ledger %s can't be read (%s)" % (path, exc.__class__.__name__))
+    reserved, settled = {}, []
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
         try:
             entry = json.loads(line)
         except ValueError:
-            continue
-        if isinstance(entry, dict):
-            entries.append(entry)
-    if not entries:
+            entry = None
+        if not isinstance(entry, dict):
+            raise LedgerError("the cost ledger %s is corrupt (line %d)" % (path, n))
+        if "reserved_usd" in entry:
+            reserved[entry.get("session")] = entry
+        else:
+            reserved.pop(entry.get("session"), None)
+            settled.append(entry)
+    if not reserved and not settled:
         return None
-    known = [e["cost_usd"] for e in entries if isinstance(e.get("cost_usd"), (int, float))
-             and not isinstance(e.get("cost_usd"), bool)]
-    return {"total_usd": round(sum(known), 6), "sessions": len(entries),
-            "sessions_without_cost": len(entries) - len(known)}
-
+    unsettled = list(reserved.values())
+    total = sum(e["cost_usd"] for e in settled if number(e.get("cost_usd")))
+    total += sum(e["reserved_usd"] for e in unsettled if number(e.get("reserved_usd")))
+    return {"total_usd": round(total, 6), "sessions": len(settled) + len(unsettled),
+            "sessions_without_cost": len([e for e in settled if not number(e.get("cost_usd"))])
+            + len([e for e in unsettled if not number(e.get("reserved_usd"))]),
+            "unsettled_sessions": len(unsettled)}
 
 BUDGET_REFUSAL = re.compile(r"(?i)\b402\b|payment required|\bbudget\b|\b(?:spend(?:ing)?|cost)[ _-]?(?:cap|limit)\b")
 
@@ -6752,7 +6785,18 @@ def run_command(argv):
                 log_event("run-halt")
                 outcome = "halted"
                 break
-            used = (task_cost(task) or {}).get("total_usd", 0.0)
+            try:
+                used = (task_cost(task) or {}).get("total_usd", 0.0)
+            except LedgerError as exc:
+                if task_budget is None:
+                    used = 0.0
+                else:
+                    print("run: task %s: %s; not starting a session" % (task, exc))
+                    log_event("run-budget", task=task, scope="ledger", spent=None, limit=task_budget, error=str(exc))
+                    escalate(task, "budget", "%s, so the task's spending is unknown" % exc,
+                             "a person checks the ledger: fix or remove it, or drop the task", "permission_denied")
+                    outcome = "escalated"
+                    break
             if task_budget is not None and used >= task_budget:
                 print("run: task %s has spent $%.2f of its $%.2f budget (HARNESS_TASK_BUDGET_USD); not starting "
                       "another session" % (task, used, task_budget))
@@ -6769,9 +6813,28 @@ def run_command(argv):
                 "python3 scripts/harness/lib/harness.py", harness_cli())
             log_path = run_dir / ("%s-%d.log" % (slug(task), attempt))
             started_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            session = "%s-%d-%d" % (run_dir.name, os.getpid(), attempt)
+            try:
+                # Reserved before the session starts, so a run killed during it still counts it.
+                write_ledger(task, {"session": session, "attempt": attempt, "reserved_usd": None if task_budget is None
+                                    else round(max(task_budget - used, 0.0), 6)})
+            except OSError as exc:
+                log_event("run-ledger", task=task, error=str(exc))
+                if task_budget is not None:
+                    print("run: task %s: the cost ledger can't be written (%s); not starting a session"
+                          % (task, exc.__class__.__name__))
+                    escalate(task, "budget", "the cost ledger can't be written (%s), so the task's spending can't be "
+                             "counted" % exc.__class__.__name__, "a person checks .git/harness/costs/",
+                             "permission_denied")
+                    outcome = "escalated"
+                    break
             code, seconds = run_agent(prompt, log_path, timeout)
             cost, turns = session_usage(log_path)
-            record_cost(task, attempt, cost, turns, log_path)
+            try:
+                write_ledger(task, {"session": session, "attempt": attempt, "cost_usd": cost, "turns": turns,
+                                    "log": str(log_path)})
+            except OSError as exc:   # the reservation stands, so the budget still counts the session
+                log_event("run-ledger", task=task, error=str(exc))
             refusal = budget_refusal(log_path, code) if task_budget is not None else None
             if refusal:
                 # The proxy refused for the task's cap or the day's: another session, or another task, is refused too.
@@ -6780,8 +6843,8 @@ def run_command(argv):
                 log_event("run-attempt", task=task, attempt=attempt, exit=code, seconds=seconds, state=task_state(task),
                           uncommitted=bool(git("status", "--porcelain").strip()), cost_usd=cost, turns=turns,
                           cause="cap-hit", step=None)
-                log_event("run-budget", task=task, scope="proxy", spent=task_cost(task)["total_usd"],
-                          limit=task_budget, error=refusal)
+                log_event("run-budget", task=task, scope="proxy", spent=cost_or_none(task), limit=task_budget,
+                          error=refusal)
                 escalate(task, "budget", "the key proxy refused the session's model calls for a spending cap: %s"
                          % refusal, "the user raises the cap (the task's or the day's), or drops the task",
                          "permission_denied")
@@ -7668,7 +7731,7 @@ def receipt_data(task, base=None, code=None):
         "sandbox": sandbox.normalized(passed.get("sandbox")),
         "approval": approval_lines(approval_section(spec_text) or ""),
         "approval_needed": approval_needed,
-        "cost": task_cost(task),
+        "cost": receipt_cost(task),
     }
     data["suggested_labels"] = suggested_labels(spec_text, data["risks"])
     return data, None
@@ -7691,12 +7754,25 @@ def sandbox_lines(evidence):
     return lines
 
 
+def receipt_cost(task):
+    try:
+        return task_cost(task)
+    except LedgerError as exc:
+        return {"total_usd": None, "sessions": None, "sessions_without_cost": None, "unsettled_sessions": None,
+                "error": str(exc)}
+
+
 def cost_lines(cost):
     if not cost:
         return ["not recorded: no runner session worked on this task"]
+    if cost.get("error"):
+        return ["unknown: %s" % cost["error"]]
     lines = ["$%.2f over %d session(s)" % (cost["total_usd"], cost["sessions"])]
     if cost["sessions_without_cost"]:
         lines.append("%d session(s) reported no cost, so the total is a floor" % cost["sessions_without_cost"])
+    if cost["unsettled_sessions"]:
+        lines.append("%d session(s) never settled (their run was stopped): each counts as the budget it reserved"
+                     % cost["unsettled_sessions"])
     return lines
 
 

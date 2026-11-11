@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **The task's cost ledger fails closed and counts a killed session.** `run` reserves each session in the ledger
+  before it starts, for what is left of `HARNESS_TASK_BUDGET_USD`, and settles it with the cost when it ends, so a
+  run killed during a session still counts it. A ledger that can't be read or is corrupt read as $0 and then crashed
+  the run; now, with a budget set, it stops the task before any session and escalates it (`budget`), as does a ledger
+  that can't be written. The receipt's `cost` adds `unsettled_sessions`, or `error` when the ledger can't be read.
+
 - **delivery-record checks the trusted clone's verify, and can sign the record.** The report now carries `verify`:
   the range, head and exit status of the trusted clone's `verify --range`. `delivery-record` refuses it unless the
   verified head is the task's `HEAD` and the range ends there, and `delivered` needs verify to have passed. With

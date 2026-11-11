@@ -9,7 +9,11 @@ per-day cap and booking before each call are the factory's key proxy's, not test
 The rule "a session starts only while the ledger is under the budget" is checked as a property over sequences of
 session costs (needs hypothesis).
 """
+import os
 import shlex
+import signal
+import subprocess
+import time
 import unittest
 
 from factory_fixture import Project, agent_script
@@ -147,6 +151,56 @@ class Runner(unittest.TestCase):
         self.assertIn("HARNESS_TASK_BUDGET_USD must be empty or a number of dollars", result.stdout)
         self.assertEqual(self.sessions(task), 0)
 
+    def ledger(self, task):
+        return self.p.path / ".git/harness/costs" / ("task-%s.jsonl" % task)
+
+    def test_a_ledger_that_cant_be_read_stops_the_task_before_any_session(self):
+        for case in ("unreadable", "corrupt", "a directory"):
+            with self.subTest(case=case):
+                task = self.new_task()
+                ledger = self.ledger(task)
+                ledger.parent.mkdir(parents=True, exist_ok=True)
+                if case == "a directory":
+                    ledger.mkdir()
+                else:
+                    ledger.write_text('{"cost_usd": 0.5}\n' + ("not json\n" if case == "corrupt" else ""))
+                if case == "unreadable":
+                    ledger.chmod(0)
+                try:
+                    result = self.run_task(task, HARNESS_TASK_BUDGET_USD="25", HARNESS_RUN_ATTEMPTS="2")
+                finally:
+                    if case == "unreadable":
+                        ledger.chmod(0o644)
+                [entry] = self.escalations(task, "budget")
+
+                self.assertEqual(self.sessions(task), 0, result.stdout)
+                self.assertNotIn("Traceback", result.stdout + result.stderr)
+                self.assertIn("cost ledger", entry["reason"])
+                self.assertIn("escalated    task %s" % task, result.stdout)
+
+    def test_a_session_a_killed_run_left_counts_against_the_budget(self):
+        task = self.new_task()
+        started, release = self.p.base / ("started-" + task), self.p.base / ("release-" + task)
+        waiting = agent_script(self.p.base / "waiting.sh", 'touch "%s"\ni=0\nwhile [ ! -f "%s" ] && [ $i -lt 600 ]; '
+                                                        'do sleep 0.1; i=$((i+1)); done\n' % (started, release))
+        command = ["python3", "-B", str(self.p.path / "scripts/harness/lib/harness.py"), "run", "--only", task]
+        run = subprocess.Popen(command, cwd=str(self.p.path), start_new_session=True, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, env=dict(self.p.env, **dict(
+                                   self.env, HARNESS_AGENT_CMD=waiting, HARNESS_TASK_BUDGET_USD="5")))
+        try:
+            deadline = time.time() + 60
+            while not started.exists() and time.time() < deadline:
+                time.sleep(0.05)
+        finally:
+            os.killpg(run.pid, signal.SIGKILL)
+            run.wait()
+            release.touch()
+        again = self.run_task(task, HARNESS_TASK_BUDGET_USD="5")
+
+        self.assertTrue(started.exists())
+        self.assertIn("has spent $5.00 of its $5.00 budget", again.stdout)
+        self.assertEqual(self.sessions(task), 0)
+
     def test_agents_may_change_neither_the_budget_nor_the_ledger(self):
         conf = self.p.file_tool("Edit", "backbone/harness.conf", agent=None, old_string='HARNESS_AUTONOMY=',
                                 new_string='HARNESS_TASK_BUDGET_USD="1000"\nHARNESS_AUTONOMY=')
@@ -192,7 +246,8 @@ class Receipt(unittest.TestCase):
         text = self.p.harness("receipt", "7.1").stdout
 
         self.assertIn("done         task 7.1", self.finished.stdout)
-        self.assertEqual(data["cost"], {"total_usd": 0.45, "sessions": 1, "sessions_without_cost": 0})
+        self.assertEqual(data["cost"], {"total_usd": 0.45, "sessions": 1, "sessions_without_cost": 0,
+                                        "unsettled_sessions": 0})
         self.assertIn("COST (the runner's agent sessions for this task)\n  - $0.45 over 1 session(s)", text)
 
     def test_a_task_no_runner_session_worked_on_has_no_recorded_cost(self):
