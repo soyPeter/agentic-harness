@@ -2830,6 +2830,34 @@ def approval_reused(name, before, after):
             "with HARNESS_VERIFY=off (in CI, the harness-change-approved label)." % name)
 
 
+def approval_state(text):
+    if text is None:
+        return None
+    text = line_endings(text)
+    return approved(text), approval_lines(outline(text))
+
+
+def reused_approvals(steps):
+    """approval_reused over steps ((revision, its parents, the paths it changes), oldest first): a step that changes an
+    approved spec's text but keeps its Approved-by lines is refused unless a later step changes those lines. A range is
+    checked step by step, since its two ends can show the same line although the user removed the approval with the
+    change and gave it again later. A merge is refused only when it reuses the approval of every parent."""
+    pending = {}
+    for rev, parents, names in steps:
+        for name in names:
+            if not re.match(r"^backbone/specs/[^/]+\.md$", name):
+                continue
+            after = show(rev, name)
+            befores = [show(parent, name) for parent in parents]
+            if all(approval_state(before) != approval_state(after) for before in befores):
+                pending.pop(name, None)
+            label = "%s (commit %s)" % (name, rev[:12]) if rev else name
+            reused = [approval_reused(label, before, after) for before in befores]
+            if reused and all(reused):
+                pending[name] = reused[0]
+    return [pending[name] for name in sorted(pending)]
+
+
 def user_only_change(before, after):
     old, new = parse_conf(before), parse_conf(after)
     changed = [key for key in USER_ONLY_KEYS if old.get(key) != new.get(key)]
@@ -2935,11 +2963,8 @@ def verify_changes(before, after, changed, done_fingerprint, allow_user_changes=
             problem = start_problems(task, "finish")
             if problem:
                 problems.append(problem)
-    for name in changed if before and not allow_user_changes else []:
-        if re.match(r"^backbone/specs/[^/]+\.md$", name):
-            problem = approval_reused(name, show(before, name), show(after, name))
-            if problem:
-                problems.append(problem)
+    if before and not allow_user_changes:
+        problems.extend(reused_approvals(range_steps(before, after) if after else [(after, [before], changed)]))
     if values["HARNESS_JUDGE_GATE"] != "off":
         max_rounds = int(values["HARNESS_JUDGE_MAX_ROUNDS"] or 2)
         for task in sorted(new_done - old_done):
@@ -3020,6 +3045,14 @@ def verify_range(spec, allow_user_changes=False):
     changed = diff_names(base, tip)
     return verify_changes(base, tip, changed, lambda task: tree_fingerprint(done_commit(task, commits, tip)),
                           allow_user_changes)
+
+
+def range_steps(base, tip):
+    """The commits of base..tip, oldest first, each with its parents and the specs it changes (reused_approvals)."""
+    lines = [line.split() for line in git("rev-list", "--reverse", "--parents", "%s..%s" % (base, tip)).splitlines()]
+    return [(line[0], line[1:], sorted({name for parent in line[1:]
+                                        for name in diff_names(parent, line[0], "--", "backbone/specs")}))
+            for line in lines if line]
 
 
 def done_commit(task, commits, tip):

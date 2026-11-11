@@ -11,7 +11,9 @@
   approval the user removed to change it needs a current grill pass and their approval again. Verify also refuses a
   commit that changes an approved spec while its `Approved-by:` lines stay as they were, since that approval was given
   on the earlier text (the user approves the new text with a new line; in CI the `harness-change-approved` label lets
-  it through). `next` routes a changed `[WIP]` task to `grill`, `approve`, `test` and `judge` with a `reason`; `state
+  it through). A range is checked commit by commit, so an approval removed with the change and given again later with
+  the same line is a renewal, and a change committed under the old approval passes once a later commit changes the
+  `Approved-by:` lines. `next` routes a changed `[WIP]` task to `grill`, `approve`, `test` and `judge` with a `reason`; `state
   --json` gives the judge verdict's `stale` (`code`, `spec` or `unrecorded`); the receipt refuses a pass on an
   earlier spec and names the spec and code it was judged on (`judged_on`). Stale passes stay in the append-only
   history. Upgrade note: a judge, review or tester record from an earlier release has no spec fingerprint, so it

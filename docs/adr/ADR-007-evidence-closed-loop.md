@@ -295,7 +295,9 @@ local audit did not use.
   `## Approval` is part of what the griller, the user and the judge passed.
 - Verify refuses a commit that changes an approved spec, other than its `Approved-by:` lines, while those lines stay
   as they were. That is the freeze, applied to changes made outside the hooks. The user approves the new text with
-  a new line. In CI, the `harness-change-approved` label lets a deliberate change through.
+  a new line. In CI, the `harness-change-approved` label lets a deliberate change through. A range is checked commit
+  by commit, each against its own parents, so a user who removes the approval with the change and restores the same
+  line later renews it, though both ends of the range show that line.
 - `next` routes a changed `[WIP]` task to `grill`, then `approve`, then `test` and `judge`, each with a `reason`, and
   then to every review lens. `state --json` gives the judge verdict's `stale` (`code`, `spec` or `unrecorded`). The
   receipt refuses a pass on an earlier spec and names the spec and code it was judged on (`judged_on`).

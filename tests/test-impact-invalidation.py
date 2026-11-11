@@ -618,6 +618,62 @@ class Verify(unittest.TestCase):
         self.assertIn("approval was given on the earlier text", out)
         self.assertEqual(allowed, 0, after)
 
+    def test_ci_accepts_an_approval_removed_with_the_change_and_given_again_with_the_same_line(self):
+        self.project.remove_approval()
+        self.project.edit_spec("criterion")
+        self.project.grill_pass()
+        changed, out = self.project.verify()
+        self.project.commit("docs: change a criterion, approval taken back")
+        self.project.approve(APPROVAL)
+        approved, after = self.project.verify()
+        self.project.commit("docs: approve the changed spec (same day, same line)")
+
+        code, ranged = self.project.harness("verify", "--range", "%s..HEAD" % self.base)
+
+        self.assertEqual((changed, approved), (0, 0), out + after)
+        self.assertEqual(code, 0, ranged)
+
+    def test_ci_accepts_a_merge_that_brings_in_such_a_renewal(self):
+        self.project.git("checkout", "-q", "-b", "spec-change")
+        self.project.remove_approval()
+        self.project.edit_spec("criterion")
+        self.project.grill_pass()
+        self.project.commit("docs: change a criterion, approval taken back")
+        self.project.approve(APPROVAL)
+        self.project.commit("docs: approve the changed spec (same day, same line)")
+        self.project.git("checkout", "-q", "main")
+        self.project.write("docs/notes.md", "Notes.\n")
+        self.project.commit("docs: notes")
+        self.project.git("merge", "-q", "--no-ff", "-m", "Merge the spec change", "spec-change")
+
+        code, out = self.project.harness("verify", "--range", "%s..HEAD" % self.base)
+
+        self.assertEqual(code, 0, out)
+
+    def test_ci_accepts_a_change_whose_approval_a_later_commit_renews(self):
+        self.project.edit_spec("criterion")
+        self.project.commit("docs: change a criterion (committed outside the hooks)")
+        self.project.remove_approval()
+        self.project.approve(RENEWED)
+        self.project.commit("docs: approve the changed spec")
+
+        code, out = self.project.harness("verify", "--range", "%s..HEAD" % self.base)
+
+        self.assertEqual(code, 0, out)
+
+    def test_ci_refuses_a_change_under_an_approval_renewed_only_before_it(self):
+        self.project.remove_approval()
+        self.project.edit_spec("criterion")
+        self.project.grill_pass()
+        self.project.approve(RENEWED)
+        self.project.commit("docs: change a criterion and approve it")
+        self.project.edit_spec("assumption")
+        self.project.commit("docs: reword an assumption under that approval")
+
+        code, out = self.project.harness("verify", "--range", "%s..HEAD" % self.base)
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("approval was given on the earlier text", out)
 
 
 @unittest.skipIf(given is None, "hypothesis is not installed (pip install -r tests/requirements.txt)")
