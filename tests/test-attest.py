@@ -828,7 +828,7 @@ class Workflow(unittest.TestCase):
         verify = self.jobs()["verify"]
 
         self.assertIn("if: github.event_name == 'pull_request'\n", verify)
-        for word in ("secrets.", "environment:", "cosign", "HARNESS_ATTEST", "upload-artifact", "attest"):
+        for word in ("secrets.", "environment:", "cosign", "HARNESS_ATTEST", "attest"):
             self.assertNotIn(word, verify)
 
     def test_the_signing_job_runs_only_for_a_push_to_the_default_branch_in_its_protected_environment(self):
@@ -850,7 +850,8 @@ class Workflow(unittest.TestCase):
 
         self.assertEqual([s.splitlines()[0] for s in steps], [
             CHECK_PUSHED, TAKE_PUSHED, CHECK_ENVIRONMENT, INSTALL_COSIGN, CHECK_KEY,
-            "Write the verdict attestation", "Sign the verdict attestation", "Upload the verdict attestation"])
+            "Write the verdict attestation", "Sign the verdict attestation", "Upload the verdict attestation",
+            "Write the traceability export", "Sign the traceability export", "Upload the signed traceability export"])
         for step in steps:
             self.assertIn("if: env.HARNESS_ATTEST_SIGN == 'true'\n", step)
         write = steps[5]

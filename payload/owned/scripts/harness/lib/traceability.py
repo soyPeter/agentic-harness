@@ -1,17 +1,23 @@
-"""Traceability export (ADR-004): the trace model harness.py builds, written as ReqIF 1.2, Sphinx-Needs needs.json
-(format 1) or a self-contained HTML matrix. Pure functions of the model, standard library only.
+"""Traceability export (ADR-004): the trace model harness.py builds, written as ReqIF 1.2, a ReqIF archive (.reqifz)
+holding it and the receipts, Sphinx-Needs needs.json (format 1) or a self-contained HTML matrix. Pure functions of the
+model, standard library only.
 
 Harness-owned file: the harness update replaces it.
 
 Ids are the spec's own (REQ-, NFR- and AC-<task>-<n>), TASK-<task> for a task and TEST-<task>-<hash of its path> for a
-test file. Results, verdicts, fingerprints and commits are strings: ReqIF has no type for them, and ADR-004 defines
-what they mean.
+test file. In ReqIF, a criterion's result and the judge's verdict are enumerations of the values ADR-004 defines;
+fingerprints, commits and the rest are strings.
 """
 import html
+import io
 import json
+import re
 import xml.etree.ElementTree as ET
+import zipfile
 
 REQIF_NS = "http://www.omg.org/spec/ReqIF/20110401/reqif.xsd"
+XHTML_NS = "http://www.w3.org/1999/xhtml"
+ET.register_namespace("xhtml", XHTML_NS)
 NOTE = "Derived from backbone/ and git; not the system of record (ADR-004)."
 REQUIREMENT_ATTRS = ("ReqIF.ForeignID", "ReqIF.Text", "Harness.Kind", "Harness.Task", "Harness.EARSPattern")
 CRITERION_ATTRS = ("ReqIF.ForeignID", "ReqIF.Text", "Harness.Task", "Harness.Result", "Harness.Verdict",
@@ -21,7 +27,14 @@ TEST_ATTRS = ("ReqIF.ForeignID", "ReqIF.Name", "Harness.Task")
 TASK_ATTRS = ("ReqIF.ForeignID", "ReqIF.Name", "Harness.Status", "Harness.Spec", "Harness.SpecFingerprint",
               "Harness.ChangeClass", "Harness.Grill", "Harness.Approval", "Harness.Verdict", "Harness.JudgedAt",
               "Harness.CodeFingerprint", "Harness.Commits", "Harness.TestRun", "Harness.TestFilesFrom",
-              "Harness.Reviews", "Harness.Gaps")
+              "Harness.Reviews", "Harness.Gaps", "Harness.Receipt")
+RESULTS = ("met", "not met", "not evaluated", "not judged")
+VERDICTS = ("pass on the current code", "pass on earlier code", "fail", "not judged")
+# attribute -> (its datatype's IDENTIFIER, LONG-NAME, values in KEY order). Harness.Receipt is XHTML, an object that
+# names the receipt's file in a .reqifz; the other attributes are strings.
+ENUMERATIONS = {"Harness.Result": ("AH-D-RESULT", "Result", RESULTS),
+                "Harness.Verdict": ("AH-D-VERDICT", "Verdict", VERDICTS)}
+XHTML_ATTRS = ("Harness.Receipt",)
 # key -> (element, IDENTIFIER, LONG-NAME, attribute definitions)
 SPEC_TYPES = {
     "requirement": ("SPEC-OBJECT-TYPE", "AH-T-REQUIREMENT", "Requirement", REQUIREMENT_ATTRS),
@@ -64,7 +77,17 @@ def indent(element, level=0):
         child.tail = pad
 
 
-def reqif(model):
+def enum_value_id(datatype, value):
+    return "%s-%s" % (datatype.replace("-D-", "-E-"), re.sub(r"[^A-Za-z0-9]+", "-", value).upper())
+
+
+def attribute_kind(attr):
+    return "ENUMERATION" if attr in ENUMERATIONS else "XHTML" if attr in XHTML_ATTRS else "STRING"
+
+
+def reqif(model, receipts=None):
+    """The ReqIF document; receipts ({task id: its file in the archive}) adds each task's Harness.Receipt."""
+    receipts = receipts or {}
     time = model["time"]
     stamp = {"LAST-CHANGE": time}
 
@@ -87,8 +110,16 @@ def reqif(model):
     sub(header, "SOURCE-TOOL-ID", model["tool"])
     sub(header, "TITLE", "Traceability: %s" % model["project"])
     content = sub(sub(root, "CORE-CONTENT"), "REQ-IF-CONTENT")
-    datatype = sub(sub(content, "DATATYPES"), "DATATYPE-DEFINITION-STRING", IDENTIFIER="AH-D-STRING",
-                   LONG_NAME="String", **stamp)
+    datatypes = sub(content, "DATATYPES")
+    datatype = sub(datatypes, "DATATYPE-DEFINITION-STRING", IDENTIFIER="AH-D-STRING", LONG_NAME="String", **stamp)
+    for ident, name, values in ENUMERATIONS.values():
+        specified = sub(sub(datatypes, "DATATYPE-DEFINITION-ENUMERATION", IDENTIFIER=ident, LONG_NAME=name, **stamp),
+                        "SPECIFIED-VALUES")
+        for key, value in enumerate(values):
+            enum = sub(specified, "ENUM-VALUE", IDENTIFIER=enum_value_id(ident, value), LONG_NAME=value, **stamp)
+            sub(sub(enum, "PROPERTIES"), "EMBEDDED-VALUE", KEY=str(key), OTHER_CONTENT="")
+    sub(datatypes, "DATATYPE-DEFINITION-XHTML", IDENTIFIER="AH-D-XHTML", LONG_NAME="XHTML", **stamp)
+    datatype_of = {"STRING": "AH-D-STRING", "XHTML": "AH-D-XHTML"}
     types = sub(content, "SPEC-TYPES")
     definitions = {}
     for key, (element, ident, name, attrs) in SPEC_TYPES.items():
@@ -96,10 +127,13 @@ def reqif(model):
         if attrs:
             holder = sub(spec_type, "SPEC-ATTRIBUTES")
         for attr in attrs:
+            kind = attribute_kind(attr)
             definitions[key, attr] = "%s-%s" % (ident.replace("-T-", "-A-"), attr)
-            definition = sub(holder, "ATTRIBUTE-DEFINITION-STRING", IDENTIFIER=definitions[key, attr],
-                             LONG_NAME=attr, **stamp)
-            ref(definition, "TYPE", "DATATYPE-DEFINITION-STRING-REF", "AH-D-STRING")
+            extra = {"MULTI_VALUED": "false"} if kind == "ENUMERATION" else {}
+            definition = sub(holder, "ATTRIBUTE-DEFINITION-" + kind, IDENTIFIER=definitions[key, attr],
+                             LONG_NAME=attr, **dict(stamp, **extra))
+            ref(definition, "TYPE", "DATATYPE-DEFINITION-%s-REF" % kind,
+                ENUMERATIONS[attr][0] if kind == "ENUMERATION" else datatype_of[kind])
     objects, relations = sub(content, "SPEC-OBJECTS"), sub(content, "SPEC-RELATIONS")
     specifications = sub(content, "SPECIFICATIONS")
     longest = [0]
@@ -108,11 +142,25 @@ def reqif(model):
         holder = None
         for attr in SPEC_TYPES[key][3]:
             value = given.get(attr) or given.get(attr.split(".", 1)[1])
-            if value:
-                holder = holder if holder is not None else sub(parent, "VALUES")
+            if not value:
+                continue
+            holder = holder if holder is not None else sub(parent, "VALUES")
+            kind = attribute_kind(attr)
+            if kind == "ENUMERATION":
+                held = sub(holder, "ATTRIBUTE-VALUE-ENUMERATION")
+                datatype_id, _, allowed = ENUMERATIONS[attr]
+                if value not in allowed:
+                    raise ValueError("%s is not a value of %s" % (value, attr))
+                ref(held, "VALUES", "ENUM-VALUE-REF", enum_value_id(datatype_id, value))
+            elif kind == "XHTML":
+                held = sub(holder, "ATTRIBUTE-VALUE-XHTML")
+                path, label = value
+                block = ET.SubElement(sub(held, "THE-VALUE"), "{%s}div" % XHTML_NS)
+                ET.SubElement(block, "{%s}object" % XHTML_NS, {"data": path, "type": "text/plain"}).text = label
+            else:
+                held = sub(holder, "ATTRIBUTE-VALUE-STRING", THE_VALUE=value)
                 longest[0] = max(longest[0], len(value))
-                ref(sub(holder, "ATTRIBUTE-VALUE-STRING", THE_VALUE=value), "DEFINITION",
-                    "ATTRIBUTE-DEFINITION-STRING-REF", definitions[key, attr])
+            ref(held, "DEFINITION", "ATTRIBUTE-DEFINITION-%s-REF" % kind, definitions[key, attr])
 
     def spec_object(ident, key, given):
         obj = sub(objects, "SPEC-OBJECT", IDENTIFIER=ident, LONG_NAME=ident, **stamp)
@@ -141,8 +189,9 @@ def reqif(model):
                 relation(t["id"], "tests", target)
         specification = sub(specifications, "SPECIFICATION", IDENTIFIER="TASK-" + task["id"],
                             LONG_NAME="Task %s: %s" % (task["id"], task["title"]), **stamp)
-        values(specification, "task", dict(task_values(task), **{"ReqIF.ForeignID": task["id"],
-                                                                 "ReqIF.Name": task["title"]}))
+        receipt = (receipts[task["id"]], "Receipt of task %s" % task["id"]) if task["id"] in receipts else None
+        values(specification, "task", dict(task_values(task), Receipt=receipt,
+                                           **{"ReqIF.ForeignID": task["id"], "ReqIF.Name": task["title"]}))
         children = sub(specification, "CHILDREN")
         for ident in held:
             ref(sub(children, "SPEC-HIERARCHY", IDENTIFIER="H-" + ident, **stamp), "OBJECT", "SPEC-OBJECT-REF", ident)
@@ -150,6 +199,25 @@ def reqif(model):
     datatype.set("MAX-LENGTH", str(max(65535, longest[0])))
     indent(root)
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="unicode") + "\n"
+
+
+def reqifz(model):
+    """A ReqIF archive: traceability.reqif and receipts/<task>.txt, the `harness.py receipt` of each task that has one
+    (a judge pass on the current code), which the task's Harness.Receipt names."""
+    receipts = {t["id"]: ("receipts/%s.txt" % t["id"], t["receipt"]) for t in model["tasks"] if t.get("receipt")}
+    files = [("traceability.reqif", reqif(model, {task: path for task, (path, _) in receipts.items()}))]
+    files += sorted(receipts.values())
+    # ZIP keeps a local time without a zone, and nothing before 1980.
+    stamp = max(tuple(int(n) for n in re.findall(r"\d+", model["time"][:19])), (1980, 1, 1, 0, 0, 0))
+    buffer = io.BytesIO()
+    # Stored, not deflated, and marked as made on Unix: deflate's output depends on the zlib build and ZipInfo's
+    # create_system on the platform, and the same state must give the same bytes everywhere.
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        for name, text in files:
+            info = zipfile.ZipInfo(name, stamp)
+            info.create_system, info.external_attr = 3, 0o644 << 16
+            archive.writestr(info, text.encode("utf-8"))
+    return buffer.getvalue()
 
 
 # --------------------------------------------------------------------------- Sphinx-Needs needs.json, format 1
@@ -250,5 +318,5 @@ def html_matrix(model):
     return "\n".join(out) + "\n"
 
 
-FORMATS = {"reqif": (reqif, "traceability.reqif"), "needs": (needs, "needs.json"),
-           "html": (html_matrix, "traceability.html")}
+FORMATS = {"reqif": (reqif, "traceability.reqif"), "reqifz": (reqifz, "traceability.reqifz"),
+           "needs": (needs, "needs.json"), "html": (html_matrix, "traceability.html")}
