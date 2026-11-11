@@ -7418,6 +7418,22 @@ def sandbox_evidence_lines(evidence):
     if str(evidence.get("allowlist_hash", "")).startswith("sha256:"):
         lines.append("allowlist_hash covers host names only, not the addresses they resolve to or the GitHub ranges "
                      "init-firewall.sh adds")
+    if evidence.get("isolation_class") != "none":
+        lines.extend(egress_denial_lines(evidence.get("egress_denials")))
+    return lines
+
+
+def egress_denial_lines(denials):
+    if not isinstance(denials, dict):
+        return ["egress denials: not logged (the egress container predates its denial log)"]
+    lines = ["egress denials since the egress container started (%s): %s%s, logged in %s (%s)" % (
+        denials.get("since") or "unknown", denials.get("count") or "none",
+        " or more (the log stopped at its limit)" if denials.get("truncated") else "", denials.get("log"),
+        denials.get("log_sha256"))]
+    top = [entry for entry in denials.get("top") or [] if isinstance(entry, dict)]
+    if top:
+        lines.append("denied: " + "; ".join("%s (%s) x%s" % (entry.get("target"), entry.get("kind"), entry.get("count"))
+                                            for entry in top))
     return lines
 
 

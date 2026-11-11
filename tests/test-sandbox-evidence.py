@@ -264,6 +264,23 @@ class Evidence(Project):
 
         self.assertIn("container without an allowlist", text)
 
+    def test_the_receipt_cites_the_egress_denials_recorded_with_the_judge_pass(self):
+        denials = {"log": "/run/harness-egress/denials.jsonl", "log_sha256": "sha256:" + "c" * 64,
+                   "since": "2026-11-11T10:00:00Z", "count": 9, "truncated": False,
+                   "top": [{"kind": "connect", "target": "192.0.2.1:443/tcp", "count": 6},
+                           {"kind": "dns", "target": "exfil.example", "count": 3}]}
+        text, data = self.recorded(dict(RECORDED_IN_CONTAINER, base_image_digest="unpinned", egress_denials=denials))
+
+        self.assertEqual(data["sandbox"]["egress_denials"], denials)
+        self.assertIn("egress denials since the egress container started (2026-11-11T10:00:00Z): 9, logged in "
+                      "/run/harness-egress/denials.jsonl (sha256:%s)" % ("c" * 64), text)
+        self.assertIn("denied: 192.0.2.1:443/tcp (connect) x6; exfil.example (dns) x3", text)
+
+    def test_the_receipt_says_when_a_container_logged_no_denials(self):
+        text, _ = self.recorded(dict(RECORDED_IN_CONTAINER, base_image_digest="unpinned"))
+
+        self.assertIn("egress denials: not logged (the egress container predates its denial log)", text)
+
     def test_the_allowlist_hash_is_said_to_cover_host_names_only(self):
         text, _ = self.recorded(dict(RECORDED_IN_CONTAINER, base_image_digest="unpinned"))
 

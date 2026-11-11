@@ -19,7 +19,7 @@ ISOLATION_CLASSES = ("none", "container", "userspace-kernel", "microVM", "dedica
 CREDENTIAL_VARIABLES = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
 PINNED = re.compile(r"@(sha256:[0-9a-f]{64})$")
 NOT_ISOLATED = {"isolation_class": "none", "base_image_digest": "none", "allowlist_hash": "none", "region": "local",
-                "control_plane": "none", "credential_mode": "host"}
+                "control_plane": "none", "credential_mode": "host", "egress_denials": None}
 CONTAINER_MARKERS = ("/.dockerenv", "/run/.containerenv")
 PROC_STATUS = "/proc/self/status"
 # linux/capability.h. The agent's container drops NET_ADMIN and NET_RAW and has no sudo.
@@ -29,6 +29,9 @@ JSONC_TOKEN = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.DOTALL)
 JSONC_COMMA = re.compile(r'"(?:\\.|[^"\\])*"|,(?=\s*[}\]])')
 # The egress container's published list, in the agent's container (docker-compose.yml). Only this path counts.
 ALLOWLIST_PATH = "/run/harness-egress/allowlist"
+# What the egress container denied (egress.py), on the same read-only volume.
+DENIALS_PATH = "/run/harness-egress/denials.jsonl"
+DENIALS_CITED = 10
 
 
 class Sandbox(object):
@@ -66,7 +69,8 @@ class SandboxBackend(object):
         raise NotImplementedError
 
     def identity(self):
-        """The sandbox evidence: one value per EVIDENCE_FIELDS name, and isolation_reason."""
+        """The sandbox evidence: one value per EVIDENCE_FIELDS name, isolation_reason, and egress_denials (a summary of
+        what the sandbox's egress control denied, or None when nothing logged it)."""
         raise NotImplementedError
 
 
@@ -112,7 +116,7 @@ class Devcontainer(SandboxBackend):
                 "allowlist_hash": allowlist_hash(hosts) if hosts is not None else "none",
                 "region": "local", "control_plane": "local",
                 "credential_mode": "env" if any(os.environ.get(v) for v in CREDENTIAL_VARIABLES) else "login",
-                "isolation_reason": reason}
+                "isolation_reason": reason, "egress_denials": egress_denials(DENIALS_PATH)}
 
 
 BACKENDS = {Devcontainer.name: Devcontainer}
@@ -167,6 +171,32 @@ def published_hosts(path):
     except (OSError, UnicodeDecodeError):
         return None
     return sorted({line.strip().lower() for line in text.splitlines() if line.strip()}) or None
+
+
+def egress_denials(path):
+    """A summary of the egress container's denial log: since when it logs, how many packets it denied, the targets
+    denied most, and the log's sha256, so the receipt can cite it. None when there is no log to read."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return None
+    started, truncated, counts = None, False, {}
+    for line in data.decode("utf-8", "replace").splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        started = started or record.get("started")
+        truncated = truncated or record.get("truncated") is True
+        if isinstance(record.get("kind"), str) and isinstance(record.get("target"), str):
+            key = (record["kind"], record["target"])
+            counts[key] = counts.get(key, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:DENIALS_CITED]
+    return {"log": str(path), "log_sha256": "sha256:" + hashlib.sha256(data).hexdigest(), "since": started,
+            "count": sum(counts.values()), "truncated": truncated,
+            "top": [{"kind": kind, "target": target, "count": count} for (kind, target), count in ranked]}
 
 
 def unpublished_allowlist():

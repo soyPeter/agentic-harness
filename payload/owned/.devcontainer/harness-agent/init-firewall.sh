@@ -4,15 +4,18 @@
 # Everything outbound is dropped except DNS, the loopback, established connections and these hosts:
 # the Anthropic API, GitHub (git and gh), and HARNESS_FIREWALL_ALLOW. IPs are resolved at start time.
 # Once the rules are in force, the host list is published for the agent's container, whose judge verdicts record its
-# hash as evidence (ADR-003).
+# hash as evidence (ADR-003). Every packet the rules drop goes to NFLOG group 7 first, which egress.py logs.
 set -euo pipefail
 set -f   # the allowlist is split on spaces, never expanded as file names
 
 PUBLISHED=/run/harness-egress/allowlist
+DENIALS=/run/harness-egress/denials.jsonl
+# Packets beyond this rate are still dropped, just not logged.
+LOG_LIMIT=(-m limit --limit 50/second --limit-burst 200 -j NFLOG --nflog-group 7)
 ALLOW="api.anthropic.com statsig.anthropic.com github.com api.github.com codeload.github.com \
 objects.githubusercontent.com ${HARNESS_FIREWALL_ALLOW:-}"
 
-rm -f "$PUBLISHED"
+rm -f "$PUBLISHED" "$DENIALS"
 iptables -F OUTPUT
 ipset destroy harness-allow 2>/dev/null || true
 ipset create harness-allow hash:net
@@ -32,11 +35,13 @@ iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
 iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
 iptables -A OUTPUT -m set --match-set harness-allow dst -j ACCEPT
+iptables -A OUTPUT "${LOG_LIMIT[@]}"
 iptables -P OUTPUT DROP
 # The allowlist holds IPv4 addresses only, so no IPv6 may leave either.
 if ip6tables -L OUTPUT >/dev/null 2>&1; then
   ip6tables -F OUTPUT
   ip6tables -A OUTPUT -o lo -j ACCEPT
+  ip6tables -A OUTPUT "${LOG_LIMIT[@]}"
   ip6tables -P OUTPUT DROP
 fi
 

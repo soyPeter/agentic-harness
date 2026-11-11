@@ -5,8 +5,9 @@ minutes and needs the network.
 Each class bootstraps a throwaway project, brings its .devcontainer/harness-agent/ up with `devcontainer up` and checks
 from inside, as the agent (Restrictions needs only docker):
 - a host off the allowlist can't be reached, and an allowlisted one can;
-- the agent's container holds neither NET_ADMIN nor NET_RAW, and nothing the agent runs changes the rules in force or
-  the allowlist the evidence is taken from;
+- the agent's container holds neither NET_ADMIN nor NET_RAW, and nothing the agent runs changes the rules in force,
+  the allowlist the evidence is taken from or the egress container's log of what it denied;
+- a denied connection is logged by the egress container, and the receipt cites the log;
 - a judge pass recorded inside records that sandbox, and the receipt shows it on the host;
 - in a thin project (ThinSandbox), the container fetches the pinned engine when it starts and Claude Code loads it as
   the plugin, so the same holds through the launcher.
@@ -16,6 +17,7 @@ which needs a container by default (HARNESS_SANDBOX_REQUIRE), starts and is judg
 The containers, images and volumes a class created are removed afterwards. The harness-agent-claude-config volume,
 which every project's sandbox shares, is left alone.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -35,6 +37,8 @@ DEFAULT_HOSTS = ["api.anthropic.com", "api.github.com", "codeload.github.com", "
 DEFAULT_ALLOWLIST_HASH = "sha256:0e8bb6fbde0f567902ea181ebaaabe69c10a830267e395f64a2c4d0e649d5f41"
 DEFAULT_PUBLISHED = "\n".join(DEFAULT_HOSTS) + "\n"
 EGRESS_ALLOWLIST = "/run/harness-egress/allowlist"
+EGRESS_DENIALS = "/run/harness-egress/denials.jsonl"
+UNROUTABLE = "192.0.2.1"   # TEST-NET-1: no DNS involved, and nothing answers there anyway
 BLOCKED = "https://example.com"
 ALLOWED = "https://api.github.com/zen"
 
@@ -166,6 +170,12 @@ class Sandbox(unittest.TestCase):
         listed = self.inside('cat "$HARNESS_EGRESS_ALLOWLIST"')
         return sorted(listed.stdout.split()) if listed.returncode == 0 else None
 
+    def denials(self):
+        """The records of the egress container's denial log, as the agent reads them."""
+        log = self.inside("cat %s" % EGRESS_DENIALS)
+        self.assertEqual(log.returncode, 0, log.stderr)
+        return [json.loads(line) for line in log.stdout.splitlines() if line.strip()]
+
 
 class Allowlist(Sandbox):
     def test_a_host_off_the_allowlist_is_unreachable(self):
@@ -173,6 +183,15 @@ class Allowlist(Sandbox):
 
     def test_an_allowlisted_host_is_reachable(self):
         self.assertTrue(self.reachable(ALLOWED))
+
+    def test_the_egress_container_logs_a_denied_connection_with_the_agents_uid(self):
+        self.assertFalse(self.reachable("http://%s/" % UNROUTABLE))
+        uid = int(self.inside("id -u").stdout)
+
+        records = [{key: record.get(key) for key in ("kind", "target", "uid")} for record in self.denials()]
+
+        self.assertIn({"kind": "connect", "target": "%s:80/tcp" % UNROUTABLE, "uid": uid}, records)
+        self.assertIn("started", self.denials()[0])
 
     def test_the_agent_container_holds_no_network_admin_capability(self):
         status = self.inside("grep '^CapBnd:' /proc/self/status")
@@ -215,10 +234,13 @@ class Allowlist(Sandbox):
         pinned = re.search(r"(?m)^ARG HARNESS_SANDBOX_IMAGE=\S+@(sha256:[0-9a-f]{64})$",
                            (self.project / ".devcontainer/harness-agent/Dockerfile").read_text())
 
+        self.assertFalse(self.reachable("https://%s/" % UNROUTABLE))
+
         judged = self.inside("CLAUDE_PROJECT_DIR=/workspace HARNESS_TEST_CMD=true "
                              "python3 -B scripts/harness/lib/harness.py hook judge-stop",
                              input=stop_input("judge", JUDGE_PASS))
         receipt = json.loads(self.host(*harness, "receipt", "7.1", "--json").stdout)
+        text = self.host(*harness, "receipt", "7.1").stdout
 
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
         self.assertTrue(pinned, "the Dockerfile pins its base image by digest")
@@ -229,6 +251,11 @@ class Allowlist(Sandbox):
             "allowlist_hash": DEFAULT_ALLOWLIST_HASH, "region": "local", "control_plane": "local",
             "credential_mode": "login"})
         self.assertIn("in a container", receipt["sandbox"]["isolation_reason"])
+        denials = receipt["sandbox"]["egress_denials"]
+        self.assertGreaterEqual(denials["count"], 1)
+        self.assertIn({"kind": "connect", "target": "%s:443/tcp" % UNROUTABLE},
+                      [{key: entry[key] for key in ("kind", "target")} for entry in denials["top"]])
+        self.assertIn("logged in %s" % EGRESS_DENIALS, text)
 
 
 @unittest.skipUnless(os.environ.get("HARNESS_E2E") == "1" and shutil.which("docker"),
@@ -360,6 +387,22 @@ class Restrictions(unittest.TestCase):
         self.assertEqual(sandbox["isolation_class"], "none")
         self.assertEqual(sandbox["allowlist_hash"], "none")
 
+    def test_the_judge_pass_records_a_summary_of_the_egress_containers_denial_log(self):
+        log = self.egress / "denials.jsonl"
+        records = [{"started": "2026-11-11T10:00:00Z"}] + [
+            {"at": "2026-11-11T10:0%d:00Z" % n, "kind": kind, "target": target, "uid": 1001}
+            for n, (kind, target) in enumerate([("connect", "192.0.2.1:443/tcp")] * 3 + [("dns", "exfil.example")])]
+        log.write_text("".join(json.dumps(record) + "\n" for record in records) + "not a record\n")
+        self.addCleanup(log.unlink)
+
+        denials = self.sandbox(drop=("NET_ADMIN", "NET_RAW"))["egress_denials"]
+
+        self.assertEqual(denials, {
+            "log": EGRESS_DENIALS, "log_sha256": "sha256:" + hashlib.sha256(log.read_bytes()).hexdigest(),
+            "since": "2026-11-11T10:00:00Z", "count": 4, "truncated": False,
+            "top": [{"kind": "connect", "target": "192.0.2.1:443/tcp", "count": 3},
+                    {"kind": "dns", "target": "exfil.example", "count": 1}]})
+
     def test_doctor_inside_the_sandbox_passes_with_the_published_allowlist(self):
         flags, environment = self.restricted()
         result = self.run_in_container(flags, ["doctor"], environment)
@@ -459,9 +502,13 @@ class Tamper(Sandbox):
                     "sudo -n iptables -P OUTPUT ACCEPT; iptables -P OUTPUT ACCEPT; ip6tables -P OUTPUT ACCEPT; "
                     'echo example.com >> "$HARNESS_EGRESS_ALLOWLIST"; true')
 
+        forged = self.inside('echo \'{"kind": "forged"}\' >> %s' % EGRESS_DENIALS)
+
         self.assertFalse(self.reachable(BLOCKED))
         self.assertTrue(self.reachable(ALLOWED))
         self.assertEqual(self.published_hosts(), DEFAULT_HOSTS)
+        self.assertNotEqual(forged.returncode, 0)
+        self.assertNotIn("forged", [record.get("kind") for record in self.denials()])
 
 
 if __name__ == "__main__":

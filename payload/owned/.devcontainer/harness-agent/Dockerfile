@@ -23,6 +23,8 @@ RUN useradd -m -s /bin/bash agent \
 COPY init-firewall.sh /usr/local/bin/init-firewall.sh
 COPY trust-workspace.py /usr/local/bin/trust-workspace.py
 COPY thin-engine.py /usr/local/bin/thin-engine.py
-RUN chmod 0755 /usr/local/bin/init-firewall.sh /usr/local/bin/trust-workspace.py /usr/local/bin/thin-engine.py
+COPY egress.py /usr/local/bin/egress.py
+RUN chmod 0755 /usr/local/bin/init-firewall.sh /usr/local/bin/trust-workspace.py /usr/local/bin/thin-engine.py \
+      /usr/local/bin/egress.py
 
 USER agent

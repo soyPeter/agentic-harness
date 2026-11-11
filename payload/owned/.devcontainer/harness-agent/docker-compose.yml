@@ -1,7 +1,8 @@
 # Agentic harness: the sandbox's two containers (harness-owned; devcontainer.json starts them).
 # The egress container applies the outbound allowlist (init-firewall.sh) in the network namespace the agent's container
-# joins. The agent can't change those rules: it holds neither NET_ADMIN nor NET_RAW, has no sudo, and shares neither
-# processes nor files with the egress container. If the egress container stops, the agent loses its network.
+# joins, and logs what it denies (egress.py). The agent can't change those rules or the log: it holds neither NET_ADMIN
+# nor NET_RAW, has no sudo, shares no processes with the egress container and mounts its volume read-only. If the
+# egress container stops, the agent loses its network.
 services:
   egress:
     build: .
@@ -12,9 +13,10 @@ services:
       HARNESS_FIREWALL_ALLOW: ""
     volumes:
       - egress-allowlist:/run/harness-egress
-    command: ["sh", "-c", "/usr/local/bin/init-firewall.sh && exec sleep infinity"]
+    # egress.py logs what the rules deny to /run/harness-egress/denials.jsonl; if it stops, the agent loses its network.
+    command: ["sh", "-c", "/usr/local/bin/init-firewall.sh && exec python3 /usr/local/bin/egress.py"]
     healthcheck:
-      test: ["CMD-SHELL", "iptables -S OUTPUT | grep -qx -- '-P OUTPUT DROP' && test -s /run/harness-egress/allowlist"]
+      test: ["CMD-SHELL", "iptables -S OUTPUT | grep -qx -- '-P OUTPUT DROP' && test -s /run/harness-egress/allowlist && test -s /run/harness-egress/denials.jsonl"]
       interval: 2s
       timeout: 5s
       retries: 60

@@ -279,3 +279,12 @@ Still open after v1:
   and judge passes record the same evidence as a full install's. Inside the image, `doctor` reports an error, so `run`
   and `orca` refuse to start, unless the sessions would load exactly the pinned plugin. Codex and OpenCode sessions in
   a thin project's sandbox get no plugin from this; the image runs Claude Code.
+- **8. Egress denials logged and cited by the receipt: done (2026-11-11).** `init-firewall.sh` sends every packet
+  its rules drop to NFLOG group 7 first (rate-limited to 50 a second; the rest are still dropped). `egress.py`, the
+  `egress` container's main process, reads the group over netlink (standard library only) and appends one JSON line per
+  packet to `/run/harness-egress/denials.jsonl` (target address, port and protocol, and the sending uid), on the volume
+  the agent mounts read-only; its health check waits for the log, and if it stops the agent loses its network. Each
+  judge pass in a container records `egress_denials`: since when the log runs, how many packets were denied, the ten
+  targets denied most and the log's sha256. The receipt cites them, or says "not logged" for an `egress` container
+  from before the log. The log restarts with the `egress` container, so it covers the container's lifetime, not one
+  task.

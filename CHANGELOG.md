@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **The sandbox logs what it denies, and the receipt cites it (ADR-003 follow-up 8).** Every outbound packet the
+  `egress` container's rules drop is logged first (NFLOG, up to 50 a second), and the new `egress.py`, now the
+  `egress` container's main process, appends one line per packet to `/run/harness-egress/denials.jsonl` (target
+  address, port, protocol and the sending uid), which the agent mounts read-only. Each judge pass in a container records
+  `egress_denials` in its sandbox evidence (since when, how many, the ten targets denied most, the log's sha256), and
+  the receipt cites them; an `egress` container from before the log shows "not logged". Covered by
+  `tests/test-sandbox-evidence.py` and, in real containers, `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`).
+  **Upgrading:** rebuild the sandbox.
+
 - **Thin projects get the sandbox (ADR-003 follow-up 9).** `init --thin`, `pin` and `update.sh --to-thin` install
   `.devcontainer/harness-agent/` from the pinned release. `pin` and `--to-thin` update the sandbox files nobody edited
   and keep an edited one, writing the release's copy to `<file>.harness-new` and exiting 1, as `update.sh` does; the
