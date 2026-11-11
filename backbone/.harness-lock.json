@@ -1,0 +1,13 @@
+{
+  "mode": "thin",
+  "version": "0.30.0",
+  "commit": "5b754dcd19fec8adfad234cf306954df91d88fe3",
+  "kept": {
+    "backbone/0-START-HERE.md": "d15ee782343083c8e1ca7a47ae49ef258c1c5576a0687f744894b271267be3e2",
+    "backbone/8-WORKFLOW.md": "fb9a9da22c5267cce550ec1c19814582b6b51f77b72a7a545e3818a5360d5694",
+    "backbone/HOOKS.md": "5e13d61a284728f823d3318e2c17ab413d60294eded490bd74614a5d2fb31a96",
+    "backbone/SKILLS.md": "c2f15a94e7c6529e49aff53750aac2965e261b1b174418f85d687cc65bff8979",
+    "backbone/templates/adr.md": "55ec7d5879a396d35a72d33855cc5640d2b86d99a36fc5eac78482bdf449a22d",
+    "backbone/templates/spec.md": "3696fb1bcea4405957c3cb55bcd5f0f25150fd921feafecb8bf7c46a35dae44d"
+  }
+}

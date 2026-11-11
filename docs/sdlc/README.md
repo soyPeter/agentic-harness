@@ -14,9 +14,10 @@ always-on agent software factory that brings work in from Slack, GitHub and Line
 
 ![The factory: signals, define, build, judge and deliver, merge and observe, with people setting the rules above](1-factory.svg)
 
-- **People set the rules.** The top row lives in files and settings only the user can change: ADR acceptance,
-  `routing.conf`, `guardrails.conf`, `tools.conf`, and in `harness.conf` the gate switches, risk rules, autonomy
-  mode and profile.
+- **People set the rules.** Only the user accepts an ADR, writes the tool contracts in `tools.conf`, or changes the
+  user-only keys of `harness.conf` (gate switches, risk rules, autonomy mode, profile). Skill routes in
+  `routing.conf` and rules in `guardrails.conf` come from the packs an accepted ADR adopts and the rules agreed at
+  setup.
 - **Signals.** Work comes from a person, a Linear ticket (`harness.py linear import`) or the task list. The harness's
   own feedback adds more: escalations, red CI, failure-class proposals and `harness.py report` candidates. Production
   incidents are not a signal yet.
@@ -31,15 +32,17 @@ always-on agent software factory that brings work in from Slack, GitHub and Line
   - verify on every commit;
   - `harness-verify` in CI, with the base branch's verifier.
 
-  Then a person merges.
+  Then a person merges the pull request. The deliverer can't merge, and under the `triple` profile no agent can;
+  `harness-verify` blocks a merge only once it is a required check in branch protection.
 - **What fails becomes the next task.**
   - Red CI becomes a fix task on the same pull request.
   - Escalations wait for a person.
   - A failure class seen twice opens a proposal.
   - The report points at missing rules or skills.
 
-  Triage before Define (deduplicate, set an owner, pick a lane or park) and tracing a production incident back to its
-  pull request and spec are proposals, not ADRs here yet.
+  Tracing a production incident back to its pull request and spec is drawn dashed: it is proposed in
+  [ADR-007](../adr/ADR-007-evidence-closed-loop.md), not built. So is triage before Define (deduplicate, set an owner,
+  pick a lane or park), which the diagram doesn't draw.
 
 ## 2. One task, request by request
 
@@ -59,7 +62,7 @@ something. Both loops are bounded: the griller repeats until it passes, and the 
 - whether autonomous mode may approve the spec by policy;
 - which risk label the receipt suggests.
 
-Whatever the class, a person approves every spec in supervised mode and merges every pull request.
+Whatever the class, a person approves every spec in supervised mode and merges the pull request.
 
 ## 4. What the harness can prove about a change
 
@@ -73,9 +76,10 @@ it. The bottom row holds the three proposed ADRs. Each ships a first slice; none
 ## Sources
 
 - [README](../../README.md), and in `payload/owned/`: `AGENTS.md`, `backbone/8-WORKFLOW.md`, `backbone/HOOKS.md`
-- [ADR-001](../adr/ADR-001-thin-mode-plugin.md) and [ADR-002](../adr/ADR-002-change-class-ladder.md). ADR-003
-  (sandbox backends), ADR-004 (traceability export) and ADR-005 (verdict attestations) are drafts on their own branches,
-  not on `main` yet; diagram 4 shows them as proposed.
+- [ADR-001](../adr/ADR-001-thin-mode-plugin.md) and [ADR-002](../adr/ADR-002-change-class-ladder.md) are accepted.
+  [ADR-003](../adr/ADR-003-sandbox-backends.md), [ADR-004](../adr/ADR-004-traceability-export.md) and
+  [ADR-005](../adr/ADR-005-verdict-attestations.md) are on `main` as Proposed: each ships a first slice, none is
+  accepted yet; diagram 4 shows them as proposed.
 - [Agent-SDLC landscape research](../research/2026-11-agent-sdlc-landscape.md)
 
 The SVGs are plain text and carry their own background, so they read the same in GitHub's light and dark themes.
