@@ -3399,6 +3399,37 @@ def plugin_mismatch():
             % (plugin, pinned, pinned, plugin))
 
 
+def offered_plugins():
+    """The versions of the agentic-harness plugins CLAUDE_CODE_PLUGIN_DIRS gives Claude Code sessions: each path is a
+    plugin, or a folder whose children are."""
+    found = []
+    for entry in filter(None, os.environ.get("CLAUDE_CODE_PLUGIN_DIRS", "").split(os.pathsep)):
+        path = Path(os.path.expanduser(entry))
+        manifest = path / ".claude-plugin/plugin.json"
+        candidates = [path] if manifest.is_file() else sorted(path.iterdir()) if path.is_dir() else []
+        for plugin in candidates:
+            data = json_file(plugin / ".claude-plugin/plugin.json") or {}
+            if data.get("name") == "agentic-harness":
+                found.append(str(data.get("version") or "unknown"))
+    return found
+
+
+def sandbox_plugin_problem():
+    """Inside the harness-agent image, why a thin project's Claude Code sessions would run without the plugin of the
+    release it pins, or None. There the plugin comes from CLAUDE_CODE_PLUGIN_DIRS (thin-engine.py), not an install;
+    without it a session that skips its permission prompts would run with no harness hooks at all."""
+    info = lock()
+    if not os.environ.get("HARNESS_SANDBOX_IMAGE") or info.get("mode") != "thin":
+        return None
+    pinned, offered = str(info.get("version") or ""), offered_plugins()
+    if offered and set(offered) == {pinned}:
+        return None
+    return ("Claude Code sessions in this sandbox would not load the agentic-harness plugin v%s this project pins "
+            "(CLAUDE_CODE_PLUGIN_DIRS offers %s), so they would run without the harness hooks. Restart the container, "
+            "whose start runs .devcontainer/harness-agent/thin-engine.py to fetch the pinned engine, or run that "
+            "script and read why it failed" % (pinned, ", ".join("v" + v for v in offered) or "none"))
+
+
 def health():
     """List of (level, message) for misconfigurations; level is 'error' or 'warn'."""
     issues = []
@@ -3472,6 +3503,9 @@ def health():
     unpublished = sandbox.unpublished_allowlist()
     if unpublished:
         issues.append(("error", unpublished))
+    unplugged = sandbox_plugin_problem()
+    if unplugged:
+        issues.append(("error", unplugged))
     stale = stale_sandbox_config()
     if stale:
         issues.append(("warn", stale))

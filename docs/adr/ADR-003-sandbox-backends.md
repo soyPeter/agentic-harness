@@ -270,3 +270,12 @@ Still open after v1:
   read all refuse, and the last is a doctor error. `run` skips such a task before starting a session for it, and the
   receipt says what the class requires and whether the judge pass met it. The evidence stays a record of the sandbox;
   the gate is what refuses.
+- **9. The sandbox for thin installs: done (2026-11-11).** `init --thin`, `pin` and `update.sh --to-thin` install
+  `.devcontainer/harness-agent/` from the pinned release; `pin` and `--to-thin` update the files nobody edited and keep
+  an edited one with the release's copy beside it (`<file>.harness-new`), by the hashes the lock records under `kept`,
+  as `update.sh` does. When the container starts, `thin-engine.py` fetches the pinned release into the launcher's engine
+  cache, refuses it unless it is the pinned commit with no local changes, and links it into the folder
+  `CLAUDE_CODE_PLUGIN_DIRS` names, so every Claude Code session in the sandbox loads the pinned plugin and its hooks,
+  and judge passes record the same evidence as a full install's. Inside the image, `doctor` reports an error, so `run`
+  and `orca` refuse to start, unless the sessions would load exactly the pinned plugin. Codex and OpenCode sessions in
+  a thin project's sandbox get no plugin from this; the image runs Claude Code.

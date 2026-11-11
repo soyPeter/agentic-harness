@@ -27,6 +27,7 @@ LAUNCHER = ROOT / "plugin/launcher.py"
 VERSION = (ROOT / "VERSION").read_text().strip()
 LOCK = "backbone/.harness-lock.json"
 WORKFLOW = ".github/workflows/harness-verify.yml"
+SANDBOX = ".devcontainer/harness-agent"
 SHIM = ".githooks/pre-commit"
 PLUGIN = "agentic-harness@agentic-harness"
 FULL_HOOKS = "scripts/harness/git-hooks"
@@ -129,8 +130,8 @@ def set_release_version(source, version):
 
 def build_source(source, env):
     """Releases v0.26.1 (before thin mode), v<VERSION> (this checkout) and v99.0.0, a later one that changes a harness
-    file, a backbone document, two of the container pack's files, the shim, the settings fragment (a permission rule
-    more, LATER_RULE, and one fewer, DROPPED_RULE) and harness.conf."""
+    file, a backbone document, the sandbox's Dockerfile, two of the container pack's files, the shim, the settings
+    fragment (a permission rule more, LATER_RULE, and one fewer, DROPPED_RULE) and harness.conf."""
     source.mkdir()
     run(source, env, "git", "init", "-q", "-b", "main")
     shutil.copytree(ROOT / "payload", source / "payload")
@@ -148,6 +149,7 @@ def build_source(source, env):
     run(source, env, "git", "tag", "v" + VERSION)
     set_release_version(source, "99.0.0")
     for name in ("payload/owned/AGENTS.md", "payload/owned/backbone/8-WORKFLOW.md", "plugin/pre-commit",
+                 "payload/owned/.devcontainer/harness-agent/Dockerfile",
                  "catalog/container/install/" + PACK_FILE, "catalog/container/install/" + PACK_DOC):
         with open(str(source / name), "a") as handle:
             handle.write("# 99.0.0\n")
@@ -283,14 +285,16 @@ class Fixture(unittest.TestCase):
 class Conversion(Fixture):
     def test_switching_to_thin_and_back_gives_back_the_full_install(self):
         installed = self.git("rev-parse", "HEAD").stdout.strip()
-        harness_docs = {name: digest for name, digest in self.lock()["files"].items() if name.startswith("backbone/")}
+        kept = {name: digest for name, digest in self.lock()["files"].items()
+                if name.startswith(("backbone/", SANDBOX + "/"))}
+        sandbox = {name: (self.project / name).read_bytes() for name in kept if name.startswith(SANDBOX + "/")}
         result = self.update("--to-thin", self.project)
         self.assertIn("thin mode", result.stdout)
-        for name in ("AGENTS.md", "scripts/harness", ".claude/agents", ".claude/skills", ".codex", ".opencode",
-                     ".devcontainer"):
+        for name in ("AGENTS.md", "scripts/harness", ".claude/agents", ".claude/skills", ".codex", ".opencode"):
             self.assertFalse((self.project / name).exists(), name)
+        self.assertEqual({name: (self.project / name).read_bytes() for name in sandbox}, sandbox)
         self.assertEqual(self.lock(), {"mode": "thin", "version": VERSION, "commit": self.tag_commit(VERSION),
-                                       "installed": INSTALLED, "kept": harness_docs})
+                                       "installed": INSTALLED, "kept": kept})
         self.assertEqual((self.project / SHIM).read_bytes(), self.release("plugin/pre-commit"))
         self.assertTrue(os.access(str(self.project / SHIM), os.X_OK))
         self.assertEqual(self.hooks_path(), ".githooks")
@@ -354,12 +358,12 @@ class Conversion(Fixture):
 
     def test_edited_harness_files_are_kept_as_backups(self):
         edits = ("AGENTS.md", ".claude/agents/judge.md", ".claude/skills/security/SKILL.md", ".codex/agents/judge.toml",
-                 ".opencode/plugins/harness.js", "scripts/harness/guardrails.core.conf",
-                 ".devcontainer/harness-agent/Dockerfile")
-        for name in edits + (WORKFLOW, "backbone/8-WORKFLOW.md"):
+                 ".opencode/plugins/harness.js", "scripts/harness/guardrails.core.conf")
+        in_place = ("backbone/8-WORKFLOW.md", SANDBOX + "/docker-compose.yml")
+        for name in edits + (WORKFLOW,) + in_place:
             with open(str(self.project / name), "a") as handle:
                 handle.write("# local edit\n")
-        edited = {name: (self.project / name).read_bytes() for name in edits + (WORKFLOW, "backbone/8-WORKFLOW.md")}
+        edited = {name: (self.project / name).read_bytes() for name in edits + (WORKFLOW,) + in_place}
         self.commit("chore: local harness edits", hooks=False)
         result = self.update("--to-thin", self.project)
         for name in edits:
@@ -371,20 +375,24 @@ class Conversion(Fixture):
         self.assertFalse((self.project / ".claude/agents/griller.md").exists())
         self.assertEqual((self.project / WORKFLOW).read_bytes(), self.release("payload/owned/" + WORKFLOW))
         self.assertEqual((self.project / (WORKFLOW + ".harness-bak")).read_bytes(), edited[WORKFLOW])
-        self.assertEqual((self.project / "backbone/8-WORKFLOW.md").read_bytes(), edited["backbone/8-WORKFLOW.md"])
-        self.assertFalse((self.project / "backbone/8-WORKFLOW.md.harness-bak").exists())
+        for name in in_place:
+            with self.subTest(name=name):
+                self.assertEqual((self.project / name).read_bytes(), edited[name])
+                self.assertFalse((self.project / (name + ".harness-bak")).exists())
         self.commit("chore: switch the agentic harness to thin mode")
 
         result = self.update("--to-full", self.project)
-        self.assertIn("keep      backbone/8-WORKFLOW.md", result.stdout)
-        self.assertEqual((self.project / "backbone/8-WORKFLOW.md").read_bytes(), edited["backbone/8-WORKFLOW.md"])
-        self.assertFalse((self.project / "backbone/8-WORKFLOW.md.harness-new").exists())
+        for name in in_place:
+            with self.subTest(name=name):
+                self.assertIn("keep      " + name, result.stdout)
+                self.assertEqual((self.project / name).read_bytes(), edited[name])
+                self.assertFalse((self.project / (name + ".harness-new")).exists())
         for name in edits + (WORKFLOW,):
             with self.subTest(name=name):
                 self.assertEqual((self.project / name).read_bytes(), self.release("payload/owned/" + name))
                 self.assertEqual((self.project / (name + ".harness-bak")).read_bytes(), edited[name])
         self.assertEqual(self.lock()["harness_version"], VERSION)
-        self.assertEqual(self.locally_edited(), ["backbone/8-WORKFLOW.md"])
+        self.assertEqual(self.locally_edited(), sorted(in_place))
 
     def test_running_a_conversion_again_changes_nothing(self):
         self.update("--to-thin", self.project)
@@ -468,6 +476,8 @@ class Conversion(Fixture):
         settings = json.loads((self.project / ".claude/settings.json").read_text())
         self.assertEqual(settings["extraKnownMarketplaces"]["agentic-harness"]["source"]["ref"], "v99.0.0")
         self.assertEqual((self.project / SHIM).read_bytes(), self.release("plugin/pre-commit", "99.0.0"))
+        dockerfile = SANDBOX + "/Dockerfile"
+        self.assertEqual((self.project / dockerfile).read_bytes(), self.release("payload/owned/" + dockerfile, "99.0.0"))
         self.commit("chore: switch the agentic harness to thin mode")
         self.update("--to-full", self.project)
         self.assertEqual(self.lock()["harness_version"], "99.0.0")
@@ -477,6 +487,19 @@ class Conversion(Fixture):
             "permissions"]["allow"])
         self.assertIn(LATER_SETTING, (self.project / "backbone/harness.conf").read_text())
         self.assertFalse((self.project / ".githooks").exists())
+
+    def test_switching_to_a_release_that_changed_an_edited_sandbox_file_keeps_the_edit(self):
+        edited = self.edit(SANDBOX + "/Dockerfile")
+        self.commit("chore: a local edit to the sandbox", hooks=False)
+
+        result = self.update("--to-thin", self.project, "--version", "99.0.0", check=False)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("CONFLICT  %s/Dockerfile" % SANDBOX, result.stdout)
+        for name, data in edited.items():
+            self.assertEqual((self.project / name).read_bytes(), data)
+            self.assertEqual((self.project / (name + ".harness-new")).read_bytes(),
+                             self.release("payload/owned/" + name, "99.0.0"))
 
     def test_switching_back_after_the_pin_moved_works_like_update_sh(self):
         """Release 99.0.0 changes AGENTS.md, backbone/8-WORKFLOW.md and two of the container pack's files."""
@@ -1178,9 +1201,9 @@ class Failures(Fixture):
 
 class Properties(Fixture):
     """For any set of harness files the user edited: the switch to thin mode keeps exactly those, as backups, and
-    removes the rest, but leaves backbone/ as it is; the switch back restores every harness file and keeps the
-    backups, keeps each edited backbone document without a conflict (the release didn't change), and update.sh status
-    reports exactly those documents as edited."""
+    removes the rest, but leaves backbone/ and the sandbox as they are; the switch back restores every harness file and
+    keeps the backups, keeps each edited backbone document and sandbox file without a conflict (the release didn't
+    change), and update.sh status reports exactly those as edited."""
 
     @classmethod
     def setUpClass(cls):
@@ -1207,7 +1230,7 @@ class Properties(Fixture):
         self.commit("chore: local harness edits", hooks=False, project=project)
         self.update("--to-thin", project, project=project)
         for name in self.owned:
-            if name.startswith("backbone/"):
+            if name.startswith(("backbone/", SANDBOX + "/")):
                 expected, backup = edited.get(name, original[name]), None
             elif name == WORKFLOW:
                 expected, backup = original[name], edited.get(name)
@@ -1223,12 +1246,12 @@ class Properties(Fixture):
 
         result = self.update("--to-full", project, check=False, project=project)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        kept = sorted(name for name in edits if name.startswith("backbone/"))
+        kept = sorted(name for name in edits if name.startswith(("backbone/", SANDBOX + "/")))
         for name in self.owned:
             self.assertEqual(content(project / name), edited[name] if name in kept else original[name], name)
             self.assertIsNone(content(project / (name + ".harness-new")), name)
             self.assertEqual(content(project / (name + ".harness-bak")),
-                             None if name.startswith("backbone/") else edited.get(name), name)
+                             None if name.startswith(("backbone/", SANDBOX + "/")) else edited.get(name), name)
         self.assertEqual(self.hooks_path(project), FULL_HOOKS)
         self.assertEqual(self.locally_edited(project), kept)
 

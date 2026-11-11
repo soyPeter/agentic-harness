@@ -15,11 +15,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN npm install -g @anthropic-ai/claude-code
 
 # ~/.claude exists before the volume mounts there, so the new volume takes the agent's ownership, not root's.
+# ~/.agentic-harness/plugins is where thin-engine.py links a thin project's pinned engine (CLAUDE_CODE_PLUGIN_DIRS).
 RUN useradd -m -s /bin/bash agent \
-    && install -d -o agent -g agent /home/agent/.claude
+    && install -d -o agent -g agent /home/agent/.claude /home/agent/.agentic-harness \
+         /home/agent/.agentic-harness/plugins
 
 COPY init-firewall.sh /usr/local/bin/init-firewall.sh
 COPY trust-workspace.py /usr/local/bin/trust-workspace.py
-RUN chmod 0755 /usr/local/bin/init-firewall.sh /usr/local/bin/trust-workspace.py
+COPY thin-engine.py /usr/local/bin/thin-engine.py
+RUN chmod 0755 /usr/local/bin/init-firewall.sh /usr/local/bin/trust-workspace.py /usr/local/bin/thin-engine.py
 
 USER agent

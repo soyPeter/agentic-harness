@@ -266,12 +266,12 @@ python3 /path/to/agentic-harness/plugin/launcher.py init --thin [--version 0.30.
 ```
 
 In Claude Code, `/agentic-harness:init` does the same. It fetches and checks the release, then writes the project seed
-(`backbone/`, `CLAUDE.md`), the pin, `harness-verify.yml`, the shim with `core.hooksPath=.githooks`, and the plugin
-entries. After a fresh clone, each developer runs `git config core.hooksPath .githooks` once.
+(`backbone/`, `CLAUDE.md`), the pin, `harness-verify.yml`, the shim with `core.hooksPath=.githooks`, the sandbox
+(`.devcontainer/harness-agent/`) and the plugin entries. After a fresh clone, each developer runs `git config core.hooksPath .githooks` once.
 
 **Move the pin** to upgrade: `python3 /path/to/agentic-harness/plugin/launcher.py pin <version>` (the user's command;
-agents can't run it). It checks the release, updates the pin and the plugin's marketplace ref, and brings the shim
-and `harness-verify.yml` to that release. The upgrade is then one reviewed change.
+agents can't run it). It checks the release, updates the pin and the plugin's marketplace ref, and brings the shim,
+`harness-verify.yml` and the sandbox files you haven't edited to that release. The upgrade is then one reviewed change.
 
 **Switch an installed project**:
 
@@ -283,7 +283,9 @@ and `harness-verify.yml` to that release. The upgrade is then one reviewed chang
 - Both need a clean working tree and check everything before they write. If a write fails part way (permissions, a
   full disk), they undo their changes. On a project that is already switched, they change nothing.
 - `--to-thin` pins the installed release, or `--version`. It deletes each harness file you haven't edited and keeps
-  an edited one as `<file>.harness-bak`. `backbone/`, `CLAUDE.md` and adopted packs' files stay as they are. The pin
+  an edited one as `<file>.harness-bak`. `backbone/`, `CLAUDE.md` and adopted packs' files stay as they are, and so
+  does the sandbox, brought to the pinned release as `update.sh` would (an edited file whose release copy changed gets
+  a `<file>.harness-new`, and the switch exits 1). The pin
   keeps the hashes the full install recorded for the harness's files among them (`"kept"`) and the install date.
   `harness.py adopt` and `adopt --remove` work from these hashes as they do from a full install's, so a pack can be
   adopted again after the pin moved, and removing one deletes the files you haven't edited. Adopting again never
@@ -327,7 +329,11 @@ and a warning in supervised mode. Install the plugin at the pinned release, or m
   is protected.
 - The pre-commit shim is the only git hook: Conventional Commits (`commit-msg`) and the pre-push check run in full
   installs only, while CI's `verify --range` applies to both.
-- The `.devcontainer/harness-agent/` sandbox for unattended runs comes with the full install only.
+- The `.devcontainer/harness-agent/` sandbox comes with thin mode too (`init --thin`, `pin` and `--to-thin` install
+  it). When the container starts, it fetches the pinned release and Claude Code loads it as the plugin; run the
+  harness there with `python3 ~/.agentic-harness/plugins/agentic-harness/plugin/launcher.py <command>`. `pin` keeps a
+  sandbox file you edited (the allowlist in `docker-compose.yml`, say) and writes the release's copy beside it as
+  `<file>.harness-new`.
 
 ## Enforce it everywhere
 

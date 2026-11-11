@@ -7,7 +7,9 @@ from inside, as the agent (Restrictions needs only docker):
 - a host off the allowlist can't be reached, and an allowlisted one can;
 - the agent's container holds neither NET_ADMIN nor NET_RAW, and nothing the agent runs changes the rules in force or
   the allowlist the evidence is taken from;
-- a judge pass recorded inside records that sandbox, and the receipt shows it on the host.
+- a judge pass recorded inside records that sandbox, and the receipt shows it on the host;
+- in a thin project (ThinSandbox), the container fetches the pinned engine when it starts and Claude Code loads it as
+  the plugin, so the same holds through the launcher.
 Restrictions runs the harness-agent image directly, with the agent's restrictions and each one left out: the sandbox is
 recorded as a container only with all of them and the published allowlist at /run/harness-egress/allowlist. Schema work,
 which needs a container by default (HARNESS_SANDBOX_REQUIRE), starts and is judged there and then finishes on the host.
@@ -111,17 +113,21 @@ class Sandbox(unittest.TestCase):
                     "ANTHROPIC_API_KEY"):
             cls.env.pop(key, None)
         cls.host("git", "init", "-q", "-b", "main")
-        cls.host(str(ROOT / "bootstrap.sh"), str(cls.project), "--name", "sandbox")
-        cls.host("git", "add", "-A")
-        cls.host("git", "commit", "-qm", "chore: adopt agentic harness")
+        cls.install()
         cls.addClassCleanup(cls.remove_sandbox)
         up = cls.host(DEVCONTAINER, "up", "--workspace-folder", str(cls.project), "--config", str(cls.config),
                       timeout=1800)
         cls.container = json.loads(up.stdout.strip().splitlines()[-1])["containerId"]
 
     @classmethod
-    def host(cls, *args, input=None, timeout=300):
-        result = subprocess.run(args, cwd=cls.project, env=cls.env, input=input, capture_output=True, text=True,
+    def install(cls):
+        cls.host(str(ROOT / "bootstrap.sh"), str(cls.project), "--name", "sandbox")
+        cls.host("git", "add", "-A")
+        cls.host("git", "commit", "-qm", "chore: adopt agentic harness")
+
+    @classmethod
+    def host(cls, *args, input=None, timeout=300, env=None):
+        result = subprocess.run(args, cwd=cls.project, env=env or cls.env, input=input, capture_output=True, text=True,
                                 timeout=timeout)
         if result.returncode != 0:
             raise AssertionError("%s failed (exit %d):\n%s%s" % (" ".join(args), result.returncode, result.stdout,
@@ -379,6 +385,72 @@ class Restrictions(unittest.TestCase):
         self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
         self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+
+
+class ThinSandbox(Sandbox):
+    """A thin project (ADR-001) gets the sandbox from init --thin; the release it pins is this working tree, published in
+    the workspace so the container can fetch it without the network (HARNESS_ENGINE_SOURCE)."""
+    LAUNCHER = "~/.agentic-harness/plugins/agentic-harness/plugin/launcher.py"
+
+    @classmethod
+    def install(cls):
+        release = cls.project / ".harness-release"
+        names = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=ROOT,
+                               capture_output=True, text=True, check=True).stdout
+        for name in filter(None, names.split("\0")):
+            if (ROOT / name).is_file():
+                (release / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(ROOT / name), str(release / name))
+        cls.version = (ROOT / "VERSION").read_text().strip()
+        for args in (("init", "-q", "-b", "main"), ("add", "-A"), ("commit", "-qm", "release"),
+                     ("tag", "v" + cls.version)):
+            subprocess.run(("git",) + args, cwd=release, env=cls.env, capture_output=True, check=True)
+        with open(str(cls.project / ".git/info/exclude"), "a") as exclude:
+            exclude.write(".harness-release/\n")
+        cls.on_host = dict(cls.env, HARNESS_ENGINE_SOURCE=str(release),
+                           HARNESS_ENGINES=str(cls.project.parent / "engines"))
+        cls.host("python3", "-B", str(ROOT / "plugin/launcher.py"), "init", "--thin", env=cls.on_host)
+        cls.host("git", "add", "-A")
+        cls.host("git", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "chore: adopt agentic harness (thin)")
+        cls.env["HARNESS_ENGINE_SOURCE"] = "/workspace/.harness-release"
+
+    def test_the_container_offers_the_pinned_engine_to_claude_code_as_the_plugin(self):
+        plugins = self.inside("claude plugin list")
+        doctor = self.inside("python3 -B %s doctor" % self.LAUNCHER)
+
+        self.assertEqual(plugins.returncode, 0, plugins.stdout + plugins.stderr)
+        self.assertIn("agentic-harness@inline", plugins.stdout)
+        self.assertIn("Version: %s" % self.version, plugins.stdout)
+        self.assertIn("loaded", plugins.stdout)
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+        self.assertNotIn("ERROR", doctor.stdout)
+
+    def test_a_judge_pass_inside_records_the_sandbox_and_the_receipt_on_the_host_shows_it(self):
+        (self.project / "backbone/specs").mkdir(parents=True, exist_ok=True)
+        spec = self.project / "backbone/specs/7.1.md"
+        spec.write_text(SPEC)
+        tasks = self.project / "backbone/3-TASKS.md"
+        tasks.write_text(tasks.read_text() + "- [ ] **Task 7.1: Customer search** (spec: backbone/specs/7.1.md)\n")
+        self.host("git", "add", "-A")
+        self.host("git", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "docs: spec for task 7.1")
+        launcher = ("python3", "-B", str(ROOT / "plugin/launcher.py"))
+        self.host(*launcher, "hook", "grill-stop", env=self.on_host,
+                  input=stop_input("griller", {"verdict": "pass", "task": "7.1", "questions": [], "summary": "s"}))
+        spec.write_text(spec.read_text() + "Approved-by: Ana (2026-11-01)\n")
+        tasks.write_text(tasks.read_text().replace("- [ ] **Task 7.1", "- [WIP] **Task 7.1"))
+        (self.project / "src").mkdir(exist_ok=True)
+        (self.project / "src/search.py").write_text(
+            "def search(names, q):  # AC-7.1-1\n    return [n for n in names if q.lower() in n.lower()]\n")
+        (self.project / "tests").mkdir(exist_ok=True)
+        (self.project / "tests/test_search.py").write_text("def test_contains():  # AC-7.1-1\n    assert True\n")
+
+        judged = self.inside("CLAUDE_PROJECT_DIR=/workspace HARNESS_TEST_CMD=true python3 -B %s hook judge-stop"
+                             % self.LAUNCHER, input=stop_input("judge", JUDGE_PASS))
+        receipt = json.loads(self.host(*launcher, "receipt", "7.1", "--json", env=self.on_host).stdout)
+
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        self.assertEqual(receipt["sandbox"]["isolation_class"], "container", receipt["sandbox"]["isolation_reason"])
+        self.assertEqual(receipt["sandbox"]["allowlist_hash"], DEFAULT_ALLOWLIST_HASH)
 
 
 class Tamper(Sandbox):

@@ -30,6 +30,8 @@ services:
     environment:
       HARNESS_AGENT_CMD: claude -p --dangerously-skip-permissions --output-format json
       HARNESS_EGRESS_ALLOWLIST: /run/harness-egress/allowlist
+      # Claude Code loads each plugin in this folder: a thin project's pinned engine (thin-engine.py), else none.
+      CLAUDE_CODE_PLUGIN_DIRS: /home/agent/.agentic-harness/plugins
     volumes:
       - ../..:/workspace:cached
       - claude-config:/home/agent/.claude

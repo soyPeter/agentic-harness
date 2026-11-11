@@ -12,6 +12,11 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 ENGINE = ROOT / "payload/owned/scripts/harness/lib/harness.py"
 LAUNCHER = ROOT / "plugin/launcher.py"
+SANDBOX = ".devcontainer/harness-agent"
+
+
+def sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 class ThinInstall(unittest.TestCase):
@@ -59,8 +64,9 @@ class ThinInstall(unittest.TestCase):
             data["version"] = version
             path.write_text(json.dumps(data, indent=2) + "\n")
 
-    def run_at(self, cwd, *args, check=True):
-        result = subprocess.run(args, cwd=cwd, env=self.env, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    def run_at(self, cwd, *args, check=True, env=None):
+        result = subprocess.run(args, cwd=cwd, env=env or self.env, stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True)
         if check:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
@@ -73,11 +79,13 @@ class ThinInstall(unittest.TestCase):
         lock_path = self.project / "backbone/.harness-lock.json"
         lock = json.loads(lock_path.read_text())
         harness_docs = ROOT / "payload/owned/backbone"
+        sandbox = ROOT / "payload/owned" / SANDBOX
+        kept = {"backbone/" + path.relative_to(harness_docs).as_posix(): sha256(path)
+                for path in sorted(harness_docs.rglob("*")) if path.is_file()}
+        kept.update({"%s/%s" % (SANDBOX, path.name): sha256(path) for path in sandbox.iterdir()})
         self.assertEqual(lock, {"mode": "thin", "version": "0.30.0",
                                 "commit": self.run_at(self.source, "git", "rev-parse", "v0.30.0").stdout.strip(),
-                                "kept": {"backbone/" + path.relative_to(harness_docs).as_posix():
-                                         hashlib.sha256(path.read_bytes()).hexdigest()
-                                         for path in sorted(harness_docs.rglob("*")) if path.is_file()}})
+                                "kept": kept})
         self.assertFalse((self.project / "scripts/harness").exists())
         self.assertFalse((self.project / "AGENTS.md").exists())
         self.assertNotIn("@AGENTS.md", (self.project / "CLAUDE.md").read_text())
@@ -438,6 +446,102 @@ console.log(JSON.stringify(texts));
         self.assertTrue((self.project / ".githooks/pre-commit").stat().st_mode & 0o111)
         self.assertEqual((self.project / ".github/workflows/harness-verify.yml").read_text(), workflow.read_text())
         self.assertIn(".githooks/pre-commit", result.stdout)
+
+
+    def release_sandbox(self, version, changed=()):
+        """Release v<version> with each named sandbox file changed; returns the release's sandbox folder."""
+        folder = self.source / "payload/owned" / SANDBOX
+        for name in changed:
+            path = folder / name
+            path.write_text(path.read_text() + "# %s\n" % version)
+        self.set_release_version(version)
+        self.run_at(self.source, "git", "add", "-A")
+        self.run_at(self.source, "git", "commit", "-qm", "release " + version)
+        self.run_at(self.source, "git", "tag", "v" + version)
+        return folder
+
+    def edit_allowlist(self):
+        """The project's docker-compose.yml with an extra allowlisted host, as a user sets it."""
+        compose = self.project / SANDBOX / "docker-compose.yml"
+        compose.write_text(compose.read_text().replace('HARNESS_FIREWALL_ALLOW: ""', 'HARNESS_FIREWALL_ALLOW: "pypi.org"'))
+        return compose
+
+    def test_init_installs_the_sandbox_of_the_pinned_release(self):
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+
+        release = self.work / "cache/0.30.0/payload/owned" / SANDBOX
+        kept = json.loads((self.project / "backbone/.harness-lock.json").read_text())["kept"]
+        for source in sorted(release.iterdir()):
+            installed = self.project / SANDBOX / source.name
+            with self.subTest(name=source.name):
+                self.assertEqual(installed.read_bytes(), source.read_bytes())
+                self.assertEqual(os.access(str(installed), os.X_OK), os.access(str(source), os.X_OK))
+                self.assertEqual(kept["%s/%s" % (SANDBOX, source.name)], sha256(source))
+        self.assertTrue((self.project / SANDBOX / "thin-engine.py").is_file())
+
+    def test_pin_updates_the_sandbox_files_nobody_edited_and_keeps_an_edited_one(self):
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        compose = self.edit_allowlist()
+        release = self.release_sandbox("0.30.2", changed=("Dockerfile", "docker-compose.yml"))
+
+        result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "pin", "0.30.2", check=False)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual((self.project / SANDBOX / "Dockerfile").read_bytes(), (release / "Dockerfile").read_bytes())
+        self.assertIn('HARNESS_FIREWALL_ALLOW: "pypi.org"', compose.read_text())
+        self.assertEqual((self.project / SANDBOX / "docker-compose.yml.harness-new").read_bytes(),
+                         (release / "docker-compose.yml").read_bytes())
+        self.assertIn("CONFLICT", result.stdout)
+        self.assertIn("docker-compose.yml.harness-new", result.stdout)
+        self.assertEqual(json.loads((self.project / "backbone/.harness-lock.json").read_text())["version"], "0.30.2")
+
+    def test_pin_keeps_an_edited_sandbox_file_the_release_did_not_change(self):
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        compose = self.edit_allowlist()
+
+        result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "pin", "0.30.1")
+
+        self.assertIn('HARNESS_FIREWALL_ALLOW: "pypi.org"', compose.read_text())
+        self.assertFalse((self.project / SANDBOX / "docker-compose.yml.harness-new").exists())
+        self.assertNotIn("CONFLICT", result.stdout)
+
+    def test_pin_adds_the_sandbox_to_a_project_pinned_before_thin_mode_had_it(self):
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        shutil.rmtree(str(self.project / ".devcontainer"))
+        lock_path = self.project / "backbone/.harness-lock.json"
+        lock = json.loads(lock_path.read_text())
+        lock["kept"] = {name: digest for name, digest in lock["kept"].items() if not name.startswith(SANDBOX)}
+        lock_path.write_text(json.dumps(lock, indent=2) + "\n")
+
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "pin", "0.30.1")
+
+        self.assertTrue((self.project / SANDBOX / "docker-compose.yml").is_file())
+        self.assertIn(SANDBOX + "/docker-compose.yml", json.loads(lock_path.read_text())["kept"])
+
+    def test_doctor_in_the_sandbox_needs_claude_code_to_load_the_pinned_plugin(self):
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        image = dict(self.env, HARNESS_SANDBOX_IMAGE="node@sha256:" + "a" * 64)
+        image.pop("CLAUDE_CODE_PLUGIN_DIRS", None)
+        pinned, other, empty = self.work / "plugins", self.work / "other-plugins", self.work / "no-plugins"
+        for folder in (pinned, other, empty):
+            folder.mkdir()
+        (pinned / "agentic-harness").symlink_to(self.work / "cache/0.30.0")
+        (other / "agentic-harness").symlink_to(self.source)
+
+        def doctor(plugin_dirs=None, inside=True):
+            env = dict(image if inside else self.env)
+            if plugin_dirs is not None:
+                env["CLAUDE_CODE_PLUGIN_DIRS"] = plugin_dirs
+            return self.run_at(self.project, "python3", "-B", str(LAUNCHER), "doctor", env=env, check=False).stdout
+
+        missing = "Claude Code sessions in this sandbox would not load the agentic-harness plugin v0.30.0"
+        self.assertIn(missing, doctor())
+        self.assertIn("thin-engine.py", doctor())
+        self.assertNotIn(missing, doctor(str(pinned)))
+        self.assertNotIn(missing, doctor("%s:%s" % (empty, self.work / "cache/0.30.0")))
+        self.assertIn("v0.30.1", doctor(str(other)))
+        self.assertIn(missing, doctor("%s:%s" % (other, pinned)))
+        self.assertNotIn(missing, doctor(inside=False))
 
 
 if __name__ == "__main__":

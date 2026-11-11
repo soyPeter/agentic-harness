@@ -2537,7 +2537,7 @@ out=$(HARNESS_SKILL_MAX_AGE=1 "$M/scripts/harness/doctor.sh")
 contains "doctor warns about skills not verified recently" "was last verified" "$out"
 mkdir -p "$M/.claude/skills/undated"; printf -- '---\nname: undated\ndescription: x\n---\n# x\n' > "$M/.claude/skills/undated/SKILL.md"
 contains "doctor warns about skills without a date" "skill undated has no last-verified date" "$("$M/scripts/harness/doctor.sh")"
-for f in devcontainer.json docker-compose.yml Dockerfile init-firewall.sh trust-workspace.py; do
+for f in devcontainer.json docker-compose.yml Dockerfile init-firewall.sh trust-workspace.py thin-engine.py; do
   [ -f "$M/.devcontainer/harness-agent/$f" ] && ok "sandbox file installed: $f" || bad "sandbox file installed: $f"
 done
 contains "the spec template has an Assumptions section" "## Assumptions" "$(cat "$M/backbone/templates/spec.md")"

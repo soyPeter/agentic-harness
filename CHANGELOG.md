@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Thin projects get the sandbox (ADR-003 follow-up 9).** `init --thin`, `pin` and `update.sh --to-thin` install
+  `.devcontainer/harness-agent/` from the pinned release. `pin` and `--to-thin` update the sandbox files nobody edited
+  and keep an edited one, writing the release's copy to `<file>.harness-new` and exiting 1, as `update.sh` does; the
+  lock records their hashes under `kept`. When the container starts, the new `thin-engine.py` fetches the release the
+  project pins (from `HARNESS_ENGINE_SOURCE`, passed in from the host, or GitHub), checks it is the pinned commit, and
+  links it into `~/.agentic-harness/plugins/`, which the agent's container names in `CLAUDE_CODE_PLUGIN_DIRS`: every
+  Claude Code session in there loads the pinned plugin, and its judge passes record the container like a full
+  install's. Run the harness there with `python3 ~/.agentic-harness/plugins/agentic-harness/plugin/launcher.py`.
+  Inside the image, `doctor` reports an error (so `run` and `orca` refuse) when a thin project's sessions wouldn't load
+  exactly the pinned plugin. `tests/test-thin-install.py` and `tests/test-thin-convert.py` cover the files and the
+  check; `ThinSandbox` in `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`) brings a thin project's sandbox up for real.
+  **Upgrading:** a thin project gets the sandbox with its next `pin`; rebuild the container after it.
+
 - **Schema work needs the sandbox (ADR-003 follow-up 4).** A new user-only setting, `HARNESS_SANDBOX_REQUIRE`
   (default `schema=container`), names the isolation class each Change-Class needs, as space-separated
   `<class>=<isolation class>` pairs; a pair also covers the classes above it on the ladder. A task of such a class

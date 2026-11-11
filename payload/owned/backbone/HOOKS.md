@@ -202,7 +202,8 @@ Logs go to `.git/harness/runs/<timestamp>/<task>-<attempt>.log`. Agents can't st
 - an image built from a base pinned by digest;
 - no host credentials apart from `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`, counted against your Claude subscription) or `ANTHROPIC_API_KEY` (billed per token). The host's keychain login isn't visible in the container;
 - a trusted workspace;
-- `HARNESS_AGENT_CMD` set to `--dangerously-skip-permissions`, because the container, not the prompt, is the boundary.
+- `HARNESS_AGENT_CMD` set to `--dangerously-skip-permissions`, because the container, not the prompt, is the boundary;
+- in a thin project (ADR-001), the harness plugin: `init --thin` and `pin` install the sandbox too, and when the container starts, `thin-engine.py` fetches the release the project pins into `~/.agentic-harness/engines/<version>/`, refuses it unless it is the pinned commit with no local changes, and links it into `~/.agentic-harness/plugins/`, which `CLAUDE_CODE_PLUGIN_DIRS` names, so every Claude Code session in the container loads the pinned plugin and its hooks. Run the harness there with `python3 ~/.agentic-harness/plugins/agentic-harness/plugin/launcher.py <command>`. `HARNESS_ENGINE_SOURCE` on the host names another repository to fetch from; it must be reachable from the container. Inside the image, `doctor` reports an error, so `run` and `orca` refuse to start, when a thin project's sessions wouldn't load exactly the pinned plugin. `pin` updates the sandbox files nobody edited and keeps an edited one, writing the release's copy to `<file>.harness-new` (exit code 1), as `update.sh` does.
 
 Add your toolchain in a Dockerfile that builds `FROM` it.
 
