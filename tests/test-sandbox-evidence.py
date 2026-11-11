@@ -19,6 +19,9 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+REAL_DOCKER = shutil.which("docker")
+# The tests give the harness a HOME of their own; docker keeps reading the user's configuration, its plugins included.
+DOCKER_CONFIG = os.environ.get("DOCKER_CONFIG") or os.path.expanduser("~/.docker")
 DEVCONTAINER_REL = ".devcontainer/harness-agent/devcontainer.json"
 # Where the egress container publishes its allowlist, read-only, in the agent's container (docker-compose.yml).
 EGRESS_ALLOWLIST = "/run/harness-egress/allowlist"
@@ -367,12 +370,13 @@ class Start(Project):
     (harness.py sandbox-approve), and agents may not change either.
     """
 
-    def tools(self, *names, failing=False, unisolated=False, racing=False, running=False):
+    def tools(self, *names, failing=False, unisolated=False, racing=False, running=False, compose=False):
         """A PATH with git, python3 and sh, and executables standing in for names: they succeed, or fail like a sandbox
         that can't come up. unisolated: devcontainer brings up a "sandbox" that runs everything right here, on the
         host. racing: devcontainer up first rewrites the workspace's devcontainer.json with an initializeCommand, as an
         agent racing the check would, and records whether the definition it was given has one. running: docker says
-        a container of the project's sandbox is running."""
+        a container of the project's sandbox is running. compose: docker hands `docker compose` to the real docker,
+        which resolves the sandbox's Compose files without starting anything."""
         folder = Path(tempfile.mkdtemp(prefix="tools ", dir=str(self.work)))
         for tool in ("git", "python3", "sh"):
             (folder / tool).symlink_to(shutil.which(tool))
@@ -384,6 +388,9 @@ class Start(Project):
                 script.write_text(RACING_DEVCONTAINER % (str(folder / "calls"), str(self.project / DEVCONTAINER_REL)))
             elif running and name == "docker":
                 script.write_text("#!/bin/sh\necho \"docker $*\" >> '%s/calls'\necho 0123456789ab\n" % folder)
+            elif compose and name == "docker":
+                script.write_text("#!/bin/sh\necho \"docker $*\" >> '%s/calls'\n[ \"$1\" = compose ] && DOCKER_CONFIG='%s' "
+                                  "exec '%s' \"$@\"\nexit 0\n" % (folder, DOCKER_CONFIG, REAL_DOCKER))
             else:
                 script.write_text("#!/bin/sh\necho \"${0##*/} $*\" >> '%s/calls'\n%s\n" % (
                     folder, 'echo \'{"outcome":"error","message":"the build failed"}\'; exit 1'
@@ -462,9 +469,10 @@ class Start(Project):
         self.assertFalse((Path(path) / "calls").exists(), "nothing was started")
         self.assertNotIn("harness/task-", self.command("git", "branch", "--list").stdout)
 
+    @unittest.skipUnless(REAL_DOCKER, "resolves the Compose files with docker compose config")
     def test_run_stops_before_any_session_when_the_sandbox_does_not_come_up(self):
         self.approve()
-        path = self.tools("devcontainer", "docker", failing=True)
+        path = self.tools("devcontainer", "docker", failing=True, compose=True)
 
         run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
 
@@ -521,9 +529,10 @@ class Start(Project):
         self.assertRegex(out, r"sha256:[0-9a-f]{64}")
         self.assertIn("devcontainer.json", out)
 
+    @unittest.skipUnless(REAL_DOCKER, "resolves the Compose files with docker compose config")
     def test_run_refuses_a_sandbox_that_does_not_isolate_the_session(self):
         self.approve()
-        path = self.tools("devcontainer", "docker", unisolated=True)
+        path = self.tools("devcontainer", "docker", unisolated=True, compose=True)
 
         run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
 
@@ -531,12 +540,13 @@ class Start(Project):
         self.assertIn("isolation_class none", run.stdout)
         self.assertNotIn("attempt 1", run.stdout)
 
+    @unittest.skipUnless(REAL_DOCKER, "resolves the Compose files with docker compose config")
     def test_run_brings_up_a_private_checked_copy_so_a_change_made_after_the_check_never_runs(self):
         self.approve()
         config = self.project / DEVCONTAINER_REL
         kept = config.read_text()
         self.addCleanup(config.write_text, kept)
-        path = self.tools("devcontainer", "docker", racing=True)
+        path = self.tools("devcontainer", "docker", racing=True, compose=True)
 
         run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
 
@@ -545,8 +555,55 @@ class Start(Project):
         self.assertIn("given: clean", calls)
         given = Path(re.search(r"(?m)^config: (.+)$", calls).group(1))
         self.assertFalse(str(given.resolve()).startswith(str(self.project)), given)
-        override = json.loads((given.parent / "docker-compose.workspace.yml").read_text())
-        self.assertEqual(override["services"]["agent"]["volumes"][0]["source"], str(self.project))
+        self.assertFalse(given.exists(), "the private copy outlives the run")
+
+    @unittest.skipUnless(REAL_DOCKER, "resolves the Compose files with docker compose config")
+    def test_run_names_its_own_compose_project_and_leaves_no_copy_behind(self):
+        self.approve()
+        workspace_env = self.project / ".env"
+        workspace_env.write_text("COMPOSE_PROJECT_NAME=someone-elses-project\n")
+        self.addCleanup(workspace_env.unlink)
+        config = self.project / DEVCONTAINER_REL
+        kept = config.read_text()
+        self.addCleanup(config.write_text, kept)
+        path = self.tools("devcontainer", "docker", racing=True, compose=True)
+
+        self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
+
+        calls = (Path(path) / "calls").read_text()
+        project = re.search(r"(?m)^project: (.*)$", calls).group(1)
+        self.assertRegex(project, r"^harness-agent-[0-9a-f]{12}$")
+        self.assertFalse(re.search(r"(?m)^cwd: %s" % re.escape(str(self.project)), calls), calls)
+        runs = Path(self.env["HOME"]) / ".agentic-harness/sandbox-runs"
+        self.assertEqual(sorted(runs.iterdir()) if runs.is_dir() else [], [])
+
+    @unittest.skipUnless(REAL_DOCKER, "resolves the Compose files with docker compose config")
+    def test_a_mount_run_cannot_reproduce_from_its_private_copy_starts_nothing(self):
+        config = self.project / DEVCONTAINER_REL
+        kept = config.read_text()
+        self.addCleanup(config.write_text, kept)
+        config.write_text(kept.replace('"workspaceFolder": "/workspace"', '"workspaceFolder": "/workspace/app"'))
+        self.approve()
+        path = self.tools("devcontainer", "docker", compose=True)
+
+        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
+
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("relative to the sandbox's folder", run.stdout)
+        self.assertNotIn("devcontainer up", (Path(path) / "calls").read_text())
+
+    def test_a_symlink_in_the_definition_is_never_trusted(self):
+        link = self.project / ".devcontainer/harness-agent/extra.yml"
+        link.symlink_to("docker-compose.yml")
+        self.addCleanup(link.unlink)
+
+        doctor = self.harness("doctor", check=False, HARNESS_SANDBOX_START="on", PATH=self.tools("devcontainer", "docker"))
+        approve = self.harness("sandbox-approve", check=False)
+
+        self.assertEqual(doctor.returncode, 1, doctor.stdout)
+        self.assertIn("symlink", doctor.stdout)
+        self.assertEqual(approve.returncode, 1, approve.stdout)
+        self.assertIn("extra.yml", approve.stdout)
 
     def test_run_refuses_while_the_projects_sandbox_is_already_up(self):
         self.approve()
@@ -558,12 +615,13 @@ class Start(Project):
         self.assertIn("already up", run.stdout)
         self.assertNotIn("devcontainer up", (Path(path) / "calls").read_text())
 
+    @unittest.skipUnless(REAL_DOCKER, "resolves the Compose files with docker compose config")
     def test_the_isolation_check_ignores_modules_the_workspace_holds(self):
         self.approve()
         spoof = self.project / "json.py"
         spoof.write_text("def dumps(value):\n    return '[\"container\", \"spoofed\"]'\n")
         self.addCleanup(spoof.unlink)
-        path = self.tools("devcontainer", "docker", unisolated=True)
+        path = self.tools("devcontainer", "docker", unisolated=True, compose=True)
 
         run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
 
@@ -608,7 +666,7 @@ class Start(Project):
 
 
 RACING_DEVCONTAINER = """#!/usr/bin/env python3
-import sys
+import os, sys
 args = sys.argv[1:]
 calls, workspace_config = %r, %r
 with open(calls, "a") as log:
@@ -619,6 +677,7 @@ with open(calls, "a") as log:
         with open(workspace_config, "w") as config:
             config.write(text.replace('"name"', '"initializeCommand": "touch /tmp/escaped", "name"', 1))
         log.write("config: %%s\\n" %% args[args.index("--config") + 1])
+        log.write("project: %%s\\ncwd: %%s\\n" %% (os.environ.get("COMPOSE_PROJECT_NAME"), os.getcwd()))
         with open(args[args.index("--config") + 1]) as given:
             log.write("given: %%s\\n" %% ("evil" if "initializeCommand" in given.read() else "clean"))
 print('{"outcome": "error", "message": "stopped by the test"}')

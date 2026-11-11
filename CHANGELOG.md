@@ -13,7 +13,7 @@
   `HARNESS_SANDBOX_START=on` (default `off`), `run` brings `.devcontainer/harness-agent/` up with the devcontainer CLI
   before each session, has the harness inside run `doctor`, and refuses every session when either fails. Each session
   runs in the agent's container with the agent command the sandbox defines and the harness settings your environment
-  sets; its timeout is enforced inside the container, and the runner stops the containers it started after each
+  sets; its timeout is enforced inside the container, and the runner removes the sandbox's containers after each
   session; it refuses to start while the project's sandbox is already up. `doctor` reports an error without the
   devcontainer CLI, `docker`
   or the sandbox files, and `run --worktree` is refused in this mode. A dry run says it would bring the sandbox up.
@@ -24,8 +24,11 @@
     you approved with the new `harness.py sandbox-approve` (recorded in `~/.agentic-harness/sandbox-approvals.json`).
     A changed, added or removed file in `.devcontainer/harness-agent/` stops the run before `up`, and `doctor` says
     so. `run` brings up a private copy of the definition (in `~/.agentic-harness/sandbox-runs/`), checked after it was
-    copied, so a change made after the check never reaches `devcontainer up`. After `up`, the host's own code checks,
-    in Python's isolated mode, that the agent's container isolates its sessions. In a full install `run` executes the
+    copied, so a change made after the check never reaches `devcontainer up`; each run's copy is its own and removed
+    afterwards, and a bind mount the copy would resolve differently, one into `~/.agentic-harness`, or a symlink in the
+    definition stops the run. The Compose project is named by the harness, and the containers are removed after every
+    session, so nothing an agent changes inside them reaches the next. After `up`, the host's own code checks, with an
+    absolute interpreter and no environment, that the agent's container isolates its sessions. In a full install `run` executes the
     workspace's own `scripts/harness/`, which the sandbox can write too: use thin mode with `HARNESS_SANDBOX_START=on`. Agents can't change
     the definition, write the approvals or run `sandbox-approve`. **Upgrading:** approve a full install's sandbox once
     before turning `HARNESS_SANDBOX_START` on, and again after you or an update change it.

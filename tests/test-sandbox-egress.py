@@ -543,6 +543,9 @@ class ThinSandbox(Sandbox):
 AGENT = """import json, os, subprocess, sys, time
 prompt = sys.stdin.read()
 print(open("/proc/self/status").read())
+marker = os.path.expanduser("~/.left-by-an-earlier-session")
+print("home marker: %%s" %% ("persisted" if os.path.exists(marker) else "fresh"))
+open(marker, "w").close()
 if "Task 7.2" in prompt:
     time.sleep(600)
 report = %s
@@ -598,7 +601,8 @@ class HostRun(Sandbox):
 
     def run_task(self, task, **settings):
         env = dict(self.run_env, HARNESS_SANDBOX_START="on", HARNESS_AUTONOMY="autonomous", HARNESS_VERIFY="block",
-                   HARNESS_RUN_ATTEMPTS="1", HARNESS_ALLOW_PARALLEL_WIP="1", **settings)
+                   HARNESS_RUN_ATTEMPTS="1", HARNESS_ALLOW_PARALLEL_WIP="1")
+        env.update(settings)
         return subprocess.run(["python3", "-B", str(self.project / "scripts/harness/lib/harness.py"), "run", "--only",
                                task], cwd=self.project, env=env, capture_output=True, text=True, timeout=2400)
 
@@ -640,10 +644,23 @@ class HostRun(Sandbox):
         self.assertIn("exit None", run.stdout)
         self.assertEqual(self.running(), [], "the timed-out session's sandbox still runs")
 
-    def test_run_refuses_a_sandbox_someone_else_already_brought_up(self):
+    def unblock(self, task):
+        """The task without the BLOCKED note an earlier test's escalation left, as the user takes it back."""
         tasks = self.project / "backbone/3-TASKS.md"
-        # An earlier session may have escalated the task; the user takes it back, so run has a task to start.
-        tasks.write_text(re.sub(r"(?m)^(.*\*\*Task 7\.1: .*?)\s+[-\u2014]+\s+BLOCKED:.*$", r"\1", tasks.read_text()))
+        tasks.write_text(re.sub(r"(?m)^(.*\*\*Task %s: .*?)\s+[-\u2014]+\s+BLOCKED:.*$" % re.escape(task), r"\1",
+                                tasks.read_text()))
+
+    def test_nothing_a_session_leaves_in_its_container_reaches_the_next_session(self):
+        self.unblock("7.1")
+
+        run = self.run_task("7.1", HARNESS_RUN_ATTEMPTS="2")
+
+        self.assertIn("run: task 7.1 attempt 2", run.stdout, run.stdout + run.stderr)
+        logs = sorted((self.project / ".git/harness/runs").glob("*/7.1-2.log"))
+        self.assertIn("home marker: fresh", logs[-1].read_text())
+
+    def test_run_refuses_a_sandbox_someone_else_already_brought_up(self):
+        self.unblock("7.1")
         self.up()
         self.addCleanup(self.stop)
         runs = self.project / ".git/harness/runs"

@@ -6521,6 +6521,11 @@ def sandbox_approve_command(_argv):
     if unreadable:
         print("sandbox-approve: %s can't be read, so %s can't be approved" % (", ".join(unreadable), SANDBOX_DEFINITION))
         return 1
+    links = [name for name, digest in sandbox.definition_files(folder) if digest.startswith("symlink:")]
+    if links:
+        print("sandbox-approve: %s is a symlink, and run never trusts one: replace it with the file it points to"
+              % ", ".join(links))
+        return 1
     digest = sandbox.definition_digest(folder)
     reference = sandbox_reference()
     print("sandbox-approve: %s of %s is %s:" % (SANDBOX_DEFINITION, ROOT, digest))

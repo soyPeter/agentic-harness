@@ -299,7 +299,7 @@ Still open after v1:
   default `off`), the `devcontainer` backend's `create` brings `.devcontainer/harness-agent/` up with the devcontainer
   CLI when the runner isn't already in it, has the harness inside run `doctor` and refuses every session when either
   fails. `exec` runs each session in the agent's container with the agent command the sandbox defines and the harness
-  settings the user's environment sets, and enforces the session's timeout inside the container. `teardown` stops the
+  settings the user's environment sets, and enforces the session's timeout inside the container. `teardown` removes the
   containers the backend started after every session. `doctor` errors without
   the devcontainer CLI, `docker` or the sandbox files, so `run` refuses; `run --worktree` is refused in this mode,
   because a worktree's git metadata lies outside what the sandbox mounts. The default stays `off`: turning it on needs
@@ -314,10 +314,21 @@ Still open after v1:
   isolated. Agents can't write the definition or the approvals, or run `sandbox-approve`.
   A second review found a window between the check and `devcontainer up` reading the files, which an agent's process
   left in a sandbox that was already up could use to swap them. So `run` refuses to start while the project's sandbox
-  is up, stops it after every session, and brings up a private copy of the definition, checked after it was copied,
+  is up, stops (later: removes) it after every session, and brings up a private copy of the definition, checked after it was copied,
   from `~/.agentic-harness/sandbox-runs/` (a generated Compose file mounts the workspace by its absolute path). The
   isolation check runs in Python's isolated mode, so no module in the workspace stands in for the standard library,
   and a definition file that can't be read counts as a changed one.
+  A third review found that moving the Compose file into the private copy made its relative mounts resolve from there:
+  an approved definition whose `workspaceFolder` isn't the template's mounted `~/.agentic-harness/sandbox-runs` into
+  the agent's container, so one project's agent could rewrite another's copy between its check and its `up`. Each run
+  now has a private folder of its own (`mkdtemp`, removed after the session), and `docker compose config` resolves the
+  Compose files from the workspace and from the copy before `up`: a bind whose source differs between the two is
+  relative, and only the workspace mount the generated file replaces may be one; no bind may hold or lie in
+  `~/.agentic-harness`. Symlinks in the definition are refused, the Compose project is named by the harness (a `.env`
+  in the workspace can't choose it), and the containers are removed after every session and recreated by the next
+  `up`, so nothing an agent changes inside them persists; the isolation probe runs with `/usr/bin/python3` under
+  `env -i`. Named volumes do persist: an agent can write the shared Claude Code login volume's `~/.claude`, which
+  later sessions read.
   Limits: in a full install, `run` on the host executes the workspace's own `scripts/harness/`, which an agent in the
   sandbox can write too, so the approval protects thin installs, whose engine lives outside the project; use thin mode
   with `HARNESS_SANDBOX_START=on`. Other spellings of `harness.py sandbox-approve` in an agent's shell command (a

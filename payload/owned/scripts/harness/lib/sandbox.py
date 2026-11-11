@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 EVIDENCE_FIELDS = ("backend", "isolation_class", "base_image_digest", "allowlist_hash", "region", "control_plane",
@@ -98,15 +99,16 @@ class Devcontainer(SandboxBackend):
     """The local .devcontainer/harness-agent/ sandbox. By default sessions run where the runner runs: inside the
     container when the user started it there, otherwise on the host, and this backend starts and destroys nothing.
     With start (HARNESS_SANDBOX_START=on) a runner on the host brings the project's sandbox up with the devcontainer
-    CLI, has the harness inside check it (harness: its command there) and runs each session in it, with the agent
-    command the sandbox defines, then stops the containers it started. HARNESS_SANDBOX_IMAGE is set by the image's
-    environment, which a host can set too, so the container is claimed only when the process shows the container's
-    restrictions and the egress container's list (isolation)."""
+    CLI, from a private, checked copy of its definition, for each session: it checks from the host that the session
+    will be isolated, has the harness inside check it (harness: its command there), runs the session with the agent
+    command the sandbox defines, then removes the containers, so nothing a session leaves there reaches the next one.
+    HARNESS_SANDBOX_IMAGE is set by the image's environment, which a host can set too, so the container is claimed only
+    when the process shows the container's restrictions and the egress container's list (isolation)."""
     name = "devcontainer"
 
     def __init__(self, start=False, harness=None, reference=None):
         self.start, self.harness, self.reference = start, harness, reference
-        self.compose_project = self.config = None
+        self.private = self.config = None
 
     def starts_sandbox(self):
         return self.start and isolation()[0] != "container"
@@ -117,24 +119,28 @@ class Devcontainer(SandboxBackend):
         problem = start_problem(workspace, self.reference)
         if problem:
             raise SandboxError(problem)
-        # With none of the sandbox's processes left, nothing an agent started there can change the definition while it
-        # is checked and read.
-        if self.containers(workspace, running=True):
-            raise SandboxError("the project's sandbox is already up (an editor's Reopen in Container, say), and run "
-                               "brings it up itself for each session and stops it afterwards, so that nothing an agent "
-                               "left running there can change its definition between the check and devcontainer up. "
-                               "Stop it first (close the editor's container, or docker stop its two containers)")
-        self.config = private_definition(workspace, self.reference)
+        # With nothing running that can write the workspace, nothing an agent left behind can change the definition
+        # while it is checked and copied.
+        if self.running(workspace):
+            raise SandboxError("the project's sandbox, or another container that mounts the project, is already up (an "
+                               "editor's Reopen in Container, say). run brings the sandbox up itself for each session "
+                               "and removes it afterwards, so that nothing an agent left running can change its "
+                               "definition while it is checked. Stop it first (close the editor's container, or "
+                               "docker stop it)")
+        self.private, self.config = private_definition(workspace, self.reference)
+        box = Sandbox(workspace)
         try:
-            up = subprocess.run(self.cli(workspace, "up"), capture_output=True, text=True, timeout=UP_SECONDS)
+            up = subprocess.run(self.cli(workspace, "up") + ["--remove-existing-container"], capture_output=True,
+                                text=True, timeout=UP_SECONDS, cwd=str(self.private), env=self.cli_env(workspace))
         except subprocess.TimeoutExpired:
+            self.teardown(box)
             raise SandboxError("devcontainer up did not finish in %d seconds" % UP_SECONDS)
         result = last_json(up.stdout)
-        self.compose_project = result.get("composeProjectName")
+        box = Sandbox(workspace, result.get("containerId"), result.get("remoteWorkspaceFolder") or "/workspace")
         if up.returncode != 0 or result.get("outcome") != "success":
+            self.teardown(box)
             raise SandboxError("devcontainer up failed: %s" % (result.get("message") or up.stderr.strip()[-600:]
                                                                 or "exit %d" % up.returncode))
-        box = Sandbox(workspace, result.get("containerId"), result.get("remoteWorkspaceFolder") or "/workspace")
         isolated, reason = self.probe(box)
         if isolated != "container":
             self.teardown(box)
@@ -160,11 +166,13 @@ class Devcontainer(SandboxBackend):
                 return None
         # Stopping `devcontainer exec` on the host would leave the session running inside, so the timeout is enforced
         # there; the host's own limit is only a backstop.
-        bounded = ["timeout", "-k", "10", str(timeout), "sh", "-c", command] if timeout else ["sh", "-c", command]
+        bounded = ["timeout", "-k", "10", str(timeout), "/bin/sh", "-c", command] if timeout else \
+            ["/bin/sh", "-c", command]
         started = time.time()
         try:
             code = subprocess.run(self.in_workspace(sandbox, bounded, env), input=stdin, stdout=log,
-                                  stderr=subprocess.STDOUT, text=True,
+                                  stderr=subprocess.STDOUT, text=True, cwd=str(self.private),
+                                  env=self.cli_env(sandbox.workspace),
                                   timeout=timeout + EXEC_GRACE_SECONDS if timeout else None).returncode
         except subprocess.TimeoutExpired:
             return None
@@ -176,38 +184,57 @@ class Devcontainer(SandboxBackend):
         return ["devcontainer", command, "--workspace-folder", str(workspace),
                 "--config", str(self.config or Path(workspace) / DEVCONTAINER_CONFIG)]
 
+    def cli_env(self, workspace):
+        """The environment for the devcontainer CLI: the Compose project named by the harness, not by a .env an agent
+        could write."""
+        return dict(os.environ, COMPOSE_PROJECT_NAME=compose_project(workspace))
+
     def in_workspace(self, sandbox, argv, env=None):
         remote_env = [arg for key, value in sorted((env or {}).items())
                       for arg in ("--remote-env", "%s=%s" % (key, value))]
         return (self.cli(sandbox.workspace, "exec") + remote_env +
-                ["sh", "-c", 'cd "$1" && shift && exec "$@"', "sh", sandbox.remote_workspace] + argv)
+                ["/bin/sh", "-c", 'cd "$1" && shift && exec "$@"', "sh", sandbox.remote_workspace] + argv)
 
     def inside(self, sandbox, script, env=None):
-        return subprocess.run(self.in_workspace(sandbox, ["sh", "-c", script], env), capture_output=True, text=True,
-                              timeout=600)
+        return subprocess.run(self.in_workspace(sandbox, ["/bin/sh", "-c", script], env), capture_output=True,
+                              text=True, timeout=600, cwd=str(self.private), env=self.cli_env(sandbox.workspace))
 
     def probe(self, sandbox):
         """(isolation_class, reason) of a process in the sandbox, worked out by this module's own code, not by the
-        harness inside, which the workspace holds."""
-        source = Path(__file__).read_text(encoding="utf-8") + "\nprint(json.dumps(isolation()))\n"
+        harness inside, which the workspace holds. It runs with no environment but the two variables the check reads,
+        taken from the container's configuration, so no PATH, HOME or shell startup file stands in for it."""
+        inspected = subprocess.run(["docker", "inspect", "-f", "{{json .Config.Env}}", str(sandbox.container)],
+                                   capture_output=True, text=True)
         try:
-            # -I: no module from the workspace, the user's site or the environment stands in for the standard library.
-            found = subprocess.run(self.in_workspace(sandbox, ["python3", "-I", "-B", "-"]), input=source,
-                                   capture_output=True, text=True, timeout=120)
+            pairs = [item.split("=", 1) for item in json.loads(inspected.stdout or "[]") if "=" in item]
+        except ValueError:
+            pairs = []
+        kept = ["%s=%s" % (key, value) for key, value in pairs
+                if key in ("HARNESS_SANDBOX_IMAGE", "HARNESS_EGRESS_ALLOWLIST")]
+        source = Path(__file__).read_text(encoding="utf-8") + "\nprint(json.dumps(isolation()))\n"
+        argv = (self.cli(sandbox.workspace, "exec") + ["--default-user-env-probe", "none", "/usr/bin/env", "-i"] +
+                kept + ["/usr/bin/python3", "-I", "-B", "-"])
+        try:
+            found = subprocess.run(argv, input=source, capture_output=True, text=True, timeout=120,
+                                   cwd=str(self.private), env=self.cli_env(sandbox.workspace))
             return tuple(last_json_value(found.stdout))
         except (subprocess.TimeoutExpired, TypeError, ValueError):
             return "unknown", "the isolation check didn't answer"
 
-    def containers(self, workspace, running=False):
-        """The ids of the agent's container docker knows for the workspace. Raises SandboxError when docker can't
-        say."""
-        found = subprocess.run(["docker", "ps", "-q"] + ([] if running else ["-a"]) +
-                               ["--filter", "label=devcontainer.local_folder=%s" % workspace],
-                               capture_output=True, text=True)
-        if found.returncode != 0:
-            raise SandboxError("docker can't list the sandbox's containers: %s" % (found.stderr.strip()[-300:]
-                                                                                  or "exit %d" % found.returncode))
-        return found.stdout.split()
+    def running(self, workspace):
+        """The ids of the running containers that belong to the workspace's sandbox or mount the workspace. Raises
+        SandboxError when docker can't say."""
+        found = set()
+        real = os.path.realpath(str(workspace))
+        for selector in sorted({"label=devcontainer.local_folder=%s" % workspace,
+                                "label=devcontainer.local_folder=%s" % real, "volume=%s" % workspace,
+                                "volume=%s" % real, "label=com.docker.compose.project=%s" % compose_project(workspace)}):
+            listed = subprocess.run(["docker", "ps", "-q", "--filter", selector], capture_output=True, text=True)
+            if listed.returncode != 0:
+                raise SandboxError("docker can't list the containers: %s" % (listed.stderr.strip()[-300:]
+                                                                            or "exit %d" % listed.returncode))
+            found.update(listed.stdout.split())
+        return sorted(found)
 
     def copy_in(self, sandbox, host_path, sandbox_path):
         shutil.copy2(str(host_path), str(sandbox_path))
@@ -221,14 +248,17 @@ class Devcontainer(SandboxBackend):
         return published_hosts(ALLOWLIST_PATH)
 
     def teardown(self, sandbox):
-        """Stops the containers this backend started, which ends whatever a session left running."""
-        if sandbox.container is None or not self.compose_project:
+        """Removes the containers this backend brought up, and its private copy of the definition: whatever a session
+        left running or changed in them doesn't reach the next session. Named volumes stay."""
+        if self.private is None:
             return
-        project = subprocess.run(["docker", "ps", "-q", "--filter",
-                                  "label=com.docker.compose.project=%s" % self.compose_project],
-                                 capture_output=True, text=True).stdout.split()
-        if project:
-            subprocess.run(["docker", "stop"] + project, capture_output=True, text=True)
+        listed = subprocess.run(["docker", "ps", "-aq", "--filter",
+                                 "label=com.docker.compose.project=%s" % compose_project(sandbox.workspace)],
+                                capture_output=True, text=True).stdout.split()
+        if listed:
+            subprocess.run(["docker", "rm", "-f"] + listed, capture_output=True, text=True)
+        shutil.rmtree(str(self.private), ignore_errors=True)
+        self.private = self.config = None
 
     def identity(self):
         isolation_class, reason = isolation()
@@ -347,7 +377,12 @@ def start_problem(workspace, reference=None):
 
 
 def untrusted_definition(folder, workspace, reference):
-    """Why this machine doesn't trust the sandbox definition in folder, for workspace, or None."""
+    """Why this machine doesn't trust the sandbox definition in folder, for workspace, or None. A symlink is never
+    trusted: what it points to can change after the check."""
+    links = [name for name, digest in definition_files(folder) if digest.startswith("symlink:")]
+    if links:
+        return ("the sandbox's definition holds a symlink (%s), which run never trusts: replace it with the file it "
+                "points to" % ", ".join(links))
     digest = definition_digest(folder)
     if reference is not None and definition_digest(reference) == digest:
         return None
@@ -365,16 +400,30 @@ def private_runs():
     return Path(os.path.expanduser("~/.agentic-harness/sandbox-runs"))
 
 
+def compose_project(workspace):
+    """The Compose project of the sandbox run brings up for workspace: one per project, named by the harness."""
+    return "harness-agent-" + hashlib.sha256(os.path.realpath(str(workspace)).encode("utf-8")).hexdigest()[:12]
+
+
 def private_definition(workspace, reference):
-    """The devcontainer.json run brings up: a copy of the workspace's definition in a folder of this machine's user,
-    checked after it was copied, plus a Compose file that mounts the workspace by its absolute path. A change made to
-    the workspace after the check never reaches devcontainer up. Raises SandboxError."""
-    source = Path(workspace) / DEVCONTAINER_CONFIG.rsplit("/", 1)[0]
-    runs = private_runs() / hashlib.sha256(os.path.realpath(str(workspace)).encode("utf-8")).hexdigest()[:16]
-    copy = runs / source.name
-    shutil.rmtree(str(runs), ignore_errors=True)
+    """(the run's private folder, the devcontainer.json to bring up): a copy of the workspace's definition in a folder
+    of this run's own, which only this machine's user can open and no sandbox mounts, checked after it was copied, plus
+    a Compose file that mounts the workspace by its absolute path. A change made to the workspace after the check never
+    reaches devcontainer up. Raises SandboxError; the folder is removed then."""
+    private_runs().mkdir(parents=True, exist_ok=True)
+    os.chmod(str(private_runs()), 0o700)
+    private = Path(tempfile.mkdtemp(prefix="run-", dir=str(private_runs())))
     try:
-        runs.mkdir(parents=True, mode=0o700)
+        return private, checked_copy(workspace, reference, private)
+    except BaseException:
+        shutil.rmtree(str(private), ignore_errors=True)
+        raise
+
+
+def checked_copy(workspace, reference, private):
+    source = Path(workspace) / DEVCONTAINER_CONFIG.rsplit("/", 1)[0]
+    copy = private / source.name
+    try:
         shutil.copytree(str(source), str(copy), symlinks=True)
     except (OSError, shutil.Error) as exc:
         raise SandboxError("the sandbox's definition can't be copied to check it: %s" % exc)
@@ -393,10 +442,64 @@ def private_definition(workspace, reference):
              "target": config.get("workspaceFolder") or "/workspace", "consistency": "cached"}
     (copy / WORKSPACE_OVERRIDE).write_text(json.dumps({"services": {config["service"]: {"volumes": [mount]}}}) + "\n",
                                            encoding="utf-8")
+    files = [os.path.realpath(str(copy / name)) for name in compose] + [str(copy / WORKSPACE_OVERRIDE)]
+    outside = [name for name, path in zip(compose, files) if not path.startswith(str(copy.resolve()) + os.sep)]
+    if outside:
+        raise SandboxError("the sandbox's devcontainer.json names Compose files outside its folder (%s), which run "
+                           "can't check" % ", ".join(outside))
+    unsafe = unsafe_mounts(compose, copy, workspace, private, config["service"], mount["target"])
+    if unsafe:
+        raise SandboxError(unsafe)
     # The devcontainer CLI takes no other file name for its configuration.
     (copy / "devcontainer.json").write_text(json.dumps(dict(config, dockerComposeFile=list(compose) + [WORKSPACE_OVERRIDE]),
                                                        indent=2) + "\n", encoding="utf-8")
     return copy / "devcontainer.json"
+
+
+def bind_mounts(files, folder, workspace):
+    """{(service, target): source} of the bind mounts the Compose files give, resolved from folder as docker compose
+    resolves them for devcontainer up, or the reason they can't be resolved."""
+    argv = ["docker", "compose"] + [arg for path in files for arg in ("-f", str(path))] + ["config", "--format", "json"]
+    resolved = subprocess.run(argv, capture_output=True, text=True, cwd=str(folder),
+                              env=dict(os.environ, COMPOSE_PROJECT_NAME=compose_project(workspace)))
+    try:
+        services = json.loads(resolved.stdout).get("services") or {}
+    except (ValueError, AttributeError):
+        return "docker compose can't resolve the sandbox's Compose files: %s" % (resolved.stderr.strip()[-400:]
+                                                                                or "exit %d" % resolved.returncode)
+    return {(name, volume.get("target")): os.path.realpath(str(volume.get("source") or ""))
+            for name, service in services.items() for volume in (service or {}).get("volumes") or []
+            if isinstance(volume, dict) and volume.get("type") == "bind"}
+
+
+def unsafe_mounts(compose, copy, workspace, private, service, workspace_target):
+    """Why the copy's Compose files mount something run can't bring up safely, or None. A bind from a path relative to
+    the sandbox's folder resolves differently from the private copy, so only the workspace mount, which the generated
+    file replaces, may be one. No bind may hold or lie in ~/.agentic-harness, where the approvals and copies are."""
+    folder = Path(workspace) / DEVCONTAINER_CONFIG.rsplit("/", 1)[0]
+    here = bind_mounts([folder / name for name in compose], folder, workspace)
+    there = bind_mounts([copy / name for name in compose], copy, workspace)
+    for found in (here, there):
+        if isinstance(found, str):
+            return found
+    real = os.path.realpath(str(workspace))
+    for (name, target), source in sorted(there.items()):
+        if here.get((name, target)) != source and not (
+                name == service and target == workspace_target and here.get((name, target)) == real):
+            return ("the sandbox's Compose file mounts %s into %s from a path relative to the sandbox's folder, which "
+                    "run can't reproduce from its private copy: mount the workspace at the devcontainer.json's "
+                    "workspaceFolder, or use an absolute path" % (target, name))
+    final = bind_mounts([copy / name for name in compose] + [copy / WORKSPACE_OVERRIDE], copy, workspace)
+    if isinstance(final, str):
+        return final
+    harness_home = os.path.realpath(os.path.expanduser("~/.agentic-harness"))
+    copied = os.path.realpath(str(private))
+    for (name, target), source in sorted(final.items()):
+        if (source == harness_home or source.startswith(harness_home + os.sep) or source == copied
+                or harness_home.startswith(source.rstrip(os.sep) + os.sep)):
+            return ("the sandbox's Compose file mounts %s into %s, which holds or lies in %s, where this machine keeps "
+                    "the sandbox approvals and run's copies" % (source, name, harness_home))
+    return None
 
 
 def definition_files(folder):
