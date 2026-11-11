@@ -456,6 +456,8 @@ class Admission(unittest.TestCase):
             "git revert --no-edit %s" % revoking,
             "git cherry-pick %s" % undoing,
             "git cherry-pick main..undo",
+            "git cherry-pick -s %s" % undoing,
+            "git checkout -t undo",
             "git checkout undo",
             "git apply %s" % undo,
             "git apply < %s" % undo,
@@ -484,6 +486,16 @@ class Admission(unittest.TestCase):
                         "git checkout -- .", "git reset --hard", "git checkout-index -f -a"):
             with self.subTest(command=command):
                 self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command}), "backbone/")
+
+    def test_git_commands_that_leave_the_policy_files_as_they_are_still_run(self):
+        tools = self.project.root / "backbone/tools.conf"
+        tools.write_bytes(tools.read_bytes().replace(b"\n", b"\r\n"))
+        self.project.commit("chore: tools.conf with CRLF line ends")
+        self.project.write("notes.txt", "x\n")
+        for command in ("git checkout -- .", "git stash", "git restore .", "git checkout -b topic"):
+            with self.subTest(command=command):
+                result = self.project.hook("pre-tool-use", "Bash", {"command": command})
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_a_revocation_holds_while_the_committed_or_the_working_file_has_it(self):
         self.project.admit()

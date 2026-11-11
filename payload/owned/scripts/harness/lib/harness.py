@@ -1626,8 +1626,7 @@ def git_findings(words):
 # index, a stash or a patch would change them outside the hooks that refuse agents' edits.
 POLICY_FILES = ("backbone/tools.conf", "backbone/admissions.conf", "backbone/harness.conf",
                 "backbone/.harness-lock.json", "backbone/escalations.md")
-GIT_OPTION_ARGS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix",
-                   "--exec-path", "--list-cmds", "--attr-source")
+GIT_OPTION_ARGS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env")
 GIT_PLAIN = ("status", "log", "diff", "show", "add", "commit", "push", "fetch", "pull", "merge", "rebase", "branch",
              "tag", "rev-parse", "rev-list", "ls-files", "ls-tree", "cat-file", "config", "remote", "blame", "grep",
              "describe", "shortlog", "reflog", "worktree", "init", "clone", "help", "version", "notes", "bisect",
@@ -1635,16 +1634,14 @@ GIT_PLAIN = ("status", "log", "diff", "show", "add", "commit", "push", "fetch", 
              "update-ref", "show-ref", "check-ignore", "check-attr", "var", "hash-object", "count-objects", "fsck",
              "gc", "prune", "submodule", "archive", "bundle", "verify-commit", "verify-tag", "whatchanged", "range-diff",
              "cherry", "name-rev", "stripspace", "interpret-trailers", "credential", "lfs", "maintenance")
-REV_OPTIONS = {"checkout": ("-b", "-B", "--orphan", "--conflict", "-t", "--track"),
-               "switch": ("-c", "-C", "--orphan", "--conflict", "-t", "--track"),
-               "restore": ("-s", "--source", "--conflict"),
-               "reset": (), "stash": ("-m", "--message"),
-               "cherry-pick": ("-m", "--mainline", "-s", "--strategy", "-X", "--strategy-option", "-S", "--gpg-sign"),
-               "revert": ("-m", "--mainline", "--strategy", "-X", "--strategy-option", "-S", "--gpg-sign"),
+# The options of each subcommand that take the next word as their value (git's optional values need "=").
+REV_OPTIONS = {"checkout": ("-b", "-B", "--orphan"), "switch": ("-c", "-C", "--orphan"),
+               "restore": ("-s", "--source"), "reset": (), "stash": ("-m", "--message"),
+               "cherry-pick": ("-m", "--mainline", "--strategy", "-X", "--strategy-option"),
+               "revert": ("-m", "--mainline", "--strategy", "-X", "--strategy-option"),
                "read-tree": ("--prefix", "--index-output"), "checkout-index": ("--prefix", "--stage"),
-               "apply": ("-p", "-C", "--directory", "--exclude", "--include", "--whitespace", "--build-fake-ancestor"),
-               "am": ("-p", "-C", "--directory", "--exclude", "--include", "--whitespace", "--patch-format", "-S",
-                      "--resolvemsg"),
+               "apply": ("-p", "--directory", "--exclude", "--include", "--whitespace", "--build-fake-ancestor"),
+               "am": ("-p", "--directory", "--exclude", "--include", "--whitespace", "--patch-format", "--resolvemsg"),
                "clean": ("-e", "--exclude")}
 
 
@@ -1718,7 +1715,7 @@ def policy_changes(source, files):
     changed = []
     for p in files:
         try:
-            current = (ROOT / p).read_text(encoding="utf-8", errors="replace")
+            current = (ROOT / p).read_bytes().decode("utf-8", "replace")
         except OSError:
             current = None
         if len({blobs[source + p], blobs[":" + p], blobs["HEAD:" + p], current}) > 1:
