@@ -145,7 +145,7 @@ class ThinRegressions(unittest.TestCase):
 
     def extract(self, check=True, source=None):
         runner = self.work / "runner temp"
-        runner.mkdir()
+        runner.mkdir(exist_ok=True)
         env = dict(self.env, BASE_REF="origin/review-base", RUNNER_TEMP=str(runner), GITHUB_ENV=str(runner / "github-env"))
         result = self.run_command("bash", "-e", "-o", "pipefail", "-c", self.extraction_script(source),
                                   env=env, check=check)
@@ -200,7 +200,25 @@ assert h['decisions'].load_definitions(str(h['DECISIONS_FILE']))['decisions']
         trusted, result = self.extract(check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("using the pull request's copy", result.stdout)
+        self.assertIn("(git archive exited with 128)", result.stdout)
+        self.assertIn("scripts/harness/decisions.json", result.stderr)
         self.assertFalse((trusted / "scripts/harness/decisions.json").exists())
+
+    def test_ci_fails_when_the_base_engine_cannot_be_unpacked(self):
+        if os.geteuid() == 0:
+            self.skipTest("root writes into a read-only folder")
+        self.install()
+        self.commit_base()
+        trusted = self.work / "runner temp/trusted"
+        trusted.mkdir(parents=True)
+        trusted.chmod(0o555)
+        self.addCleanup(trusted.chmod, 0o755)
+        _, result = self.extract(check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Cannot extract the base branch's verifier and required engine configuration (tar exited with",
+                      result.stdout)
+        self.assertNotIn("Using the harness", result.stdout)
+        self.assertFalse((self.work / "runner temp/github-env").exists())
 
     def test_ci_fetches_the_base_branch_pin_for_a_thin_project(self):
         source = self.work / "engine-source"
