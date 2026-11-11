@@ -59,8 +59,9 @@ def final_message(report):
 
 
 def agent_script(path, body):
-    """An executable stand-in for the agent CLI the runner starts (HARNESS_AGENT_CMD): body is shell."""
-    path.write_text("#!/bin/sh\ncat >/dev/null\n" + body)
+    """An executable stand-in for the agent CLI the runner starts (HARNESS_AGENT_CMD): body is shell, with the prompt
+    the runner sent on stdin in $prompt."""
+    path.write_text("#!/bin/sh\nprompt=$(cat)\n" + body)
     path.chmod(0o755)
     return shlex.quote(str(path))
 

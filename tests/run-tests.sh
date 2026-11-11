@@ -93,6 +93,7 @@ factory-contract|the factory contract: versioned JSON fields, events, outward wr
 no-merge-profile|the no-merge profile: every merge path, per profile in harness.conf and the environment (ADR-008)
 task-budget|the per-task spend cap: the ledger across resumes, the proxy's refusal, cost on the receipt (ADR-008; properties need hypothesis)
 intake|intake: provenance, dedupe, the trusted-sender verdict, request text as data (ADR-008; properties need hypothesis)
+external-delivery|delivery from a trusted clone: ready-to-deliver, delivery-plan, delivery-record (ADR-008)
 agent-hooks|agents' own hooks record verdicts and keep write scopes
 live-plugin|live: a plugin judge verdict is recorded (runs with HARNESS_E2E=1)
 sandbox-egress|live: the sandbox's allowlist, capabilities and evidence in a real container (runs with HARNESS_E2E=1)"

@@ -70,6 +70,9 @@ only).
   merge, approve or close, and its git ref commands (checkout, merge, reset, push and the like) may not name the default
   branch, which changes only through the PR. Finishing, committing and pushing (pre-push hook) all refuse a task
   without its review passes. Both are on by default (`HARNESS_REVIEW`, `HARNESS_DELIVER`, user-only).
+  `HARNESS_DELIVER="external"` is for a lane without GitHub credentials: the task stops at the deliver step,
+  `delivery-plan` tells an agent factory what to push and open from its trusted clone, and `delivery-record` records
+  the outcome.
 
 ## Who decides, by Change-Class
 

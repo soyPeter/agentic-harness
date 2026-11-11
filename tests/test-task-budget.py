@@ -30,12 +30,10 @@ n=$(wc -l < "$AGENT_DIR/sessions-$task" | tr -d ' ')
 cost=$(sed -n "${n}p" "$AGENT_DIR/costs-$task" 2>/dev/null)
 echo "{\\"type\\":\\"result\\",\\"total_cost_usd\\":${cost:-${AGENT_COST:-0.6}},\\"num_turns\\":1,\\"result\\":\\"ok\\"}"
 """
-REFUSED_AGENT = """cat >/dev/null
-echo '{"type":"result","subtype":"success","is_error":true,"total_cost_usd":0.2,"num_turns":1,"result":"API Error: 402 {\\"error\\":{\\"message\\":\\"task budget exhausted\\"}}"}'
+REFUSED_AGENT = """echo '{"type":"result","subtype":"success","is_error":true,"total_cost_usd":0.2,"num_turns":1,"result":"API Error: 402 {\\"error\\":{\\"message\\":\\"task budget exhausted\\"}}"}'
 exit 1
 """
-FINISHING_AGENT = """prompt=$(cat)
-task=$(printf '%s\\n' "$prompt" | sed -n 's/^Drive Task \\([^ ]*\\) .*/\\1/p')
+FINISHING_AGENT = """task=$(printf '%s\\n' "$prompt" | sed -n 's/^Drive Task \\([^ ]*\\) .*/\\1/p')
 sed -i.bak "s/^- \\[WIP\\] \\*\\*Task $task/- [x] **Task $task/" backbone/3-TASKS.md && rm -f backbone/3-TASKS.md.bak
 git add -A && HARNESS_VERIFY=off git commit -qm "feat: task $task"
 echo '{"type":"result","total_cost_usd":0.45,"num_turns":2,"result":"ok"}'

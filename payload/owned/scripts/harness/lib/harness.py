@@ -28,6 +28,9 @@ Usage:
   harness.py run [--max-tasks N] [--only <task>] [--worktree [--pr]] [--dry-run]   (autonomous, unattended)
   harness.py report [--days N] [--json | --rules]                 (events: verdicts, gates, rules, lift, candidates)
   harness.py receipt <task-id> [--base <rev>] [--json]            (what the harness can prove about a judged task)
+  harness.py delivery-plan <task-id> [--base <branch>] [--pr-labels a,b] [--json]
+                                                                  (HARNESS_DELIVER=external: what to push and open)
+  harness.py delivery-record <task-id> <report.json>              (the trusted clone's delivery outcome; user-only)
   harness.py linear import <ISSUE> --task <id> [--light] [--from F] [--sender S] [--sender-verdict trusted|untrusted]
   harness.py linear receipt <task> [--status S]                   (Linear as the system of record; user-only)
   harness.py intake <request.json> [--json]                       (a request from the factory's doors, ADR-008; user-only)
@@ -1633,12 +1636,14 @@ def shell_findings(command, cwd=None, depth=0):
             found.extend(shell_findings(" ".join(words[1:]), cwd, depth + 1))
         elif prog in INTERPRETERS:
             command = next((w for w in words[2:4] if w in ("run", "ci-judge", "ci-protect", "orca", "orca-nightly",
-                                                         "snapshot", "linear", "intake")), None)
+                                                         "snapshot", "linear", "intake", "delivery-record")),
+                           None)
             # these dry runs change nothing
             planning = command in ("orca", "orca-nightly", "linear") and "--dry-run" in words
             if any(w.endswith("harness.py") for w in words[1:3]) and command and not planning:
-                found.append("harness.py run, orca, orca-nightly, snapshot, linear, intake, ci-judge and ci-protect are "
-                             "for the user, CI, an agent factory or an Orca automation's precheck, not agents.")
+                found.append("harness.py run, orca, orca-nightly, snapshot, linear, intake, delivery-record, ci-judge "
+                             "and ci-protect are for the user, CI, an agent factory or an Orca automation's precheck, "
+                             "not agents.")
             flag = next((f for f in ("-c", "-e", "-pe", "-ne") if f in words), None)
             if flag and words.index(flag) + 1 < len(words):
                 found.extend(code_findings(words[words.index(flag) + 1], "That %s one-liner" % prog))
@@ -3465,6 +3470,8 @@ def health():
         issues.append(("error", "HARNESS_REQ_STYLE must be one of %s" % "|".join(REQ_STYLES)))
     if values["HARNESS_PROFILE"] not in PROFILES:
         issues.append(("error", "HARNESS_PROFILE must be empty or one of %s" % "|".join(p for p in PROFILES if p)))
+    if values["HARNESS_DELIVER"] not in DELIVER_MODES:
+        issues.append(("error", "HARNESS_DELIVER must be on, off or external"))
     if values["HARNESS_TASK_BUDGET_USD"].strip() and dollars(values["HARNESS_TASK_BUDGET_USD"]) is None:
         issues.append(("error", "HARNESS_TASK_BUDGET_USD must be empty or a number of dollars"))
     unusable = sandbox.problem(values["HARNESS_SANDBOX_BACKEND"])
@@ -4514,6 +4521,8 @@ API_VALUE_FLAGS = ("-F", "-f", "-H", "-p", "-q", "-t", "-X", "--cache", "--field
                    "--jq", "--method", "--preview", "--raw-field", "--template")
 LABEL_VALUE_FLAGS = ("-c", "-d", "-R", "--color", "--description", "--repo")
 MERGE_REFUSAL = "it opens and updates the PR; merging is the user's call, like closing or approving it."
+EXTERNAL_REFUSAL = ("delivery is external here (HARNESS_DELIVER=external): the factory pushes and opens the PR from its "
+                    "trusted clone, so the deliverer pushes and opens nothing. Stop and report.")
 EXPANSION_REFUSAL = ("write the gh command out: an expansion ($... or `...`) outside a flag's value can add flags or "
                      "commands the harness can't read.")
 DELIVERY_GH_REFUSAL = ("it runs only the gh commands delivery needs: gh pr create, edit, view, checks and list, "
@@ -5445,6 +5454,8 @@ def role_command_refusal(agent, command, cwd=None):
     """Why agent may not run command, or None. The deliverer reaches GitHub, but the decisions there stay the user's."""
     if agent != "deliverer":
         return None
+    if conf()["HARNESS_DELIVER"] == "external" and outward_actions(command):
+        return EXTERNAL_REFUSAL
     risk_added = set()
     targets = {b for b in ("main", "master", default_branch()) if b}
     on_default = git("rev-parse", "--abbrev-ref", "HEAD").strip() in targets
@@ -5678,12 +5689,24 @@ def latest_delivery(head):
 
 def delivery_step(step):
     """A finished task is done once the branch tip that holds it is delivered: pushed, in a PR, CI green."""
-    if conf()["HARNESS_DELIVER"] == "off":
+    mode = conf()["HARNESS_DELIVER"]
+    if mode == "off":
         return dict(step, step="done", role=None)
     head = git("rev-parse", "-q", "--verify", "HEAD").strip()
     if git("status", "--porcelain").strip():
         return dict(step, step="deliver", role=None, needed="the finished task committed (the deliverer pushes "
                                                              "only committed work)")
+    if mode == "external":
+        last = latest_delivery(head)
+        if last and last.get("delivery") == "delivered":
+            return dict(step, step="done", role=None, pr=last.get("pr"))
+        if last:
+            return dict(step, step="delivery-failed", role=None, delivery=last.get("delivery"), pr=last.get("pr"),
+                        findings=last.get("findings_detail") or [], owners=last.get("owners") or [],
+                        needed="a fix task for each finding (or the user, for theirs), then deliver again")
+        return dict(step, step="deliver", role=None, external=True, head=head[:12],
+                    needed="delivery from the trusted clone (HARNESS_DELIVER=external): harness.py delivery-plan "
+                           "%s --json, then delivery-record" % step["task"])
     if not git("remote", "get-url", "origin").strip():
         return dict(step, step="deliver", role=None, needed="an origin remote to push to (or the user turns "
                                                              "delivery off: HARNESS_DELIVER=\"off\")")
@@ -5815,6 +5838,11 @@ CONTRACT_COMMANDS = {
                "request_fields": ["contract", "source", "channel", "message_id", "url", "sender", "sender_verdict",
                                   "received_at", "dedupe_key", "text"],
                "fields": ["contract", "task", "created", "spec", "escalated", "dedupe_key"]},
+    "delivery-plan": {"command": "delivery-plan <task> [--base <branch>] [--pr-labels a,b] --json",
+                      "fields": ["contract", "task", "ready", "needed", "branch", "base", "head", "title", "body",
+                                 "draft", "labels", "escalations"]},
+    "delivery-record": {"command": "delivery-record <task> <report.json>",
+                        "report_fields": ["delivery", "branch", "base", "head", "pr", "checks", "findings"]},
     "run": {"command": "run --only <task>"},
     "trace": {"command": "trace <task> --json"},
     "report": {"command": "report --json"},
@@ -5850,19 +5878,25 @@ OUTWARD_GH = {("pr", "create"): "pr-create", ("pr", "new"): "pr-create", ("pr", 
               ("label", "create"): "label-create"}
 
 
+def outward_actions(command):
+    """[(action, words)] for each push, PR create or edit and label create command makes."""
+    if not re.search(r"(?<![\w.-])(git|gh)(?![\w.-])", command):
+        return []
+    found = []
+    for _, words, why in gh_calls(command):
+        action = None if why else "push" if git_subcommand(words) == "push" else (
+            OUTWARD_GH.get(gh_parts(words)[:2]) if program(words) == "gh" else None)
+        if action:
+            found.append((action, words))
+    return found
+
+
 def log_outward(command, via):
     """An outward event for each push, PR create or edit and label create in a command the hooks let through. It is
     logged before the command runs: the factory's own audit log has what came of it."""
-    if not re.search(r"(?<![\w.-])(git|gh)(?![\w.-])", command):
-        return
     try:
-        for _, words, why in gh_calls(command):
-            if why:
-                continue
-            action = "push" if git_subcommand(words) == "push" else (
-                OUTWARD_GH.get(gh_parts(words)[:2]) if program(words) == "gh" else None)
-            if action:
-                log_event("outward", action=action, via=via, command=" ".join(words)[:500])
+        for action, words in outward_actions(command):
+            log_event("outward", action=action, via=via, command=" ".join(words)[:500])
     except Exception:   # the audit trail never fails the call it describes
         pass
 
@@ -6167,6 +6201,10 @@ Stop when `python3 scripts/harness/lib/harness.py next {task}` says done, or the
 tasks."""
 
 
+EXTERNAL_NOTE = ("\nDelivery is external (HARNESS_DELIVER=external): don't run the deliverer. Stop once the task is [x] "
+                 "and committed; the factory pushes it and opens the PR from its trusted clone.")
+
+
 def attempt_cause(code, seconds, outcome, dirty):
     """(class, sentence) for why a runner session ended without finishing its task."""
     if code is None:
@@ -6419,7 +6457,7 @@ def run_worktrees(queue, open_prs):
         summary.append((task, outcome))
     for task, outcome in summary:
         print("run: %-12s task %s" % (outcome, task))
-    return 0 if all(o in ("done", "blocked", "escalated", "skipped") for _, o in summary) else 1
+    return 0 if all(o in ("done", "blocked", "escalated", "skipped", "ready-to-deliver") for _, o in summary) else 1
 
 
 def git_in(tree, *args):
@@ -6641,7 +6679,8 @@ def run_command(argv):
                 break
             resume = ("The task is already [WIP]: resume it." if task_state(task) == "wip"
                       else "The task is pending.")
-            prompt = (RUN_PROMPT.format(task=task, title=title, state=resume) + retry_note).replace(
+            prompt = (RUN_PROMPT.format(task=task, title=title, state=resume)
+                      + (EXTERNAL_NOTE if values["HARNESS_DELIVER"] == "external" else "") + retry_note).replace(
                 "python3 scripts/harness/lib/harness.py", harness_cli())
             log_path = run_dir / ("%s-%d.log" % (slug(task), attempt))
             started_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -6684,19 +6723,22 @@ def run_command(argv):
                         after.get("findings"), ensure_ascii=False)[:800]), after["needed"])
                     outcome = "escalated"
                     break
-                if after["step"] == "deliver" and not after.get("role"):
+                if after.get("external"):
+                    outcome = "ready-to-deliver"
+                elif after["step"] == "deliver" and not after.get("role"):
                     escalate(task, "runner", "the finished task can't be delivered", after["needed"])
                     outcome = "escalated"
                     break
-                if after["step"] != "done":
+                elif after["step"] != "done":
                     outcome = "undelivered"
-            step = next_step(task) if outcome not in ("done", "blocked") else {}
+            settled = outcome in ("done", "blocked", "ready-to-deliver")
+            step = next_step(task) if not settled else {}
             cause = attempt_cause(code, seconds, outcome, dirty)
             log_event("run-attempt", task=task, attempt=attempt, exit=code, seconds=seconds, state=outcome,
                       uncommitted=dirty, cost_usd=cost, turns=turns, cause=cause[0], step=step.get("step"))
             print("run: task %s attempt %d: %s (%ss, exit %s%s)" % (task, attempt, outcome, seconds, code,
                                                                    ", uncommitted changes" if dirty else ""))
-            if outcome not in ("done", "blocked"):
+            if not settled:
                 # Only a session that ended cleanly having done nothing proves a retry futile: an agent error (an API
                 # overload) or a timeout (a long test run) can pass, so those keep their attempts.
                 signature = (workspace_fingerprint(), git("rev-parse", "-q", "--verify", "HEAD").strip(),
@@ -6709,7 +6751,7 @@ def run_command(argv):
                     break
                 last_signature = signature
                 retry_note = retry_brief(task, attempt, attempts, cause[1], step, started_at)
-            if outcome == "done" and not dirty:
+            if outcome in ("done", "ready-to-deliver") and not dirty:
                 data, _ = receipt_data(task)
                 if data:
                     receipt = run_dir / ("%s.receipt.txt" % slug(task))
@@ -6721,7 +6763,7 @@ def run_command(argv):
             if outcome == "done" and dirty:
                 outcome = "done-uncommitted"
         else:
-            if outcome not in ("done", "blocked", "agent-failed", "escalated", "cap-hit"):
+            if outcome not in ("done", "blocked", "agent-failed", "escalated", "cap-hit", "ready-to-deliver"):
                 escalate(task, "runner", "no resolution after %d agent session(s) (last state: %s; logs: %s)"
                          % (attempts, outcome, run_dir), "a look at the run logs and the task's state")
                 outcome = "escalated"
@@ -6731,7 +6773,7 @@ def run_command(argv):
     log_event("run-end", summary=summary)
     for task, outcome in summary:
         print("run: %-12s task %s" % (outcome, task))
-    return 0 if all(o in ("done", "blocked", "escalated") for _, o in summary) else 1
+    return 0 if all(o in ("done", "blocked", "escalated", "ready-to-deliver") for _, o in summary) else 1
 
 
 CI_JUDGE_PROMPT = """You are the judge, running in CI on a pull request. Task {task} is marked [x] in
@@ -7923,6 +7965,142 @@ def intake_command(argv):
     return 0
 
 
+# --------------------------------------------------------------------------- delivery from a trusted clone (ADR-008)
+# With HARNESS_DELIVER="external" the lane holds no GitHub credential: the factory pushes and opens the PR from a
+# trusted clone. The harness still decides what is delivered (delivery-plan) and records what came of it
+# (delivery-record), which next reads as it reads the deliverer's own report.
+DELIVER_MODES = ("on", "off", "external")
+
+
+def plan_labels(suggested, current):
+    """{add, remove}: the receipt's class:* labels the PR lacks, and its risk:* label when it is higher than every
+    risk:* label the PR has, replacing those. A PR keeps one risk:* label, which only goes up."""
+    risk = next((label for label in suggested if label in RISK_LABELS), None)
+    held = [label for label in current if label in RISK_LABELS]
+    top = max((RISK_LABELS.index(label) for label in held), default=-1)
+    add = [label for label in suggested if label.startswith("class:") and label not in current]
+    if risk and RISK_LABELS.index(risk) > top:
+        return {"add": [risk] + add, "remove": held}
+    return {"add": add, "remove": []}
+
+
+def plan_base(given):
+    if given:
+        return given
+    return default_branch() or next((b for b in ("main", "master")
+                                     if git("rev-parse", "-q", "--verify", "refs/heads/%s" % b).strip()), None)
+
+
+def delivery_plan(task, base=None, current=()):
+    """What the factory pushes and opens for task, or {ready: false, needed}."""
+    plan = {"contract": CONTRACT_VERSION, "task": task, "ready": False}
+    step = next_step(task)
+    if step["step"] not in ("deliver", "delivery-failed", "done", "blocked"):
+        return dict(plan, needed="task %s is at step %s; a plan comes once it is finished and committed"
+                    % (task, step["step"]))
+    if git("status", "--porcelain").strip():
+        return dict(plan, needed="commit the task's changes first: a plan names a commit")
+    branch = git("rev-parse", "--abbrev-ref", "HEAD").strip()
+    base = plan_base(base)
+    if not base:
+        return dict(plan, needed="the base branch: pass --base <branch>")
+    if branch in ("", "HEAD", base):
+        return dict(plan, needed="the task's own branch checked out (harness/task-%s), not %s" % (slug(task),
+                                                                                                 branch or "nothing"))
+    blocked = step["step"] == "blocked"
+    data, problem = receipt_data(task, base if git("rev-parse", "-q", "--verify", base).strip() else None)
+    escalations = [e for e in escalation_entries() if e["task"] == task and (e["status"] or "").lower() == "open"]
+    lines = []
+    if blocked:
+        lines += ["BLOCKED: task %s is escalated and waits for a person (backbone/escalations.md):" % task, ""]
+        lines += ["- %s: %s (needed: %s)" % (e["kind"], e["reason"], e["needed"]) for e in escalations] + [""]
+    lines += ["```", receipt_text(data), "```"] if data else ["No receipt: %s." % problem]
+    follow = ["- %s (%s review, %s)" % (f.get("issue"), lens, f.get("severity"))
+              for lens, entry in sorted(lens_reviews(task).items()) if entry
+              for f in entry.get("findings") or [] if f.get("severity") in ("should-fix", "nice-to-have")]
+    lines += ["", "Follow-ups:"] + (follow or ["- none"])
+    lines += ["", "Planned by harness.py delivery-plan; the harness-verify check re-checks the gates. Only a human "
+                  "merges this pull request."]
+    labels = plan_labels(data["suggested_labels"] if data else [], current)
+    return dict(plan, ready=True, branch=branch, base=base, head=git("rev-parse", "HEAD").strip(),
+                title="Task %s: %s" % (task, task_title(task) or (data or {}).get("title") or task),
+                body="\n".join(lines), draft=blocked, labels=labels, escalations=escalations)
+
+
+def delivery_plan_command(argv):
+    value = lambda flag: argv[argv.index(flag) + 1] if flag in argv and argv.index(flag) + 1 < len(argv) else None
+    task = next((a for i, a in enumerate(argv) if not a.startswith("--")
+                 and (i == 0 or argv[i - 1] not in ("--base", "--pr-labels"))), None)
+    if not task:
+        sys.stderr.write("usage: harness.py delivery-plan <task> [--base <branch>] [--pr-labels a,b] [--json]\n")
+        return 64
+    current = [label.strip() for label in (value("--pr-labels") or "").split(",") if label.strip()]
+    plan = delivery_plan(task, value("--base"), current)
+    if "--json" in argv:
+        print(json.dumps(plan, indent=2))
+    elif not plan["ready"]:
+        print("delivery-plan: not ready: %s" % plan["needed"])
+    else:
+        print("delivery-plan: push %s (%s) and open a %sPR into %s: %s\nlabels: add %s; remove %s\n\n%s"
+              % (plan["branch"], plan["head"][:12], "draft " if plan["draft"] else "", plan["base"], plan["title"],
+                 ", ".join(plan["labels"]["add"]) or "none", ", ".join(plan["labels"]["remove"]) or "none",
+                 plan["body"]))
+    return 0 if plan["ready"] else 1
+
+
+def delivery_record(task, report):
+    """Problems with the trusted clone's report on task; with none, the deliver event next reads is logged."""
+    if not isinstance(report, dict):
+        return ["the report is not a JSON object"]
+    outcome, findings = report.get("delivery"), report.get("findings") or []
+    head = git("rev-parse", "-q", "--verify", "HEAD").strip()
+    pushed = str(report.get("head") or "")
+    problems = []
+    if task_state(task) == "missing":
+        problems.append("there is no task %s in backbone/3-TASKS.md" % task)
+    if outcome not in DELIVERY_OUTCOMES:
+        problems.append("delivery must be one of %s, not %r" % (", ".join(DELIVERY_OUTCOMES), outcome))
+    if not pushed:
+        problems.append("head is required: the commit the trusted clone pushed")
+    elif git("rev-parse", "-q", "--verify", pushed + "^{commit}").strip() != head:
+        problems.append("the pushed head %s is not the task's HEAD %s" % (pushed[:12], head[:12] or "?"))
+    if not isinstance(findings, list):
+        problems.append("findings must be a list")
+        findings = []
+    if outcome == "delivered":
+        if git("status", "--porcelain").strip():
+            problems.append("there are uncommitted changes, so the PR doesn't hold what was reviewed")
+        if report.get("checks") not in ("passed", "none"):
+            problems.append("checks are %r: record ci-failed, or wait until they pass" % report.get("checks"))
+    elif outcome in DELIVERY_OUTCOMES and (not findings or not all(isinstance(f, dict) and f.get("owner")
+                                                                   for f in findings)):
+        problems.append("a %s report lists the findings that stopped delivery, each with an owner" % outcome)
+    if problems:
+        return problems
+    owners = sorted({str(f.get("owner")) for f in findings})
+    log_event("deliver", task=task, delivery=outcome, branch=report.get("branch"), base=report.get("base"), head=head,
+              pr=report.get("pr"), checks=report.get("checks"), findings=len(findings), owners=owners,
+              findings_detail=findings[:20], problems=None, via="external")
+    return []
+
+
+def delivery_record_command(argv):
+    if len(argv) != 2:
+        sys.stderr.write("usage: harness.py delivery-record <task> <report.json>\n")
+        return 64
+    try:
+        report = json.loads(read(Path(argv[1])) or "null")
+    except ValueError as exc:
+        print("delivery-record: %s is not JSON: %s" % (argv[1], exc))
+        return 1
+    problems = delivery_record(argv[0], report)
+    if problems:
+        print("delivery-record: refused, nothing recorded:\n- " + "\n- ".join(problems))
+        return 1
+    print("delivery-record: task %s: %s recorded for %s" % (argv[0], report.get("delivery"), str(report["head"])[:12]))
+    return 0
+
+
 def receipt_command(argv):
     base = argv[argv.index("--base") + 1] if "--base" in argv and argv.index("--base") + 1 < len(argv) else None
     task = next((a for i, a in enumerate(argv) if not a.startswith("--") and (i == 0 or argv[i - 1] != "--base")),
@@ -8342,6 +8520,10 @@ DELIVERY_OUTCOMES = ("delivered", "hold", "ci-failed")
 def record_delivery(data):
     """The deliverer's Stop: a "delivered" claim must match the checkout (pushed, clean, CI green), and a stop short
     of it must name what stopped it, so the orchestrator can route each finding to its owner."""
+    if conf()["HARNESS_DELIVER"] == "external":
+        emit({"systemMessage": "harness: delivery is external (HARNESS_DELIVER=external); only delivery-record "
+                               "records it, so the deliverer's report is not recorded."})
+        return
     report = extract_report(data.get("last_assistant_message")
                             or last_message_from_transcript(data.get("transcript_path")), "delivery")
     if report is None:
@@ -8539,6 +8721,10 @@ def main(argv):
         return report_command(argv[2:])
     if argv[1:2] == ["receipt"]:
         return receipt_command(argv[2:])
+    if argv[1:2] == ["delivery-plan"]:
+        return delivery_plan_command(argv[2:])
+    if argv[1:2] == ["delivery-record"]:
+        return delivery_record_command(argv[2:])
     if argv[1:2] == ["linear"]:
         return linear_command(argv[2:])
     if argv[1:2] == ["intake"]:

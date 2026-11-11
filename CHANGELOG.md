@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Delivery from a trusted clone (ADR-008, follow-up 4).** `HARNESS_DELIVER="external"` (user-only) is for a lane
+  that holds no GitHub credential. `next` returns `deliver` with no role and `external: true` for a finished,
+  committed task, and `run` ends it there with outcome `ready-to-deliver` instead of retrying or escalating it.
+  `harness.py delivery-plan <id> [--base <branch>] [--pr-labels a,b] [--json]` says what the factory pushes and opens:
+  the branch, base, head commit, PR title and body (the receipt and the reviews' follow-ups) and the labels to add and
+  remove, under the deliverer's rules (only the receipt's `risk:*` and `class:*` labels, one `risk:*` label that only
+  goes up); an escalated task gets a draft PR naming the escalation. `harness.py delivery-record <id> <report.json>`,
+  refused to agents, records the trusted clone's outcome as the `deliver` event `next` reads, with the checks the
+  deliverer's report gets: the pushed head is the task's `HEAD`, `delivered` needs green or no checks, and `hold` and
+  `ci-failed` need findings with owners. In external mode a deliverer in the lane pushes nothing and its report isn't
+  recorded. Doctor checks `HARNESS_DELIVER` is `on`, `off` or `external`.
+
 - **Intake with provenance and the trusted-sender verdict (ADR-008, follow-up 2).** `harness.py intake <request.json>
   [--json]` turns a request from an agent factory's doors (Slack, GitHub, Linear, the clock) into a pending task. It
   allocates the id (`intake.<n>`) under a lock shared by the repository's worktrees, writes a draft spec whose frozen

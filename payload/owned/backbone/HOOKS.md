@@ -269,6 +269,12 @@ Its Stop hook (`deliver-stop`; Codex and OpenCode through `subagent-stop`) check
 - `hold` and `ci-failed` are refused without findings, each with an owner;
 - every report is logged as a `deliver` event with the PR, the head, the findings and the owners. `next` reads it: `delivered` on the current `HEAD` makes the task `done`; `hold` or `ci-failed` makes it `delivery-failed`, with the findings. A fix goes through the pipeline as a new task, and the next delivery covers the new `HEAD`.
 
+**Delivery from a trusted clone** (`HARNESS_DELIVER="external"`, the harness's ADR-008). An agent factory's lane holds no GitHub credential, so the factory pushes and opens the PR from a trusted clone, and the harness still decides what is delivered:
+- `next` returns `deliver` with no role and `external: true` for a finished, committed task, and `run` ends it there (`ready-to-deliver`) instead of retrying it or escalating; the session's prompt tells the agent not to run the deliverer. A deliverer that runs anyway pushes, opens and labels nothing (those calls are refused), and its report is not recorded.
+- `harness.py delivery-plan <id> [--base <branch>] [--pr-labels a,b] [--json]` says what to deliver: `branch`, `base` (`--base`, else `origin/HEAD`, else `main` or `master`), `head` (the full commit), `title`, `body` (the receipt, the reviews' should-fix and nice-to-have findings as follow-ups) and `labels`, `add` and `remove`, under the deliverer's rules: only the receipt's `risk:*` and `class:*` labels, and one `risk:*` label that only goes up, given the PR's current labels in `--pr-labels`. An escalated task gets a plan for a draft PR (`draft: true`) naming the escalation. While the task isn't finished, or has uncommitted changes, or the base branch is checked out, the plan says what is `needed` (`ready: false`, exit 1). Agents may run it.
+- The factory fetches the branch, runs `harness.py verify --range origin/<base>..<head>` with the engine the base branch pins, pushes, opens or updates the PR as planned and watches the checks.
+- `harness.py delivery-record <id> <report.json>` records the outcome as the `deliver` event `next` reads (`via: external`). The report has the deliverer's fields: `delivery` (`delivered`, `hold` or `ci-failed`), `branch`, `base`, `head`, `pr`, `checks` and `findings`. It is refused, and nothing recorded, unless `head` is the task's `HEAD`; `delivered` needs a clean tree and `checks` `passed` or `none`; `hold` and `ci-failed` need findings, each with an `owner`. Agents can't run it.
+
 The **pre-push hook** runs `verify` on the commits being pushed, so no push, by the deliverer or anyone else, carries a finished task without its judge and review passes. In `harness.py orca --merge`, tasks are merged into the base locally; the base branch is delivered from its own checkout.
 
 ## Coordinator API
@@ -501,6 +507,7 @@ Two files of each kind apply: the core file in `scripts/harness/`, then the proj
 | `HARNESS_CONTAINER_ENGINE` | empty | Container engine chosen in the stack ADR (set when a container pack is adopted) |
 | `HARNESS_DECISION_PROVIDER`, `_MODE`, `_ADR`, `_CMD`, `_MODEL`, `_URL`, `_TIMEOUT` | `none`, `off`, empty, empty, empty, empty, `20` | Decision layer (see above). User-only, except the timeout |
 | `HARNESS_COMMIT_NUDGE` | `8` | With no `[WIP]` task, nudge to commit at this many changed tracked files; `0` turns it off |
+| `HARNESS_DELIVER` | `on` | `on`: the deliverer delivers a finished task; `off`: a finished task is done once committed; `external`: an agent factory delivers it from a trusted clone (see Deliverer). User-only |
 | `HARNESS_PROFILE` | empty | Organisation profile: empty, `triple` or `no-merge` (see Profiles). User-only; the environment can add it, never lift it |
 | `HARNESS_REQ_STYLE` | `plain` | `plain` or `ears`: with `ears`, `spec-check` requires an EARS pattern for every requirement. User-only |
 
