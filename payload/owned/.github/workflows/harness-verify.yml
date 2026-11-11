@@ -6,13 +6,19 @@
 # Changes to the harness itself or to user-only settings fail the check unless a maintainer adds the
 # `harness-change-approved` label (restrict who may label pull requests accordingly).
 #
+# A pull request that verifies also gets the traceability matrix (ADR-004) as the artifact `harness-traceability`,
+# written by the same base-branch engine, so the pull request can't change what describes it. It is derived, not a
+# gate: an engine without `trace export` writes none and the check still passes.
+#
 # Optional (ADR-005): the `attest` job runs on a push to the default branch (`main` below: change it to yours). It
 # verifies the pushed range with the engine the push starts from (the previous tip), writes an in-toto statement of its
 # verdicts and signs it with the key in the `harness-attest` environment, which only the default branch may use. Pull
 # requests never run it, so they never see the key. Run `harness.py ci-protect --attest` once, commit the public key as
 # harness-attest.pub on the default branch (it is an enforcement file: a harness change), then add the secrets
 # HARNESS_ATTEST_KEY and HARNESS_ATTEST_PASSWORD to that environment only (ADR-005 describes it). The job refuses to sign
-# while repository-level copies of them exist. Without the key the job does nothing.
+# while repository-level copies of them exist. Without the key the job does nothing. With it, the job also writes the
+# traceability export as a .reqifz (ADR-004) with the same engine and signs it with the same key, as the artifact
+# `harness-traceability-signed`.
 name: harness-verify
 
 on:
@@ -135,6 +141,26 @@ jobs:
           ALLOW: ${{ contains(github.event.pull_request.labels.*.name, 'harness-change-approved') && '--allow-user-changes' || '' }}
         run: |
           python3 "$ENGINE_SCRIPT" verify --range "origin/$BASE..HEAD" $ALLOW
+
+      - name: Write the traceability matrix
+        shell: bash
+        env:
+          HARNESS_ROOT: ${{ github.workspace }}
+        run: |
+          out="$RUNNER_TEMP/harness-traceability"
+          if python3 "$ENGINE_SCRIPT" trace export --format html --out "$out" && [[ -f "$out/traceability.html" ]]; then
+            echo "Wrote the traceability matrix with the base branch's engine."
+          else
+            rm -rf "$out"
+            echo "::warning::The base branch's engine wrote no traceability matrix: it predates harness.py trace export, or the export failed (above). The check doesn't depend on it."
+          fi
+
+      - name: Upload the traceability matrix
+        uses: actions/upload-artifact@v7
+        with:
+          name: harness-traceability
+          path: ${{ runner.temp }}/harness-traceability/
+          if-no-files-found: ignore
 
   attest:
     if: github.event_name == 'push'
@@ -361,3 +387,42 @@ jobs:
           name: harness-attestation
           path: ${{ runner.temp }}/harness-attestation/
           if-no-files-found: error
+
+      - name: Write the traceability export
+        if: env.HARNESS_ATTEST_SIGN == 'true'
+        shell: bash
+        env:
+          HARNESS_ROOT: ${{ github.workspace }}
+        run: |
+          out="$RUNNER_TEMP/harness-traceability-signed"
+          if python3 "$ENGINE_SCRIPT" trace export --format reqifz --out "$out" && [[ -f "$out/traceability.reqifz" ]]; then
+            echo "Wrote the traceability export with the engine the push starts from."
+          else
+            rm -rf "$out"
+            echo "::warning::The engine the push starts from wrote no .reqifz export: it predates it, or the export failed (above). Nothing to sign; the verdict attestation is kept."
+          fi
+
+      - name: Sign the traceability export
+        if: env.HARNESS_ATTEST_SIGN == 'true'
+        shell: bash
+        env:
+          HARNESS_ATTEST_KEY: ${{ secrets.HARNESS_ATTEST_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.HARNESS_ATTEST_PASSWORD }}
+        run: |
+          dir="$RUNNER_TEMP/harness-traceability-signed"
+          if [[ ! -f "$dir/traceability.reqifz" ]]; then
+            exit 0
+          fi
+          cosign="$RUNNER_TEMP/cosign"
+          # No services in the signing config: nothing goes to a transparency log or timestamp authority.
+          "$cosign" signing-config create --out "$RUNNER_TEMP/signing-config.json"
+          "$cosign" sign-blob --yes --key env://HARNESS_ATTEST_KEY --signing-config "$RUNNER_TEMP/signing-config.json" \
+            --bundle "$dir/traceability.reqifz.sigstore.json" "$dir/traceability.reqifz" < /dev/null
+
+      - name: Upload the signed traceability export
+        if: env.HARNESS_ATTEST_SIGN == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: harness-traceability-signed
+          path: ${{ runner.temp }}/harness-traceability-signed/
+          if-no-files-found: ignore

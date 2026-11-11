@@ -5,19 +5,30 @@ to 1.2 share), for the elements the harness writes: the children and attributes 
 order where the schema fixes one (xsd:sequence) and none where it doesn't (xsd:all), the fixed REQ-IF-VERSION, and the
 xsd:ID, xsd:IDREF, xsd:dateTime and xsd:integer values. On top, what an importer relies on: every reference names an
 element of the kind it says, a value's attribute definition belongs to its element's type, and a string fits its
-datatype's MAX-LENGTH. An element the schema allows but this subset doesn't list is reported, so the check is extended
+datatype's MAX-LENGTH, an enumeration value names a value of its definition's datatype, and a definition that isn't
+MULTI-VALUED takes one. An element the schema allows but this subset doesn't list is reported, so the check is extended
 from reqif.xsd deliberately rather than passing it unseen. Nothing is downloaded.
+
+XHTML values (the schema's XHTML-CONTENT, xhtml.BlkStruct.class) hold one xhtml:div or xhtml:p. The export writes only
+xhtml:object in them, which the ReqIF Implementation Guide uses for a file exchanged with the document: it needs data
+and type. A .reqifz is a ZIP archive with the .reqif documents at its top level and the files their objects name,
+relative to the document (prostep ivip PSI 18, "ReqIFz"); archive_problems checks that every named file is there.
 """
+import io
 import re
 import xml.etree.ElementTree as ET
+import zipfile
 
 NS = "{http://www.omg.org/spec/ReqIF/20110401/reqif.xsd}"
+XHTML = "{http://www.w3.org/1999/xhtml}"
 XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
 NCNAME = re.compile(r"^[A-Za-z_][A-Za-z0-9._-]*$")
 DATETIME = re.compile(r"^-?\d{4,}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:\d\d)?$")
 IDENTIFIABLE = {"IDENTIFIER": "ID", "LAST-CHANGE": "dateTime"}
 NAMED = {"DESC": "string", "LONG-NAME": "string"}
-VALUE_KINDS = ["ATTRIBUTE-VALUE-STRING"]
+KINDS = ("STRING", "ENUMERATION", "XHTML")
+VALUE_KINDS = ["ATTRIBUTE-VALUE-" + kind for kind in KINDS]
+DEFINITION_KINDS = ["ATTRIBUTE-DEFINITION-" + kind for kind in KINDS]
 SPEC_TYPE = ("all", [("ALTERNATIVE-ID", False), ("SPEC-ATTRIBUTES", False)], IDENTIFIABLE, NAMED)
 
 
@@ -52,23 +63,45 @@ RULES = {
     "REQ-IF-CONTENT": ("sequence", [("DATATYPES", False), ("SPEC-TYPES", False), ("SPEC-OBJECTS", False),
                                     ("SPEC-RELATIONS", False), ("SPECIFICATIONS", False),
                                     ("SPEC-RELATION-GROUPS", False)], {}, {}),
-    "DATATYPES": many("DATATYPE-DEFINITION-STRING"),
+    "DATATYPES": many(*["DATATYPE-DEFINITION-" + kind for kind in KINDS]),
     "DATATYPE-DEFINITION-STRING": ("all", [("ALTERNATIVE-ID", False)], dict(IDENTIFIABLE, **{"MAX-LENGTH": "integer"}),
                                    NAMED),
+    "DATATYPE-DEFINITION-ENUMERATION": ("all", [("ALTERNATIVE-ID", False), ("SPECIFIED-VALUES", False)], IDENTIFIABLE,
+                                        NAMED),
+    "SPECIFIED-VALUES": many("ENUM-VALUE"),
+    "ENUM-VALUE": ("all", [("ALTERNATIVE-ID", False), ("PROPERTIES", True)], IDENTIFIABLE, NAMED),
+    "PROPERTIES": one("EMBEDDED-VALUE"),
+    "EMBEDDED-VALUE": ("all", [], {"KEY": "integer", "OTHER-CONTENT": "string"}, {}),
+    "DATATYPE-DEFINITION-XHTML": ("all", [("ALTERNATIVE-ID", False)], IDENTIFIABLE, NAMED),
     "SPEC-TYPES": many("SPEC-OBJECT-TYPE", "SPEC-RELATION-TYPE", "SPECIFICATION-TYPE"),
     "SPEC-OBJECT-TYPE": SPEC_TYPE,
     "SPEC-RELATION-TYPE": SPEC_TYPE,
     "SPECIFICATION-TYPE": SPEC_TYPE,
-    "SPEC-ATTRIBUTES": many("ATTRIBUTE-DEFINITION-STRING"),
+    "SPEC-ATTRIBUTES": many(*DEFINITION_KINDS),
     "ATTRIBUTE-DEFINITION-STRING": ("all", [("ALTERNATIVE-ID", False), ("DEFAULT-VALUE", False), ("TYPE", True)],
                                     IDENTIFIABLE, dict(NAMED, **{"IS-EDITABLE": "boolean"})),
     "ATTRIBUTE-DEFINITION-STRING/TYPE": one("DATATYPE-DEFINITION-STRING-REF"),
+    "ATTRIBUTE-DEFINITION-ENUMERATION": ("all", [("ALTERNATIVE-ID", False), ("DEFAULT-VALUE", False), ("TYPE", True)],
+                                         dict(IDENTIFIABLE, **{"MULTI-VALUED": "boolean"}),
+                                         dict(NAMED, **{"IS-EDITABLE": "boolean"})),
+    "ATTRIBUTE-DEFINITION-ENUMERATION/TYPE": one("DATATYPE-DEFINITION-ENUMERATION-REF"),
+    "ATTRIBUTE-DEFINITION-XHTML": ("all", [("ALTERNATIVE-ID", False), ("DEFAULT-VALUE", False), ("TYPE", True)],
+                                   IDENTIFIABLE, dict(NAMED, **{"IS-EDITABLE": "boolean"})),
+    "ATTRIBUTE-DEFINITION-XHTML/TYPE": one("DATATYPE-DEFINITION-XHTML-REF"),
     "SPEC-OBJECTS": many("SPEC-OBJECT"),
     "SPEC-OBJECT": ("all", [("ALTERNATIVE-ID", False), ("VALUES", False), ("TYPE", True)], IDENTIFIABLE, NAMED),
     "SPEC-OBJECT/TYPE": one("SPEC-OBJECT-TYPE-REF"),
     "VALUES": many(*VALUE_KINDS),
     "ATTRIBUTE-VALUE-STRING": ("all", [("DEFINITION", True)], {"THE-VALUE": "string"}, {}),
     "ATTRIBUTE-VALUE-STRING/DEFINITION": one("ATTRIBUTE-DEFINITION-STRING-REF"),
+    "ATTRIBUTE-VALUE-ENUMERATION": ("all", [("DEFINITION", True), ("VALUES", False)], {}, {}),
+    "ATTRIBUTE-VALUE-ENUMERATION/DEFINITION": one("ATTRIBUTE-DEFINITION-ENUMERATION-REF"),
+    "ATTRIBUTE-VALUE-ENUMERATION/VALUES": many("ENUM-VALUE-REF"),
+    "ATTRIBUTE-VALUE-XHTML": ("all", [("THE-VALUE", True), ("THE-ORIGINAL-VALUE", False), ("DEFINITION", True)], {},
+                              {"IS-SIMPLIFIED": "boolean"}),
+    "ATTRIBUTE-VALUE-XHTML/DEFINITION": one("ATTRIBUTE-DEFINITION-XHTML-REF"),
+    "ATTRIBUTE-VALUE-XHTML/THE-VALUE": ("xhtml", [], {}, {}),
+    "ATTRIBUTE-VALUE-XHTML/THE-ORIGINAL-VALUE": ("xhtml", [], {}, {}),
     "SPEC-RELATIONS": many("SPEC-RELATION"),
     "SPEC-RELATION": ("all", [("ALTERNATIVE-ID", False), ("VALUES", False), ("SOURCE", True), ("TARGET", True),
                               ("TYPE", True)], IDENTIFIABLE, NAMED),
@@ -87,13 +120,32 @@ RULES = {
 }
 # A reference element -> the element kind it must name. SPEC-RELATION's ends are GLOBAL-REFs (strings) in the schema,
 # which may point into another document; an export is self-contained, so here they must resolve too.
-REFERENCES = {name + "-REF": name for name in ("DATATYPE-DEFINITION-STRING", "SPEC-OBJECT-TYPE", "SPEC-RELATION-TYPE",
-                                               "SPECIFICATION-TYPE", "ATTRIBUTE-DEFINITION-STRING", "SPEC-OBJECT")}
+REFERENCES = {name + "-REF": name for name in ["DATATYPE-DEFINITION-" + kind for kind in KINDS] + DEFINITION_KINDS +
+              ["SPEC-OBJECT-TYPE", "SPEC-RELATION-TYPE", "SPECIFICATION-TYPE", "SPEC-OBJECT", "ENUM-VALUE"]}
 VALUE_TYPE = {"text:string": "string", "text:dateTime": "dateTime"}
+# The XHTML elements the export writes -> the attributes each needs.
+XHTML_ELEMENTS = {"div": (), "p": (), "object": ("data", "type")}
 
 
 def local(tag):
     return tag[len(NS):] if tag.startswith(NS) else None
+
+
+def xhtml_problems(element, where, problems):
+    """An XHTML-CONTENT element: one xhtml:div or xhtml:p, and below it only the XHTML this check knows."""
+    blocks = [child.tag[len(XHTML):] if child.tag.startswith(XHTML) else child.tag for child in element]
+    if (element.text or "").strip() or len(blocks) != 1 or blocks[0] not in ("div", "p"):
+        problems.append("%s: holds exactly one xhtml:div or xhtml:p" % where)
+    for child in element.iter():
+        if child is element:
+            continue
+        name = child.tag[len(XHTML):] if child.tag.startswith(XHTML) else None
+        if name not in XHTML_ELEMENTS:
+            problems.append("%s: %s is not XHTML this check knows (extend tests/reqif_check.py)" % (where, child.tag))
+            continue
+        for attr in XHTML_ELEMENTS[name]:
+            if not child.get(attr):
+                problems.append("%s: xhtml:%s needs %s" % (where, name, attr))
 
 
 def value_problem(kind, value):
@@ -123,6 +175,9 @@ def structure(element, parent, path, problems):
         problems.append("%s: not an element this check knows (extend tests/reqif_check.py from reqif.xsd)" % where)
         return
     content, children, required, optional = rule
+    if content == "xhtml":
+        xhtml_problems(element, where, problems)
+        return
     for attr, kind in required.items():
         if attr not in element.attrib:
             problems.append("%s: attribute %s is required" % (where, attr))
@@ -196,34 +251,87 @@ def problems(document):
         if values is None or type_ref is None:
             continue
         spec_type = by_id.get((type_ref.text or "").strip())
-        definitions = {d.get("IDENTIFIER"): d for d in spec_type.iter(NS + "ATTRIBUTE-DEFINITION-STRING")} \
+        definitions = {d.get("IDENTIFIER"): d for d in spec_type.iter() if local(d.tag) in DEFINITION_KINDS} \
             if spec_type is not None else {}
         seen = set()
         for value in values:
-            ref = value.find("%sDEFINITION/%sATTRIBUTE-DEFINITION-STRING-REF" % (NS, NS))
+            ref = value.find("%sDEFINITION/*" % NS)
             ident = (ref.text or "").strip() if ref is not None else None
+            where = "%s %s" % (local(holder.tag), holder.get("IDENTIFIER"))
             if ident not in definitions:
-                found.append("%s %s: a value for %s, which its type %s doesn't define"
-                             % (local(holder.tag), holder.get("IDENTIFIER"), ident, type_ref.text))
+                found.append("%s: a value for %s, which its type %s doesn't define" % (where, ident, type_ref.text))
                 continue
             if ident in seen:
-                found.append("%s %s: two values for %s" % (local(holder.tag), holder.get("IDENTIFIER"), ident))
+                found.append("%s: two values for %s" % (where, ident))
             seen.add(ident)
-            datatype = by_id.get((definitions[ident].findtext("%sTYPE/%sDATATYPE-DEFINITION-STRING-REF" % (NS, NS))
-                                  or "").strip())
-            limit = datatype.get("MAX-LENGTH") if datatype is not None else None
-            if limit and limit.isdigit() and len(value.get("THE-VALUE") or "") > int(limit):
-                found.append("%s %s: the value for %s is longer than MAX-LENGTH %s"
-                             % (local(holder.tag), holder.get("IDENTIFIER"), ident, limit))
+            definition = definitions[ident]
+            datatype = by_id.get((definition.findtext("%sTYPE/*" % NS) or "").strip())
+            if datatype is None:
+                continue
+            if local(value.tag) == "ATTRIBUTE-VALUE-STRING":
+                limit = datatype.get("MAX-LENGTH")
+                if limit and limit.isdigit() and len(value.get("THE-VALUE") or "") > int(limit):
+                    found.append("%s: the value for %s is longer than MAX-LENGTH %s" % (where, ident, limit))
+            elif local(value.tag) == "ATTRIBUTE-VALUE-ENUMERATION":
+                allowed = {e.get("IDENTIFIER") for e in datatype.iter(NS + "ENUM-VALUE")}
+                chosen = [(r.text or "").strip() for r in value.iter(NS + "ENUM-VALUE-REF")]
+                found += ["%s: the value for %s names %s, which is not a value of its datatype %s"
+                          % (where, ident, c, datatype.get("IDENTIFIER")) for c in chosen if c not in allowed]
+                if definition.get("MULTI-VALUED") in ("false", "0") and len(chosen) > 1:
+                    found.append("%s: the value for %s holds %d values; its definition isn't MULTI-VALUED"
+                                 % (where, ident, len(chosen)))
+    return found
+
+
+def archive(data):
+    """{file name: bytes} of a .reqifz."""
+    with zipfile.ZipFile(io.BytesIO(data)) as handle:
+        return {info.filename: handle.read(info) for info in handle.infolist()}
+
+
+def archive_problems(data):
+    """Every way a .reqifz breaks the archive rules or holds a document that breaks the vendored ones; [] if none."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as handle:
+            names = [info.filename for info in handle.infolist()]
+    except zipfile.BadZipFile as exc:
+        return ["not a ZIP archive: %s" % exc]
+    files = archive(data)
+    found = ["%s: appears %d times in the archive" % (n, names.count(n)) for n in sorted(set(names))
+             if names.count(n) > 1]
+    found += ["%s: not a path inside the archive" % n for n in names
+              if n.startswith("/") or "\\" in n or ".." in n.split("/")]
+    documents = sorted(n for n in files if n.endswith(".reqif") and "/" not in n)
+    if not documents:
+        found.append("no .reqif document at the archive's top level")
+    for name in documents:
+        wrong = problems(files[name])
+        found += ["%s: %s" % (name, p) for p in wrong]
+        if wrong:
+            continue
+        for ident, objects in sorted(attachments(files[name]).items()):
+            found += ["%s: %s's xhtml:object names %s, which the archive doesn't hold" % (name, ident, path)
+                      for path, _ in objects if path not in files]
     return found
 
 
 def _values(holder, by_id):
+    """{attribute definition LONG-NAME: value}: a string as written, an enumeration as its values' LONG-NAMEs (comma
+    separated), XHTML as its text."""
     named = {}
-    for value in holder.iter(NS + "ATTRIBUTE-VALUE-STRING"):
-        definition = by_id.get(value.findtext("%sDEFINITION/%sATTRIBUTE-DEFINITION-STRING-REF" % (NS, NS)))
-        if definition is not None:
-            named[definition.get("LONG-NAME")] = value.get("THE-VALUE")
+    for value in holder.find(NS + "VALUES") if holder.find(NS + "VALUES") is not None else []:
+        definition = by_id.get(value.findtext("%sDEFINITION/*" % NS))
+        if definition is None:
+            continue
+        kind = local(value.tag)
+        if kind == "ATTRIBUTE-VALUE-ENUMERATION":
+            text = ", ".join(by_id[r.text].get("LONG-NAME") for r in value.iter(NS + "ENUM-VALUE-REF")
+                             if r.text in by_id)
+        elif kind == "ATTRIBUTE-VALUE-XHTML":
+            text = " ".join("".join(value.find(NS + "THE-VALUE").itertext()).split())
+        else:
+            text = value.get("THE-VALUE")
+        named[definition.get("LONG-NAME")] = text
     return named
 
 
@@ -277,3 +385,36 @@ def header(document):
     root, _ = _index(document)
     head = root.find("%sTHE-HEADER/%sREQ-IF-HEADER" % (NS, NS))
     return {local(e.tag): e.text for e in head} if head is not None else {}
+
+
+def attribute_types(document):
+    """{spec type LONG-NAME: {attribute LONG-NAME: (STRING, ENUMERATION or XHTML, [its enumeration's value LONG-NAMEs in
+    KEY order])}}."""
+    root, by_id = _index(document)
+    found = {}
+    for spec_type in root.find("%sCORE-CONTENT/%sREQ-IF-CONTENT/%sSPEC-TYPES" % (NS, NS, NS)):
+        attrs = found.setdefault(spec_type.get("LONG-NAME"), {})
+        for definition in spec_type.iter():
+            if local(definition.tag) not in DEFINITION_KINDS:
+                continue
+            datatype = by_id.get(definition.findtext("%sTYPE/*" % NS))
+            values = sorted(datatype.iter(NS + "ENUM-VALUE"),
+                            key=lambda e: int(e.find("%sPROPERTIES/%sEMBEDDED-VALUE" % (NS, NS)).get("KEY"))) \
+                if datatype is not None else []
+            attrs[definition.get("LONG-NAME")] = (local(definition.tag).rsplit("-", 1)[1],
+                                                 [e.get("LONG-NAME") for e in values])
+    return found
+
+
+def attachments(document):
+    """{ReqIF.ForeignID: [(data, type) of each xhtml:object in its values]} for each SPEC-OBJECT and SPECIFICATION that
+    has one."""
+    root, by_id = _index(document)
+    found = {}
+    for kind in ("SPEC-OBJECT", "SPECIFICATION"):
+        for holder in root.iter(NS + kind):
+            objects = [(o.get("data"), o.get("type")) for value in holder.findall("%sVALUES/*" % NS)
+                       for o in value.iter(XHTML + "object")]
+            if objects:
+                found[_values(holder, by_id).get("ReqIF.ForeignID")] = objects
+    return found

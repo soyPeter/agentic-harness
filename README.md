@@ -113,11 +113,14 @@ pass stale.
   commits being pushed, and CI the pull request's commits (`harness.py verify --range`) with the **base branch's**
   verifier, so a pull request can't weaken the check that gates it, and a change made any other way is still caught.
 - **Traceability export** ([ADR-004](docs/adr/ADR-004-traceability-export.md), Proposed): `harness.py trace export
-  --format reqif|needs|html [--out DIR] [--task ID]` writes the chain requirement → acceptance criterion → test file →
-  judge verdict → commit as ReqIF 1.2, a Sphinx-Needs `needs.json` (format 1) or a self-contained HTML matrix for a pull
-  request. It is derived from `backbone/` and git, which stay the record: one-way, no network, nothing reads it back.
-  Each task says whether its judge pass is on the current code, which commits carry the judged code, and the gaps it can
-  see. It is not signed, validated or PCI DSS evidence; the ADR lists what it can and can't support.
+  --format reqif|reqifz|needs|html [--out DIR] [--task ID]` writes the chain requirement → acceptance criterion → test
+  file → judge verdict → commit as ReqIF 1.2 (results and verdicts as enumerations), a ReqIF archive with each task's
+  receipt, a Sphinx-Needs `needs.json` (format 1) or a self-contained HTML matrix. It is derived from `backbone/` and
+  git, which stay the record: one-way, no network, nothing reads it back. Each task says whether its judge pass is on
+  the current code, which commits carry the judged code, and the gaps it can see. `harness-verify` uploads the matrix
+  of each pull request that verifies, written by the base branch's engine, and the deliverer links it from the pull
+  request (`harness.py trace link`); with the ADR-005 key, the push job signs a `.reqifz`. It is not validated or PCI
+  DSS evidence; the ADR lists what it can and can't support.
 - **Signed verdict attestations** (optional, [ADR-005](docs/adr/ADR-005-verdict-attestations.md), Proposed):
   `harness.py attest --range <base>..<tip>` prints an in-toto Statement about the tip commit with each finished task's
   verdict chain (spec fingerprint, grill, judge and review verdicts, Change-Class, risk and receipt), only for a range
