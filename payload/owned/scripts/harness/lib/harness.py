@@ -30,8 +30,9 @@ Usage:
   harness.py linear import <ISSUE> --task <id> [--light] [--from F] | linear receipt <task> [--status S]
                                                                   (Linear as the system of record; user-only)
   harness.py trace <task-id> [--json]                             (the task's events: context, skills, edits, refusals, tests)
-  harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]
+  harness.py trace export --format reqif|reqifz|needs|html [--out DIR] [--task ID]
                                                                   (derived traceability export, ADR-004)
+  harness.py trace link <matrix-url> [--task ID]                  (the comment that links a matrix, ADR-004)
   harness.py ci-judge --range <base>..<tip>                       (CI: independent re-judging of finished tasks)
   harness.py ci-protect [--branch main] [--with-judge] [--dry-run] (require the CI checks; needs gh)
   harness.py ci-protect --attest [--dry-run] [--recorded-fallback] [--delete-repo-copies]
@@ -6873,6 +6874,8 @@ def trace_line(event):
 def trace_command(argv):
     if argv[:1] == ["export"]:
         return trace_export_command(argv[1:])
+    if argv[:1] == ["link"]:
+        return trace_link_command(argv[1:])
     task = next((a for a in argv if not a.startswith("--")), None)
     if not task:
         sys.stderr.write("usage: harness.py trace <task> [--json]\n")
@@ -6901,7 +6904,11 @@ def trace_command(argv):
 # A derived, one-way view of the chain requirement -> criterion -> test -> verdict -> commit for ALM and docs-as-code
 # tools. backbone/ and git stay the record: nothing reads the export back, and it never touches the network.
 
-TRACE_USAGE = "usage: harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]\n"
+TRACE_USAGE = "usage: harness.py trace export --format reqif|reqifz|needs|html [--out DIR] [--task ID]\n"
+TRACE_LINK_USAGE = "usage: harness.py trace link <matrix-url> [--task ID]\n"
+# A link a pull request or Linear comment shows as written: https, and none of the characters that end a Markdown link
+# or autolink early, open an HTML tag or start emphasis or code.
+MATRIX_URL = re.compile(r"https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~:/?#@!$&+,;=%-]*)?")
 TASK_ID = re.compile(r"^[A-Za-z0-9._-]*[A-Za-z0-9]$")
 XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff\ud800-\udfff]")
 EARS_LEAD = re.compile(r"^((?:(?:While|When|Where)\s+.+?,\s*|If\s+.+?,\s*then\s+)*)the\s+\S.*?\s+shall\s+\S", re.I)
@@ -7095,19 +7102,25 @@ def trace_test_id(task, path):
     return "TEST-%s-%s" % (task, hashlib.sha256(path.encode("utf-8")).hexdigest()[:12])
 
 
-def trace_model(tasks):
+def trace_model(tasks, receipts=False):
+    """The export's model of tasks; with receipts, each task also carries its `receipt` text, or None where the
+    receipt command would refuse."""
     head = git("rev-parse", "-q", "--verify", "HEAD").strip() or None
     current = code_fingerprint()
     by_code, incomplete = commits_by_code()
     incomplete = incomplete if head else None
     settings = committed_conf()
     version = lock().get("harness_version") or lock().get("version") or "unknown"
-    return {"project": clean(settings["HARNESS_PROJECT_NAME"] or "unnamed project"), "version": version,
-            "tool": "agentic-harness %s" % version, "head": head,
-            "time": git("log", "-1", "--format=%cI", "HEAD").strip() if head else "1970-01-01T00:00:00+00:00",
-            "code_fingerprint": current, "code_matches_head": bool(head) and head in by_code.get(current, []),
-            "req_style": settings["HARNESS_REQ_STYLE"],
-            "tasks": [trace_task(task, current, by_code, incomplete, settings) for task in tasks]}
+    model = {"project": clean(settings["HARNESS_PROJECT_NAME"] or "unnamed project"), "version": version,
+             "tool": "agentic-harness %s" % version, "head": head,
+             "time": git("log", "-1", "--format=%cI", "HEAD").strip() if head else "1970-01-01T00:00:00+00:00",
+             "code_fingerprint": current, "code_matches_head": bool(head) and head in by_code.get(current, []),
+             "req_style": settings["HARNESS_REQ_STYLE"],
+             "tasks": [trace_task(task, current, by_code, incomplete, settings) for task in tasks]}
+    for task in model["tasks"] if receipts else []:
+        data, _ = receipt_data(task["id"], code=current)
+        task["receipt"] = receipt_text(data) + "\n" if data else None
+    return model
 
 
 def stdout_file_in_repository():
@@ -7162,17 +7175,66 @@ def trace_export_command(argv):
                              "untracked file there counts as code and would make the judge's passes stale; redirect "
                              "stdout outside the repository or to a git-ignored file.\n" % rel)
             return 1
-    document = render(trace_model(tasks))
+    document = render(trace_model(tasks, receipts=flags["--format"] == "reqifz"))
     if target is None:
-        sys.stdout.write(document)
+        if isinstance(document, bytes):
+            sys.stdout.flush()
+            sys.stdout.buffer.write(document)
+        else:
+            sys.stdout.write(document)
         return 0
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(document, encoding="utf-8")
+        if isinstance(document, bytes):
+            target.write_bytes(document)
+        else:
+            target.write_text(document, encoding="utf-8")
     except OSError as exc:
         print("trace export: can't write %s: %s" % (target, exc))
         return 1
     print("trace export: wrote %s" % target)
+    return 0
+
+
+def matrix_link_problem(url):
+    if MATRIX_URL.fullmatch(url):
+        return None
+    return ("%r is not an https link a comment shows as written: letters, digits and -._~:/?#@!$&+,;=%% only, no "
+            "spaces, quotes, brackets or parentheses" % url)
+
+
+def trace_link_text(url, task, head):
+    """The comment that links the traceability matrix at url, which describes commit head."""
+    return ("**Traceability matrix** (ADR-004): %s\n\n"
+            "It traces requirement -> acceptance criterion -> test -> judge verdict -> commit for %s at commit %s. It is "
+            "derived from backbone/ and git, not the record: `harness.py trace export --format html` at that commit, with "
+            "the same engine, writes the same file.\n" % (url, "task %s" % task if task else "every task with a spec",
+                                                          head))
+
+
+def trace_link_command(argv):
+    url, task, rest = None, None, list(argv)
+    while rest:
+        word = rest.pop(0)
+        if word == "--task" and rest and task is None:
+            task = rest.pop(0)
+        elif not word.startswith("--") and url is None:
+            url = word
+        else:
+            sys.stderr.write(TRACE_LINK_USAGE)
+            return 64
+    if url is None:
+        sys.stderr.write(TRACE_LINK_USAGE)
+        return 64
+    head = git("rev-parse", "-q", "--verify", "HEAD").strip()
+    problem = (matrix_link_problem(url) or
+               ("no spec at %s" % spec_rel(task) if task is not None and not (TASK_ID.match(task) and
+                                                                               spec_path(task).is_file()) else None) or
+               (None if head else "the repository has no commit, and a matrix describes one"))
+    if problem:
+        sys.stderr.write("trace link: %s\n" % problem)
+        return 1
+    sys.stdout.write(trace_link_text(url, task, head))
     return 0
 
 
@@ -7351,7 +7413,8 @@ def receipt_text(d):
 
 LINEAR_LINE = re.compile(r"^Linear:\s*([A-Z][A-Z0-9]{0,9}-\d+)\b", re.M)
 LINEAR_USAGE = ("usage: harness.py linear import <ISSUE-ID> --task <id> [--light] [--from <issue.json>] [--dry-run]\n"
-                "       harness.py linear receipt <task> [--status <state name>] [--base <rev>] [--dry-run]\n")
+                "       harness.py linear receipt <task> [--status <state name>] [--base <rev>] [--matrix <url>] "
+                "[--dry-run]\n")
 
 
 def linear_import(issue, task, light, dry_run):
@@ -7393,10 +7456,12 @@ def linear_import(issue, task, light, dry_run):
     return 0
 
 
-def linear_receipt(task, status, base, dry_run):
-    """Post the task's receipt as a comment on its Linear issue, and optionally move the issue (never to a closed
-    state)."""
+def linear_receipt(task, status, base, dry_run, matrix=None):
+    """Post the task's receipt as a comment on its Linear issue, with the link to the traceability matrix at matrix if
+    given, and optionally move the issue (never to a closed state)."""
     import linear
+    if matrix and matrix_link_problem(matrix):
+        raise HarnessError(matrix_link_problem(matrix))
     m = LINEAR_LINE.search(read(spec_path(task)))
     if not m:
         raise HarnessError("%s has no 'Linear: <ISSUE-ID>' line; import the task with harness.py linear import"
@@ -7406,6 +7471,8 @@ def linear_receipt(task, status, base, dry_run):
         raise HarnessError(problem)
     body = "**agentic harness receipt** (task %s)\n\n```\n%s\n```\n\nOnly a human merges the pull request and " \
            "closes this issue." % (task, receipt_text(data))
+    if matrix:
+        body += "\n\n" + trace_link_text(matrix, task, git("rev-parse", "-q", "--verify", "HEAD").strip()).strip()
     if dry_run:
         print("Would comment on %s:\n%s%s" % (m.group(1), body, "\nWould move %s to '%s'" % (m.group(1), status)
                                                if status else ""))
@@ -7439,7 +7506,7 @@ def linear_command(argv):
                 issue = linear.fetch_issue(argv[1])
             return linear_import(issue, value("--task"), "--light" in argv, "--dry-run" in argv)
         if argv[:1] == ["receipt"] and len(argv) >= 2:
-            return linear_receipt(argv[1], value("--status"), value("--base"), "--dry-run" in argv)
+            return linear_receipt(argv[1], value("--status"), value("--base"), "--dry-run" in argv, value("--matrix"))
     except linear.LinearError as exc:
         sys.stderr.write("harness: linear: %s\n" % exc)
         return 1
