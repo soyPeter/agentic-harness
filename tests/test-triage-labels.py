@@ -83,13 +83,19 @@ Tech requirements:
 """
 
 
+JUDGE_PASS = {"verdict": "pass", "task": "7.1", "summary": "s", "findings": [],
+              "criteria": [{"id": "AC-7.1-1", "met": True, "evidence": "src/search.py:2", "tests": ["test_contains"]}],
+              "tests": {"command": "true", "result": "passed"}}
+
+
 def final_message(report):
     return "Done.\n\n```json\n%s\n```" % json.dumps(report)
 
 
 class JudgedTask(unittest.TestCase):
-    """A project whose task 7.1 has a judge pass on its current code, so `receipt 7.1` answers. The search code was
-    committed before the spec, so the task's own change is documentation; --base <adopted> takes in the code too."""
+    """A project whose task 7.1 has a judge pass on its current code and spec, so `receipt 7.1` answers. The search
+    code was committed before the spec, so the task's own change is documentation; --base <adopted> takes in the code
+    too."""
 
     @classmethod
     def setUpClass(cls):
@@ -124,10 +130,7 @@ class JudgedTask(unittest.TestCase):
         tasks.write_text(tasks.read_text().replace("- [ ] **Task 7.1", "- [WIP] **Task 7.1"))
         (cls.project / "docs").mkdir(exist_ok=True)
         (cls.project / "docs/search.md").write_text("# Customer search\n\nA query matches any part of a name.\n")
-        cls.hook("judge-stop", "judge", {
-            "verdict": "pass", "task": "7.1", "summary": "s", "findings": [],
-            "criteria": [{"id": "AC-7.1-1", "met": True, "evidence": "src/search.py:2", "tests": ["test_contains"]}],
-            "tests": {"command": "true", "result": "passed"}})
+        cls.hook("judge-stop", "judge", JUDGE_PASS)
 
     @classmethod
     def tearDownClass(cls):
@@ -158,11 +161,13 @@ class JudgedTask(unittest.TestCase):
         cls.harness("hook", event, input=json.dumps(stop))
 
     def receipt(self, change_class, risky, *flags, context="", approval=""):
-        """`receipt 7.1` with the spec declaring change_class (whole lines, or None for no line). context goes at the
-        end of the Context section and approval after the Approved-by line."""
+        """`receipt 7.1` with the spec declaring change_class (whole lines, or None for no line), judged again on that
+        spec, since a judge pass covers only the spec it judged. context goes at the end of the Context section and
+        approval after the Approved-by line."""
         text = SPEC.format(change_class=change_class + "\n" if change_class is not None else "",
                            context=context + (RISK_TERM if risky else ""))
         self.spec.write_text(text + "Approved-by: Ana (2026-11-01)\n" + approval)
+        self.hook("judge-stop", "judge", JUDGE_PASS)
         return self.harness("receipt", "7.1", *flags)
 
     def receipt_json(self, change_class, risky, *flags, **spec):

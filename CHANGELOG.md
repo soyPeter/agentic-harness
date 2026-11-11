@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **A spec change makes the evidence and approval given on the earlier text stale (ADR-007, Proposed; first slice).**
+  Judge, review and tester records now carry the spec fingerprint (the grill's: the spec outside its Approval section
+  and every ADR it references) next to the code fingerprint. A pass counts only on the code and the spec it judged, so
+  a changed acceptance criterion, constraint, assumption, Change-Class or ADR sends the task back to the griller, the
+  judge, the tester and every review lens even when the code is the same. Finishing a task (the hook, `finish`,
+  pre-commit and CI `verify`) now passes the start gate again, as HOOKS.md already said verify did: a spec whose
+  approval the user removed to change it needs a current grill pass and their approval again. Verify also refuses a
+  commit that changes an approved spec while its `Approved-by:` lines stay as they were, since that approval was given
+  on the earlier text (the user approves the new text with a new line; in CI the `harness-change-approved` label lets
+  it through). `next` routes a changed `[WIP]` task to `grill`, `approve`, `test` and `judge` with a `reason`; `state
+  --json` gives the judge verdict's `stale` (`code`, `spec` or `unrecorded`); the receipt refuses a pass on an
+  earlier spec and names the spec and code it was judged on (`judged_on`). Stale passes stay in the append-only
+  history. Upgrade note: a judge, review or tester record from an earlier release has no spec fingerprint, so it
+  counts as stale: run them again for tasks in progress. ADR-007's implementation notes hold the audit (P0) this
+  slice came from, and what it leaves out.
 - **The harness as the gate inside the agent software factory (ADR-008, Proposed; docs only).**
   `docs/adr/ADR-008-harness-inside-agent-factory.md` decides how the harness sits inside an always-on factory that
   takes work from Slack, GitHub and Linear. The factory owns the doors, the sender check, identity and keys, lanes,

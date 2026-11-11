@@ -22,7 +22,7 @@ Per-file checks in PreToolUse:
 
 | File | Checks |
 |---|---|
-| `backbone/3-TASKS.md` | One `[WIP]` at a time; **start gate** for a new `[WIP]`; **judge gate** for finishing one |
+| `backbone/3-TASKS.md` | One `[WIP]` at a time; **start gate** for a new `[WIP]`; the start gate again and the **judge gate** for finishing one |
 | `backbone/specs/*.md` | `Approved-by:` lines are user-only; an approved spec is frozen |
 | `backbone/adr/*.md` | Only the user sets an ADR to `Accepted`; an accepted ADR is frozen except for being superseded |
 | `backbone/harness.conf` | The gate switches, `HARNESS_JUDGE_MAX_ROUNDS`, `HARNESS_VERIFY`, `HARNESS_ORCHESTRATOR_SCOPE` and the decision-layer keys are user-only |
@@ -52,7 +52,7 @@ Claude Code skips the hook for Read, Grep, Glob, LS and TodoWrite, so the reads 
 |---|---|---|
 | `analyst`, `architect`, `implementer`, `scribe` | PreToolUse | Write scope: analyst may edit specs and the PRD; architect ADRs, the ADR index, `2-PLANNING.md` and specs; scribe `6-MEMORY.md`, ADRs and the index; implementer anything except `backbone/`, `.claude/` and harness files |
 | `griller` | Stop (as SubagentStop) | Records the grill verdict with the spec fingerprint in `.verdicts/<id>.grill.json`. It marks each non-blocker that carries a recommendation `apply`, so that question is applied without being asked |
-| `judge` | Stop (as SubagentStop) | Records the judge verdict with the code fingerprint in `.verdicts/<id>.judge.json` |
+| `judge` | Stop (as SubagentStop) | Records the judge verdict with the code fingerprint and the spec fingerprint (`spec`, the grill's fingerprint of the spec it judged) in `.verdicts/<id>.judge.json` |
 
 Both recorders take the verdict JSON from the agent's final message, falling back to the transcript. If there is no valid JSON, they send the agent back once. A claimed pass is **re-derived** from the agent's own evidence and the files before it is recorded, as described below. Project subagents and their hooks only load once Claude Code trusts the project folder.
 
@@ -81,7 +81,9 @@ Before an agent edits a file, it must have loaded, in the same session, every sk
 
 ### Judge gate (`HARNESS_JUDGE_GATE`)
 
-Taking a task out of `[WIP]`, other than reverting it to `- [ ]` with the same text, requires a latest judge verdict of **pass** whose code fingerprint equals the current code. The fingerprint is the git tree hash of the working tree, excluding `backbone/`.
+Taking a task out of `[WIP]`, other than reverting it to `- [ ]` with the same text, requires a latest judge verdict of **pass** whose code fingerprint equals the current code and whose spec fingerprint equals the current spec. The code fingerprint is the git tree hash of the working tree, excluding `backbone/`; the spec fingerprint is the grill's (the spec outside its Approval section, and every ADR it references). So a change to an acceptance criterion, a constraint, an assumption, the Change-Class or a referenced ADR makes the judge's pass stale even when the code is the same, and the judge runs again on the current spec (ADR-007 in the agentic-harness repository). A pass recorded before verdicts carried the spec fingerprint can't show which spec it judged, so it counts as stale too. Each stale pass stays in the history; the new one is appended after it.
+
+Finishing also passes the start gate again: a spec whose approval the user removed to change it needs a current griller pass and the user's approval again before the task can finish.
 
 A judge pass is recorded as a fail unless all of these hold:
 - Every AC in the spec was evaluated as met, with tests listed.
@@ -100,7 +102,9 @@ The user can always act directly. Hooks only see agent edits, so the user can ed
 
 The hooks guard edits made through the tools. `harness.py verify` checks the **resulting state**, so it also catches changes made any other way. It runs in the pre-commit hook on the staged change, in the pre-push hook on the commits being pushed, and in CI on a range of commits:
 
-- Every task that became `[WIP]` or `[x]` passes the start gate: valid spec, current grill pass, user approval.
+- Every task that became `[WIP]` or `[x]` passes the start gate: valid spec, current grill pass, user approval. A task that goes from `[WIP]` to `[x]` passes it again, so a spec changed during the build needs its approval back.
+- Every task that became `[x]` has a judge pass on its current spec (and every lens, and the tester's record when `HARNESS_TESTER` is on, too).
+- An approved spec that changes outside its Approval section keeps no approval: a commit that changes one while its `Approved-by:` lines stay as they were is refused, since that approval was given on the earlier text. The user removes the approval before the spec changes and approves the new text with a new line. In a range, the `harness-change-approved` label lets it through.
 - Every task that became `[x]` has a judge pass whose fingerprint equals the committed code (in CI, the code of the commit that marked it done), and the pass holds up when re-derived.
 - With `HARNESS_REVIEW` on, every task that became `[x]` also has a pass from each review lens (correctness, structure, lean) on that same code.
 - At most one `[WIP]` task (unless `HARNESS_ALLOW_PARALLEL_WIP="1"`).
@@ -237,7 +241,7 @@ Regenerate the Codex and OpenCode agents after changing a Claude Code agent: `to
 - The tester writes the acceptance tests from the spec first, at least one per AC, in files matching `HARNESS_ACCEPTANCE_PATHS` (default: any path containing `acceptance`).
 - The tester may write only there; the implementer may not write there at all.
 - On the tester's Stop, the harness records which files cover which criteria, and a fingerprint of them, in `backbone/.verdicts/<id>.tests.json`. It refuses to record while a criterion has no acceptance test.
-- The judge gate refuses to finish the task when no tests were recorded, a criterion lacks one, or the files changed since they were recorded, including through the shell.
+- The judge gate refuses to finish the task when no tests were recorded, a criterion lacks one, or the files changed since they were recorded, including through the shell. The record carries the spec fingerprint too: when the spec changes, `next` sends the task back to the tester and the judge gate refuses it until the tester records the tests again.
 
 **Debugger** (`HARNESS_DEBUGGER`, default `on`). After a judge fail, `next` sends the task to the debugger before the implementer. It changes nothing and records a fix brief with the root causes, each with an owner, in `backbone/.verdicts/<id>.debug.json`. `next` hands that brief to the implementer, and lists any other owner (the tester, analyst or user) under `needs`.
 
@@ -245,7 +249,7 @@ Regenerate the Codex and OpenCode agents after changing a Claude Code agent: `to
 
 `HARNESS_REVIEW` (user-only, default `on`). After the judge passes a task, `next` returns the `review` step with the `lenses` still due: `correctness` (bugs, security, blast radius, missing tests), `structure` and `lean`. Start one `reviewer` per lens, all at once; they work independently, so they run in parallel, and the lenses can run on different models (`--agents reviewer=codex`). Each follows the `change-review` skill and changes nothing.
 
-Its Stop hook (`review-stop`; Codex and OpenCode through `subagent-stop`) records the lens's verdict in `backbone/.verdicts/<id>.review.json`, with the code fingerprint. A `must-fix` finding records a fail whatever verdict the reviewer claimed. A fail sends the task to the implementer with the findings (`fix`); the changed code goes back to the judge, then to the lenses again. A lens that passed on the current code is not run again.
+Its Stop hook (`review-stop`; Codex and OpenCode through `subagent-stop`) records the lens's verdict in `backbone/.verdicts/<id>.review.json`, with the code fingerprint and the spec fingerprint. A `must-fix` finding records a fail whatever verdict the reviewer claimed. A fail sends the task to the implementer with the findings (`fix`); the changed code goes back to the judge, then to the lenses again. A lens that passed on the current code and spec is not run again.
 
 The judge gate, and so `finish`, pre-commit, pre-push and CI `verify`, refuses a finished task without a pass from every lens on its committed code. After `HARNESS_JUDGE_MAX_ROUNDS` consecutive fails of a lens, it says to stop and take the findings to the user.
 
@@ -276,10 +280,10 @@ A coordinator asks the harness what a task needs instead of knowing the workflow
 
 | Command | Answer |
 |---|---|
-| `harness.py state [--json]` | Every task: state, `change_class`, spec problems, grill and judge verdicts (and whether they are current), approval, open escalations |
-| `harness.py next <id> [--json]` | `progress` is a fingerprint of the whole checkout, specs and verdicts included: the same step with the same `progress` means the last worker changed nothing. `change_class` is the spec's class (`feature` when it declares none). The next step and who does it: `define` (analyst or architect), `grill` (griller), `answer` (the griller's questions, routed; `needs_user` says whether any must go to the user), `approve`, `start`, `test` (tester), `implement`, `judge`, `diagnose` (debugger), `fix` (implementer, with the debugger's brief or the reviews' must-fix findings), `review` (one reviewer per lens in `lenses`, in parallel), `finish` (scribe, then `finish`), `deliver` (deliverer, after the commit), `delivery-failed`, `blocked`, `done` |
+| `harness.py state [--json]` | Every task: state, `change_class`, spec problems, grill and judge verdicts (and whether they are current), approval, open escalations. The judge's `stale` says why its verdict isn't current: `code`, `spec` (the spec or one of its ADRs changed) or `unrecorded` (no spec fingerprint). Without `--json`, a `[WIP]` task's line notes a stale judge verdict and a spec that is no longer approved |
+| `harness.py next <id> [--json]` | `progress` is a fingerprint of the whole checkout, specs and verdicts included: the same step with the same `progress` means the last worker changed nothing. `change_class` is the spec's class (`feature` when it declares none). The next step and who does it: `define` (analyst or architect), `grill` (griller), `answer` (the griller's questions, routed; `needs_user` says whether any must go to the user), `approve`, `start`, `test` (tester), `implement`, `judge`, `diagnose` (debugger), `fix` (implementer, with the debugger's brief or the reviews' must-fix findings), `review` (one reviewer per lens in `lenses`, in parallel), `finish` (scribe, then `finish`), `deliver` (deliverer, after the commit), `delivery-failed`, `blocked`, `done`. A `[WIP]` task whose spec changed goes back to `grill`, then `approve` when its approval was removed, then `test` and `judge` (with a `reason` naming the spec change), then `review` for every lens |
 | `harness.py questions <id> [--json]` | The griller's open questions, each routed: design questions to the architect, the rest to the analyst. A question marked `apply` (a non-blocker with the griller's recommendation) is applied by that role without asking |
-| `harness.py start <id>` / `finish <id>` | Mark the task `[WIP]` / `[x]` through the same gates as an edit of `3-TASKS.md` (start: spec, grill, approval, one `[WIP]`; finish: a current judge pass) |
+| `harness.py start <id>` / `finish <id>` | Mark the task `[WIP]` / `[x]` through the same gates as an edit of `3-TASKS.md` (start: spec, grill, approval, one `[WIP]`; finish: the same spec, grill and approval checks, and a judge pass on the current code and spec) |
 
 Under an Orca coordinator (`HARNESS_ORCA_RUN` set), `escalate` also sends an `escalation` message to the Run's mailbox.
 
@@ -373,7 +377,7 @@ Each event carries the task in progress and, inside a hook, the session and agen
 | `feature`, an invalid one, or none | `risk:elevated` | `risk:high` |
 | `schema` | `risk:high` | `risk:high` |
 
-It refuses a task without a judge pass on the current code. `harness.py run` saves it next to the run logs and `--pr` puts it in the pull request; the Orca coordinator does the same and keeps it in `.git/harness/receipts/`.
+It refuses a task without a judge pass on the current code and spec, and names both in its VERIFIED heading (`judged_on` in the JSON: the spec and code fingerprints the judge passed). `harness.py run` saves it next to the run logs and `--pr` puts it in the pull request; the Orca coordinator does the same and keeps it in `.git/harness/receipts/`.
 
 **Traceability export** (ADR-004 in the agentic-harness repository). `harness.py trace export --format reqif|needs|html [--out DIR] [--task ID]` writes every task with a spec (or `--task`) as the chain requirement → acceptance criterion → test file → judge verdict → commit. It is derived and one-way: `backbone/` and git stay the record, it makes no network call, and no gate reads it.
 - **Formats:** `reqif` (ReqIF 1.2: one `SPECIFICATION` per task, requirements, criteria and test files as `SPEC-OBJECT`s, `Verifies` and `Tests` relations, `ReqIF.ForeignID`/`ReqIF.Text`/`ReqIF.Name` and `Harness.*` string attributes), `needs` (Sphinx-Needs `needs.json`, format 1: need types `task`, `req`, `ac`, `test`, link fields `verifies` and `tests`, fields `harness_*`; ids contain dots and dashes, so a Sphinx project sets `needs_id_regex` to allow them) and `html` (one self-contained page, no script or external resource).
@@ -382,7 +386,7 @@ It refuses a task without a judge pass on the current code. `harness.py run` sav
 - **EARS** (`HARNESS_REQ_STYLE=ears`): each requirement's pattern (ubiquitous, event-driven, state-driven, unwanted behaviour, optional feature, complex, or not an EARS pattern).
 - **Output:** stdout, or `DIR/traceability.reqif`, `DIR/needs.json` or `DIR/traceability.html` with `--out`. An `--out` inside the repository is refused unless git ignores it, since an untracked file counts as code and would make the judge's passes stale. The same repository state gives the same bytes.
 
-**Linear** (`harness.py linear`, user-only; agents may run only `--dry-run`). `linear import <ISSUE> --task <id> [--light] [--from <issue.json>]` writes a draft spec from the template, with a `Linear: <ISSUE> (<url>)` line and the ticket quoted in Context as source material. It also adds the pending task line, `(light)` when asked. `linear receipt <task> [--status <state>]` posts the receipt as a comment on the ticket. It refuses without a judge pass on the current code, and refuses a state that completes or cancels the ticket. Both need `LINEAR_API_KEY`; `HARNESS_LINEAR_URL` points them at another endpoint.
+**Linear** (`harness.py linear`, user-only; agents may run only `--dry-run`). `linear import <ISSUE> --task <id> [--light] [--from <issue.json>]` writes a draft spec from the template, with a `Linear: <ISSUE> (<url>)` line and the ticket quoted in Context as source material. It also adds the pending task line, `(light)` when asked. `linear receipt <task> [--status <state>]` posts the receipt as a comment on the ticket. It refuses without a judge pass on the current code and spec, and refuses a state that completes or cancels the ticket. Both need `LINEAR_API_KEY`; `HARNESS_LINEAR_URL` points them at another endpoint.
 
 ## Profiles (`HARNESS_PROFILE`)
 
