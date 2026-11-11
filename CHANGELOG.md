@@ -36,7 +36,8 @@
 - **Agents can't start a user-only command by another spelling.** The shell gate refused `harness.py run`, `linear`,
   `intake` and the other user-only commands only when `harness.py` and the command were in fixed places, so
   `python3 -B -I .../harness.py intake`, the thin launcher, `-m harness`, a script or command from an expansion, a
-  shell function, `-c` code with `runpy`, or a copy of the engine went through; an agent in autonomous mode could file
+  shell function, `xargs` or `find -exec`, the engine's source on an interpreter's stdin, `-c` code with `runpy`, or a
+  copy of the engine went through; an agent in autonomous mode could file
   a trusted task with `intake`. The gate now finds the engine and its command wherever they are, refuses running the
   engine from code and copying, linking or aliasing it, and keeps the dry runs allowed. `intake` and `linear import`
   no longer refresh the out-of-band snapshot, so if an agent runs them anyway, their writes show as tampering and the

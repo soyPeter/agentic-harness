@@ -297,6 +297,14 @@ SPELLINGS = (
     "h() {{ python3 scripts/harness/lib/harness.py \"$@\"; }}; h {c}",
     "sh -c 'python3 -B scripts/harness/lib/harness.py {c}'",
     "eval \"python3 scripts/harness/lib/harness.py {c}\"",
+    "echo {c} | xargs python3 scripts/harness/lib/harness.py",
+    "printf '%s\\n' scripts/harness/lib/harness.py | xargs -I{{}} python3 {{}} {c}",
+    "find scripts -name harness.py -exec python3 {{}} {c} \\;",
+    "find scripts/harness/lib -name 'h*.py' -exec python3 {{}} {c} \\;",
+    "cd scripts/harness/lib && python3 - {c} < harness.py",
+    "cd scripts/harness/lib && python3 - {c} <harness.py",
+    "cat scripts/harness/lib/harness.py | python3 - {c}",
+    "python3 /dev/stdin {c} < scripts/harness/lib/harness.py",
 )
 # Running the engine through code the hooks don't read, or from a copy, whatever the command.
 CODE_AND_COPIES = (
@@ -318,6 +326,8 @@ ALLOWED = ("python3 scripts/harness/lib/harness.py next 1.1 --json", "python3 -B
            "grep -n 'def intake' scripts/harness/lib/harness.py", "git diff -- scripts/harness/lib/harness.py",
            "python3 scripts/harness/lib/harness.py next 1.1 --json > /tmp/next.json",
            "python3 scripts/harness/lib/harness.py state --json 2>/dev/null | head -5",
+           "find tests -name '*.py' -exec grep -l intake {} \\;", "git ls-files '*.py' | xargs python3 -m pyflakes",
+           "find tests -name 'test_*.py' -exec python3 {} \\;", "python3 - <<'EOF'\nprint(1)\nEOF",
            "npm run build", "make run", "docker run --rm alpine true")
 
 

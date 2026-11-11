@@ -1628,6 +1628,7 @@ def code_findings(code, label):
 # have one) change nothing.
 USER_COMMANDS = ("run", "orca", "orca-nightly", "snapshot", "linear", "intake", "delivery-record", "ci-judge",
                  "ci-protect")
+FIND_EXEC = ("-exec", "-execdir", "-ok", "-okdir")
 PLANNING_COMMANDS = ("orca", "orca-nightly", "linear")
 ENGINE_MODULES = ("harness", "launcher", "thin")
 ENGINE_CODE = re.compile(r"\b(?:harness|launcher|thin)\.py\b|\brunpy\b|\b(?:import|from)\s+(?:harness|launcher|thin)\b")
@@ -1640,14 +1641,52 @@ def engine_script(word):
     """The harness script (harness.py, launcher.py, thin.py) word names, a glob included, or None."""
     base = word.rsplit("/", 1)[-1]
     if any(c in base for c in GLOB_CHARS):
+        # '*.py' names every script; 'h*.py' or 'harness.p?' aims at these.
+        if not re.sub(r"[%s]" % re.escape(GLOB_CHARS), "", base.rsplit(".", 1)[0]):
+            return None
         return next((name for name in INSTALL_SCRIPTS if fnmatch.fnmatch(name, base)), None)
     return base if base in INSTALL_SCRIPTS else None
 
 
-def engine_findings(prog, words, written):
+def is_runtime(word):
+    name = program([word])
+    return name in INTERPRETERS or bool(RUNTIMES.fullmatch(name))
+
+
+def stdin_script(words, start):
+    """Whether the runtime at words[start] reads its script from stdin: an operand -, /dev/stdin or /dev/fd/N, or no
+    script operand at all (-c and -m name their code)."""
+    i = start + 1
+    while i < len(words):
+        word = words[i]
+        if word in ("-c", "-m"):
+            return False
+        if word in ("-X", "-W"):
+            i += 2
+            continue
+        if word == "-" or not word.startswith("-"):
+            return word == "-" or bool(STDIN_FILE.search(word))
+        i += 1
+    return True
+
+
+def engine_findings(prog, words, written, segment="", fed=False):
     """Why a command that starts, copies or aliases the harness engine is refused to agents. The engine runs from its
-    own path, where the hooks read its command; a copy, an alias, a module run or a script word from an expansion
-    would run any command unread."""
+    own path, where the hooks read its command; a copy, an alias, a module run, a script word from an expansion, its
+    source on an interpreter's stdin or a command built from input (xargs, find -exec) would run any command unread.
+    fed: the segment reads a pipe from a command that names the engine."""
+    runtimes = [i for i, w in enumerate(words) if is_runtime(w)]
+    names_engine = any(engine_script(w) for w in words)
+    builds = prog in ("xargs", "parallel") or (prog == "find" and any(w in FIND_EXEC for w in words))
+    if builds and runtimes:
+        operand = next((w for w in words[runtimes[0] + 1:] if not w.startswith("-")), "")
+        if names_engine or fed or ((not operand or operand == "{}" or operand in words[:runtimes[0]])
+                                   and any(w in USER_COMMANDS + ("pin",) for w in words[runtimes[0] + 1:])):
+            return ["It runs a script with arguments built from input or a file search (xargs, parallel, find -exec), "
+                    "which the hooks can't read; run the harness engine by its path, with the command written out."]
+    if runtimes and runtimes[0] == 0 and stdin_script(words, 0) and (fed or ENGINE_CODE.search(segment)):
+        return ["It feeds the harness engine to an interpreter on stdin, which the hooks can't read; run harness.py by "
+                "its path."]
     script = next((i for i, w in enumerate(words) if engine_script(w)), None)
     run = script is not None and (script == 0 or any(w in INTERPRETERS or RUNTIMES.fullmatch(w)
                                                      for w in map(program, ([w] for w in words[:script]))))
@@ -1691,7 +1730,9 @@ def shell_findings(command, cwd=None, depth=0):
         if prog == "cd" and len(words) > 1:
             cwd = os.path.join(cwd or str(ROOT), os.path.expanduser(words[1]))
             continue
-        found.extend(engine_findings(prog, words, written_paths(segment, words)))
+        fed = index > 0 and segments[index - 1][1] == "|" and any(
+            engine_script(w) for w in shell_words(segments[index - 1][0])[1])
+        found.extend(engine_findings(prog, words, written_paths(segment, words), segment, fed))
         for path in written_paths(segment, words):
             label = install_path(path, cwd)
             if label:
