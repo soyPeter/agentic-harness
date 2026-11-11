@@ -62,3 +62,33 @@ The deliverer already never merges; this ADR locks that as policy, not only as c
   from `report` lift/candidates.
 - Seeded project ADR-001 ("Adopt the agentic harness") is unrelated numbering: product ADRs live
   under `docs/adr/` in this repository.
+
+## Amendment: follow-up (c), eval and replay fixtures (added 2026-11-11)
+Added on 2026-11-11. Status stays Accepted; the decision above is unchanged.
+
+**How (c) was decided.** The report's candidates were plain strings, and a refusal logged only its reason, so no past
+refusal could be replayed. Follow-up (c) was cut down to the deterministic gates: their answer depends only on the
+hook input and the rules, so a fixture can be replayed exactly, with no model calls. The rest of policy replay and
+shadow evaluation stays with [ADR-007](ADR-007-evidence-closed-loop.md) (Proposed), which asks for resettable
+fixtures, a pinned harness and an evaluator whose expected outcomes are independent of the builder. In v1 the fixtures
+are the user's: agents only draft them.
+
+**What v1 covers.**
+- Capture: a refused `pre-tool-use` call, and a bounded sample of allowed ones per gate, is kept in `.git/harness/`
+  with its input redacted and size-capped, its settings fingerprint, and whether its outcome is state-free or
+  state-dependent, with why.
+- Candidates: `harness.py report --json` gives each one an id, kind, reason, tasks and the captured inputs behind it.
+- Fixtures: `harness.py eval export` drafts reviewable fixtures into `backbone/proposals/evals/`. `backbone/evals/` is
+  user-owned like `tools.conf`: the hooks refuse agents' writes to it, and verify refuses a commit that changes it
+  unless the user makes it (`HARNESS_VERIFY=off`, or the `harness-change-approved` label in CI).
+- Replay: `harness.py eval replay [--engine <harness.py>]` runs the state-free fixtures through `hook pre-tool-use` in a
+  throwaway checkout, and exits non-zero on a hole (a refusal now allowed), a false block (an allowed call now
+  blocked), a changed refusal reason or an error. Judge-fail and escalation candidates are exported as eval prompts and
+  not replayed.
+
+**Left for later.**
+- Running the replay in CI, in the self-test and in `harness-verify` with the base branch's engine against the pull
+  request's, so a rule or engine change that reopens a past refusal or blocks a past allow shows on the pull request.
+  Today it runs locally with `--engine`.
+- Replaying state-dependent refusals (task, spec, verdict and skill state).
+- Model-based replay, eval prompts and shadow candidates, per ADR-007.
