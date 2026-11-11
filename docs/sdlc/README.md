@@ -37,8 +37,9 @@ point where the harness waits for a human.
   - A failure class seen twice opens a proposal.
   - The report points at missing rules or skills.
 
-  Tracing a production incident back to its pull request and spec is drawn dashed: a proposal, not an ADR here yet.
-  So is triage before Define (deduplicate, set an owner, pick a lane or park), which the diagram doesn't draw.
+  Tracing a production incident back to its pull request and spec is drawn dashed: it is proposed in
+  [ADR-007](../adr/ADR-007-evidence-closed-loop.md), not built. So is triage before Define (deduplicate, set an owner,
+  pick a lane or park), which the diagram doesn't draw.
 
 ## 2. One task, request by request
 

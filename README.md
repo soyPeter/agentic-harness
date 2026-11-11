@@ -32,7 +32,8 @@ only).
   protection (`harness.py ci-protect` or `enroll.sh --protect`).
 - **What fails becomes the next task.** Red CI becomes a fix task on the same pull request, escalations wait for a
   person, a failure class seen twice opens a proposal, and the report points at missing rules or skills. Tracing a
-  production incident back to its pull request and spec is proposed, not built.
+  production incident back to its pull request and spec is proposed in
+  [ADR-007](docs/adr/ADR-007-evidence-closed-loop.md), not built.
 
 ## One task, request by request
 
@@ -157,8 +158,11 @@ pass stale.
 | [ADR-003](docs/adr/ADR-003-sandbox-backends.md) (Proposed) | Sandbox backends and the sandbox evidence in the receipt |
 | [ADR-004](docs/adr/ADR-004-traceability-export.md) (Proposed) | Traceability export: ReqIF, `needs.json` and an HTML matrix |
 | [ADR-005](docs/adr/ADR-005-verdict-attestations.md) (Proposed) | Signed verdict attestations in CI |
+| [ADR-006](docs/adr/ADR-006-external-agent-resource-admission.md) (Proposed) | Admit third-party agent setup resources explicitly |
+| [ADR-007](docs/adr/ADR-007-evidence-closed-loop.md) (Proposed) | The evidence-driven closed loop: triage, requirement-change impact, incident attribution |
 | [Agent-SDLC landscape](docs/research/2026-11-agent-sdlc-landscape.md) | Research: compliance and traceability tools, agent sandboxes; where ADR-003 to ADR-005 came from |
-| [Design challenge and onboarding plan](docs/research/2026-11-design-challenge-agent-onboarding-plan.md) | A proposed plan, not authorized: qualify the design challenge and agent-readable onboarding |
+| [Orca self-rollout plan](docs/research/2026-11-orca-self-rollout-plan.md) (Accepted) | Run the open plans and ADR follow-ups on this repository through Orca |
+| Proposed plans in [docs/research](docs/research/) | Not accepted or implemented: [design challenge and onboarding](docs/research/2026-11-design-challenge-agent-onboarding-plan.md), [delegation contracts](docs/research/2026-11-delegation-contracts-qualification-plan.md), [task dependency gate](docs/research/2026-11-task-dependency-gate-plan.md), [reviewer-first PR bodies](docs/research/2026-11-pr-body-reviewer-opener-plan.md), [indeterminate side-effect outcome](docs/research/2026-11-indeterminate-side-effect-outcome-plan.md), [model-change instruction review](docs/research/2026-11-model-change-instruction-review-plan.md), [structural skeleton in the spec](docs/research/2026-11-structural-skeleton-spec-plan.md) (parked) |
 | [CHANGELOG.md](CHANGELOG.md) | What each release changed |
 
 ## Stack-neutral by design
