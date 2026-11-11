@@ -352,6 +352,22 @@ class Admission(unittest.TestCase):
                 result = self.project.hook("pre-tool-use", "Bash", {"command": command})
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_an_admissions_file_the_harness_cannot_read_blocks_every_project_skill_bundle(self):
+        self.project.admit()
+        self.project.write(".claude/skills/plain/SKILL.md", SKILL_TEXT.replace("vendor-sdk", "plain"))
+        self.project.append("backbone/admissions.conf", "\n[revoke SHA256:%s]\nreason = leaks keys\n"
+                            % self.project.digest().split(":", 1)[1])
+
+        status = self.project.harness("admission")
+        self.assertEqual(status.returncode, 1, status.stdout)
+        self.assertIn("line", status.stdout)
+        for skill in ("vendor-sdk", "plain"):
+            with self.subTest(skill=skill):
+                self.assertRefused(self.project.invoke(skill), "can't read")
+        self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": "sh %s" % SCRIPT}), "can't read")
+        self.assertRefused(self.project.edit_vendor_code(), "can't read")
+        self.assertEqual(self.project.invoke("adr-writing").returncode, 0)
+
     def test_a_revoked_bundle_copied_under_another_name_is_blocked(self):
         self.project.admit()
         self.project.revoke(self.project.digest())

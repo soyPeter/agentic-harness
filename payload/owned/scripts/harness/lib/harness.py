@@ -4226,14 +4226,20 @@ REVOCATION_SOURCES = (":", "HEAD:", "main:", "master:", "origin/main:", "origin/
 
 
 def admissions():
-    """(records, revocations, errors): the records the working copy holds, and the revocations of the working copy,
-    the index, HEAD and the default branch together."""
+    """(records, revocations, errors): the records the working copy holds, the revocations of the working copy,
+    the index, HEAD and the default branch together, and the lines the working, staged or committed copy has that
+    the harness can't read (one of them may be a revocation)."""
     if "parsed" not in ADMISSIONS_CACHE:
-        records, revocations, errors = admission.parse(read(ADMISSIONS_FILE))
+        text = read(ADMISSIONS_FILE)
+        records, revocations, errors = admission.parse(text)
         name = ADMISSIONS_FILE.relative_to(ROOT).as_posix()
-        for text in git_blobs([source + name for source in REVOCATION_SOURCES]).values():
-            for digest, fields in admission.parse(text or "")[1].items():
+        for source, other in git_blobs([source + name for source in REVOCATION_SOURCES]).items():
+            parsed = admission.parse(other or "")
+            for digest, fields in parsed[1].items():
                 revocations.setdefault(digest, fields)
+            if source.startswith((":", "HEAD:")) and other is not None and other != text:
+                errors += ["%s (%s copy)" % (e, "staged" if source.startswith(":") else "committed")
+                           for e in parsed[2]]
         ADMISSIONS_CACHE["parsed"] = records, revocations, errors
     return ADMISSIONS_CACHE["parsed"]
 
@@ -4282,7 +4288,7 @@ def revoked_message(digest, revocations):
 def admission_problems(name, fields):
     """Why the admitted bundle name isn't guidance now; empty when it is."""
     _, revocations, _ = admissions()
-    problems = list(fields["problems"])
+    problems = list(fields["problems"]) + list(filter(None, [unreadable_admissions("")]))
     decision = fields.get("decision") or ""
     if admission.ADR_REF.match(decision):
         adr = adr_file(decision)
@@ -4372,12 +4378,25 @@ def skill_targets(name):
     return targets
 
 
+def core_skill(folder):
+    """Whether the skill folder is one of the harness's core skills, which a broken admissions file doesn't block."""
+    return folder is None or (folder + "/SKILL.md") in lock().get("files", {})
+
+
+def unreadable_admissions(folder):
+    _, _, errors = admissions()
+    if not errors or core_skill(folder):
+        return None
+    return ("backbone/admissions.conf has lines the harness can't read (%s), and any of them may revoke this bundle: "
+            "no project skill bundle is guidance until the user fixes them" % "; ".join(errors[:3]))
+
+
 def bundle_problem(folder, names):
     """Why the skill bundle at folder (relative to the root), known by names, isn't guidance now (ADR-006), or None."""
-    records, revocations, _ = admissions()
-    if not (records or revocations):
+    records, revocations, errors = admissions()
+    if not (records or revocations or errors):
         return None
-    problems = []
+    problems = list(filter(None, [unreadable_admissions(folder)]))
     for record, fields in sorted(records.items()):
         bundle = admission.bundle_path(fields.get("path")) or ""
         if record.lower() in names or (bundle and (folder == bundle or folder.startswith(bundle + "/")
@@ -4488,6 +4507,9 @@ def true_case(path):
 def blocked_bundle_of(name):
     """(the bundle that the repository path name is in, why it isn't usable now) or None."""
     records, revocations, _ = admissions()
+    folder = skill_folder(name)
+    if folder and unreadable_admissions(folder):
+        return folder, unreadable_admissions(folder)
     for record, fields in sorted(records.items()):
         bundle = admission.bundle_path(fields.get("path"))
         if bundle and (name == bundle or name.startswith(bundle + "/")):
@@ -4503,7 +4525,9 @@ def blocked_bundle_of(name):
 
 
 def any_blocked_bundle():
-    records, revocations, _ = admissions()
+    records, revocations, errors = admissions()
+    if errors:
+        return True
     if any(admission_problems(record, fields) for record, fields in records.items()):
         return True
     return bool(revocations) and any(folder and bundle_digest(folder) in revocations
@@ -4513,8 +4537,8 @@ def any_blocked_bundle():
 def blocked_bundle_runs(segment, words, cwd, piped=()):
     """A command that runs a file of a bundle that isn't usable now (changed since its review, or revoked), or runs
     code the harness can't read while such a bundle is in the repository."""
-    records, revocations, _ = admissions()
-    if not (records or revocations) or not words:
+    records, revocations, errors = admissions()
+    if not (records or revocations or errors) or not words:
         return []
     names, unreadable = code_files(segment, words, piped)
     root = os.path.realpath(str(ROOT))
