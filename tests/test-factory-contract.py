@@ -240,6 +240,82 @@ class Outward(unittest.TestCase):
                          [("issue-create", "harness", "5.1", "https://github.com/o/r/issues/12")])
 
 
+# The commands only the user, CI, the factory or an Orca precheck runs, with the arguments they need.
+USER_ONLY = ("run --only 1.1", "linear import DIS-1 --task 9.1", "linear receipt 7.1", "intake request.json",
+             "delivery-record 7.1 report.json", "snapshot", "orca --pr", "orca-nightly", "ci-judge --range a..b",
+             "ci-protect", "pin 0.31.0")
+# Every way an agent could start the engine with one of them: {c} is the command.
+SPELLINGS = (
+    "python3 scripts/harness/lib/harness.py {c}",
+    "python3 -B -I scripts/harness/lib/harness.py {c}",
+    "python3 -u -X dev scripts/harness/lib/harness.py {c}",
+    "python3.12 scripts/harness/lib/harness.py {c}",
+    "./scripts/harness/lib/harness.py {c}",
+    "env python3 scripts/harness/lib/harness.py {c}",
+    "timeout 60 python3 scripts/harness/lib/harness.py {c}",
+    "python3 /opt/engines/0.30.0/plugin/launcher.py {c}",
+    "python3 -m runpy scripts/harness/lib/harness.py {c}",
+    "cd scripts/harness/lib && python3 -m harness {c}",
+    "PYTHONPATH=scripts/harness/lib python3 -m harness {c}",
+    "python3 scripts/harness/lib/harness.p? {c}",
+    "H=scripts/harness/lib/harness.py; python3 $H {c}",
+    "h() {{ python3 scripts/harness/lib/harness.py \"$@\"; }}; h {c}",
+    "sh -c 'python3 -B scripts/harness/lib/harness.py {c}'",
+    "eval \"python3 scripts/harness/lib/harness.py {c}\"",
+)
+# Running the engine through code the hooks don't read, or from a copy, whatever the command.
+CODE_AND_COPIES = (
+    "python3 -c \"import runpy; runpy.run_path('scripts/harness/lib/harness.py', run_name='__main__')\" intake r.json",
+    "python3 - <<'EOF'\nimport sys, runpy\nsys.argv = ['h', 'intake', 'r.json']\n"
+    "runpy.run_path('scripts/harness/lib/harness.py', run_name='__main__')\nEOF",
+    "python3 -c 'import sys; sys.path.insert(0, \"scripts/harness/lib\"); import harness'",
+    "cp scripts/harness/lib/harness.py /tmp/h.py",
+    "cat scripts/harness/lib/harness.py > h.py",
+    "git show HEAD:scripts/harness/lib/harness.py > /tmp/h.py",
+    "ln -s $PWD/scripts/harness/lib/harness.py tool.py",
+    "alias h='python3 scripts/harness/lib/harness.py'",
+)
+ALLOWED = ("python3 scripts/harness/lib/harness.py next 1.1 --json", "python3 -B scripts/harness/lib/harness.py contract",
+           "python3 scripts/harness/lib/harness.py escalate 1.1 --reason x",
+           "python3 scripts/harness/lib/harness.py delivery-plan 7.1 --json",
+           "python3 scripts/harness/lib/harness.py linear import DIS-1 --task 9.1 --dry-run",
+           "python3 scripts/harness/lib/harness.py orca --pr --dry-run",
+           "grep -n 'def intake' scripts/harness/lib/harness.py", "git diff -- scripts/harness/lib/harness.py",
+           "python3 scripts/harness/lib/harness.py next 1.1 --json > /tmp/next.json",
+           "python3 scripts/harness/lib/harness.py state --json 2>/dev/null | head -5",
+           "npm run build", "make run", "docker run --rm alpine true")
+
+
+class UserOnlyCommands(unittest.TestCase):
+    """The user-only commands are refused to agents however the engine is started."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.p = Project("factory user-only ")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.p.cleanup()
+
+    def test_every_spelling_of_a_user_only_command_is_refused(self):
+        for spelling in SPELLINGS:
+            for command in USER_ONLY:
+                with self.subTest(command=spelling.format(c=command)):
+                    self.assertEqual(self.p.bash(spelling.format(c=command), "implementer").returncode, 2)
+
+    def test_the_engine_run_through_code_or_from_a_copy_is_refused(self):
+        for command in CODE_AND_COPIES:
+            with self.subTest(command=command):
+                self.assertEqual(self.p.bash(command, "implementer").returncode, 2)
+
+    def test_the_agents_own_commands_and_reads_of_the_engine_are_allowed(self):
+        for command in ALLOWED:
+            with self.subTest(command=command):
+                answer = self.p.bash(command, "implementer")
+
+                self.assertEqual(answer.returncode, 0, answer.stderr)
+
+
 class TaskLock(unittest.TestCase):
     """Two lanes on one task: `run --only` holds a lock in the shared git directory while it drives the task."""
 

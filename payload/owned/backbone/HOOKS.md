@@ -357,6 +357,8 @@ The shell checks can't see what a script file does. The harness keeps a snapshot
 
 Restore a file with `git checkout -- <file>`.
 
+**User-only commands.** `run`, `orca`, `orca-nightly`, `snapshot`, `linear`, `intake`, `delivery-record`, `ci-judge`, `ci-protect` and `pin` are refused to agents however the engine is started: with interpreter flags (`python3 -B -I`), by its path or a glob, through the thin launcher (`launcher.py`), as a module (`-m harness`, `-m runpy`), with the script or the command coming from an expansion (`$H`, a shell function's `"$@"`), or behind `env`, `timeout`, `sh -c` or `eval`. Code that runs the engine (`python3 -c` or a heredoc naming `harness.py` or `runpy`) is refused whatever the command, and so is copying, linking or aliasing the engine. Their dry runs (`orca`, `orca-nightly`, `linear`) stay allowed. The shell checks read what is written; a script an agent writes and runs is beyond them. So `intake` and `linear import` leave the snapshot alone: run by an agent anyway, the spec and task line they write show as out-of-band changes.
+
 ## Event log, trace and report
 
 Blocks, verify refusals, verdicts, approvals, escalations and run attempts are appended to `.git/harness/events.jsonl`, and so is what a task's agents did:

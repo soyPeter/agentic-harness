@@ -240,6 +240,28 @@ class Intake(unittest.TestCase):
         self.assertIn("backbone/specs/%s.md: its '## Source' section changed" % task, refused.stdout)
         self.assertNotIn("'## Source' section", allowed.stdout)
 
+    def test_an_agent_that_runs_intake_anyway_is_caught_as_tampering(self):
+        p = Project("intake tamper ", HARNESS_AUTONOMY="autonomous")
+        try:
+            p.add_task("3.1", "Being built", marker="WIP")
+            p.commit("chore: task in progress")
+            command = "python3 tool.py"
+            p.hook("session-start", {"session_id": "s1"})
+            started = p.hook("pre-tool-use", {"session_id": "s1", "agent_id": "a1", "agent_type": "implementer",
+                                              "tool_name": "Bash", "tool_input": {"command": command}})
+            self.intake(request(dedupe_key=self.key("tamper"), sender_verdict="untrusted"), project=p)
+            p.hook("post-tool-use", {"session_id": "s1", "agent_id": "a1", "agent_type": "implementer",
+                                     "tool_name": "Bash", "tool_input": {"command": command}})
+            tamper = p.events("tamper")
+            blocked = p.json("next", "3.1", "--json")["step"]
+        finally:
+            p.cleanup()
+
+        self.assertEqual(started.returncode, 0, started.stderr)
+        self.assertEqual(len(tamper), 1)
+        self.assertIn("backbone/3-TASKS.md", tamper[0]["files"])
+        self.assertEqual(blocked, "blocked")
+
     def test_agents_may_not_run_intake(self):
         answer = self.p.bash("python3 scripts/harness/lib/harness.py intake request.json", "implementer")
 

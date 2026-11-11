@@ -1585,9 +1585,65 @@ def git_findings(words):
 
 
 def code_findings(code, label):
+    found = []
     if PROTECTED_MENTION.search(code) and CODE_WRITES.search(code):
-        return ["%s writes to harness-protected paths (backbone/, scripts/harness/, .claude/, git hooks, "
-                "harness-attest.pub); use the Write/Edit tools so the gates see the change." % label]
+        found.append("%s writes to harness-protected paths (backbone/, scripts/harness/, .claude/, git hooks, "
+                     "harness-attest.pub); use the Write/Edit tools so the gates see the change." % label)
+    if ENGINE_CODE.search(code):
+        found.append("%s runs the harness engine from code the hooks don't read; run harness.py itself, with the "
+                     "commands agents may run." % label)
+    return found
+
+
+# The commands only the user, CI, an agent factory or an Orca automation's precheck runs. Their dry runs (where they
+# have one) change nothing.
+USER_COMMANDS = ("run", "orca", "orca-nightly", "snapshot", "linear", "intake", "delivery-record", "ci-judge",
+                 "ci-protect")
+PLANNING_COMMANDS = ("orca", "orca-nightly", "linear")
+ENGINE_MODULES = ("harness", "launcher", "thin")
+ENGINE_CODE = re.compile(r"\b(?:harness|launcher|thin)\.py\b|\brunpy\b|\b(?:import|from)\s+(?:harness|launcher|thin)\b")
+USER_COMMAND_REFUSAL = ("harness.py %s is for the user, CI, an agent factory or an Orca automation's precheck, not "
+                        "agents, however the engine is started: run, orca, orca-nightly, snapshot, linear, intake, "
+                        "delivery-record, ci-judge, ci-protect and pin are theirs.")
+
+
+def engine_script(word):
+    """The harness script (harness.py, launcher.py, thin.py) word names, a glob included, or None."""
+    base = word.rsplit("/", 1)[-1]
+    if any(c in base for c in GLOB_CHARS):
+        return next((name for name in INSTALL_SCRIPTS if fnmatch.fnmatch(name, base)), None)
+    return base if base in INSTALL_SCRIPTS else None
+
+
+def engine_findings(prog, words, written):
+    """Why a command that starts, copies or aliases the harness engine is refused to agents. The engine runs from its
+    own path, where the hooks read its command; a copy, an alias, a module run or a script word from an expansion
+    would run any command unread."""
+    script = next((i for i, w in enumerate(words) if engine_script(w)), None)
+    run = script is not None and (script == 0 or any(w in INTERPRETERS or RUNTIMES.fullmatch(w)
+                                                     for w in map(program, ([w] for w in words[:script]))))
+    if script is not None and (prog in COPY_PROGRAMS or prog == "alias" or (written and not run)):
+        return ["It copies, links or aliases the harness engine (%s); agents run it where it is, so the hooks read "
+                "its command." % engine_script(words[script])]
+    if script is None and "-m" in words[:-1] and words[words.index("-m") + 1] in ENGINE_MODULES + ("runpy",):
+        script = words.index("-m") + 1
+    if script is None:
+        runtime = prog in INTERPRETERS or RUNTIMES.fullmatch(prog)
+        operand = next((w for w in words[1:] if not w.startswith("-")), "") if runtime else ""
+        if not EXPANSION.search(operand):
+            return []
+        script = words.index(operand)
+    command = next((w for w in words[script + 1:] if not w.startswith("-")), "")
+    if command == "pin":
+        return ["pin moves the engine release this project pins, and with it every gate; only the user does that, in "
+                "their own terminal."]
+    if EXPANSION.search(words[script]) and any(w in USER_COMMANDS for w in words[script + 1:]):
+        return [USER_COMMAND_REFUSAL % "<expansion>"]
+    if EXPANSION.search(command):
+        return ["It runs the harness engine with a command from an expansion ($... or `...`), which the hooks can't "
+                "read; write the command out."]
+    if command in USER_COMMANDS and not (command in PLANNING_COMMANDS and "--dry-run" in words):
+        return [USER_COMMAND_REFUSAL % command]
     return []
 
 
@@ -1606,10 +1662,7 @@ def shell_findings(command, cwd=None, depth=0):
         if prog == "cd" and len(words) > 1:
             cwd = os.path.join(cwd or str(ROOT), os.path.expanduser(words[1]))
             continue
-        script = next((i for i, w in enumerate(words[:4]) if w.rsplit("/", 1)[-1] in INSTALL_SCRIPTS), None)
-        if script is not None and words[script + 1:script + 2] == ["pin"]:
-            found.append("pin moves the engine release this project pins, and with it every gate; only the user does "
-                         "that, in their own terminal.")
+        found.extend(engine_findings(prog, words, written_paths(segment, words)))
         for path in written_paths(segment, words):
             label = install_path(path, cwd)
             if label:
@@ -1634,16 +1687,7 @@ def shell_findings(command, cwd=None, depth=0):
                 found.extend(shell_findings(words[words.index("-c") + 1], cwd, depth + 1))
         elif prog == "eval" and depth < 3:
             found.extend(shell_findings(" ".join(words[1:]), cwd, depth + 1))
-        elif prog in INTERPRETERS:
-            command = next((w for w in words[2:4] if w in ("run", "ci-judge", "ci-protect", "orca", "orca-nightly",
-                                                         "snapshot", "linear", "intake", "delivery-record")),
-                           None)
-            # these dry runs change nothing
-            planning = command in ("orca", "orca-nightly", "linear") and "--dry-run" in words
-            if any(w.endswith("harness.py") for w in words[1:3]) and command and not planning:
-                found.append("harness.py run, orca, orca-nightly, snapshot, linear, intake, delivery-record, ci-judge "
-                             "and ci-protect are for the user, CI, an agent factory or an Orca automation's precheck, "
-                             "not agents.")
+        elif prog in INTERPRETERS or RUNTIMES.fullmatch(prog):
             flag = next((f for f in ("-c", "-e", "-pe", "-ne") if f in words), None)
             if flag and words.index(flag) + 1 < len(words):
                 found.extend(code_findings(words[words.index(flag) + 1], "That %s one-liner" % prog))
@@ -1657,7 +1701,7 @@ def shell_findings(command, cwd=None, depth=0):
         prog = program(words)
         if prog in SHELLS and depth < 3:
             found.extend(shell_findings(body, cwd, depth + 1))
-        elif prog in INTERPRETERS:
+        elif prog in INTERPRETERS or RUNTIMES.fullmatch(prog):
             found.extend(code_findings(body, "That %s script" % prog))
         elif any(client in opening for client in SQL_CLIENTS) and DELETE_ALL.search(body):
             found.append("DELETE without a WHERE clause removes every row.")
@@ -2205,8 +2249,9 @@ def propose(cls):
     return path
 
 
-def escalate(task, kind, reason, needed=None, cls=None):
-    """Park task for the user: a BLOCKED note on its line (out of [WIP]) and an entry in escalations.md."""
+def escalate(task, kind, reason, needed=None, cls=None, refresh=True):
+    """Park task for the user: a BLOCKED note on its line (out of [WIP]) and an entry in escalations.md. A user-only
+    command passes refresh=False: run by an agent anyway, its writes must still show as out-of-band changes."""
     cls = cls if cls in FAILURE_CLASSES else failure_class(kind, reason)
     stamp = time.strftime("%Y-%m-%d %H:%M")
     text = read(TASKS)
@@ -2228,7 +2273,8 @@ def escalate(task, kind, reason, needed=None, cls=None):
         handle.write(entry)
     if propose(cls):
         log_event("proposal", failure_class=cls)
-    snapshot_refresh()
+    if refresh:
+        snapshot_refresh()
     issue = None
     if conf()["HARNESS_ESCALATE_GH"] == "on" and shutil.which("gh"):
         result = subprocess.run(["gh", "issue", "create", "--title", "Harness escalation: task %s: %s" % (task, kind),
@@ -7692,7 +7738,7 @@ def linear_import(issue, task, light, dry_run, sender=None, verdict=None):
             escalate(task, "intake", "the ticket came from an untrusted sender (%s via linear): a person reads it "
                      "before any work" % source_value(sender or creator.get("name") or "unknown"),
                      "a person reviews %s; nothing builds until a person approves the spec (Approved-by:)"
-                     % spec_rel(task), "permission_denied")
+                     % spec_rel(task), "permission_denied", refresh=False)
     return 0
 
 
@@ -7937,8 +7983,7 @@ def intake(data):
             escalate(task, "intake", "the request came from an untrusted sender (%s via %s): a person reads it "
                      "before any work" % (source_value(data["sender"]), door),
                      "a person reviews %s; nothing builds until a person approves the spec (Approved-by:)"
-                     % spec_rel(task), "permission_denied")
-        snapshot_refresh()
+                     % spec_rel(task), "permission_denied", refresh=False)
         return {"contract": CONTRACT_VERSION, "task": task, "created": True, "spec": spec_rel(task),
                 "escalated": verdict != "trusted", "dedupe_key": key}
     finally:
