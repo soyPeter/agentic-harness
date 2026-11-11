@@ -49,8 +49,8 @@
 - **Agents run no program the hooks can't read.** For every agent, an interpreter or a shell reading its program
   from stdin (a pipe, a file redirect, a process substitution) is refused unless the program is a literal heredoc or
   here-string; `env -S` is read as the command it splits, `awk` may not run commands, and git may not be given one to
-  run (`git -c` or `git config` with a `!` alias, `core.sshCommand`, `core.pager`, helpers, filters). Previously and `xargs`, `parallel`
-  and `find -exec` may not run a shell, or an interpreter whose program comes from their input, nor (`xargs`,
+  run (`git -c` or `git config` with a `!` alias, `core.sshCommand`, `core.pager`, helpers, filters). `xargs`,
+  `parallel` and `find -exec` may not run a shell, or an interpreter whose program comes from their input, nor (`xargs`,
   `parallel`) a writer unless a `find` that can't reach `.git`, or `git ls-files`, feeds them. **Behaviour change:**
   `echo 'print(1)' | python3`, `echo ls | sh`, `find tests -name '*.py' -exec python3 {} \;`, `git -c core.pager=...`
   and awk's `system()` are refused; put the program in a file or a heredoc, and use `--no-pager`. Reading the
