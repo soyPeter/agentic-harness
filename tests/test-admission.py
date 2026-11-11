@@ -208,6 +208,28 @@ class Admission(unittest.TestCase):
         self.assertAdmitted()
         self.assertEqual(self.project.invoke("vendor-sdk", session="later").returncode, 0)
 
+    def test_files_git_ignores_are_not_part_of_the_bundle(self):
+        self.project.write(".gitignore", "__pycache__/\nnode_modules/\n")
+        self.project.admit()
+        reviewed = self.project.digest()
+        self.project.write(BUNDLE + "/scripts/__pycache__/setup.cpython-314.pyc", "cache")
+        self.project.write(BUNDLE + "/node_modules/dep/index.js", "module.exports = 1\n")
+
+        self.assertEqual(self.project.digest(), reviewed)
+        self.assertAdmitted()
+        self.assertEqual(self.project.invoke("vendor-sdk").returncode, 0)
+
+        self.project.write(BUNDLE + "/extra.md", "Not reviewed.\n")
+        self.assertRefused(self.project.invoke("vendor-sdk"), "changed since its review")
+
+    def test_revoked_bytes_stay_revoked_with_ignored_files_beside_them(self):
+        self.project.write(".gitignore", "__pycache__/\n")
+        self.project.admit()
+        self.project.revoke(self.project.digest())
+        self.project.write(BUNDLE + "/scripts/__pycache__/setup.cpython-314.pyc", "cache")
+
+        self.assertRefused(self.project.invoke("vendor-sdk"), "revoked")
+
     def test_a_redirected_link_in_the_bundle_loses_admission_even_to_the_same_bytes(self):
         self.project.write(BUNDLE + "/reference-v2.md", (self.project.root / BUNDLE / "reference.md").read_text())
         link = self.project.root / BUNDLE / "standards.md"

@@ -4266,10 +4266,35 @@ def git_blobs(specs):
 
 
 def bundle_digest(rel_path):
+    """The digest of the bundle at rel_path as git sees it: its tracked files and the untracked ones git doesn't
+    ignore, so a __pycache__ or node_modules beside the reviewed files changes nothing. A bundle git lists nothing of
+    (outside a repository, or all ignored) counts every file."""
     key = "digest:" + rel_path
     if key not in ADMISSIONS_CACHE:
-        ADMISSIONS_CACHE[key] = admission.disk_digest(str(ROOT / rel_path))
+        ADMISSIONS_CACHE[key] = admission.disk_digest(str(ROOT / rel_path), bundle_files(rel_path))
     return ADMISSIONS_CACHE[key]
+
+
+def bundle_files(rel_path):
+    """The files of the folder bundle at rel_path that count, relative to it, as git sees them; None to count every
+    file."""
+    key = "files:" + rel_path
+    if key not in ADMISSIONS_CACHE:
+        listed = git("ls-files", "-c", "-o", "--exclude-standard", "-z", "--", ":(literal)" + rel_path)
+        names = sorted({n[len(rel_path) + 1:] for n in listed.split("\0") if n.startswith(rel_path + "/")})
+        ADMISSIONS_CACHE[key] = names or None
+    return ADMISSIONS_CACHE[key]
+
+
+def revoked_digest(rel_path):
+    """The revoked digest the bundle at rel_path has, as git sees it or counting every file, or None."""
+    _, revocations, _ = admissions()
+    if not revocations:
+        return None
+    key = "full:" + rel_path
+    if key not in ADMISSIONS_CACHE:
+        ADMISSIONS_CACHE[key] = admission.disk_digest(str(ROOT / rel_path))
+    return next((d for d in (bundle_digest(rel_path), ADMISSIONS_CACHE[key]) if d in revocations), None)
 
 
 def bundle_path_problem(path):
@@ -4313,11 +4338,12 @@ def admission_problems(name, fields):
     if fields.get("digest") and now != fields["digest"]:
         problems.append("%s changed since its review: it is %s now, and the record says %s. The user reviews it again "
                         "and records the new digest, or restores the reviewed bytes" % (path, now, fields["digest"]))
-    if now in revocations and now != fields.get("digest"):
-        problems.append(revoked_message(now, revocations))
+    revoked = revoked_digest(path)
+    if revoked and revoked != fields.get("digest"):
+        problems.append(revoked_message(revoked, revocations))
     full = ROOT / path
     problems.extend("not admissible: %s/%s links out of the bundle, to bytes its digest doesn't cover" % (path, link)
-                    for link in admission.links_out(str(full)))
+                    for link in admission.links_out(str(full), bundle_files(path)))
     for skill_md in sorted(full.rglob("SKILL.md")) if full.is_dir() else ([full] if full.name == "SKILL.md" else []):
         text = read(skill_md)
         for reason in admission.runs_on_load(text) + [admission.preapproves(text)]:
@@ -4402,9 +4428,9 @@ def bundle_problem(folder, names):
         if record.lower() in names or (bundle and (folder == bundle or folder.startswith(bundle + "/")
                                                    or bundle.startswith(folder + "/"))):
             problems.extend(admission_problems(record, fields))
-    now = bundle_digest(folder) if revocations else None
-    if now in revocations:
-        problems.append(revoked_message(now, revocations))
+    revoked = revoked_digest(folder)
+    if revoked:
+        problems.append(revoked_message(revoked, revocations))
     return "; ".join(sorted(set(problems), key=problems.index)) or None
 
 
@@ -4516,11 +4542,9 @@ def blocked_bundle_of(name):
             problems = admission_problems(record, fields)
             if problems:
                 return record, "it isn't admitted now (%s)" % "; ".join(problems)
-    folder = skill_folder(name)
-    if revocations and folder:
-        now = bundle_digest(folder)
-        if now in revocations:
-            return folder, revoked_message(now, revocations)
+    revoked = revoked_digest(folder) if folder else None
+    if revoked:
+        return folder, revoked_message(revoked, revocations)
     return None
 
 
@@ -4530,8 +4554,7 @@ def any_blocked_bundle():
         return True
     if any(admission_problems(record, fields) for record, fields in records.items()):
         return True
-    return bool(revocations) and any(folder and bundle_digest(folder) in revocations
-                                     for folder in skill_documents().values())
+    return bool(revocations) and any(folder and revoked_digest(folder) for folder in skill_documents().values())
 
 
 def blocked_bundle_runs(segment, words, cwd, piped=()):
@@ -4578,8 +4601,8 @@ def admission_health():
     recorded = {admission.bundle_path(f.get("path")) for f in records.values()}
     for path, folder in sorted(skill_documents().items()):
         name = rel(str(path))
-        if revocations and folder and folder not in recorded and bundle_digest(folder) in revocations:
-            issues.append(("error", "skill %s: %s" % (name, revoked_message(bundle_digest(folder), revocations))))
+        if folder and folder not in recorded and revoked_digest(folder):
+            issues.append(("error", "skill %s: %s" % (name, revoked_message(revoked_digest(folder), revocations))))
         runs = admission.runs_on_load(read(path))
         if runs:
             issues.append(("warn", "skill %s %s, so agents' Skill calls to it are refused (ADR-006)"
@@ -4659,7 +4682,10 @@ def admission_verify(before, after, changed, allow_user_changes):
 
 def admission_command(argv):
     if argv[:1] == ["digest"] and len(argv) == 2:
-        found = admission.disk_digest(os.path.abspath(argv[1]))
+        full, root = os.path.realpath(argv[1]), os.path.realpath(str(ROOT))
+        inside = full.startswith(root + os.sep) and os.path.exists(full)
+        found = (bundle_digest(os.path.relpath(full, root).replace(os.sep, "/")) if inside
+                 else admission.disk_digest(os.path.abspath(argv[1])))
         if found is None:
             sys.stderr.write("admission: nothing at %s\n" % argv[1])
             return 1

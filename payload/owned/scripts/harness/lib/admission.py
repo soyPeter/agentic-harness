@@ -113,8 +113,9 @@ def content_hash(data, link=False):
     return hashlib.sha256((b"symlink:" if link else b"") + data).hexdigest()
 
 
-def disk_entries(path):
-    """(name, hash) pairs for the bundle at path, a folder or a file; None when nothing is there."""
+def disk_entries(path, names=None):
+    """(name, hash) pairs for the bundle at path, a folder or a file; None when nothing is there. names, when given,
+    are the files of the bundle that count (as git lists them); otherwise every file under path does."""
     def entry(full, name):
         if os.path.islink(full):
             return name, content_hash(os.fsencode(os.readlink(full)), link=True)
@@ -128,6 +129,8 @@ def disk_entries(path):
         return [entry(path, os.path.basename(path))]
     if not os.path.isdir(path):
         return None
+    if names is not None:
+        return [entry(os.path.join(path, name), name) for name in names if name.rsplit("/", 1)[-1] not in SKIPPED]
     found = []
     for top, dirs, files in os.walk(path):
         for name in dirs + files:
@@ -139,14 +142,17 @@ def disk_entries(path):
     return found
 
 
-def links_out(path):
-    """The links in the bundle at path that lead out of it: the digest covers a link's target path, not the bytes
-    there, so what such a link leads to can change without changing the digest."""
+def links_out(path, names=None):
+    """The links in the bundle at path (among names, when given) that lead out of it: the digest covers a link's
+    target path, not the bytes there, so what such a link leads to can change without changing the digest."""
     if os.path.islink(path):
         return [os.path.basename(path)]
     if not os.path.isdir(path):
         return []
     root, found = os.path.realpath(path), []
+    if names is not None:
+        return [name for name in names if os.path.islink(os.path.join(path, name)) and not
+                os.path.realpath(os.path.join(path, name)).startswith(root + os.sep)]
     for top, dirs, files in os.walk(path):
         for name in dirs + files:
             full = os.path.join(top, name)
@@ -156,8 +162,8 @@ def links_out(path):
     return found
 
 
-def disk_digest(path):
-    entries = disk_entries(path)
+def disk_digest(path, names=None):
+    entries = disk_entries(path, names)
     return digest(entries) if entries is not None else None
 
 
