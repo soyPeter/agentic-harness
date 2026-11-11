@@ -366,7 +366,7 @@ What was built, and where it reads this ADR one way among several:
   of `next`, `state`, `receipt`, `escalations`, `intake` and `delivery-plan` always has, and the fields of each event
   kind, so the factory can check an engine before routing work to it; the tests pin version 1 against both the
   declaration and the answers. `escalations --json` and `v` on every event as proposed. `outward` events are logged
-  by post-tool-use once a Bash call has run, with its `result`: a push, a pull request created or edited, a label
+  by post-tool-use once a Bash call has run, with its `result` (`unknown` where the agent CLI doesn't say): a push, a pull request created or edited, a label
   created or a GitHub API write, however it is spelled, with the agent's role as `via`; and the GitHub issue, push,
   pull request and Linear comment the harness makes itself. `gh pr comment` and `ci-protect` are not covered. The
   per-task lock is an OS lock in `.git/harness/locks/`, taken by every runner path: `run` with or without `--only`
@@ -378,7 +378,8 @@ What was built, and where it reads this ADR one way among several:
   (`.git/harness/costs/task-<id>.jsonl`) holds what the task spent across runs and resumes, so the factory sets the
   same value on every run of a task. Each session is reserved before it starts, for what remains of the budget, and
   settled when it ends, so a session whose run was killed counts as all it could have spent. A ledger that can't be
-  read or written, or is corrupt, stops the task (`budget`) instead of reading as nothing. Reaching the cap escalates
+  read or written, is corrupt, or is missing while the event log shows the task ran, stops the task (`budget`)
+  instead of reading as nothing. Reaching the cap escalates
   the task (`budget`) and the run goes on with other tasks. The proxy's refusal is recognised only while a budget is
   set, as an HTTP 402 in the agent's own error report; the proxy must refuse that way (assumed). It escalates
   `budget` and stops the run, since the day's cap may refuse the next task too. The escalation's class is
@@ -394,24 +395,30 @@ What was built, and where it reads this ADR one way among several:
   a range (unless the user approves it with `--allow-user-changes`), and the analyst's instructions say to keep it.
   `linear import` trusts the ticket by default, since the user runs it; the factory passes `--sender-verdict`. The
   user-only commands (`intake`, `delivery-record`, and `run`, `linear` and the others that were refused only in one
-  spelling before) are refused to agents however the engine is started, and `intake` and `linear import` leave the
-  out-of-band snapshot alone, so if an agent runs them anyway their writes show as tampering.
+  spelling before) are refused to agents however the engine is started: interpreter flags, the launcher, a module
+  run, an expansion, a shell function, `xargs` or `find -exec`, the engine's source on stdin, code that runs it, a copy.
+  `intake` and `linear import` leave the out-of-band snapshot alone, so if an agent runs them anyway by a path the
+  shell checks miss, their writes show as tampering.
 - **4, delivery from a trusted clone.** The lane can't read the pull request's labels, so the factory passes them to
   `delivery-plan` (`--pr-labels`) and gets the labels to add and remove. `delivery-record` takes the trusted clone's
   `verify` result and refuses a report whose verified head or range isn't the task's `HEAD`, or a `delivered` one
-  whose verify failed. In external mode no agent pushes, opens or edits a pull request or creates a label, and a
-  deliverer's report isn't recorded: only `delivery-record` writes the `deliver` event `next` reads. With
-  `HARNESS_DELIVERY_KEY`, a secret the factory sets for `delivery-record` and `next` only (`run` and `orca` drop it
-  before starting sessions), records are signed and `next` counts only signed ones. `harness.py orca` was not
+  whose verify failed. In external mode every agent only reads GitHub (`gh` reads, no git push by any name), and a
+  deliverer's report isn't recorded: only `delivery-record` writes the `deliver` event `next` reads, and a record
+  counts only for its own task. With `HARNESS_DELIVERY_KEY`, a secret the factory sets for `delivery-record` and
+  `next` only (`run` and `orca` refuse to start while it is in their environment, since a session could read it from
+  its parent), records are signed and `next` counts only signed ones. `harness.py orca` was not
   otherwise adapted: it leaves such a task waiting at the deliver step and starts no deliverer.
 - **Agents write nothing in the git directory**, with the file tools or the shell, by a relative or an absolute path,
-  from the checkout or a linked worktree: the event log, the cost ledgers and the run locks live there.
+  from the checkout or a linked worktree, with `find -delete`, or through a path built from `$VAR` or `git rev-parse`:
+  the event log, the cost ledgers, the run locks and the out-of-band snapshot live there.
 
 What remains open, plainly: the lane's agents can run code the hooks don't read (a test or a script they write and
-run). Such code can still append to the event log, change the cost ledger or delete a run lock in `.git/harness/`.
-Signed delivery records (`HARNESS_DELIVERY_KEY`) keep a forged delivery from counting, the out-of-band snapshot
-catches changes to `backbone/`, and the key proxy enforces spend whatever the ledger says; without the key, `next`
-trusts every delivery record, as it trusts the deliverer's own report today.
+run). Such code can still append to the event log, change or delete the cost ledger, delete a run lock, or rewrite
+the out-of-band snapshot, all in the git directory, and so hide a change to `backbone/` from the tamper check too.
+Signed delivery records (`HARNESS_DELIVERY_KEY`) keep a forged delivery from counting, a missing ledger stops a task
+that ran before, and the key proxy enforces spend whatever the ledger says; the judge, the reviews, `harness-verify`
+in CI and the human review remain the defence for the rest. Without the key, `next` trusts every delivery record, as
+it trusts the deliverer's own report today.
 
 Not built, and why:
 
