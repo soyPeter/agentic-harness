@@ -17,8 +17,9 @@ These are the harness's own decisions. A spec that needs one of them on its `ADR
 |---|---|---|---|
 | [ADR-001](../docs/adr/ADR-001-thin-mode-plugin.md) | Thin mode plugin | Accepted | 2026-11-03 |
 | [ADR-002](../docs/adr/ADR-002-change-class-ladder.md) | Change-class ladder | Accepted | 2026-11-06 |
-| [ADR-003](../docs/adr/ADR-003-sandbox-backends.md) | Sandbox backends | Proposed | 2026-11-07 |
-| [ADR-004](../docs/adr/ADR-004-traceability-export.md) | Traceability export | Proposed | 2026-11-07 |
-| [ADR-005](../docs/adr/ADR-005-verdict-attestations.md) | Verdict attestations | Proposed | 2026-11-07, revised 2026-11-08 |
+| [ADR-003](../docs/adr/ADR-003-sandbox-backends.md) | Sandbox backends | Accepted | 2026-11-07 |
+| [ADR-004](../docs/adr/ADR-004-traceability-export.md) | Traceability export | Accepted | 2026-11-07 |
+| [ADR-005](../docs/adr/ADR-005-verdict-attestations.md) | Verdict attestations | Accepted | 2026-11-07, revised 2026-11-08 |
 | [ADR-006](../docs/adr/ADR-006-external-agent-resource-admission.md) | External agent resource admission | Proposed | 2026-11-08 |
 | [ADR-007](../docs/adr/ADR-007-evidence-closed-loop.md) | Evidence closed loop | Proposed | 2026-11-07, revised 2026-11-10 |
+| [ADR-008](../docs/adr/ADR-008-harness-inside-agent-factory.md) | Harness inside the agent factory | Proposed | 2026-11-11 |
