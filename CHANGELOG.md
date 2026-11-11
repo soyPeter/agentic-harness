@@ -63,7 +63,8 @@
   `schema=container` in autonomous mode and nothing in supervised mode; pairs you set apply in both. A task of such a class
   starts only in a session whose own sandbox has that class, and finishes only when its latest judge pass recorded one:
   `start`, `finish`, an agent's edit of `3-TASKS.md` and `verify` (pre-commit and CI, from the recorded evidence) all
-  refuse otherwise. A judge pass recorded before the evidence, an unknown isolation class or backend, and a value that
+  refuse otherwise. While it is `[WIP]`, a session without that sandbox may only read: its write and exec tool calls,
+  and tools without a contract, are refused. A judge pass recorded before the evidence, an unknown isolation class or backend, and a value that
   can't be read refuse too; the last is a doctor error. `run` skips such a task before starting a session for it
   (exit 1), and `receipt` says what the class requires and whether the judge pass met it (`sandbox_required` in
   `--json`). **Upgrading:** supervised projects see no change. In autonomous mode, schema work now has to start in,

@@ -2690,9 +2690,31 @@ def sandbox_refusal(task, evidence, doing, whose, remedy):
 def sandbox_start_problem(task):
     """Why task can't start in the sandbox this process runs in, or None. A start is checked where it happens, so CI's
     verify, which runs elsewhere, never checks it."""
-    return sandbox_refusal(task, sandbox.evidence(conf()["HARNESS_SANDBOX_BACKEND"]), "cannot start here",
+    return sandbox_refusal(task, sandbox.session_isolation(conf()["HARNESS_SANDBOX_BACKEND"]), "cannot start here",
                            "this session's sandbox", "Start it inside the .devcontainer/harness-agent/ sandbox "
                            "(harness.py run brings it up with HARNESS_SANDBOX_START=on)")
+
+
+def sandbox_work_problem(tool, tool_input):
+    """Why this session may not run tool while a [WIP] task needs a sandbox the session lacks, or None. Reads go on;
+    anything that may write or run, a tool without a contract included, waits for that sandbox. A task's own line in
+    3-TASKS.md is the start and finish gates' to judge."""
+    contract = tool_contract(tool)
+    if contract is not None and contract["class"] not in ("write", "exec"):
+        return None
+    if tool in FILE_TOOLS and canonical(rel(tool_input.get("file_path") or "")) == "backbone/3-TASKS.md":
+        return None
+    tasks = wip_task_ids()
+    if not tasks:
+        return None
+    here = sandbox.session_isolation(conf()["HARNESS_SANDBOX_BACKEND"])
+    for task in tasks:
+        refusal = sandbox_refusal(task, here, "is [WIP], so no work on it happens here", "this session's sandbox",
+                                  "Work on it only inside the .devcontainer/harness-agent/ sandbox: stop here and "
+                                  "report it")
+        if refusal:
+            return refusal
+    return None
 
 
 def sandbox_finish_problem(task, judged):
@@ -4187,6 +4209,9 @@ def hook_pre_tool_use(data):
         if mismatch:
             deny("Harness blocked this call: %s. In autonomous mode no work runs until they match; stop and report "
                  "it." % mismatch)
+    unsandboxed = sandbox_work_problem(tool, tool_input) if tool != "apply_patch" else None
+    if unsandboxed:
+        deny("Harness blocked this call: %s" % unsandboxed)
     if tool.startswith(KNOWLEDGE_TOOL_PREFIX):
         knowledge_guard(tool, tool_input)
         return
@@ -6566,7 +6591,7 @@ def run_command(argv):
     # A session could neither start nor finish such a task: skip it before paying for one. Sessions in a sandbox run
     # brings up are checked by the gates inside it.
     unsandboxed = {} if starting else {
-        task: sandbox_refusal(task, sandbox.evidence(values["HARNESS_SANDBOX_BACKEND"]), "can't run here",
+        task: sandbox_refusal(task, sandbox.session_isolation(values["HARNESS_SANDBOX_BACKEND"]), "can't run here",
                               "the sandbox its sessions would run in",
                               "Run harness.py run inside the .devcontainer/harness-agent/ sandbox, or set "
                               "HARNESS_SANDBOX_START=on")

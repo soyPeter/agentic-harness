@@ -4,6 +4,7 @@ and nothing in supervised mode; explicit pairs apply in both.
 
   where checked              which evidence                                    entry points
   start                      the sandbox the starting session runs in          start, an agent's edit of 3-TASKS.md
+  work on a [WIP] task       the sandbox the session runs in                   every write or exec tool call
   finish                     the sandbox recorded with the latest judge pass   finish, an agent's edit, verify (CI)
   run                        the sandbox its sessions would run in             run (skips the task before any session)
 
@@ -358,6 +359,58 @@ class Start(unittest.TestCase):
 
         self.assertEqual(code, 2, out)
         self.assertIn("HARNESS_SANDBOX_REQUIRE", out)
+
+
+class Work(unittest.TestCase):
+    """While a [WIP] task needs a sandbox this session doesn't have, the session may read but not write or run
+    anything: the code of that task is written where its class needs it."""
+
+    @classmethod
+    def setUpClass(cls):
+        temp = tempfile.TemporaryDirectory(prefix="sandbox gate ")
+        cls.addClassCleanup(temp.cleanup)
+        cls.project = Project(Path(temp.name).resolve() / "project")
+        cls.project.mark(TASKS["feature"], " ", "WIP")
+        cls.project.mark(TASKS["schema"], " ", "WIP")
+
+    def call(self, tool, tool_input, **settings):
+        return self.project.hook("pre-tool-use", {"agent_id": "a1", "tool_name": tool, "tool_input": tool_input},
+                                 HARNESS_SKILL_GATE="off", **settings)
+
+    def write(self, **settings):
+        return self.call("Write", {"file_path": str(self.project.root / "src/app.py"), "content": "VALUE = 2\n"},
+                         **settings)
+
+    def test_a_session_outside_the_sandbox_a_wip_task_needs_may_only_read(self):
+        required = {"HARNESS_SANDBOX_REQUIRE": "schema=container"}
+        calls = {"Write": self.write(**required), "Bash": self.call("Bash", {"command": "ls"}, **required),
+                 "an unknown tool": self.call("mcp__db__run_sql", {"query": "drop table t"}, **required)}
+        for name, (code, out) in calls.items():
+            with self.subTest(tool=name):
+                self.assertEqual(code, 2, out)
+                self.assertIn("Task 1.4 is [WIP]", out)
+                self.assertIn("at least container", out)
+        for tool, tool_input in (("Read", {"file_path": str(self.project.root / "src/app.py")}),
+                                 ("Grep", {"pattern": "VALUE"})):
+            with self.subTest(tool=tool):
+                self.assertEqual(self.call(tool, tool_input, **required)[0], 0)
+
+    def test_a_task_line_goes_to_the_start_and_finish_gates_instead(self):
+        line = "- [ ] **Task 1.1: Item**"
+        code, out = self.call("Edit", {"file_path": str(self.project.root / "backbone/3-TASKS.md"), "old_string": line,
+                                       "new_string": line.replace("[ ]", "[WIP]")},
+                              HARNESS_SANDBOX_REQUIRE="schema=container")
+
+        self.assertNotIn("no work on it happens here", out)
+
+    def test_the_default_holds_only_autonomous_sessions_to_the_sandbox(self):
+        self.assertEqual(self.write()[0], 0)
+        self.assertEqual(self.write(HARNESS_AUTONOMY="autonomous")[0], 2)
+
+    def test_work_goes_on_when_no_wip_task_needs_more_than_this_session_has(self):
+        for requirement in ("", "feature=none", "docs=none schema=none"):
+            with self.subTest(requirement=requirement):
+                self.assertEqual(self.write(HARNESS_SANDBOX_REQUIRE=requirement)[0], 0)
 
 
 class Settings(unittest.TestCase):

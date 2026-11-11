@@ -479,6 +479,15 @@ def backend(name, **options):
     return BACKENDS[name](**options)
 
 
+def session_isolation(name):
+    """The isolation_class and isolation_reason of the sandbox this process runs in, as the named backend sees it: what
+    the gates compare, without the rest of the evidence."""
+    if name not in BACKENDS:
+        return {"isolation_class": "unknown", "isolation_reason": "HARNESS_SANDBOX_BACKEND %s is unknown" % name}
+    isolation_class, reason = isolation()
+    return {"isolation_class": isolation_class, "isolation_reason": reason}
+
+
 def evidence(name):
     """The evidence for the sandbox this process runs in, as the named backend sees it."""
     if name not in BACKENDS:

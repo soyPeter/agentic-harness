@@ -286,8 +286,10 @@ Still open after v1:
   that class (`start`, an edit of `3-TASKS.md`), and finishes only when its latest judge pass recorded one (`finish`, an
   edit, and `verify`, so the pre-commit hook and CI check the recorded evidence, never their own sandbox). It fails
   closed: a judge pass recorded before the evidence, an unknown isolation class or backend, and a setting that can't be
-  read all refuse, and the last is a doctor error. `run` skips such a task before starting a session for it, and the
-  receipt says what the class requires and whether the judge pass met it. The evidence stays a record of the sandbox;
+  read all refuse, and the last is a doctor error. While such a task is `[WIP]`, a session without the sandbox it
+  needs may read but not write or run anything (write and exec tool calls, and tools without a contract, are
+  refused), so its code isn't written outside the sandbox and then judged inside it. `run` skips such a task before
+  starting a session for it, and the receipt says what the class requires and whether the judge pass met it. The evidence stays a record of the sandbox;
   the gate is what refuses.
 - **5. `run` on the host starting the sandbox: done (2026-11-11).** With `HARNESS_SANDBOX_START=on` (user-only,
   default `off`), the `devcontainer` backend's `create` brings `.devcontainer/harness-agent/` up with the devcontainer
