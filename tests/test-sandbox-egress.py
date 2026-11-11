@@ -15,8 +15,9 @@ from inside, as the agent (Restrictions needs only docker):
 - with HARNESS_SANDBOX_START=on (HostRun), run on the host brings the sandbox up itself and runs each session in it,
   stops the session inside when it times out, and stops the containers it started.
 Restrictions runs the harness-agent image directly, with the agent's restrictions and each one left out: the sandbox is
-recorded as a container only with all of them and the published allowlist at /run/harness-egress/allowlist. Schema work,
-which needs a container by default (HARNESS_SANDBOX_REQUIRE), starts and is judged there and then finishes on the host.
+recorded as a container only with all of them and the published allowlist at /run/harness-egress/allowlist. Schema work
+that needs a container (HARNESS_SANDBOX_REQUIRE=schema=container) starts and is judged there and then finishes on the
+host.
 The containers, images and volumes a class created are removed afterwards. The harness-agent-claude-config volume,
 which every project's sandbox shares, is left alone.
 """
@@ -451,16 +452,17 @@ class Restrictions(unittest.TestCase):
 
     def test_schema_work_starts_and_is_judged_in_the_sandbox_then_finishes_on_the_host(self):
         flags, environment = self.restricted()
-        environment["HARNESS_ALLOW_PARALLEL_WIP"] = "1"
+        required = {"HARNESS_SANDBOX_REQUIRE": "schema=container"}
+        environment.update(required, HARNESS_ALLOW_PARALLEL_WIP="1")
         harness = ["python3", "-B", str(self.project / "scripts/harness/lib/harness.py")]
 
-        on_the_host = subprocess.run(harness + ["start", "7.2"], cwd=self.project, env=self.env, capture_output=True,
-                                     text=True)
+        on_the_host = subprocess.run(harness + ["start", "7.2"], cwd=self.project, env=dict(self.env, **required),
+                                     capture_output=True, text=True)
         started = self.run_in_container(flags, ["start", "7.2"], environment)
         judged = self.run_in_container(flags, ["hook", "judge-stop"], environment,
                                        input=stop_input("judge", SCHEMA_JUDGE_PASS))
-        finished = subprocess.run(harness + ["finish", "7.2"], cwd=self.project, env=self.env, capture_output=True,
-                                  text=True)
+        finished = subprocess.run(harness + ["finish", "7.2"], cwd=self.project, env=dict(self.env, **required),
+                                  capture_output=True, text=True)
 
         self.assertEqual(on_the_host.returncode, 1, on_the_host.stdout + on_the_host.stderr)
         self.assertIn("at least container", on_the_host.stdout)

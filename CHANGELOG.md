@@ -57,17 +57,20 @@
   check; `ThinSandbox` in `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`) brings a thin project's sandbox up for real.
   **Upgrading:** a thin project gets the sandbox with its next `pin`; rebuild the container after it.
 
-- **Schema work needs the sandbox (ADR-003 follow-up 4).** A new user-only setting, `HARNESS_SANDBOX_REQUIRE`
-  (default `schema=container`), names the isolation class each Change-Class needs, as space-separated
-  `<class>=<isolation class>` pairs; a pair also covers the classes above it on the ladder. A task of such a class
+- **Unattended schema work needs the sandbox (ADR-003 follow-up 4).** A new user-only setting,
+  `HARNESS_SANDBOX_REQUIRE`, names the isolation class each Change-Class needs, as space-separated
+  `<class>=<isolation class>` pairs; a pair also covers the classes above it on the ladder. The default, `auto`, is
+  `schema=container` in autonomous mode and nothing in supervised mode; pairs you set apply in both. A task of such a class
   starts only in a session whose own sandbox has that class, and finishes only when its latest judge pass recorded one:
   `start`, `finish`, an agent's edit of `3-TASKS.md` and `verify` (pre-commit and CI, from the recorded evidence) all
   refuse otherwise. A judge pass recorded before the evidence, an unknown isolation class or backend, and a value that
   can't be read refuse too; the last is a doctor error. `run` skips such a task before starting a session for it
   (exit 1), and `receipt` says what the class requires and whether the judge pass met it (`sandbox_required` in
-  `--json`). **Upgrading:** schema work now has to run in `.devcontainer/harness-agent/`. The Orca coordinator's
-  workers run on the host and can't do it; set `HARNESS_SANDBOX_REQUIRE=""` in `backbone/harness.conf` to keep the
-  earlier behaviour. `tests/test-sandbox-gate.py` drives the gate through every entry point, with a property check of
+  `--json`). **Upgrading:** supervised projects see no change. In autonomous mode, schema work now has to start in,
+  and be judged in, `.devcontainer/harness-agent/`; a schema task judged on the host before the upgrade needs a judge
+  pass in the sandbox to finish, and the Orca coordinator's workers, which run on the host, can't do schema work. Set
+  `HARNESS_SANDBOX_REQUIRE=""` in `backbone/harness.conf` to keep the earlier behaviour, or `schema=container` to ask
+  for the sandbox in supervised mode too. `tests/test-sandbox-gate.py` drives the gate through every entry point, with a property check of
   the ladder; `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`) starts and judges schema work in the real image and
   finishes it on the host.
 

@@ -351,7 +351,7 @@ DEFAULTS = {
     "HARNESS_RUN_ATTEMPTS": "2",
     "HARNESS_RUN_MAX_COST": "",
     "HARNESS_SANDBOX_BACKEND": "devcontainer",
-    "HARNESS_SANDBOX_REQUIRE": "schema=container",
+    "HARNESS_SANDBOX_REQUIRE": "auto",
     "HARNESS_SANDBOX_START": "off",
     "HARNESS_CI_JUDGE_CMD": "claude -p --agent judge --dangerously-skip-permissions --output-format json",
     "HARNESS_SKILL_MAX_AGE": "180",
@@ -2658,11 +2658,19 @@ def start_problems(task):
     return None
 
 
+def sandbox_requirement():
+    """HARNESS_SANDBOX_REQUIRE as it applies here. auto, the default, holds unattended work to the sandbox: schema work
+    needs a container in autonomous mode, and nothing does in supervised mode, where a person approves each step."""
+    value = conf()["HARNESS_SANDBOX_REQUIRE"]
+    if value.strip().lower() == "auto":
+        return "schema=container" if autonomous() else ""
+    return value
+
+
 def sandbox_required(task):
     """(the isolation class task's Change-Class needs under HARNESS_SANDBOX_REQUIRE, None), or (None, why the setting
     can't be read)."""
-    return sandbox.required_isolation(conf()["HARNESS_SANDBOX_REQUIRE"], change_class(read(spec_path(task)))[0],
-                                      CHANGE_CLASSES)
+    return sandbox.required_isolation(sandbox_requirement(), change_class(read(spec_path(task)))[0], CHANGE_CLASSES)
 
 
 def sandbox_refusal(task, evidence, doing, whose, remedy):
@@ -3512,7 +3520,7 @@ def health():
     unusable = sandbox.problem(values["HARNESS_SANDBOX_BACKEND"])
     if unusable:
         issues.append(("error", unusable))
-    _, unreadable = sandbox.required_isolation(values["HARNESS_SANDBOX_REQUIRE"], CHANGE_CLASSES[0], CHANGE_CLASSES)
+    _, unreadable = sandbox.required_isolation(sandbox_requirement(), CHANGE_CLASSES[0], CHANGE_CLASSES)
     if unreadable:
         issues.append(("error", "HARNESS_SANDBOX_REQUIRE can't be read: %s; no task may start or finish until it is "
                                 "fixed" % unreadable))

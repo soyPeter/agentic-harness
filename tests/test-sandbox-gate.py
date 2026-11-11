@@ -1,5 +1,6 @@
 """The sandbox gate (follow-up 4 of the harness's ADR-003): work of a Change-Class may need a sandbox of at least some
-isolation class, set by the user in HARNESS_SANDBOX_REQUIRE (default: schema=container).
+isolation class, set by the user in HARNESS_SANDBOX_REQUIRE. The default, auto, is schema=container in autonomous mode
+and nothing in supervised mode; explicit pairs apply in both.
 
   where checked              which evidence                                    entry points
   start                      the sandbox the starting session runs in          start, an agent's edit of 3-TASKS.md
@@ -188,13 +189,13 @@ class Finish(unittest.TestCase):
     """Finishing reads the sandbox recorded with the latest judge pass."""
     # HARNESS_SANDBOX_REQUIRE        Change-Class  recorded isolation  finishes
     TABLE = (
-        (None,                           "schema",     "none",             False),
-        (None,                           "schema",     "container",        True),
-        (None,                           "schema",     "microVM",          True),
-        (None,                           "schema",     None,               False),
-        (None,                           "schema",     "unknown",          False),
-        (None,                           "feature",    "none",             True),
-        (None,                           "docs",       None,               True),
+        ("schema=container",             "schema",     "none",             False),
+        ("schema=container",             "schema",     "container",        True),
+        ("schema=container",             "schema",     "microVM",          True),
+        ("schema=container",             "schema",     None,               False),
+        ("schema=container",             "schema",     "unknown",          False),
+        ("schema=container",             "feature",    "none",             True),
+        ("schema=container",             "docs",       None,               True),
         ("",                             "schema",     "none",             True),
         ("schema=none",                  "schema",     None,               True),
         ("feature=container",            "refactor",   "none",             True),
@@ -216,11 +217,22 @@ class Finish(unittest.TestCase):
         cls.project = Project(Path(temp.name).resolve() / "project")
         cls.project.start_all_and_judge()
 
-    def finish_check(self, change_class, isolation_class, requirement):
+    def finish_check(self, change_class, isolation_class, requirement, **settings):
         task = TASKS[change_class]
         self.project.record(task, isolation_class)
-        settings = {} if requirement is None else {"HARNESS_SANDBOX_REQUIRE": requirement}
+        if requirement is not None:
+            settings["HARNESS_SANDBOX_REQUIRE"] = requirement
         return self.project.tasks_edit(task, "WIP", "x", **settings)
+
+    def test_by_default_only_autonomous_mode_needs_a_container_for_schema_work(self):
+        for autonomy, finishes in (("supervised", True), ("autonomous", False)):
+            for requirement in (None, "auto"):
+                with self.subTest(autonomy=autonomy, requirement=requirement):
+                    code, out = self.finish_check("schema", "none", requirement, HARNESS_AUTONOMY=autonomy)
+
+                    self.assertEqual(code, 0 if finishes else 2, out)
+        code, out = self.finish_check("schema", "container", None, HARNESS_AUTONOMY="autonomous")
+        self.assertEqual(code, 0, out)
 
     def test_each_class_finishes_only_with_a_judge_pass_recorded_in_the_sandbox_it_requires(self):
         for requirement, change_class, isolation_class, finishes in self.TABLE:
@@ -230,7 +242,7 @@ class Finish(unittest.TestCase):
                 self.assertEqual(code, 0 if finishes else 2, out)
 
     def test_the_refusal_names_the_class_the_isolation_it_needs_and_what_was_recorded(self):
-        code, out = self.finish_check("schema", "none", None)
+        code, out = self.finish_check("schema", "none", "schema=container")
 
         self.assertEqual(code, 2, out)
         self.assertIn("Change-Class schema", out)
@@ -239,13 +251,13 @@ class Finish(unittest.TestCase):
         self.assertIn("HARNESS_SANDBOX_REQUIRE", out)
 
     def test_a_judge_pass_without_sandbox_evidence_does_not_count_as_isolated(self):
-        code, out = self.finish_check("schema", None, None)
+        code, out = self.finish_check("schema", None, "schema=container")
 
         self.assertEqual(code, 2, out)
         self.assertIn("recorded no sandbox", out)
 
     def test_an_isolation_class_the_harness_does_not_know_does_not_count(self):
-        code, out = self.finish_check("schema", "quantum", None)
+        code, out = self.finish_check("schema", "quantum", "schema=container")
 
         self.assertEqual(code, 2, out)
         self.assertIn("quantum", out)
@@ -261,7 +273,7 @@ class Finish(unittest.TestCase):
     def test_the_finish_command_applies_the_same_gate(self):
         self.project.record(TASKS["schema"], "none")
 
-        code, out = self.project.harness("finish", TASKS["schema"])
+        code, out = self.project.harness("finish", TASKS["schema"], HARNESS_SANDBOX_REQUIRE="schema=container")
 
         self.assertEqual(code, 1, out)
         self.assertIn("at least container", out)
@@ -292,31 +304,44 @@ class Start(unittest.TestCase):
         cls.addClassCleanup(temp.cleanup)
         cls.project = Project(Path(temp.name).resolve() / "project")
 
-    def test_schema_work_does_not_start_on_the_host_by_default(self):
-        code, out = self.project.tasks_edit(TASKS["schema"], " ", "WIP")
+    def test_schema_work_does_not_start_on_the_host_in_autonomous_mode_by_default(self):
+        code, out = self.project.tasks_edit(TASKS["schema"], " ", "WIP", HARNESS_AUTONOMY="autonomous")
 
         self.assertEqual(code, 2, out)
         self.assertIn("Change-Class schema", out)
         self.assertIn("at least container", out)
         self.assertIn(".devcontainer/harness-agent/", out)
 
+    def test_schema_work_starts_on_the_host_in_supervised_mode_by_default(self):
+        code, out = self.project.tasks_edit(TASKS["schema"], " ", "WIP")
+
+        self.assertEqual(code, 0, out)
+
     def test_other_classes_start_on_the_host_by_default(self):
         for change_class in ("docs", "refactor", "feature"):
             with self.subTest(change_class=change_class):
-                code, out = self.project.tasks_edit(TASKS[change_class], " ", "WIP")
+                code, out = self.project.tasks_edit(TASKS[change_class], " ", "WIP", HARNESS_AUTONOMY="autonomous")
 
                 self.assertEqual(code, 0, out)
+
+    def test_the_user_can_ask_for_the_sandbox_in_supervised_mode_too(self):
+        self.project.set_conf(HARNESS_SANDBOX_REQUIRE="schema=container")
+        self.addCleanup(self.project.git, "checkout", "--", "backbone/harness.conf")
+
+        code, out = self.project.tasks_edit(TASKS["schema"], " ", "WIP")
+
+        self.assertEqual(code, 2, out)
 
     def test_the_user_can_lower_the_requirement(self):
         self.project.set_conf(HARNESS_SANDBOX_REQUIRE="")
         self.addCleanup(self.project.git, "checkout", "--", "backbone/harness.conf")
 
-        code, out = self.project.tasks_edit(TASKS["schema"], " ", "WIP")
+        code, out = self.project.tasks_edit(TASKS["schema"], " ", "WIP", HARNESS_AUTONOMY="autonomous")
 
         self.assertEqual(code, 0, out)
 
     def test_the_start_command_applies_the_same_gate(self):
-        code, out = self.project.harness("start", TASKS["schema"])
+        code, out = self.project.harness("start", TASKS["schema"], HARNESS_SANDBOX_REQUIRE="schema=container")
 
         self.assertEqual(code, 1, out)
         self.assertIn("at least container", out)
@@ -345,8 +370,8 @@ class Settings(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("ERROR HARNESS_SANDBOX_REQUIRE", out)
 
-    def test_doctor_accepts_the_default_and_an_empty_setting(self):
-        for requirement in (None, ""):
+    def test_doctor_accepts_the_default_auto_and_an_empty_setting(self):
+        for requirement in (None, "auto", ""):
             with self.subTest(requirement=requirement):
                 settings = {} if requirement is None else {"HARNESS_SANDBOX_REQUIRE": requirement}
                 _, out = self.project.harness("doctor", **settings)
@@ -372,7 +397,8 @@ class Verify(unittest.TestCase):
         self.project.start_all_and_judge()
 
     def verify(self):
-        return self.project.harness("verify", "--range", "%s..HEAD" % self.project.base, HARNESS_VERIFY="block")
+        return self.project.harness("verify", "--range", "%s..HEAD" % self.project.base, HARNESS_VERIFY="block",
+                                    HARNESS_SANDBOX_REQUIRE="schema=container")
 
     def test_a_schema_task_finished_with_a_judge_pass_on_the_host_fails_verify(self):
         self.project.mark(TASKS["schema"], "WIP", "x")
@@ -434,9 +460,9 @@ class Receipt(unittest.TestCase):
         cls.project.start_all_and_judge()
 
     def receipt(self, task):
-        code, text = self.project.harness("receipt", task)
+        code, text = self.project.harness("receipt", task, HARNESS_SANDBOX_REQUIRE="schema=container")
         self.assertEqual(code, 0, text)
-        code, out = self.project.harness("receipt", task, "--json")
+        code, out = self.project.harness("receipt", task, "--json", HARNESS_SANDBOX_REQUIRE="schema=container")
         self.assertEqual(code, 0, out)
         return text, json.loads(out)
 

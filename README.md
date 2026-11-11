@@ -82,7 +82,8 @@ only).
   or `risk:high` (`schema`, or `feature` with other risks). Whatever the class, a person approves every spec in
   supervised mode and merges the pull request.
 - **The sandbox each class needs** ([ADR-003](docs/adr/ADR-003-sandbox-backends.md), user-only
-  `HARNESS_SANDBOX_REQUIRE`, default `schema=container`): such work starts only in a session running in that sandbox,
+  `HARNESS_SANDBOX_REQUIRE`; the default, `auto`, asks a container for `schema` work in autonomous mode only): such
+  work starts only in a session running in that sandbox,
   and finishes only with a judge pass recorded in one, which `verify` and CI check from the recorded evidence. A
   requirement covers the classes above it too, and anything the harness can't read or doesn't know counts as no
   isolation.

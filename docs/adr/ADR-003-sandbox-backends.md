@@ -278,8 +278,10 @@ Still open after v1:
   `docker-compose.yml` name it by digest; a project that adds its toolchain then needs an image of its own published
   the same way. There is no registry for this yet, and none of it can be built or checked locally, so it waits for that
   registry and its own change. Until then `base_image_digest` covers the base only, as the evidence says.
-- **4. Gate on the evidence: done (2026-11-11).** `HARNESS_SANDBOX_REQUIRE` (user-only, default `schema=container`)
-  names the isolation class each Change-Class needs, as `<class>=<isolation class>` pairs. A pair holds for its class
+- **4. Gate on the evidence: done (2026-11-11).** `HARNESS_SANDBOX_REQUIRE` (user-only) names the isolation class
+  each Change-Class needs, as `<class>=<isolation class>` pairs. Its default, `auto`, is `schema=container` in
+  autonomous mode and nothing in supervised mode: a review found that requiring it everywhere refused schema work in
+  ordinary supervised use on the host, judged passes already recorded there and Orca's workers. A pair holds for its class
   and every class above it on ADR-002's ladder. A task of such a class starts only in a session whose own sandbox has
   that class (`start`, an edit of `3-TASKS.md`), and finishes only when its latest judge pass recorded one (`finish`, an
   edit, and `verify`, so the pre-commit hook and CI check the recorded evidence, never their own sandbox). It fails
