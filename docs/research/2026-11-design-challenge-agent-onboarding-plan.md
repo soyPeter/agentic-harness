@@ -3,8 +3,15 @@
 - **Status:** Proposed; no implementation or agent launch authorized.
 - **Date:** 2026-11-08 (Europe/Madrid).
 - **Repository:** `soyPeter/agentic-harness`.
-- **Decision links:** [ADR-002](../adr/ADR-002-change-class-ladder.md), [evidence closed-loop proposal](../adr/ADR-003-evidence-closed-loop.md), [Proposed external-resource admission ADR](../adr/ADR-006-external-agent-resource-admission.md).
+- **Decision links:** [ADR-002](../adr/ADR-002-change-class-ladder.md), [ADR-007 evidence-driven closed loop](../adr/ADR-007-evidence-closed-loop.md), [Proposed external-resource admission ADR](../adr/ADR-006-external-agent-resource-admission.md).
 - **Prior work:** [delegation-contracts qualification plan](2026-11-delegation-contracts-qualification-plan.md), including executable verifier lifecycle and judge calibration. This focused plan references rather than duplicates P0–P3 and their V refinements.
+
+
+## Decisions (2026-11-10)
+
+Pedro accepted the following default:
+
+- Run only the D0 audit (the reuse and gap map). Build nothing unless that audit shows real gaps. ADR-006 stays conditional on this audit.
 
 ## Fresh baseline and distinct purpose
 
@@ -150,3 +157,7 @@ Pawel Huryn / The Product Compass, [product-engineering](https://github.com/phur
 - [propose](https://github.com/phuryn/product-engineering/blob/061014ffe954b4dca1f108de614ce25e4607161e/product/skills/propose/SKILL.md), [proposal reference](https://github.com/phuryn/product-engineering/blob/061014ffe954b4dca1f108de614ce25e4607161e/product/skills/propose/references/proposal.md), [receipts](https://github.com/phuryn/product-engineering/blob/061014ffe954b4dca1f108de614ce25e4607161e/product/skills/propose/receipts.md): typed claims, consequential hypotheses, jobs and method-alignment failure motivate these cases. Synthesis, not vendoring.
 - [intended-vs-implemented](https://github.com/phuryn/product-engineering/blob/061014ffe954b4dca1f108de614ce25e4607161e/ai-shipping/skills/intended-vs-implemented/SKILL.md) and [derive-tests](https://github.com/phuryn/product-engineering/blob/061014ffe954b4dca1f108de614ce25e4607161e/ai-shipping/skills/derive-tests/SKILL.md): keep intent/enforcement/test evidence distinct; actual runtime mapping requires later authorized audit.
 - [LICENSE.md](https://github.com/phuryn/product-engineering/blob/061014ffe954b4dca1f108de614ce25e4607161e/LICENSE.md) and [rejected.md](https://github.com/phuryn/product-engineering/blob/061014ffe954b4dca1f108de614ce25e4607161e/rejected.md): permissive license is not authority to install/update. Preserve Proposed ADR006's reviewed admission over source auto-update/latest preferences. Do not import HTML conversion/deletion, no-ticket preferences, vendor defaults, character-count review proof or the claim that a pre-fix-passing regression test necessarily disproves a bug.
+
+## Decisions needed (human)
+
+Resolved on 2026-11-10. See [Decisions (2026-11-10)](#decisions-2026-11-10).
