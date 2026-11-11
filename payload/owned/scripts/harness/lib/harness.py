@@ -1475,7 +1475,7 @@ def protected_path(path_str, cwd):
         path = os.path.join(cwd or str(ROOT), path)
     full, root = real_path(path), real_path(str(ROOT))
     if full != root and not full.startswith(root + os.sep):
-        return None
+        return path_str if in_records(full) or evals_target(full) else None
     name = os.path.relpath(full, root).replace(os.sep, "/")
     # re.I: on a case-insensitive disk BACKBONE/x is backbone/x; elsewhere refusing it as well costs nothing.
     return name if any(re.search(p, name, re.I) for p in SHELL_PROTECTED) else None
@@ -4175,6 +4175,13 @@ def hook_pre_tool_use(data):
     if not tool_input.get("file_path"):
         return
     path_str = tool_input["file_path"]
+    if in_records(path_str):
+        deny("Harness blocked this change to %s: it is in the harness's records in the git folder (events, captured "
+             "calls, eval drafts, the kill switch), which only the harness writes." % path_str)
+    if evals_target(path_str, str(ROOT)):
+        deny("Harness blocked this change to %s: fixtures in %s/ (of this checkout or another worktree of it) say "
+             "what the gates must keep refusing or allowing, so only the user changes them. Draft fixtures with "
+             "harness.py eval export for the user to review and move." % (path_str, EVALS_DIR))
     label = install_path(path_str, data.get("cwd"))
     if label:
         deny("Harness blocked this change to %s: it is in %s, which decides this project's gates. The user changes "
@@ -6924,7 +6931,7 @@ def report_command(argv):
 
 CAPTURE_MAX_INPUT = 64 * 1024
 CAPTURE_MAX_REASON = 1000
-CAPTURE_REFUSALS = 200
+CAPTURE_REFUSALS = 100   # per gate
 CAPTURE_ALLOWS = 20   # per gate
 CAPTURE_SKIPPED = ("Read", "Grep", "Glob", "LS", "TodoWrite")
 CAPTURING = {}   # the pre-tool-use or agent-guard call being answered, set by main()
@@ -7229,6 +7236,11 @@ def eval_drafts_dir():
     return events_file().parent / "eval-drafts"
 
 
+def in_drafts(folder):
+    full, drafts = real_path(os.path.abspath(str(folder))), real_path(str(eval_drafts_dir()))
+    return full == drafts or full.startswith(drafts + os.sep)
+
+
 WORKTREES = []   # resolved once per process
 
 
@@ -7254,6 +7266,25 @@ def evals_target(path_str, cwd=None):
         if name == EVALS_DIR or name.startswith(EVALS_DIR + "/"):
             return os.path.join(root, EVALS_DIR)
     return None
+
+
+RECORD_DIRS = []   # resolved once per process
+
+
+def in_records(path_str, cwd=None):
+    """Whether path_str is in the harness's records: <common git dir>/harness (events, captures, drafts, the kill
+    switch), shared by every worktree, or this worktree's <git dir>/harness. Only the harness writes there; a forged
+    capture or event would pass for what an agent did. (A wider rule, no agent writes anywhere in the git folder, is
+    the ADR-008 prerequisites' change.)"""
+    if not RECORD_DIRS:
+        found = {real_path(str(events_file().parent))}
+        git_dir = git("rev-parse", "--absolute-git-dir").strip()
+        if git_dir:
+            found.add(real_path(os.path.join(git_dir, "harness")))
+        RECORD_DIRS.extend(sorted(found))
+    path = os.path.expanduser(str(path_str))
+    full = real_path(path if os.path.isabs(path) else os.path.join(cwd or str(ROOT), path))
+    return any(full == d or full.startswith(d + os.sep) for d in RECORD_DIRS)
 
 
 def git_facts():
@@ -7306,10 +7337,10 @@ def _capture_call(outcome, reason, causes):
             if kept or gate == "file" and outcome == "allowed" else None}
     key = dict(call, input=call["input"] if call["input"] else hashlib.sha256(raw_input.encode("utf-8")).hexdigest())
     cid = hashlib.sha256(json.dumps(key, sort_keys=True).encode("utf-8")).hexdigest()[:16]
-    folder = captures_dir() / ("blocked" if outcome == "blocked" else "allowed/" + gate)
-    path = folder / ("%s.json" % cid)
-    if outcome == "allowed" and path.exists():
-        os.utime(str(path))   # the newest are kept: a call made again counts as new
+    folder = captures_dir() / (outcome if outcome == "blocked" else "allowed") / gate
+    known = list(folder.glob("*-%s.json" % cid)) if folder.is_dir() else []
+    if outcome == "allowed" and known:
+        os.utime(str(known[0]))   # the newest are kept: a call made again counts as new
         return cid
     if outcome == "blocked":
         free = [text for text, why in causes if why is None] if causes else ([reason] if not REPLAY_STATE else [])
@@ -7326,6 +7357,9 @@ def _capture_call(outcome, reason, causes):
               "hook": CAPTURING.get("hook"), "gate": gate, "tool": tool, "replay": state, "call": call, "kept": kept,
               "note": note, "task": tasks[0] if len(tasks) == 1 else None, "redacted": dict(found),
               "settings": capture_settings()}
+    group = "-".join(hashlib.sha256(str(part).encode("utf-8")).hexdigest()[:8]
+                     for part in (raw.get("session_id") or "", reason_key(expected) if expected else ""))
+    path = known[0] if known else folder / ("%s-%s.json" % (group, cid))
     if expected is not None:
         record["reason"] = redact_text(portable(str(expected)[:CAPTURE_MAX_REASON + REDACT_SLACK], pairs))[
             :CAPTURE_MAX_REASON]
@@ -7339,14 +7373,28 @@ def _capture_call(outcome, reason, causes):
 
 
 def prune_captures(folder, keep):
-    def age(path):
+    """Keep at most keep captures in folder. A flood evicts itself: the next to go is the oldest of the session that
+    has the most, and within it of the reason given most (a capture's name starts with both, hashed)."""
+    entries = []
+    for path in folder.glob("*.json"):
         try:
-            return (path.stat().st_mtime_ns, path.name)
+            mtime = path.stat().st_mtime_ns
         except OSError:
-            return (0, path.name)
-    for path in sorted(folder.glob("*.json"), key=age, reverse=True)[keep:]:
+            continue
+        parts = path.name.split("-")
+        entries.append((mtime, path.name, parts[0] if len(parts) == 3 else "", parts[1] if len(parts) == 3 else "",
+                        path))
+    while len(entries) > keep:
+        def heaviest(field, among):
+            counts = Counter(e[field] for e in among)
+            return min(counts, key=lambda k: (-counts[k], min(e[:2] for e in among if e[field] == k)))
+        session = heaviest(2, entries)
+        among = [e for e in entries if e[2] == session]
+        reason = heaviest(3, among)
+        victim = min(e for e in among if e[3] == reason)
+        entries.remove(victim)
         try:
-            path.unlink()
+            victim[4].unlink()
         except OSError:
             pass
 
@@ -7449,6 +7497,10 @@ def eval_export(args):
         sys.stderr.write("eval export: %s is %s/ or inside it. Fixtures there say what the gates must keep refusing "
                          "or allowing, so only the user moves them there; export drafts (the default, or another "
                          "folder) for the user to review.\n" % (out, EVALS_DIR))
+        return 1
+    if in_records(folder, os.getcwd()) and not in_drafts(folder):
+        sys.stderr.write("eval export: %s is in the harness's records in the git folder; only its drafts folder (the "
+                         "default, %s) takes fixtures there.\n" % (out, eval_drafts_dir()))
         return 1
     target = Path(os.path.realpath(str(folder)))
     inside = target.relative_to(ROOT).as_posix() if target == ROOT or ROOT in target.parents else None

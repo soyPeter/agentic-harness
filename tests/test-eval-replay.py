@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import string
 import subprocess
@@ -445,6 +446,57 @@ class Capture(Project):
         self.assertIn("main session", fixture["expect"]["reason"])
         result, data = self.replay(out)
         self.assertEqual(data["counts"], {"as-expected": 1}, data)
+
+
+class SharedRecords(Project):
+    """A linked worktree shares the git folder, with the harness's records in it, and can name the main checkout's
+    files by their absolute path: neither is the agent's to write."""
+
+    def setUp(self):
+        super().setUp()
+        self.worktree = self.outside / "lane"
+        self.run_command("git", "worktree", "add", "-q", "-b", "lane", str(self.worktree), check=True)
+
+    def in_lane(self, tool, tool_input, **fields):
+        data = dict({"session_id": "s1", "agent_id": "a1", "agent_type": "implementer", "tool_name": tool,
+                     "tool_input": tool_input, "cwd": str(self.worktree)}, **fields)
+        return self.run_command("python3", "-B", str(self.worktree / ENGINE), "hook", "pre-tool-use",
+                                input=json.dumps(data), env={"CLAUDE_PROJECT_DIR": str(self.worktree)},
+                                cwd=self.worktree)
+
+    def test_no_agent_writes_the_harness_s_records_or_another_checkout_s_fixtures(self):
+        self.blocked(self.bash("git reset --hard"))
+        (capture,) = (self.project / ".git/harness/captures").rglob("*.json")
+        evals = self.project / "backbone/evals/forged.json"
+        for path in (capture, self.project / ".git/harness/captures/blocked/forged.json", evals,
+                     self.project / ".git/harness/STOP"):
+            with self.subTest(path=path):
+                self.blocked(self.in_lane("Write", {"file_path": str(path), "content": "{}"}))
+                self.blocked(self.in_lane("Bash", {"command": "echo {} > %s" % shlex.quote(str(path))}))
+                self.blocked(self.write(str(path), "{}", agent_id="a1", agent_type="implementer"))
+        self.assertFalse(evals.exists())
+
+    def test_eval_export_writes_neither_the_records_nor_another_checkout_s_fixtures(self):
+        self.blocked(self.bash("git reset --hard"))
+        for out in (self.project / ".git/harness/captures/blocked", self.project / "backbone/evals"):
+            with self.subTest(out=out):
+                result = self.run_command("python3", "-B", str(self.worktree / ENGINE), "eval", "export",
+                                          "--refusals", "--out", str(out), cwd=self.worktree,
+                                          env={"CLAUDE_PROJECT_DIR": str(self.worktree)})
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual([p.name for p in (self.project / ".git/harness/captures").rglob("refusal-*")], [])
+
+    def test_a_flood_of_refusals_does_not_push_out_the_others(self):
+        self.blocked(self.bash("git clean -fd"))
+        self.blocked(self.bash("git push --force origin main", session_id="s3"))
+        for n in range(210):
+            self.blocked(self.bash("git reset --hard HEAD~%d" % n, session_id="flood"))
+        _, fixtures, _ = self.export("--refusals")
+        commands = [f["call"]["input"]["tool_input"]["command"] for f in fixtures.values()]
+        self.assertIn("git clean -fd", commands)
+        self.assertIn("git push --force origin main", commands)
+        self.assertIn("git reset --hard HEAD~209", commands, "the newest of the flood are kept")
+        self.assertEqual(len(commands), 100, "at most 100 refusals are kept per gate")
 
 
 class Budget(Project):
