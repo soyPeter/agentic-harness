@@ -397,28 +397,34 @@ What was built, and where it reads this ADR one way among several:
   `linear import` trusts the ticket by default, since the user runs it; the factory passes `--sender-verdict`. The
   user-only commands (`intake`, `delivery-record`, and `run`, `linear` and the others that were refused only in one
   spelling before) are refused to agents however the engine is started: interpreter flags, the launcher, a module
-  run, an expansion, a shell function, `xargs` or `find -exec`, the engine's source on stdin, code that runs it, a copy.
+  run, an expansion, a shell function, code that runs it, a copy. Two rules hold for every program: an interpreter
+  reading its program from stdin is refused unless it is a literal heredoc, and `xargs`, `parallel` and `find -exec`
+  may not run a shell or an interpreter whose program comes from their input.
   `intake` and `linear import` leave the out-of-band snapshot alone, so if an agent runs them anyway by a path the
   shell checks miss, their writes show as tampering.
 - **4, delivery from a trusted clone.** The lane can't read the pull request's labels, so the factory passes them to
   `delivery-plan` (`--pr-labels`) and gets the labels to add and remove. `delivery-record` takes the trusted clone's
   `verify` result and refuses a report whose verified head or range isn't the task's `HEAD`, or a `delivered` one
-  whose verify failed. In external mode every agent only reads GitHub (`gh` reads, no git push by any name), and a
-  deliverer's report isn't recorded: only `delivery-record` writes the `deliver` event `next` reads, and a record
+  whose verify failed. In external mode the boundary is that the lane holds no push credential;
+  the hooks add defence in depth (every agent runs `gh` reads only and no push-capable git, nor git or gh through a
+  runner or as a `git-*` program), and a deliverer's report isn't recorded: only `delivery-record` writes the `deliver` event `next` reads, and a record
   counts only for its own task. With `HARNESS_DELIVERY_KEY`, a secret the factory sets for `delivery-record` and
-  `next` only (`run` and `orca` refuse to start while it is in their environment, since a session could read it from
-  its parent), records are signed and `next` counts only signed ones. `harness.py orca` was not
+  `next` only (`run`, `orca` and `ci-judge` refuse to start while it is in their environment, since a session could read it
+  from its parent), records are signed and `next` counts only signed ones. `harness.py orca` was not
   otherwise adapted: it leaves such a task waiting at the deliver step and starts no deliverer.
 - **Agents write nothing in the git directory**, with the file tools or the shell, by a relative or an absolute path,
-  from the checkout or a linked worktree, with `find -delete`, or through a path built from `$VAR` or `git rev-parse`:
-  the event log, the cost ledgers, the run locks and the out-of-band snapshot live there.
+  from the checkout or a linked worktree, through a glob, `$PWD`, `$VAR`, `git rev-parse` or an unresolved `cd`, or
+  with `find -delete` from a folder that holds it: the event log, the cost ledgers, the run locks and the
+  out-of-band snapshot live there. A task's run also leaves a marker beside them, so a missing ledger fails closed
+  even when the event log is gone too.
 
-What remains open, plainly: the lane's agents can run code the hooks don't read (a test or a script they write and
-run). Such code can still append to the event log, change or delete the cost ledger, delete a run lock, or rewrite
+What remains open, plainly: the shell checks read command text, and a text check can't see every spelling; the
+lane's agents can also run code the hooks don't read (a test or a script they write and run). Such code can still append to the event log, change or delete the cost ledger, delete a run lock, or rewrite
 the out-of-band snapshot, all in the git directory, and so hide a change to `backbone/` from the tamper check too.
-Signed delivery records (`HARNESS_DELIVERY_KEY`) keep a forged delivery from counting, a missing ledger stops a task
-that ran before, and the key proxy enforces spend whatever the ledger says; the judge, the reviews, `harness-verify`
-in CI and the human review remain the defence for the rest. Without the key, `next` trusts every delivery record, as
+The boundaries that hold are the credentials a lane doesn't have (the key proxy enforces spend whatever the ledger
+says, and with external delivery only the trusted clone can push), `harness-verify` in CI with the base branch's
+engine, and the human review; signed delivery records (`HARNESS_DELIVERY_KEY`) keep a forged delivery from counting,
+and a missing ledger stops a task that ran before. The shell checks and the out-of-band snapshot are defence in depth. Without the key, `next` trusts every delivery record, as
 it trusts the deliverer's own report today.
 
 Not built, and why:
