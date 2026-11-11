@@ -20,3 +20,5 @@ These are the harness's own decisions. A spec that needs one of them on its `ADR
 | [ADR-003](../docs/adr/ADR-003-sandbox-backends.md) | Sandbox backends | Proposed | 2026-11-07 |
 | [ADR-004](../docs/adr/ADR-004-traceability-export.md) | Traceability export | Proposed | 2026-11-07 |
 | [ADR-005](../docs/adr/ADR-005-verdict-attestations.md) | Verdict attestations | Proposed | 2026-11-07, revised 2026-11-08 |
+| [ADR-006](../docs/adr/ADR-006-external-agent-resource-admission.md) | External agent resource admission | Proposed | 2026-11-08 |
+| [ADR-007](../docs/adr/ADR-007-evidence-closed-loop.md) | Evidence closed loop | Proposed | 2026-11-07, revised 2026-11-10 |
