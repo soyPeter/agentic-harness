@@ -450,7 +450,8 @@ def git(*args):
 
 
 CANONICAL_PATHS = ("backbone/3-TASKS.md", "backbone/harness.conf", "backbone/tools.conf", "backbone/.harness-lock.json",
-                   "backbone/escalations.md", "backbone/.verdicts/", "backbone/specs/", "backbone/adr/", "backbone/")
+                   "backbone/escalations.md", "backbone/.verdicts/", "backbone/specs/", "backbone/adr/", "backbone/evals/",
+                   "backbone/")
 
 
 def canonical(path):
@@ -1476,7 +1477,8 @@ def protected_path(path_str, cwd):
     if full != root and not full.startswith(root + os.sep):
         return None
     name = os.path.relpath(full, root).replace(os.sep, "/")
-    return name if any(re.search(p, name) for p in SHELL_PROTECTED) else None
+    # re.I: on a case-insensitive disk BACKBONE/x is backbone/x; elsewhere refusing it as well costs nothing.
+    return name if any(re.search(p, name, re.I) for p in SHELL_PROTECTED) else None
 
 
 def thin_mode():
@@ -2957,7 +2959,7 @@ def verify_changes(before, after, changed, done_fingerprint, allow_user_changes=
     if tools_rel in changed and before and show(before, tools_rel) is not None and not allow_user_changes:
         problems.append("the tool contracts change (%s). They decide what agents may run, so only the user changes "
                         "them and commits that change (HARNESS_VERIFY=off git commit ...)." % tools_rel)
-    evals = [n for n in changed if n.startswith(EVALS_DIR + "/")]
+    evals = [n for n in changed if n.lower().startswith(EVALS_DIR + "/")]
     if evals and before and not allow_user_changes:
         problems.append("the eval fixtures change (%s). They say what the gates must keep refusing or allowing, so "
                         "only the user changes them and commits that change (HARNESS_VERIFY=off git commit ...)."
@@ -7227,6 +7229,33 @@ def eval_drafts_dir():
     return events_file().parent / "eval-drafts"
 
 
+WORKTREES = []   # resolved once per process
+
+
+def worktree_roots():
+    """This checkout and every other worktree of its repository, resolved."""
+    if not WORKTREES:
+        found = {real_path(str(ROOT))}
+        found.update(real_path(line[len("worktree "):]) for line in git("worktree", "list", "--porcelain").splitlines()
+                     if line.startswith("worktree "))
+        WORKTREES.extend(sorted(found))
+    return WORKTREES
+
+
+def evals_target(path_str, cwd=None):
+    """The backbone/evals/ folder (of this checkout or another worktree of it) that path_str is or lies in, as the
+    path resolves now (symlinks followed, any spelling of the name), else None."""
+    path = os.path.expanduser(str(path_str))
+    full = real_path(path if os.path.isabs(path) else os.path.join(cwd or os.getcwd(), path))
+    for root in worktree_roots():
+        if full == root or not full.startswith(root.rstrip(os.sep) + os.sep):
+            continue
+        name = os.path.relpath(full, root).replace(os.sep, "/").lower()
+        if name == EVALS_DIR or name.startswith(EVALS_DIR + "/"):
+            return os.path.join(root, EVALS_DIR)
+    return None
+
+
 def git_facts():
     """What the deliverer's gate reads from git besides the command: the origin, the default and the current branch."""
     return {"origin": git("remote", "get-url", "origin").strip() or None, "default": default_branch(),
@@ -7415,6 +7444,12 @@ def eval_export(args):
     days = int(days) if days else 7
     what = rest[0]
     folder = Path(out).expanduser() if out else eval_drafts_dir()
+    evals = evals_target(folder)
+    if evals:
+        sys.stderr.write("eval export: %s is %s/ or inside it. Fixtures there say what the gates must keep refusing "
+                         "or allowing, so only the user moves them there; export drafts (the default, or another "
+                         "folder) for the user to review.\n" % (out, EVALS_DIR))
+        return 1
     target = Path(os.path.realpath(str(folder)))
     inside = target.relative_to(ROOT).as_posix() if target == ROOT or ROOT in target.parents else None
     if inside is not None and not inside.startswith(("backbone/", ".git/")) \
@@ -7479,6 +7514,16 @@ def eval_export(args):
           % (written, folder, present, len(skipped),
              "; review them, then the user moves the ones to keep into %s/" % EVALS_DIR if written else ""))
     return 0
+
+
+def committed_fixtures():
+    """([(name, text)] of the fixtures in backbone/evals/ at HEAD, [files there the work tree adds or changes]). A
+    fixture an agent planted or edited in the work tree doesn't count: verify keeps agents from committing there."""
+    names = [n for n in git("ls-tree", "-r", "--name-only", "HEAD", "--", EVALS_DIR + "/").splitlines()
+             if n.endswith(".json")]
+    texts = [(n[len(EVALS_DIR) + 1:], git("show", "HEAD:" + n)) for n in names]
+    status = git("-c", "core.quotepath=off", "status", "--porcelain", "--untracked-files=all", "--", EVALS_DIR)
+    return texts, sorted(line[3:].strip() for line in status.splitlines() if line[3:].strip())
 
 
 def replay_project(temp):
@@ -7622,14 +7667,18 @@ def eval_replay(args):
     if not engine.is_file():
         sys.stderr.write("eval replay: no engine at %s\n" % engine)
         return 64
-    paths = sorted(folder.rglob("*.json")) if folder.is_dir() else []
+    uncommitted = []
+    if evals_target(folder) == os.path.join(real_path(str(ROOT)), EVALS_DIR):
+        texts, uncommitted = committed_fixtures()
+    else:
+        texts = [(path.relative_to(folder).as_posix(), path) for path in sorted(folder.rglob("*.json"))] \
+            if folder.is_dir() else []
     results = []
     with tempfile.TemporaryDirectory(prefix="harness-eval-") as temp:
         root, current = None, {}
-        for path in paths:
-            name = path.relative_to(folder).as_posix()
+        for name, text in texts:
             try:
-                fixture = json.loads(path.read_text(encoding="utf-8"))
+                fixture = json.loads(text.read_text(encoding="utf-8") if isinstance(text, Path) else text)
             except (OSError, ValueError) as exc:
                 results.append({"id": name, "file": name, "status": "error", "detail": "unreadable: %s" % exc})
                 continue
@@ -7663,9 +7712,13 @@ def eval_replay(args):
     failed = any(counts[s] for s in ("newly-allowed", "newly-blocked", "reason-changed", "error"))
     if as_json:
         print(json.dumps({"folder": str(folder), "engine": str(engine), "fixtures": len(results),
-                          "counts": dict(sorted(counts.items())), "results": results}, indent=2, sort_keys=True))
+                          "counts": dict(sorted(counts.items())), "results": results, "uncommitted": uncommitted},
+                         indent=2, sort_keys=True))
         return 1 if failed else 0
     print("eval replay: %d fixture(s) in %s, engine %s" % (len(results), folder, engine))
+    if uncommitted:
+        print("  not replayed: %s differ from the last commit, and only committed fixtures replay (the user commits "
+              "them): %s" % (EVALS_DIR, ", ".join(uncommitted)))
     for status, label in REPLAY_LABELS:
         print("  %s: %d" % (label, counts[status]))
         if status == "as-expected":

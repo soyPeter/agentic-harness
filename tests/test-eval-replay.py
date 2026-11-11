@@ -206,6 +206,18 @@ class Project(unittest.TestCase):
         assert len(found) == 1, "expected one fixture for %r, got %d" % (command, len(found))
         return found[0]
 
+    def keep_fixtures(self, folder, commit=True):
+        """What the user does with drafts they keep: copy them into backbone/evals/ and commit them."""
+        evals = self.project / "backbone/evals"
+        evals.mkdir(parents=True, exist_ok=True)
+        for path in Path(folder).glob("*.json"):
+            shutil.copyfile(str(path), str(evals / path.name))
+        if commit:
+            self.run_command("git", "add", "backbone/evals", check=True)
+            self.run_command("git", "commit", "-qm", "test(evals): keep fixtures", env={"HARNESS_VERIFY": "off"},
+                             check=True)
+        return evals
+
     def add_rule(self, line):
         conf = self.project / "backbone/guardrails.conf"
         conf.write_text(conf.read_text() + line + "\n")
@@ -578,7 +590,8 @@ class UserOwnedFixtures(Project):
 
     def test_verify_refuses_a_commit_that_changes_backbone_evals_unless_the_user_allows_it(self):
         self.blocked(self.bash("git reset --hard"))
-        self.export("--refusals", out=self.project / "backbone/evals")
+        out, _, _ = self.export("--refusals")
+        self.keep_fixtures(out, commit=False)
         self.run_command("git", "add", "-A")
         result = self.harness("verify")
         self.assertEqual(result.returncode, 1, result.stdout)
@@ -587,6 +600,37 @@ class UserOwnedFixtures(Project):
                          check=True)
         self.assertEqual(self.harness("verify", "--range", "HEAD~1..HEAD").returncode, 1)
         self.assertEqual(self.harness("verify", "--range", "HEAD~1..HEAD", "--allow-user-changes").returncode, 0)
+
+    def test_a_differently_spelled_path_to_backbone_evals_is_refused_too(self):
+        self.assertIn("only the user", self.blocked(self.write("backbone/EVALS/y.json", "{}")))
+        self.blocked(self.write("backbone/Evals/y.json", "{}", agent_id="a1", agent_type="implementer"))
+
+    def test_eval_export_itself_refuses_to_write_into_backbone_evals(self):
+        """However the agent names it: a shell variable, a symlink or another spelling, which the hook can't see."""
+        self.blocked(self.bash("git reset --hard"))
+        evals = self.project / "backbone/evals"
+        evals.mkdir(parents=True)
+        os.symlink("backbone/evals", str(self.project / "d"))
+        for out in (str(evals), "backbone/evals/sub", "backbone/EVALS", "d", str(self.project / "d/sub")):
+            with self.subTest(out=out):
+                result = self.harness("eval", "export", "--refusals", "--out", out)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("backbone/evals", result.stderr)
+        self.assertEqual(list(evals.rglob("*")), [])
+
+    def test_replay_of_backbone_evals_reads_the_committed_fixtures_only(self):
+        self.blocked(self.bash("git reset --hard"))
+        out, fixtures, _ = self.export("--refusals")
+        evals = self.keep_fixtures(out)
+        ((name, fixture),) = fixtures.items()
+        (evals / name).write_text(json.dumps(dict(fixture, replay={"state": "dependent", "why": "an agent said so"})))
+        (evals / "planted.json").write_text(json.dumps(dict(fixture, id="planted", expect={"outcome": "allowed"})))
+        result = self.harness("eval", "replay", "--json")
+        data = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 0, data)
+        self.assertEqual(data["counts"], {"as-expected": 1}, data)
+        self.assertCountEqual(data["uncommitted"], ["backbone/evals/" + name, "backbone/evals/planted.json"])
+        self.assertIn("only committed fixtures", self.harness("eval", "replay").stdout)
 
     def test_an_agent_exporting_drafts_in_autonomous_mode_is_not_an_out_of_band_change(self):
         auto = {"HARNESS_AUTONOMY": "autonomous"}
@@ -717,7 +761,8 @@ class Replay(Project):
 
     def test_the_default_folder_is_backbone_evals(self):
         self.blocked(self.bash("git reset --hard"))
-        self.export("--refusals", out=self.project / "backbone/evals")
+        out, _, _ = self.export("--refusals")
+        self.keep_fixtures(out)
         result = self.harness("eval", "replay", "--json")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(json.loads(result.stdout)["counts"], {"as-expected": 1})
