@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **Refused hook calls can be replayed against a rule or engine change (ADR-002 follow-up (c)).** When a hook refuses
+  a call, the harness keeps its input in `.git/harness/captures/` (never committed), and it keeps the 20 newest
+  distinct allowed calls per gate, so a false block can be measured too. Secrets are replaced first: the core
+  guardrails' private-key and AWS patterns, common token shapes, `Authorization:` values, passwords in URLs and
+  `*_TOKEN`-style variables. A token keeps its prefix and length, so the rule that refused it still fires. The project
+  and home folders become placeholders. At most 200 refusals are kept, and an input over 64 KiB keeps only its
+  metadata. Each capture says whether its outcome depends only on the input and the rules (shell checks, guardrail
+  rules, tool contracts, protected paths, scopes, the deliverer's gate) or also on state (the task, spec, verdict and
+  skill gates, the kill switch, install folders, GitHub labels), and why. `harness.py report --json` gives each harness
+  candidate an `id`, `kind`, `reason`, `tasks` and the captured inputs behind it; the text report prints the ids.
+  `harness.py eval export <candidate-id>|--refusals|--allows [--out DIR]` writes reviewable fixtures (input, expected
+  outcome, the reason a refusal must still give, provenance, redaction note) into the drafts folder
+  `backbone/proposals/evals/`. Judge-fail and escalation candidates become eval prompts, which aren't replayed.
+  `backbone/evals/` is the user's, like `tools.conf`: the hooks refuse agents' writes there, including
+  `eval export --out`, and verify refuses commits that change it. `harness.py eval replay [DIR] [--engine
+  <harness.py>] [--json]` runs the state-free fixtures through `hook pre-tool-use` in a throwaway checkout of the
+  project's rules and settings. It reports each one as still as expected, newly allowed (a hole), newly blocked (a false
+  block), blocked for another reason, skipped (with why) or an error, and exits 1 on any but the first and skipped.
+  The refusal reasons in the event log and the command names in the out-of-band snapshot are redacted the same way.
+  CI doesn't run the replay yet.
+
 - **The harness as the gate inside the agent software factory (ADR-008, Proposed; docs only).**
   `docs/adr/ADR-008-harness-inside-agent-factory.md` decides how the harness sits inside an always-on factory that
   takes work from Slack, GitHub and Linear. The factory owns the doors, the sender check, identity and keys, lanes,

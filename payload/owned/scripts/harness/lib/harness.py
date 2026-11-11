@@ -27,6 +27,10 @@ Usage:
   harness.py run [--max-tasks N] [--only <task>] [--worktree [--pr]] [--dry-run]   (autonomous, unattended)
   harness.py report [--days N] [--json | --rules]                 (events: verdicts, gates, rules, lift, candidates)
   harness.py receipt <task-id> [--base <rev>] [--json]            (what the harness can prove about a judged task)
+  harness.py eval export <candidate-id> | --refusals | --allows [--days N] [--out DIR]
+                                                                  (fixtures from captured hook calls, drafts by default)
+  harness.py eval replay [DIR] [--engine <path to harness.py>] [--json]
+                                                                  (state-free fixtures through hook pre-tool-use)
   harness.py linear import <ISSUE> --task <id> [--light] [--from F] | linear receipt <task> [--status S]
                                                                   (Linear as the system of record; user-only)
   harness.py trace <task-id> [--json]                             (the task's events: context, skills, edits, refusals, tests)
@@ -1204,12 +1208,18 @@ def remember_skill(data, name):
             pass
 
 
+SKILL_STATE = "the skill gate reads the skills this session loaded and the [WIP] task's spec"
+
+
 def skill_gate(data, path):
     if not gate_on("HARNESS_SKILL_GATE") or path.startswith("/"):
         return None
     files = skill_files()
     loaded = loaded_skills(data)
-    missing = [(skill, why) for skill, why in sorted(required_skills(path).items())
+    required = required_skills(path)
+    if required:
+        reads_state(SKILL_STATE)
+    missing = [(skill, why) for skill, why in sorted(required.items())
                if skill in files and skill not in loaded]
     if not missing:
         return None
@@ -1523,10 +1533,12 @@ def install_path(path_str, cwd):
         if root == base or root.startswith(base + os.sep):
             continue   # a project inside the install (the harness developed in thin mode) keeps its own gates
         if full == base or full.startswith(base + os.sep) or base.startswith(full.rstrip(os.sep) + os.sep):
+            reads_state("it names this machine's harness install folders")
             return label
     for _, agent in user_agent_files():
         agent = os.path.realpath(str(agent))
         if full == agent or agent.startswith(full.rstrip(os.sep) + os.sep):
+            reads_state("it names this machine's harness install folders")
             return "the harness's role agents"
     return None
 
@@ -1603,6 +1615,10 @@ def shell_findings(command, cwd=None, depth=0):
         if script is not None and words[script + 1:script + 2] == ["pin"]:
             found.append("pin moves the engine release this project pins, and with it every gate; only the user does "
                          "that, in their own terminal.")
+        if script is not None:
+            refusal = eval_out_refusal(words, script, cwd)
+            if refusal:
+                found.append(refusal)
         for path in written_paths(segment, words):
             label = install_path(path, cwd)
             if label:
@@ -2434,7 +2450,7 @@ def command_started(data):
     tool_input = data.get("tool_input") or {}
     timeout = tool_input.get("timeout")
     seconds = timeout / 1000.0 if isinstance(timeout, (int, float)) and timeout > 0 else 120
-    running[command_mark(data)] = {"command": str(tool_input.get("command") or "")[:300],
+    running[command_mark(data)] = {"command": redact_text(str(tool_input.get("command") or ""))[:300],
                                    "until": time.time() + seconds + RUNNING_MARGIN_SECONDS}
     write_snapshot(files, running)
 
@@ -2906,6 +2922,11 @@ def verify_changes(before, after, changed, done_fingerprint, allow_user_changes=
     if tools_rel in changed and before and show(before, tools_rel) is not None and not allow_user_changes:
         problems.append("the tool contracts change (%s). They decide what agents may run, so only the user changes "
                         "them and commits that change (HARNESS_VERIFY=off git commit ...)." % tools_rel)
+    evals = [n for n in changed if n.startswith(EVALS_DIR + "/")]
+    if evals and before and not allow_user_changes:
+        problems.append("the eval fixtures change (%s). They say what the gates must keep refusing or allowing, so "
+                        "only the user changes them and commits that change (HARNESS_VERIFY=off git commit ...)."
+                        % ", ".join(evals[:5]))
     locked = (json.loads(show(after, LOCK_FILE.relative_to(ROOT).as_posix()) or "{}") or {}).get("files", {})
     lock_rel = LOCK_FILE.relative_to(ROOT).as_posix()
     if before and after and not allow_user_changes:
@@ -3952,11 +3973,14 @@ def log_event(kind, **fields):
         pass
 
 
-def deny(reason, kind="block"):
-    """PreToolUse/SubagentStop: exit 2 blocks and shows stderr to the agent."""
+def deny(reason, kind="block", causes=None):
+    """PreToolUse/SubagentStop: exit 2 blocks and shows stderr to the agent. causes: [(problem, why it depends on state
+    beyond the call's input, or None)] when several checks refused it, for eval replay."""
     lines = [line.strip(" -") for line in reason.strip().splitlines() if line.strip()]
     specific = next((line for line in lines[1:] if line), lines[0] if lines else "")
-    log_event(kind, reason=specific[:200], detail=reason[:2000])
+    capture = capture_call("blocked", specific, causes) if CAPTURING else None
+    log_event(kind, reason=redact_text(specific)[:200], detail=redact_text(reason)[:2000],
+              **({"capture": capture} if capture else {}))
     sys.stderr.write(reason.rstrip() + "\n")
     sys.exit(2)
 
@@ -4072,14 +4096,17 @@ def hook_pre_tool_use(data):
     tool = data.get("tool_name") or ""
     tool_input = data.get("tool_input") or {}
     if halt_file().exists():
+        reads_state("the kill switch (.git/harness/STOP) was on")
         deny("Harness halted: %s exists (the user's kill switch). Stop working and report your state; the user "
              "removes the file to resume." % halt_file())
     if autonomous() and tool not in ("Read", "Grep", "Glob", "LS"):
         mismatch = plugin_mismatch()
         if mismatch:
+            reads_state("the plugin's version differed from the release the project pins")
             deny("Harness blocked this call: %s. In autonomous mode no work runs until they match; stop and report "
                  "it." % mismatch)
     if tool.startswith(KNOWLEDGE_TOOL_PREFIX):
+        reads_state("the knowledge tools' gate reads HARNESS_KNOWLEDGE_ROOT, a folder on this machine")
         knowledge_guard(tool, tool_input)
         return
     if tool == "apply_patch":
@@ -4119,11 +4146,11 @@ def hook_pre_tool_use(data):
     if path.startswith("backbone/.verdicts/"):
         deny("Harness blocked this change to %s: verdicts are recorded only by the griller's and judge's hooks."
              % path)
-    problems = []
+    causes = []   # (problem, why it depends on state, or None)
     hits = check_text(rules, path, added_text(tool, tool_input), ("block",))
     if hits:
         log_rule_hits(hits)
-        problems.append(describe(hits))
+        causes.append((describe(hits), None))
     checks = ()
     if path == LOCK_FILE.relative_to(ROOT).as_posix():
         deny("Harness blocked this change to %s: the lock is written by the installer and harness.py adopt only."
@@ -4137,6 +4164,10 @@ def hook_pre_tool_use(data):
     if path == "backbone/escalations.md":
         deny("Harness blocked this change to %s: escalations are written by harness.py escalate and resolved by "
              "the user." % path)
+    if path == EVALS_DIR or path.startswith(EVALS_DIR + "/"):
+        deny("Harness blocked this change to %s: fixtures in %s/ say what the gates must keep refusing or allowing, "
+             "so only the user changes them. Draft fixtures with harness.py eval export (into %s/) for the user to "
+             "review and move." % (path, EVALS_DIR, EVAL_DRAFTS))
     if path == "backbone/3-TASKS.md":
         checks = (wip_collision, start_gate, judge_gate, blocked_guard, light_guard)
     elif path == "backbone/harness.conf":
@@ -4147,23 +4178,26 @@ def hook_pre_tool_use(data):
         checks = (adr_guard,)
     before = after = None
     if checks:
+        state = ("the gate for %s compares the edit with the file as it is now and with the task, spec and verdict "
+                 "state" % path)
+        reads_state(state)
         before = read(ROOT / path)
         after = resulting_text(tool, tool_input, path_str)
         for check in checks:
             problem = check(before, after)
             if problem:
                 log_event("gate", gate=check.__name__)
-                problems.append(problem)
+                causes.append((problem, state))
     scope = orchestrator_scope(data, path)
     if scope:
         log_event("gate", gate="orchestrator_scope")
-        problems.append(scope)
+        causes.append((scope, None))
     skills = skill_gate(data, path)
     if skills:
         log_event("gate", gate="skill_gate")
-        problems.append(skills)
-    if problems:
-        deny("Harness blocked this change to %s:\n%s" % (path, "\n".join(problems)))
+        causes.append((skills, SKILL_STATE))
+    if causes:
+        deny("Harness blocked this change to %s:\n%s" % (path, "\n".join(p for p, _ in causes)), causes=causes)
     if path == "backbone/3-TASKS.md":
         for task in started_tasks(before, after):
             log_event("task-start", task=task)
@@ -5216,6 +5250,7 @@ def risk_label_refusal(targets, repo, added, removed, cwd):
 
 def pr_labels(target, repo, cwd):
     """(the names of the labels on a pull request, None), or (None, why gh couldn't read them)."""
+    reads_state("the deliverer's gate read the pull request's labels from GitHub")
     args = ["gh", "pr", "view"] + ([target] if target else []) + (["--repo", repo] if repo else [])
     try:
         result = subprocess.run(args + ["--json", "labels"], cwd=cwd or str(ROOT), capture_output=True, text=True,
@@ -6707,8 +6742,10 @@ def lift(events):
     for reason, tasks in sorted(by_tasks((re.sub(r"\s+", " ", e.get("reason", "")).strip(), e.get("task"))
                                          for e in events if e.get("kind") == "block").items()):
         if len(tasks) >= CANDIDATE_TASKS["block"]:
-            candidates.append("\"%s\" was refused in %d tasks (%s): agents keep trying it; say why in "
-                              "backbone/4-KNOWLEDGE.md or the skill they use" % (reason[:100], len(tasks), ", ".join(tasks)))
+            candidates.append(harness_candidate(
+                "refusal", reason, tasks, "\"%s\" was refused in %d tasks (%s): agents keep trying it; say why in "
+                "backbone/4-KNOWLEDGE.md or the skill they use" % (reason[:100], len(tasks), ", ".join(tasks)),
+                refusal_captures(events, reason)))
     judge_fails = []
     for e in events:
         if e.get("kind") == "verdict" and e.get("agent") == "judge" and e.get("verdict") != "pass":
@@ -6718,12 +6755,14 @@ def lift(events):
                 judge_fails.append((re.sub(r"\b(AC|REQ)-[\w.]+?-\d+\b", r"<\1>", str(reason)), e.get("task")))
     for reason, tasks in sorted(by_tasks(judge_fails).items()):
         if len(tasks) >= CANDIDATE_TASKS["judge"]:
-            candidates.append("the judge failed %d tasks (%s) for: %s; a skill, test convention or rule could prevent "
-                              "it" % (len(tasks), ", ".join(tasks), reason[:120]))
+            candidates.append(harness_candidate(
+                "judge-fail", reason, tasks, "the judge failed %d tasks (%s) for: %s; a skill, test convention or rule "
+                "could prevent it" % (len(tasks), ", ".join(tasks), reason[:120])))
     for kind, tasks in sorted(by_tasks((e.get("escalation"), e.get("task")) for e in escalations).items()):
         if len(tasks) >= CANDIDATE_TASKS["escalation"]:
-            candidates.append("the harness escalated %d tasks (%s) as %s; look for the common cause"
-                              % (len(tasks), ", ".join(tasks), kind))
+            candidates.append(harness_candidate(
+                "escalation", str(kind), tasks, "the harness escalated %d tasks (%s) as %s; look for the common cause"
+                % (len(tasks), ", ".join(tasks), kind)))
     return {
         "first_pass_judge": first_pass,
         "grill": {"fails": fails, "fails_followed_by_spec_change": changed},
@@ -6832,10 +6871,636 @@ def report_command(argv):
     unknown = m["tools_without_contract"]
     print("  tools used with no contract: %s" % ("; ".join("%s (%d)" % kv for kv in unknown.items())
                                               + " (add contracts in backbone/tools.conf)" if unknown else "none"))
-    print("  harness candidates (a failure seen in several tasks):")
-    for line in m["candidates"] or ["none"]:
-        print("    - %s" % line)
+    print("  harness candidates (a failure seen in several tasks; harness.py eval export <id> drafts a fixture):")
+    for found in m["candidates"]:
+        print("    - [%s] %s" % (found["id"], found["text"]))
+    if not m["candidates"]:
+        print("    - none")
     return 0
+
+
+# --------------------------------------------------------------------------- eval: capture and replay (ADR-002 (c))
+# A refused pre-tool-use call, and a bounded sample of allowed ones, is kept in .git/harness/captures/ (never
+# committed) with the input redacted, so `eval export` can turn it into a fixture the user reviews and `eval replay`
+# can run the state-free ones through `hook pre-tool-use` again, with this engine or another one. Judge failures and
+# escalations need a model or a person to evaluate; they are exported as eval prompts and not replayed (ADR-007).
+
+CAPTURE_MAX_INPUT = 64 * 1024
+CAPTURE_REFUSALS = 200
+CAPTURE_ALLOWS = 20   # per gate
+CAPTURE_SKIPPED = ("Read", "Grep", "Glob", "LS", "TodoWrite")
+CAPTURING = {}   # the pre-tool-use or agent-guard call being answered, set by main()
+REPLAY_STATE = []   # why that call's outcome depends on more than its input and the rules, as the gates find out
+ROOT_TOKEN, HOME_TOKEN = "{{HARNESS_ROOT}}", "{{HOME}}"
+EVALS_DIR = "backbone/evals"
+EVAL_DRAFTS = "backbone/proposals/evals"
+FIXTURE_FORMAT = "agentic-harness eval/v1"
+STATE_FREE = ("its outcome depends only on the input and the rules and settings (shell checks, tool contracts, "
+              "guardrail rules, protected paths, role scopes)")
+PROMPT_WHY = ("not replayed in v1: a judge failure or an escalation is evaluated by a model or a person, not by a "
+              "deterministic gate (model-based replay and shadow runs are ADR-007's)")
+REPLAY_FILES = ("backbone/harness.conf", "backbone/guardrails.conf", "backbone/routing.conf", "backbone/tools.conf",
+                "backbone/.harness-lock.json", ".claude/settings.json")
+EVAL_USAGE = ("usage: harness.py eval export <candidate-id> | --refusals | --allows [--days N] [--out DIR]\n"
+              "       harness.py eval replay [DIR] [--engine <path to harness.py>] [--json]\n")
+_SECRET_VALUE = r"[^\s\"'`$;&|<>()]"
+# The core guardrails' secret rules (private keys, AWS key ids), widened to the whole key, then common token shapes,
+# then credentials found by where they sit. A token keeps its prefix and length, so the rule that refused it still
+# fires on the placeholder and the fixture replays the same way.
+SECRET_PATTERNS = (
+    ("private-key", re.compile(r"(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)(.*?)(-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
+                               re.S), "block"),
+    ("aws-key-id", re.compile(r"(AKIA|ASIA)([0-9A-Z]{16,})"), "shape"),
+    ("github-token", re.compile(r"(gh[pousr]_|github_pat_)([A-Za-z0-9_]{20,})"), "shape"),
+    ("anthropic-key", re.compile(r"(sk-ant-)([A-Za-z0-9_-]{16,})"), "shape"),
+    ("api-key", re.compile(r"(\bsk-)(?!ant-)([A-Za-z0-9_-]{20,})"), "shape"),
+    ("slack-token", re.compile(r"(xox[abposr]-)([A-Za-z0-9-]{8,})"), "shape"),
+    ("authorization", re.compile(r"(?i)(authorization[\"']?\s*[:=]\s*[\"']?(?:(?:bearer|basic|token|bot)\s+)?)(%s{8,})"
+                                 % _SECRET_VALUE), "value"),
+    ("url-credentials", re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:)([^/\s@]+)(?=@)"), "value"),
+    ("secret-variable", re.compile(r"(\b[A-Z][A-Z0-9_]*(?:PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|API_?KEY|ACCESS_?KEY|"
+                                   r"PRIVATE_?KEY|CREDENTIALS?)[A-Z0-9_]*\s*[=:]\s*[\"']?)(%s{4,})" % _SECRET_VALUE),
+     "value"),
+)
+
+
+def redact_text(text, found=None):
+    """text with every secret SECRET_PATTERNS knows replaced by a placeholder; found counts them by kind."""
+    if not isinstance(text, str):
+        return text
+    for name, pattern, style in SECRET_PATTERNS:
+        def swap(match, name=name, style=style):
+            body = match.group(2)
+            if style == "block":
+                new = match.group(1) + "\nREDACTED\n" + match.group(3)
+            elif style == "shape":
+                new = match.group(1) + ("REDACTED" + "X" * len(body))[:len(body)]
+            else:
+                new = match.group(1) + "REDACTED"
+            if new != match.group(0) and found is not None:
+                found[name] += 1
+            return new
+        text = pattern.sub(swap, text)
+    return text
+
+
+def map_strings(value, change):
+    """value (hook input, JSON-shaped) with change applied to every string in it."""
+    if isinstance(value, str):
+        return change(value)
+    if isinstance(value, list):
+        return [map_strings(v, change) for v in value]
+    if isinstance(value, dict):
+        return {k: map_strings(v, change) for k, v in value.items()}
+    return value
+
+
+def redacted(value, found=None):
+    return map_strings(value, lambda text: redact_text(text, found))
+
+
+def portable_paths(cwd=None):
+    """[(folder, token)] longest first: the project's folder in each spelling this call used, and the home folder."""
+    root = os.path.realpath(str(ROOT))
+    spellings = {str(ROOT), root, os.environ.get("CLAUDE_PROJECT_DIR") or "", cwd if isinstance(cwd, str) else ""}
+    spellings |= {s[len("/private"):] for s in set(spellings) if s.startswith("/private/")}
+    pairs = [(s.rstrip("/"), ROOT_TOKEN) for s in spellings if s and s != "/" and os.path.realpath(s) == root]
+    home = os.path.expanduser("~")
+    pairs += [(h.rstrip("/"), HOME_TOKEN) for h in {home, os.path.realpath(home)} if h and h != "/"]
+    return sorted(set(pairs), key=lambda pair: -len(pair[0]))
+
+
+def portable(value, pairs):
+    """value with the folders in pairs written as their tokens, so a fixture replays on any machine."""
+    def swap(text):
+        for folder, token in pairs:
+            text = re.sub(re.escape(folder) + r"(?![A-Za-z0-9._-])", lambda _m, t=token: t, text)
+        return text
+    return map_strings(value, swap)
+
+
+def restored(value, root):
+    home = os.path.expanduser("~")
+    return map_strings(value, lambda text: text.replace(ROOT_TOKEN, str(root)).replace(HOME_TOKEN, home))
+
+
+def reads_state(why):
+    if why not in REPLAY_STATE:
+        REPLAY_STATE.append(why)
+
+
+def engine_version():
+    return lock().get("harness_version") or lock().get("version") or "unknown"
+
+
+def replayed_setting(key):
+    """Settings a pre-tool-use answer can depend on. The commands (*_CMD) never run in it, and a fixture that set them
+    would run them in whatever reads them next."""
+    return (key in DEFAULTS or key == "TRIPLE_MODE") and not key.endswith("_CMD")
+
+
+def settings_env():
+    """The harness settings this call took from the environment rather than harness.conf."""
+    return {key: os.environ[key] for key in sorted(os.environ) if replayed_setting(key)}
+
+
+def capture_settings():
+    """What decides a pre-tool-use answer besides the input: the rule, route, contract and settings files, the
+    environment's settings and the engine, with a fingerprint over all of them."""
+    files = {}
+    for path in RULE_FILES + ROUTE_FILES + [TOOLS_FILE, CONF_FILE, LOCK_FILE]:
+        path = Path(path)
+        try:
+            name = path.relative_to(ROOT).as_posix()
+        except ValueError:
+            try:
+                name = "engine:" + path.relative_to(ENGINE).as_posix()
+            except ValueError:
+                name = path.name
+        files[name] = (sha256(path) or "")[:16] or None
+    env = redacted(settings_env())
+    blob = json.dumps({"files": files, "env": env, "engine": engine_version()}, sort_keys=True)
+    return {"fingerprint": hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16], "files": files,
+            "engine": engine_version()}
+
+
+def capture_gate(tool):
+    if tool == "Bash":
+        return "shell"
+    if tool in FILE_TOOLS or tool in ("apply_patch", "NotebookEdit"):
+        return "file"
+    if tool.startswith(KNOWLEDGE_TOOL_PREFIX):
+        return "knowledge"
+    return "tool"
+
+
+def captures_dir():
+    return events_file().parent / "captures"
+
+
+def git_facts():
+    """What the deliverer's gate reads from git besides the command: the origin, the default and the current branch."""
+    return {"origin": git("remote", "get-url", "origin").strip() or None, "default": default_branch(),
+            "branch": git("rev-parse", "--abbrev-ref", "HEAD").strip() or None}
+
+
+def first_line(text):
+    return next((line.strip(" -") for line in str(text).splitlines() if line.strip(" -")), "")
+
+
+def capture_call(outcome, reason=None, causes=None):
+    """Keep the call CAPTURING holds for replay; its id, or None. Never fails the hook."""
+    try:
+        return _capture_call(outcome, reason, causes)
+    except Exception:   # a capture is evidence, never a gate: a failure here must not change the hook's answer
+        return None
+
+
+def _capture_call(outcome, reason, causes):
+    raw = CAPTURING.get("raw")
+    if not isinstance(raw, dict):
+        return None
+    tool = str(raw.get("tool_name") or "")
+    if outcome == "allowed" and (not tool or tool in CAPTURE_SKIPPED):
+        return None
+    role = CAPTURING.get("role")
+    payload = dict(raw)
+    if CAPTURING.get("hook") == "agent-guard" and str(payload.get("agent_type") or "").split(":")[-1] != role:
+        payload["agent_type"] = role   # replayed through pre-tool-use, which finds the role here
+    found = Counter()
+    pairs = portable_paths(raw.get("cwd"))
+    raw_input = json.dumps(payload, sort_keys=True)
+    kept = len(raw_input.encode("utf-8")) <= CAPTURE_MAX_INPUT
+    call = {"hook": "pre-tool-use", "source": HOOK_SOURCE, "role": role,
+            "role_from_env": bool(CAPTURING.get("role_from_env")),
+            "env": portable(redacted(settings_env(), found), pairs),
+            "git": portable(redacted(git_facts(), found), pairs) if role == "deliverer" and tool == "Bash" else None,
+            "input": portable(redacted(payload, found), pairs) if kept else None}
+    key = dict(call, input=call["input"] if kept else hashlib.sha256(raw_input.encode("utf-8")).hexdigest())
+    cid = hashlib.sha256(json.dumps(key, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    note = None if kept else "its input was over %d KiB, so it wasn't kept" % (CAPTURE_MAX_INPUT // 1024)
+    gate = capture_gate(tool)
+    folder = captures_dir() / ("blocked" if outcome == "blocked" else "allowed/" + gate)
+    path = folder / ("%s.json" % cid)
+    if outcome == "allowed" and path.exists():
+        os.utime(str(path))   # the newest are kept: a call made again counts as new
+        return cid
+    if outcome == "blocked":
+        free = [text for text, why in causes if why is None] if causes else ([reason] if not REPLAY_STATE else [])
+        whys = [why for _, why in causes if why] if causes else list(REPLAY_STATE)
+        expected = first_line(free[0]) if free else reason
+        state = {"state": "free", "why": STATE_FREE} if free else {"state": "dependent", "why": "; ".join(
+            sorted(set(whys), key=whys.index))}
+    else:
+        expected = None
+        state = {"state": "dependent", "why": "; ".join(REPLAY_STATE)} if REPLAY_STATE else \
+            {"state": "free", "why": STATE_FREE}
+    tasks = wip_task_ids()
+    record = {"id": cid, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "outcome": outcome,
+              "hook": CAPTURING.get("hook"), "gate": gate, "tool": tool, "replay": state, "call": call, "kept": kept,
+              "note": note, "task": tasks[0] if len(tasks) == 1 else None, "redacted": dict(found),
+              "settings": capture_settings()}
+    if expected is not None:
+        record["reason"] = portable(redact_text(expected), pairs)
+    folder.mkdir(parents=True, exist_ok=True)
+    handle, temp = tempfile.mkstemp(dir=str(folder), suffix=".tmp")
+    with os.fdopen(handle, "w", encoding="utf-8") as out:
+        json.dump(record, out, indent=1, sort_keys=True)
+    os.replace(temp, str(path))
+    prune_captures(folder, CAPTURE_REFUSALS if outcome == "blocked" else CAPTURE_ALLOWS)
+    return cid
+
+
+def prune_captures(folder, keep):
+    def age(path):
+        try:
+            return (path.stat().st_mtime_ns, path.name)
+        except OSError:
+            return (0, path.name)
+    for path in sorted(folder.glob("*.json"), key=age, reverse=True)[keep:]:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def read_captures(outcome):
+    """Kept captures of one outcome, newest first."""
+    base = captures_dir() / ("blocked" if outcome == "blocked" else "allowed")
+    records = []
+    for path in base.rglob("*.json") if base.is_dir() else []:
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            records.append((path.stat().st_mtime_ns, record))
+        except (OSError, ValueError):
+            continue
+    return [r for _, r in sorted(records, key=lambda pair: (-pair[0], str(pair[1].get("id"))))
+            if isinstance(r, dict) and r.get("id")]
+
+
+def capture_summary(record):
+    return {"id": record.get("id"), "at": record.get("at"), "tool": record.get("tool"), "replay": record.get("replay"),
+            "kept": record.get("kept"), "note": record.get("note"), "input": (record.get("call") or {}).get("input")}
+
+
+def refusal_captures(events, reason):
+    """The kept captures behind the refusals logged with reason, newest first."""
+    ids = {e.get("capture") for e in events if e.get("kind") == "block" and e.get("capture")
+           and re.sub(r"\s+", " ", e.get("reason", "")).strip() == reason}
+    return [r for r in read_captures("blocked") if r["id"] in ids]
+
+
+def harness_candidate(kind, reason, tasks, text, captures=()):
+    captures = list(captures)
+    return {"id": "%s-%s" % (kind, hashlib.sha256(reason.encode("utf-8")).hexdigest()[:10]), "kind": kind,
+            "reason": reason, "tasks": tasks, "text": text, "captures": [capture_summary(r) for r in captures[:5]],
+            "captures_total": len(captures)}
+
+
+def fixture_from(record, candidate_id=None, tasks=None):
+    kind = "refusal" if record.get("outcome") == "blocked" else "allow"
+    expect = {"outcome": record.get("outcome")}
+    if kind == "refusal":
+        expect["reason"] = record.get("reason")
+    found = record.get("redacted") or {}
+    note = ("Redacted before it was kept: %s. The project's folder is written %s and the home folder %s. Read the "
+            "input before you commit it." % (", ".join("%s %d" % kv for kv in sorted(found.items())) or
+                                            "no secret found", ROOT_TOKEN, HOME_TOKEN))
+    return {"fixture": FIXTURE_FORMAT, "id": "%s-%s" % (kind, record["id"][:12]), "kind": kind, "expect": expect,
+            "replay": record.get("replay"), "call": record.get("call"),
+            "provenance": {"captures": [record["id"]], "captured_at": record.get("at"), "hook": record.get("hook"),
+                           "tasks": tasks or ([record["task"]] if record.get("task") else []),
+                           "candidate": candidate_id, "engine": (record.get("settings") or {}).get("engine"),
+                           "settings": record.get("settings")},
+            "redaction": note}
+
+
+def prompt_from(found):
+    subject = {"judge-fail": "the judge failed tasks %s for: %s",
+               "escalation": "the harness escalated tasks %s as %s"}[found["kind"]] % (", ".join(found["tasks"]),
+                                                                                       found["reason"])
+    return {"fixture": FIXTURE_FORMAT, "id": "prompt-%s" % found["id"], "kind": "prompt",
+            "candidate": {k: found[k] for k in ("id", "kind", "reason", "tasks")},
+            "prompt": "Across tasks, %s. Read each task's events (harness.py trace <task>) and say which instruction, "
+                      "rule, skill or test convention would have prevented it." % subject,
+            "replay": {"state": "not replayed", "why": PROMPT_WHY},
+            "provenance": {"candidate": found["id"], "tasks": found["tasks"], "engine": engine_version()}}
+
+
+def take_option(args, name):
+    """(the value of --name V or --name=V, the other arguments); the value is None when absent, False when empty."""
+    rest, value = [], None
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == name:
+            value = args[i + 1] if i + 1 < len(args) else False
+            i += 2
+            continue
+        if arg.startswith(name + "="):
+            value = arg[len(name) + 1:] or False
+        else:
+            rest.append(arg)
+        i += 1
+    return value, rest
+
+
+def eval_export(args):
+    out, rest = take_option(args, "--out")
+    days, rest = take_option(rest, "--days")
+    if out is False or days is False or (days is not None and not days.isdigit()) or len(rest) != 1:
+        sys.stderr.write(EVAL_USAGE)
+        return 64
+    days = int(days) if days else 7
+    what = rest[0]
+    folder = Path(out).expanduser() if out else ROOT / EVAL_DRAFTS
+    target = Path(os.path.realpath(str(folder)))
+    inside = target.relative_to(ROOT).as_posix() if target == ROOT or ROOT in target.parents else None
+    if inside is not None and not inside.startswith("backbone/") and not git("check-ignore", "--", inside).strip():
+        sys.stderr.write("eval export: %s is inside the repository, outside backbone/, and git doesn't ignore it: an "
+                         "untracked file there counts as code and would make the judge's passes stale. Write it to "
+                         "the drafts folder (the default), outside the repository or to a git-ignored folder.\n"
+                         % inside)
+        return 1
+    documents, skipped = [], []
+    if what in ("--refusals", "--allows"):
+        records = read_captures("blocked" if what == "--refusals" else "allowed")
+        if not records:
+            print("eval export: no %s calls captured" % ("refused" if what == "--refusals" else "allowed"))
+            return 0
+        candidate_id, tasks = None, None
+    elif what.startswith("-"):
+        sys.stderr.write(EVAL_USAGE)
+        return 64
+    else:
+        events = report_events(days)
+        found = next((c for c in lift(events)["candidates"] if c["id"] == what), None)
+        if found is None:
+            print("eval export: no candidate %s in the last %d day(s) (harness.py report --json lists them)"
+                  % (what, days))
+            return 1
+        if found["kind"] != "refusal":
+            documents.append(prompt_from(found))
+            records = []
+        else:
+            records = refusal_captures(events, found["reason"])
+            if not records:
+                print("eval export: %s has no captured input (refused before this engine kept them, or pruned)" % what)
+                return 1
+        candidate_id, tasks = found["id"], found["tasks"]
+    for record in records:
+        if not record.get("kept") or not (record.get("call") or {}).get("input"):
+            skipped.append("%s (%s): %s" % (record["id"], record.get("tool"), record.get("note") or "no input kept"))
+            continue
+        documents.append(fixture_from(record, candidate_id, tasks))
+    written = present = 0
+    for document in documents:
+        path = folder / ("%s.json" % document["id"])
+        if path.exists():
+            present += 1
+            continue
+        folder.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        written += 1
+        print("eval export: wrote %s" % path)
+    for line in skipped:
+        print("eval export: skipped %s" % line)
+    if written:
+        snapshot_refresh()
+    print("eval export: %d fixture(s) written to %s, %d already there, %d skipped%s"
+          % (written, folder, present, len(skipped),
+             "; review them, then the user moves the ones to keep into %s/" % EVALS_DIR
+             if written and Path(os.path.abspath(str(folder))) != ROOT / EVALS_DIR else ""))
+    return 0
+
+
+def replay_project(temp):
+    """A throwaway git checkout holding only this project's rules and settings."""
+    root = Path(temp) / "project"
+    for name in REPLAY_FILES:
+        if (ROOT / name).is_file():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(str(ROOT / name), str(root / name))
+    root.mkdir(parents=True, exist_ok=True)
+    env = replay_git_env()
+    for args in (["init", "-q", "-b", "main"], ["add", "-A"],
+                 ["-c", "user.name=harness", "-c", "user.email=harness@localhost", "-c", "commit.gpgsign=false",
+                  "commit", "-q", "--allow-empty", "-m", "replay"]):
+        subprocess.run(["git"] + args, cwd=str(root), env=env, capture_output=True, text=True, timeout=60, check=True)
+    return Path(os.path.realpath(str(root)))
+
+
+def replay_git_env():
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    return env
+
+
+def replay_git(root, facts, current):
+    """Point the throwaway's branch, origin and default branch where the captured call had them; why not, or None."""
+    facts = facts if isinstance(facts, dict) else {}
+    want = (facts.get("branch") or "main", facts.get("origin"), facts.get("default"))
+    if current.get("git") == want:
+        return None
+    branch, origin, default = want
+    env = replay_git_env()
+    run = lambda *args: subprocess.run(["git"] + list(args), cwd=str(root), env=env, capture_output=True, text=True,
+                                       timeout=60)
+    for name in (branch, default):
+        if name and (not isinstance(name, str) or run("check-ref-format", "--branch", name).returncode != 0):
+            return "the captured branch name %r isn't valid" % name
+    if origin and (not isinstance(origin, str) or origin.startswith("-")):
+        return "the captured origin %r isn't valid" % origin
+    run("checkout", "-q", "-B", branch)
+    run("remote", "remove", "origin")
+    if origin:
+        run("remote", "add", "origin", origin)
+    run("symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+    if default:
+        run("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/" + default)
+    current["git"] = want
+    return None
+
+
+def replay_env(root, temp, call):
+    """No plugin, install folders, installed agents or GitHub login: a replay depends on the fixture and the rules."""
+    env = {k: v for k, v in replay_git_env().items()
+           if not k.startswith(("HARNESS_", "CLAUDE_", "CODEX_", "OPENCODE_", "GH_", "GITHUB_"))
+           and k != "TRIPLE_MODE"}
+    env.update({k: str(v) for k, v in restored(call.get("env") or {}, root).items()
+                if isinstance(k, str) and replayed_setting(k)})
+    env.update(HARNESS_ROOT=str(root), CLAUDE_PROJECT_DIR=str(root), PYTHONDONTWRITEBYTECODE="1",
+               CODEX_HOME=str(Path(temp) / "codex"), OPENCODE_CONFIG_DIR=str(Path(temp) / "opencode"),
+               GH_CONFIG_DIR=str(Path(temp) / "gh"))
+    if call.get("role_from_env") and call.get("role"):
+        env["HARNESS_ROLE"] = str(call["role"])
+    return env
+
+
+RULE_ORIGIN = re.compile(r"\s+\[[^\]\n]*, matched: .*\]\s*$")
+
+
+def reason_key(line):
+    """A refusal line without what may move under it: a rule's file and line, and the text it matched."""
+    return re.sub(r"\s+", " ", RULE_ORIGIN.sub("", str(line)).strip(" -\t")).strip()
+
+
+def fixture_summary(fixture):
+    tool_input = ((fixture.get("call") or {}).get("input") or {}).get("tool_input") or {}
+    tool = ((fixture.get("call") or {}).get("input") or {}).get("tool_name")
+    summary = {"tool": tool}
+    if isinstance(tool_input, dict) and isinstance(tool_input.get("command"), str):
+        summary["command"] = tool_input["command"]
+    elif isinstance(tool_input, dict) and isinstance(tool_input.get("file_path"), str):
+        summary["path"] = tool_input["file_path"]
+    return summary
+
+
+def replay_fixture(fixture, engine, root, temp, current):
+    """(status, what the hook did, detail) for one state-free fixture."""
+    call = fixture["call"]
+    why = replay_git(root, call.get("git"), current)
+    if why:
+        return "error", None, why
+    try:
+        result = subprocess.run([sys.executable, "-B", str(engine), "hook", "pre-tool-use", "--from",
+                                 str(call.get("source") or "claude")],
+                                input=json.dumps(restored(call["input"], root)), cwd=str(root),
+                                env=replay_env(root, temp, call), capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return "error", None, "the hook didn't run: %s" % (str(exc) or type(exc).__name__)
+    if result.returncode not in (0, 2):
+        tail = " | ".join((result.stderr or result.stdout).strip().splitlines()[-3:])
+        return "error", None, "the hook exited %d%s" % (result.returncode, ": " + tail if tail else "")
+    got = "blocked" if result.returncode == 2 else "allowed"
+    expected = fixture["expect"]["outcome"]
+    lines = [key for key in (reason_key(line) for line in result.stderr.splitlines()) if key]
+    refusal = lines[1 if len(lines) > 1 else 0] if got == "blocked" and lines else None
+    if expected == "blocked" and got == "allowed":
+        return "newly-allowed", got, None
+    if expected == "allowed" and got == "blocked":
+        return "newly-blocked", got, refusal
+    if expected == "blocked":
+        want = reason_key(restored(fixture["expect"].get("reason") or "", root))
+        if want and not any(want in line for line in lines):
+            return "reason-changed", got, refusal
+    return "as-expected", got, None
+
+
+def fixture_problem(fixture):
+    if not isinstance(fixture, dict) or fixture.get("fixture") != FIXTURE_FORMAT:
+        return "not a fixture (no \"fixture\": \"%s\")" % FIXTURE_FORMAT
+    if fixture.get("kind") == "prompt":
+        return None
+    if fixture.get("kind") not in ("refusal", "allow") or not isinstance(fixture.get("call"), dict) \
+            or not isinstance(fixture["call"].get("input"), dict) or not isinstance(fixture.get("expect"), dict) \
+            or fixture["expect"].get("outcome") not in ("blocked", "allowed"):
+        return "a fixture needs a kind, an expected outcome and the call's input"
+    return None
+
+
+REPLAY_LABELS = (("as-expected", "still as expected"), ("newly-allowed", "newly allowed (a hole)"),
+                 ("newly-blocked", "newly blocked (a false block)"), ("reason-changed", "blocked for another reason"),
+                 ("skipped", "skipped"), ("error", "errors"))
+
+
+def eval_replay(args):
+    as_json = "--json" in args
+    engine_arg, rest = take_option([a for a in args if a != "--json"], "--engine")
+    if engine_arg is False or len(rest) > 1 or any(a.startswith("-") for a in rest):
+        sys.stderr.write(EVAL_USAGE)
+        return 64
+    folder = Path(rest[0]).expanduser() if rest else ROOT / EVALS_DIR
+    engine = Path(os.path.abspath(os.path.expanduser(engine_arg))) if engine_arg else Path(__file__).resolve()
+    if not engine.is_file():
+        sys.stderr.write("eval replay: no engine at %s\n" % engine)
+        return 64
+    paths = sorted(folder.rglob("*.json")) if folder.is_dir() else []
+    results = []
+    with tempfile.TemporaryDirectory(prefix="harness-eval-") as temp:
+        root, current = None, {}
+        for path in paths:
+            name = path.relative_to(folder).as_posix()
+            try:
+                fixture = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                results.append({"id": name, "file": name, "status": "error", "detail": "unreadable: %s" % exc})
+                continue
+            problem = fixture_problem(fixture)
+            entry = {"id": fixture.get("id") if isinstance(fixture, dict) else name, "file": name,
+                     "kind": fixture.get("kind") if isinstance(fixture, dict) else None}
+            if problem:
+                results.append(dict(entry, status="error", detail=problem))
+                continue
+            entry.update(fixture_summary(fixture))
+            if fixture["kind"] == "prompt":
+                results.append(dict(entry, status="skipped", detail="eval prompt (%s candidate): %s"
+                                    % ((fixture.get("candidate") or {}).get("kind"), PROMPT_WHY)))
+                continue
+            entry["expected"] = fixture["expect"]["outcome"]
+            entry["reason"] = fixture["expect"].get("reason")
+            replay = fixture.get("replay") if isinstance(fixture.get("replay"), dict) else {}
+            if replay.get("state") != "free":
+                results.append(dict(entry, status="skipped", detail="state-dependent: %s"
+                                    % (replay.get("why") or "it isn't marked state-free")))
+                continue
+            if root is None:
+                try:
+                    root = replay_project(temp)
+                except (OSError, subprocess.SubprocessError) as exc:
+                    sys.stderr.write("eval replay: can't make the throwaway checkout: %s\n" % exc)
+                    return 2
+            status, got, detail = replay_fixture(fixture, engine, root, temp, current)
+            results.append(dict(entry, status=status, got=got, detail=detail))
+    counts = Counter(r["status"] for r in results)
+    failed = any(counts[s] for s in ("newly-allowed", "newly-blocked", "reason-changed", "error"))
+    if as_json:
+        print(json.dumps({"folder": str(folder), "engine": str(engine), "fixtures": len(results),
+                          "counts": dict(sorted(counts.items())), "results": results}, indent=2, sort_keys=True))
+        return 1 if failed else 0
+    print("eval replay: %d fixture(s) in %s, engine %s" % (len(results), folder, engine))
+    for status, label in REPLAY_LABELS:
+        print("  %s: %d" % (label, counts[status]))
+        if status == "as-expected":
+            continue
+        for r in (r for r in results if r["status"] == status):
+            what = r.get("command") or r.get("path") or r.get("file")
+            if status == "newly-allowed":
+                line = "expected blocked (%s); now allowed" % r.get("reason")
+            elif status == "newly-blocked":
+                line = "expected allowed; now blocked: %s" % r.get("detail")
+            elif status == "reason-changed":
+                line = "expected %r; now: %s" % (r.get("reason"), r.get("detail"))
+            else:
+                line = r.get("detail")
+            print("    - %s (%s%s): %s" % (r["id"], r.get("tool") or r.get("kind"), ", %s" % what if what else "",
+                                          line))
+    return 1 if failed else 0
+
+
+def eval_command(argv):
+    if argv[:1] == ["export"]:
+        return eval_export(argv[1:])
+    if argv[:1] == ["replay"]:
+        return eval_replay(argv[1:])
+    sys.stderr.write(EVAL_USAGE)
+    return 64
+
+
+def eval_out_refusal(words, script, cwd):
+    """Why an agent's `harness.py eval export --out` may not write there, or None: fixtures in backbone/evals/ are the
+    user's, and the shell checks don't see where the harness writes."""
+    if words[script + 1:script + 3] != ["eval", "export"]:
+        return None
+    out, _ = take_option(words[script + 3:], "--out")
+    if not out:
+        return None
+    name = protected_path(out, cwd)
+    if name and not (name == EVAL_DRAFTS or name.startswith(EVAL_DRAFTS + "/")):
+        return ("eval export --out %s writes into %s: fixtures in %s/ say what the gates must keep refusing or "
+                "allowing, so only the user moves them there. Export drafts (the default, %s/) for the user to review."
+                % (out, name, EVALS_DIR, EVAL_DRAFTS))
+    return None
 
 
 # --------------------------------------------------------------------------- trace
@@ -7981,9 +8646,16 @@ def main(argv):
     if len(argv) == 3 and argv[1] == "hook" and argv[2] in HOOKS:
         started, data = time.time(), {}
         try:
-            data = normalize_hook(read_hook_input(), HOOK_SOURCE)
+            raw = read_hook_input()
+            data = normalize_hook(raw, HOOK_SOURCE)
             HOOK_CONTEXT.update(session=data.get("session_id"), agent=data.get("agent_type") or data.get("agent_id"))
+            if argv[2] == "pre-tool-use":
+                from_input = str(raw.get("agent_type") or "").split(":")[-1] in PIPELINE_AGENTS
+                CAPTURING.update(hook=argv[2], raw=raw, role=data.get("harness_role"),
+                                 role_from_env=bool(data.get("harness_role")) and not from_input)
             HOOKS[argv[2]](data)
+            if CAPTURING:
+                capture_call("allowed")
         finally:
             slow = hook_slow_threshold()
             elapsed = time.time() - started
@@ -7993,7 +8665,9 @@ def main(argv):
                 sys.stdout.write("{}\n")   # Codex wants JSON on stdout when a hook exits 0
         return 0
     if len(argv) == 4 and argv[1:3] == ["hook", "agent-guard"]:
-        hook_agent_guard(read_hook_input(), argv[3])
+        raw = read_hook_input()
+        CAPTURING.update(hook="agent-guard", raw=raw, role=argv[3], role_from_env=False)
+        hook_agent_guard(raw, argv[3])
         return 0
     if argv[1:] == ["git", "pre-commit"]:
         return git_pre_commit()
@@ -8064,6 +8738,8 @@ def main(argv):
         return report_command(argv[2:])
     if argv[1:2] == ["receipt"]:
         return receipt_command(argv[2:])
+    if argv[1:2] == ["eval"]:
+        return eval_command(argv[2:])
     if argv[1:2] == ["linear"]:
         return linear_command(argv[2:])
     if argv[1:2] == ["trace"]:

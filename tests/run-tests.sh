@@ -80,6 +80,7 @@ deliverer-gate|the deliverer's gate: every way of running a command, and its pro
 thin-convert|update.sh --to-thin and --to-full, there and back (ADR-001)
 attest|attest: the verdict statement harness-verify signs, and its bytes (ADR-005)
 spec-structure|spec structure: lists, quotes, HTML blocks, setext and sections as Markdown reads them (properties need hypothesis and markdown-it-py)
+eval-replay|eval: captured hook calls, candidate ids, fixtures and replay with another engine (ADR-002 (c); properties need hypothesis)
 triage-labels|receipt: suggested labels for each Change-Class and risk (ADR-002)
 trace-export|trace export: ReqIF, needs.json and the HTML matrix (ADR-004; properties need hypothesis)
 machine-guard|machine guard: what counts as enrolled, the plugin's own check, one answer per call
