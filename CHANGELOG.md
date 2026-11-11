@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **A macOS self-test job takes about 10 minutes instead of nearly 30, under its timeout.** `tests/run-tests.sh`
+  runs the `tests/test-*.py` files alongside its shell sections, one per CPU at a time (`HARNESS_TEST_JOBS` sets
+  how many), each with its own temporary folder, and reports them in a last section with each file's time; a test
+  file it doesn't list fails the suite. The pull request jobs set `HYPOTHESIS_PROFILE=ci`: a property that starts a
+  process per example runs a quarter of its examples, drawn anew on each run, and a failure prints the
+  `@reproduce_failure` line that replays it. Local runs keep every example, and the new nightly workflow runs them all
+  on the four platforms; it is not a pull request check. The `@example` cases and decision tables run in both. The
+  escalation check waits for the next minute instead of 61 seconds, and the job timeout is 45 minutes.
 - **The deliverer's gate reads more runtimes and package runners (ADR-002, follow-up).** Refused: `bun`, `deno`, `tsx` and `ts-node` code (`-e`, `eval`), `npx`, `bunx`, `pnpx` and package runners (`npm exec`, `pnpm dlx`, `yarn dlx`, `create`), `java --source`, `jshell`, `go run` from stdin or with `-exec`, `perl -M` with code, `node --eval=` and data: URLs, `pythonX.Y` and `nodejs` by version name, every Python module run (`python3 -m unittest code.interact` reads Python from stdin) and `pytest` (`-p` loads any module): the deliverer runs no tests. A script read from `/dev/stdin` or a `/dev/fd` path, `uvx`, `uv`, `pipx`, `poetry` and `swift` are refused too. `--version` and `--help` alone are allowed. `make`, `just`, `task` and `ninja` read no file from stdin or an expansion. A command that writes a file and then runs it, or runs `make` or `npm` after writing one, is refused; written files include `dd of=`, `curl -o` and `wget -O`, and are compared by name, whatever directory a run spells (`$PWD/s.py`). `$'...'` escapes are read as the characters they name. A commit message and a `--body-file -` heredoc are text. `git fetch origin main`, `git rebase origin/main` and `git pull --rebase origin main` are allowed on a feature branch; a pull or rebase on the default branch, a refspec that writes it, a rebase given a branch to check out (`git rebase feat/x main`, which fast-forwards `main`) and an interactive rebase in any spelling (`-i`, `-ki`, `--interactive`, `--edit-todo`, `git pull --rebase=interactive`, `--rebase=i`, `-ri`), which would wait for an editor, are refused, as is a push in a command that also runs `git checkout` or `switch`. The residual limits are in HOOKS.md.
 - **The attest key's trust anchor is guarded, and repository copies of the key refuse (ADR-005, follow-up).**
   `harness-attest.pub`, the public key the `attest` job checks its key against, is now an enforcement file: a pull

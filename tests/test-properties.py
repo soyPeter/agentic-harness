@@ -11,6 +11,8 @@ import sys
 import tempfile
 import unittest
 
+from hypothesis_profiles import examples
+
 try:
     from hypothesis import given, settings, strategies as st
 except ImportError:
@@ -49,13 +51,13 @@ class HookProperties(unittest.TestCase):
                                 text=True, env=dict(os.environ, CLAUDE_PROJECT_DIR=str(self.project)))
         return result.returncode, result.stderr
 
-    @settings(max_examples=60, deadline=None)
+    @settings(max_examples=examples(60), deadline=None)
     @given(role=st.sampled_from(ROLES), plugin=plugin_names, folder=st.sampled_from(FOLDERS), name=file_names)
     def test_a_plugin_agent_gets_the_decision_of_its_role(self, role, plugin, folder, name):
         self.assertEqual(self.write_decision(plugin + ":" + role, folder + name),
                          self.write_decision(role, folder + name))
 
-    @settings(max_examples=30, deadline=None)
+    @settings(max_examples=examples(30), deadline=None)
     @given(role=st.sampled_from(ROLES), plugin=plugin_names, name=file_names)
     def test_no_agent_writes_a_verdict(self, role, plugin, name):
         code, message = self.write_decision(plugin + ":" + role, "backbone/.verdicts/" + name)

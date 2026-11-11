@@ -20,6 +20,8 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import reqif_check  # noqa: E402
 
+from hypothesis_profiles import examples
+
 try:
     from hypothesis import given, settings, strategies as st
 except ImportError:
@@ -765,7 +767,7 @@ if given is not None:
                             criteria="- AC-9.1-1 (REQ-9.1-1): Given %s, when it runs, then it works." % criterion)
             return {fmt: self.export(fmt, "--task", "9.1") for fmt in formats}
 
-        @settings(max_examples=20, deadline=None)
+        @settings(max_examples=examples(20), deadline=None)
         @given(requirement=item_text, criterion=item_text)
         def test_any_spec_text_gives_valid_documents_that_agree(self, requirement, criterion):
             documents = self.documents(requirement, criterion)
@@ -782,7 +784,7 @@ if given is not None:
             self.assertEqual([r for _, s, t in reqif_check.relations(documents["reqif"]) for r in (s, t)],
                              ["AC-9.1-1", "REQ-9.1-1"])
 
-        @settings(max_examples=15, deadline=None)
+        @settings(max_examples=examples(15), deadline=None)
         @given(requirement=printable)
         def test_printable_text_is_exported_as_written(self, requirement):
             documents = self.documents(requirement, "a customer", formats=("reqif",))

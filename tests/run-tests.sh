@@ -2,6 +2,9 @@
 # Self-test: installs the harness into throwaway repositories and exercises the
 # installer, every Claude Code hook, the git hooks and the update path.
 # Usage: tests/run-tests.sh
+#   The property checks need tests/requirements.txt installed; without it they are skipped.
+#   HYPOTHESIS_PROFILE=ci       fewer examples per property, as in the pull request jobs (default: thorough, all)
+#   HARNESS_TEST_JOBS=<n>       how many tests/test-*.py files run at once (default: one per CPU)
 set -u
 
 HARNESS="$(cd "$(dirname "$0")/.." && pwd)"
@@ -66,6 +69,37 @@ crit = [{"id": a, "met": True, "evidence": "src/api/search_controller.py:1", "te
 body = {"verdict": v, "task": "2.1", "criteria": crit, "findings": [], "tests": {"command": "pytest", "result": tests}, "summary": "s"}
 print("Judged.\n\n```json\n" + json.dumps(body, indent=2) + "\n```")' "$@"
 }
+
+# The Python test files share no state with the sections below or with each other, so they run alongside them from
+# the start, HARNESS_TEST_JOBS at a time (default: one per CPU), slowest first, each with its own temporary folder.
+# They run niced: the sections are the longest chain on a CI runner, and the files finish in the CPU time it leaves.
+# The last section reports them in this order. Each line: tests/test-<file>.py|the check's name.
+PY_TESTS="change-class|the class table through risk, approve, next, start, finish and receipt (properties need hypothesis)
+deliverer-gate|the deliverer's gate: every way of running a command, and its properties (with hypothesis)
+thin-convert|update.sh --to-thin and --to-full, there and back (ADR-001)
+attest|attest: the verdict statement harness-verify signs, and its bytes (ADR-005)
+spec-structure|spec structure: lists, quotes, HTML blocks, setext and sections as Markdown reads them (properties need hypothesis and markdown-it-py)
+triage-labels|receipt: suggested labels for each Change-Class and risk (ADR-002)
+trace-export|trace export: ReqIF, needs.json and the HTML matrix (ADR-004; properties need hypothesis)
+machine-guard|machine guard: what counts as enrolled, the plugin's own check, one answer per call
+thin-install|thin init, pin and pre-commit shim (ADR-001)
+properties|properties: a plugin agent gets its role's decisions (needs hypothesis)
+code-fingerprint|same-size edits within an index write's second or keeping the mtime; untracked, ignored, force-added files
+sandbox-evidence|receipt: the sandbox each judge pass ran in, and the runner's sandbox backend (ADR-003)
+plugin-packaging|plugin manifests and OpenCode adapter (ADR-001)
+thin-regressions|thin: skill overrides, rule provenance and CI engine assets
+agent-hooks|agents' own hooks record verdicts and keep write scopes
+live-plugin|live: a plugin judge verdict is recorded (runs with HARNESS_E2E=1)
+sandbox-egress|live: the sandbox's allowlist, capabilities and evidence in a real container (runs with HARNESS_E2E=1)"
+PY_WORK="$WORK/py"
+PY_JOBS="${HARNESS_TEST_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
+printf 'Python test files: %s at a time, Hypothesis profile %s\n' "$PY_JOBS" "${HYPOTHESIS_PROFILE:-thorough}"
+printf '%s\n' "$PY_TESTS" | while IFS='|' read -r file _; do mkdir -p "$PY_WORK/$file/tmp"; echo "$file"; done |
+  xargs -P "$PY_JOBS" -I{} sh -c 'd="$1/$2"; start=$(date +%s)
+    TMPDIR="$d/tmp" nice -n 10 python3 -B "$3/tests/test-$2.py" > "$d/out" 2>&1; code=$?
+    echo $(( $(date +%s) - start )) > "$d/seconds"; echo "$code" > "$d/exit.tmp" && mv "$d/exit.tmp" "$d/exit"' \
+    _ "$PY_WORK" {} "$HARNESS" &
+PY_PID=$!
 
 P="$WORK/demo"
 
@@ -165,7 +199,6 @@ done
 for s in requirements-writing adr-writing architecture api-design openapi; do
   [ -f "$P/.claude/skills/$s/SKILL.md" ] && ok "installed skill $s" || bad "installed skill $s"
 done
-expect 0 "agents' own hooks record verdicts and keep write scopes" python3 -B "$HARNESS/tests/test-agent-hooks.py"
 
 section "pipeline: define"
 F="$WORK/flow"
@@ -922,10 +955,6 @@ out=$(hook "$F" pre-tool-use "$FINISH" 2>&1)
 contains "a hand-written pass verdict does not hold up" "does not hold up" "$out"
 cp "$WORK/judge.json.bak" "$JV"
 
-section "the code fingerprint comes from the files' content, not git's timestamps"
-expect 0 "same-size edits within an index write's second or keeping the mtime; untracked, ignored, force-added files" \
-  python3 -B "$HARNESS/tests/test-code-fingerprint.py"
-
 section "verify: at commit time and in CI"
 git -C "$F" add -A
 expect 0 "verify passes a [WIP] task that went through the start gate" git -C "$F" commit -qm "feat(api): start customer search"
@@ -1246,7 +1275,7 @@ t, e = sys.argv[1:3]
 s = open(t).read(); open(t, "w").write(re.sub(r" — BLOCKED: [^\n]*\(backbone/escalations\.md\)", "", s))
 s = open(e).read(); open(e, "w").write(s.replace("- Status: open", "- Status: resolved (user)"))
 EOF
-sleep 61   # verdicts and escalations are stamped to the minute
+sleep $((60 - 10#$(date +%S)))   # verdicts and escalations are stamped to the minute: wait for the next one
 out=$(HARNESS_GRILL_MAX_ROUNDS=2 gfail)
 lacks "after the user answered, one more failed round doesn't escalate again" "Escalated after" "$out"
 lacks "the task stays unblocked" "Task 8.6: Item** (spec: backbone/specs/8.6.md) — BLOCKED" "$(cat "$AT")"
@@ -1506,7 +1535,6 @@ contains "the deliverer's gh calls act on this repository only: another reposito
 contains "and the refusal is exit 2" "exit=2" "$out"
 out=$(hook "$DL" pre-tool-use "$(dbash 'gh issue edit 7 --add-label risk:low')" 2>&1; echo "exit=$?")
 contains "the deliverer labels its PR through gh pr only" "gh issue edit is the user's call" "$out"
-expect 0 "the deliverer's gate: every way of running a command, and its properties (with hypothesis)" python3 -B "$HARNESS/tests/test-deliverer-gate.py"
 export PATH=$DL_PATH
 git -C "$DL" checkout -q main
 expect 2 "the deliverer may not push while on the default branch" hook "$DL" pre-tool-use "$(dbash 'git push -u origin HEAD')"
@@ -2429,8 +2457,6 @@ mkdir -p "$SP/work/r" && git -C "$SP/work/r" init -q
 cmd=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print([h["command"] for g in d["hooks"]["PreToolUse"] for h in g["hooks"] if "--harness-machine-guard" in h["command"]][0])' "$SP/.claude/settings.json")
 out=$(printf '%s' "$(gj Write "$SP/work/r")" | HOME="$SP" sh -c "$cmd" 2>&1; echo "exit=$?")
 contains "the installed hook command runs from a home with a space and a dollar sign" "exit=2" "$out"
-expect 0 "machine guard: what counts as enrolled, the plugin's own check, one answer per call" \
-  python3 -B "$HARNESS/tests/test-machine-guard.py"
 
 section "CI: independent judge and branch protection"
 trust "$F"
@@ -2608,12 +2634,6 @@ contains "receipt: exits zero" "exit=0" "$out"
 out=$($CH receipt 7.1 --json)
 expect 0 "receipt --json parses" python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["task"]=="7.1" and d["not_verified"] and d["verified"]' "$out"
 expect 0 "receipt --json lists the suggested labels" python3 -c 'import json,sys; assert json.loads(sys.argv[1])["suggested_labels"] == ["risk:elevated"]' "$out"
-expect 0 "receipt: suggested labels for each Change-Class and risk (ADR-002)" python3 -B "$HARNESS/tests/test-triage-labels.py"
-expect 0 "trace export: ReqIF, needs.json and the HTML matrix (ADR-004; properties need hypothesis)" \
-  python3 -B "$HARNESS/tests/test-trace-export.py"
-expect 0 "attest: the verdict statement harness-verify signs, and its bytes (ADR-005)" python3 -B "$HARNESS/tests/test-attest.py"
-expect 0 "receipt: the sandbox each judge pass ran in, and the runner's sandbox backend (ADR-003)" \
-  python3 -B "$HARNESS/tests/test-sandbox-evidence.py"
 
 section "Linear as the system of record: ticket -> spec -> receipt"
 FX="$HARNESS/tests/fixtures/linear"
@@ -2867,12 +2887,6 @@ contains "light lane: a task marked (light) after it started has no recorded sta
 expect 2 "light lane: agents cannot switch the lane on" hook "$G" pre-tool-use "$(edit_json "$G/backbone/harness.conf" 'HARNESS_LIGHT_LANE="off"' 'HARNESS_LIGHT_LANE="on"')"
 unset HARNESS_LIGHT_LANE HARNESS_TEST_CMD
 
-section "change class (ADR-002): who approves, the light lane, a diff that contradicts the class"
-expect 0 "the class table through risk, approve, next, start, finish and receipt (properties need hypothesis)" \
-  python3 -B "$HARNESS/tests/test-change-class.py"
-expect 0 "spec structure: lists, quotes, HTML blocks, setext and sections as Markdown reads them (properties need hypothesis and markdown-it-py)" \
-  python3 -B "$HARNESS/tests/test-spec-structure.py"
-
 section "tool contracts: every tool that can change something goes through the gate"
 T="$WORK/tools"
 new_repo "$T"
@@ -3061,16 +3075,7 @@ lacks "thin: doctor finds the pipeline agents in the engine" "agent definitions 
 lacks "thin: doctor finds the core skills the core routes name" "missing skill 'adr-writing'" "$out"
 contains "thin: the catalog comes from the engine" "quarkus" "$(thin "$T" catalog)"
 
-expect 0 "thin: skill overrides, rule provenance and CI engine assets" python3 -B "$HARNESS/tests/test-thin-regressions.py"
-
 section "thin mode: the launcher runs the engine the project pins (ADR-001)"
-expect 0 "plugin manifests and OpenCode adapter (ADR-001)" python3 -B "$HARNESS/tests/test-plugin-packaging.py"
-expect 0 "properties: a plugin agent gets its role's decisions (needs hypothesis)" python3 -B "$HARNESS/tests/test-properties.py"
-expect 0 "thin init, pin and pre-commit shim (ADR-001)" python3 -B "$HARNESS/tests/test-thin-install.py"
-expect 0 "update.sh --to-thin and --to-full, there and back (ADR-001)" python3 -B "$HARNESS/tests/test-thin-convert.py"
-expect 0 "live: a plugin judge verdict is recorded (runs with HARNESS_E2E=1)" python3 -B "$HARNESS/tests/test-live-plugin.py"
-expect 0 "live: the sandbox's allowlist, capabilities and evidence in a real container (runs with HARNESS_E2E=1)" \
-  python3 -B "$HARNESS/tests/test-sandbox-egress.py"
 L="$HARNESS/plugin/launcher.py"
 SRC="$WORK/engine-src"   # stands in for the harness repository: this checkout, committed and tagged
 mkdir -p "$SRC"
@@ -3351,6 +3356,27 @@ git -C "$TS" add -A >/dev/null 2>&1
 out=$(cd "$TS" && HARNESS_BUILD_CMD= git commit -qm "not conventional" 2>&1; echo "exit=$?")
 contains "a chained commit-msg hook still enforces Conventional Commits" "must follow Conventional Commits" "$out"
 git -C "$TS" config core.hooksPath scripts/harness/git-hooks
+
+section "Python test files (run alongside the sections above)"
+listed="|$(printf '%s\n' "$PY_TESTS" | cut -d'|' -f1 | tr '\n' '|')"
+for f in "$HARNESS"/tests/test-*.py; do
+  f=${f##*/test-}; f=${f%.py}
+  case "$listed" in *"|$f|"*) ;; *) bad "tests/test-$f.py is in PY_TESTS, so the suite runs it" ;; esac
+done
+while IFS='|' read -r file name; do
+  d="$PY_WORK/$file"
+  while [ ! -f "$d/exit" ] && kill -0 "$PY_PID" 2>/dev/null; do sleep 1; done
+  if [ ! -f "$d/exit" ]; then
+    bad "$name (tests/test-$file.py did not finish)" "$(cat "$d/out" 2>/dev/null)"
+  elif [ "$(cat "$d/exit")" -eq 0 ]; then
+    ok "$name ($(cat "$d/seconds") s)"
+  else
+    bad "$name (tests/test-$file.py: exit $(cat "$d/exit"), expected 0, $(cat "$d/seconds") s)" "$(cat "$d/out")"
+  fi
+done <<EOF
+$PY_TESTS
+EOF
+wait "$PY_PID"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -18,6 +18,8 @@ import threading
 import unittest
 import uuid
 
+from hypothesis_profiles import examples
+
 try:
     from hypothesis import given, settings, strategies as st
 except ImportError:
@@ -806,7 +808,7 @@ else:
             return shell("cp notes.txt %s" % shlex.quote(str(self.places[target] / "notes.txt")), self.places[cwd],
                          session)
 
-        @settings(max_examples=60, deadline=None)
+        @settings(max_examples=examples(60), deadline=None)
         @given(install=st.sampled_from(("guard hook", "plugin", "guard hook and plugin",
                                         "guard hook not trusted in Codex, and plugin", "plugin, no settings")),
                source=st.sampled_from(("claude", "codex")), mode=st.sampled_from(("warn", "block")),
@@ -827,7 +829,7 @@ else:
             self.assertEqual(refused, answered and mode == "block", messages)
             self.assertEqual(len(messages), 1 if answered else 0, messages)
 
-        @settings(max_examples=40, deadline=None)
+        @settings(max_examples=examples(40), deadline=None)
         @given(before=st.sampled_from(("nothing (status)", "install warn", "install block", "install warn --plugin",
                                        "install block --plugin")),
                after=st.sampled_from(("install warn", "install block", "install warn --plugin",
@@ -851,7 +853,7 @@ else:
             for message in messages:
                 self.assertIn("is not enrolled in the agentic harness", message)
 
-        @settings(max_examples=30, deadline=None)
+        @settings(max_examples=examples(30), deadline=None)
         @given(source=st.sampled_from(("claude", "codex")), mode=st.sampled_from(("warn", "block")),
                tool=st.sampled_from(("Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "apply_patch", "Read",
                                      "Task")),

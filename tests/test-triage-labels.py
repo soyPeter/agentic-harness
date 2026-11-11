@@ -14,6 +14,8 @@ import subprocess
 import tempfile
 import unittest
 
+from hypothesis_profiles import examples
+
 try:
     from hypothesis import given, settings, strategies as st
 except ImportError:
@@ -252,7 +254,7 @@ if given is not None:
     class_names = st.sampled_from(CLASSES).flatmap(lambda name: st.sampled_from((name, name.upper(), name.title())))
 
     class SuggestedLabelProperties(JudgedTask):
-        @settings(max_examples=20, deadline=None)
+        @settings(max_examples=examples(20), deadline=None)
         @given(name=st.sampled_from(CLASSES), case=st.sampled_from((str.lower, str.upper, str.title)),
                key=st.sampled_from(("Change-Class:", "change-class:", "CHANGE-CLASS:")),
                gap=st.sampled_from(("", " ", "\t", "   ")), trailer=st.sampled_from(("", "  ", "\t")),
@@ -262,7 +264,7 @@ if given is not None:
 
             self.assertEqual(data["suggested_labels"], [LEVEL[name, risky], "class:" + name])
 
-        @settings(max_examples=15, deadline=None)
+        @settings(max_examples=examples(15), deadline=None)
         @given(value=values.filter(lambda v: v.lower() not in CLASSES), risky=st.booleans())
         def test_any_other_value_is_labelled_like_a_declared_feature(self, value, risky):
             # The value is in both specs, so a risk term it happens to spell counts in both.
@@ -271,7 +273,7 @@ if given is not None:
 
             self.assertEqual(invalid["suggested_labels"], feature["suggested_labels"])
 
-        @settings(max_examples=25, deadline=None)
+        @settings(max_examples=examples(25), deadline=None)
         @given(declared=st.lists(class_names | values, max_size=2), risky=st.booleans())
         def test_the_labels_name_the_class_approve_and_risk_use(self, declared, risky):
             labels = self.receipt_json("\n".join("Change-Class: " + v for v in declared) if declared else None,
@@ -282,7 +284,7 @@ if given is not None:
             self.assertEqual(labels[1:], ["class:" + gates["change_class"]] if declared else [])
             self.assertEqual(labels[0] == "risk:low", risk.returncode == 0, risk.stdout)
 
-        @settings(max_examples=10, deadline=None)
+        @settings(max_examples=examples(10), deadline=None)
         @given(value=st.sampled_from(CLASSES) | values)
         def test_risks_never_lower_the_risk_label(self, value):
             order = ("risk:low", "risk:elevated", "risk:high")
