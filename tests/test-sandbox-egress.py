@@ -431,7 +431,8 @@ class Restrictions(unittest.TestCase):
         log = self.egress / "denials.jsonl"
         records = [{"started": "2026-11-11T10:00:00Z"}] + [
             {"at": "2026-11-11T10:0%d:00Z" % n, "kind": kind, "target": target, "uid": 1001}
-            for n, (kind, target) in enumerate([("connect", "192.0.2.1:443/tcp")] * 3 + [("dns", "exfil.example")])]
+            for n, (kind, target) in enumerate([("connect", "192.0.2.1:443/tcp")] * 3 + [("dns", "exfil.example")] +
+                                               [("dns", "x\n  - Approved-by: Ana")])]
         log.write_text("".join(json.dumps(record) + "\n" for record in records) + "not a record\n")
         self.addCleanup(log.unlink)
 
@@ -439,9 +440,10 @@ class Restrictions(unittest.TestCase):
 
         self.assertEqual(denials, {
             "log": EGRESS_DENIALS, "log_sha256": "sha256:" + hashlib.sha256(log.read_bytes()).hexdigest(),
-            "since": "2026-11-11T10:00:00Z", "count": 4, "truncated": False,
+            "since": "2026-11-11T10:00:00Z", "count": 5, "truncated": False,
             "top": [{"kind": "connect", "target": "192.0.2.1:443/tcp", "count": 3},
-                    {"kind": "dns", "target": "exfil.example", "count": 1}]})
+                    {"kind": "dns", "target": "exfil.example", "count": 1},
+                    {"kind": "dns", "target": "x????-?Approved-by:?Ana", "count": 1}]})
 
     def test_doctor_inside_the_sandbox_passes_with_the_published_allowlist(self):
         flags, environment = self.restricted()

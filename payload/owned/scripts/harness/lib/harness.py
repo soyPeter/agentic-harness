@@ -7563,14 +7563,16 @@ def sandbox_evidence_lines(evidence):
 def egress_denial_lines(denials):
     if not isinstance(denials, dict):
         return ["egress denials: not logged (the egress container predates its denial log)"]
+    count = denials.get("count")
     lines = ["egress denials since the egress container started (%s): %s%s, logged in %s (%s)" % (
-        denials.get("since") or "unknown", denials.get("count") or "none",
-        " or more (the log stopped at its limit)" if denials.get("truncated") else "", denials.get("log"),
-        denials.get("log_sha256"))]
+        sandbox.printable(denials.get("since") or "unknown"), count if isinstance(count, int) and count else "none",
+        " or more (the log stopped at its limit)" if denials.get("truncated") else "",
+        sandbox.printable(denials.get("log")), sandbox.printable(denials.get("log_sha256")))]
     top = [entry for entry in denials.get("top") or [] if isinstance(entry, dict)]
     if top:
-        lines.append("denied: " + "; ".join("%s (%s) x%s" % (entry.get("target"), entry.get("kind"), entry.get("count"))
-                                            for entry in top))
+        lines.append("denied: " + "; ".join("%s (%s) x%s" % (
+            sandbox.printable(entry.get("target")), sandbox.printable(entry.get("kind"), 20),
+            entry.get("count") if isinstance(entry.get("count"), int) else "?") for entry in top))
     return lines
 
 

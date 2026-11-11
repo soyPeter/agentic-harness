@@ -33,6 +33,9 @@ ALLOWLIST_PATH = "/run/harness-egress/allowlist"
 # What the egress container denied (egress.py), on the same read-only volume.
 DENIALS_PATH = "/run/harness-egress/denials.jsonl"
 DENIALS_CITED = 10
+# What a denied target may show of itself: a host name, an address, a port, a protocol. The agent chooses the names it
+# asks for, and the receipt that cites them goes into pull requests.
+UNPRINTABLE = re.compile(r"[^A-Za-z0-9._:/\[\]()-]")
 # The sandbox a project carries, relative to its root; HARNESS_SANDBOX_START brings it up with the devcontainer CLI.
 DEVCONTAINER_CONFIG = ".devcontainer/harness-agent/devcontainer.json"
 # A build on a cold cache installs the agent CLI; a session's own timeout is enforced inside the container too.
@@ -299,12 +302,18 @@ def egress_denials(path):
         started = started or record.get("started")
         truncated = truncated or record.get("truncated") is True
         if isinstance(record.get("kind"), str) and isinstance(record.get("target"), str):
-            key = (record["kind"], record["target"])
+            key = (printable(record["kind"], 20), printable(record["target"]))
             counts[key] = counts.get(key, 0) + 1
     ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:DENIALS_CITED]
     return {"log": str(path), "log_sha256": "sha256:" + hashlib.sha256(data).hexdigest(), "since": started,
             "count": sum(counts.values()), "truncated": truncated,
             "top": [{"kind": kind, "target": target, "count": count} for (kind, target), count in ranked]}
+
+
+def printable(text, limit=255):
+    """text with every character a host name, address or port doesn't use replaced by '?', and cut to limit."""
+    text = UNPRINTABLE.sub("?", str(text))
+    return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
 def start_problem(workspace, reference=None):

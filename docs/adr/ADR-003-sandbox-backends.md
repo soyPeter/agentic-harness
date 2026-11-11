@@ -332,7 +332,9 @@ Still open after v1:
   judge pass in a container records `egress_denials`: since when the log runs, how many packets were denied, the ten
   targets denied most and the log's sha256. The receipt cites them, or says "not logged" for an `egress` container
   from before the log. The log restarts with the `egress` container, so it covers the container's lifetime, not one
-  task.
+  task. A review found that a name the agent asked for could carry line breaks into the receipt, and so into a pull
+  request; a target now shows only the characters of a host name, address and port (`?` for any other, at most 255),
+  both in the recorded summary and in the receipt.
 - **9. The sandbox for thin installs: done (2026-11-11).** `init --thin`, `pin` and `update.sh --to-thin` install
   `.devcontainer/harness-agent/` from the pinned release; `pin` and `--to-thin` update the files nobody edited and keep
   an edited one with the release's copy beside it (`<file>.harness-new`), by the hashes the lock records under `kept`,

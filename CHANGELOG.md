@@ -43,7 +43,9 @@
   `egress` container's main process, appends one line per packet to `/run/harness-egress/denials.jsonl` (target
   address, port, protocol and the sending uid), which the agent mounts read-only. Each judge pass in a container records
   `egress_denials` in its sandbox evidence (since when, how many, the ten targets denied most, the log's sha256), and
-  the receipt cites them; an `egress` container from before the log shows "not logged". Covered by
+  the receipt cites them; an `egress` container from before the log shows "not logged". A target shows only the
+  characters of a host name, address and port (`?` for any other, at most 255), so a name the agent asked for can't
+  add lines to a receipt or a pull request. Covered by
   `tests/test-sandbox-evidence.py` and, in real containers, `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`).
   **Upgrading:** rebuild the sandbox.
 
