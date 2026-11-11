@@ -400,6 +400,74 @@ class Admission(unittest.TestCase):
         self.project.write(".claude/skills/plain/SKILL.md", SKILL_TEXT.replace("vendor-sdk", "plain"))
         self.assertEqual(self.project.invoke("plain").returncode, 0)
 
+    # --------------------------------------------------------------------- which skill a Skill call loads
+    def test_a_skill_call_reaches_the_skill_by_any_name_claude_code_gives_it(self):
+        runs = SKILL_TEXT.replace("vendor-sdk", "x") + "```!\nnode --version\n```\n"
+        cases = (
+            ("its frontmatter name", ".claude/skills/x/SKILL.md", runs.replace("name: x", "name: alias"), "alias"),
+            ("a quoted frontmatter name", ".claude/skills/x/SKILL.md", runs.replace("name: x", "'name': \"alias\""),
+             "alias"),
+            ("a nested skills folder", "src/.claude/skills/n/SKILL.md", runs.replace("name: x", "name: n"), "src:n"),
+            ("a nested skills folder, unqualified", "src/.claude/skills/n/SKILL.md", runs.replace("name: x", "name: n"),
+             "n"),
+            ("another case", ".CLAUDE/skills/x/SKILL.md", runs.replace("name: x", "name: alias"), "ALIAS"),
+            ("a command file", ".claude/commands/deploy.md", runs, "deploy"))
+        for name, path, text, invoked in cases:
+            with self.subTest(name):
+                self.project.write(path, text)
+
+                self.assertRefused(self.project.invoke(invoked), "outside the harness's gates")
+                (self.project.root / path).unlink()
+
+    def test_a_frontmatter_the_harness_cannot_read_could_name_or_register_anything(self):
+        for front, body, why in (("<<: *defaults\n", "", "frontmatter"), ("? hooks\n: {}\n", "", "frontmatter"),
+                                 ("{hooks: {}}\n", "", "frontmatter"), ("\"hoo\\x6bs\": {}\n", "", "frontmatter"),
+                                 ("name: \"\\x61lias\"\n", "```!\nid\n```\n", "runs shell commands")):
+            with self.subTest(front=front):
+                self.project.write(".claude/skills/odd/SKILL.md",
+                                   SKILL_TEXT.replace("name: vendor-sdk\n", front).replace("vendor-sdk", "odd") + body)
+
+                result = self.project.invoke("alias")
+
+                self.assertRefused(result, "odd", why)
+
+    def test_load_time_shell_is_found_where_claude_code_finds_it(self):
+        for body in ("Setup: ```! id```\n", "> ```!\n> id\n> ```\n", "Key:\ufeff!`id`\n",
+                     "Text ````!\nid\n````\n"):
+            with self.subTest(body=body):
+                self.project.write(".claude/skills/probe/SKILL.md", SKILL_TEXT.replace("vendor-sdk", "probe") + body)
+
+                self.assertRefused(self.project.invoke("probe"), "runs shell commands")
+
+    def test_a_quoted_frontmatter_key_still_registers_hooks_or_preapproves_tools(self):
+        for front, why in (("\"hooks\":\n  SessionStart: []\n", "registers hooks"),
+                           ("'allowed-tools': Bash\n", "pre-approves tools"),
+                           ("hooks :\n  SessionStart: []\n", "registers hooks")):
+            with self.subTest(front=front):
+                self.project.write(SKILL, SKILL_TEXT.replace("sources:", front + "sources:"))
+                self.project.admit()
+
+                self.assertRefused(self.project.invoke("vendor-sdk"), why)
+
+    def test_revoked_bytes_under_another_folder_are_blocked_by_the_name_they_still_carry(self):
+        self.project.admit()
+        self.project.revoke(self.project.digest())
+        self.project.commit("fix: revoke vendor-sdk v1")
+        for moved in (".claude/skills/vendor-sdk-v1", "src/.claude/skills/vendor-sdk"):
+            with self.subTest(moved=moved):
+                shutil.copytree(str(self.project.root / BUNDLE), str(self.project.root / moved))
+                shutil.rmtree(str(self.project.root / BUNDLE))
+
+                self.assertRefused(self.project.invoke("vendor-sdk"), "revoked")
+                self.assertRefused(self.project.hook("pre-tool-use", "Bash",
+                                                     {"command": "sh %s/scripts/setup.sh" % moved}), "revoked")
+                self.project.run("git", "add", "-A")
+                verify = self.project.harness("verify")
+                self.assertEqual(verify.returncode, 1, verify.stdout)
+                self.assertIn("%s brings back a revoked bundle" % moved, verify.stdout)
+                shutil.copytree(str(self.project.root / moved), str(self.project.root / BUNDLE))
+                shutil.rmtree(str(self.project.root / moved))
+
 
 @unittest.skipIf(given is None, "hypothesis is not installed (pip install -r tests/requirements.txt)")
 class AdmissionProperties(unittest.TestCase):
@@ -432,18 +500,18 @@ class AdmissionProperties(unittest.TestCase):
             self.assertEqual(invoked.returncode, 0 if admitted else 2, invoked.stderr)
 
         @settings(max_examples=examples(40), deadline=None)
-        @given(before=st.text(alphabet="ab \t\n:.([-*>", max_size=6), command=st.from_regex(r"[a-z]{1,8}",
+        @given(before=st.text(alphabet="ab \t\n:.([-*>\ufeff", max_size=6), command=st.from_regex(r"[a-z]{1,8}",
                                                                                              fullmatch=True))
         @example(before="", command="date")
         @example(before="KEY=", command="date")
-        def test_a_shell_placeholder_runs_only_at_a_line_start_or_after_whitespace(self, before, command):
+        def test_a_shell_placeholder_runs_only_at_a_line_start_or_after_whitespace_or_a_bom(self, before, command):
             name = "probe"
             self.project.write(".claude/skills/%s/SKILL.md" % name,
                                SKILL_TEXT.replace("vendor-sdk", name) + "Value: x" + before + "!`" + command + "`\n")
 
             result = self.project.hook("pre-tool-use", "Skill", {"skill": name})
 
-            runs = before[-1:] in (" ", "\t", "\n")
+            runs = before[-1:] in (" ", "\t", "\n", "\ufeff")
             self.assertEqual(result.returncode, 2 if runs else 0, result.stderr)
 
 

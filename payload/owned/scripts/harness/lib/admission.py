@@ -27,11 +27,14 @@ SECTION = re.compile(r"^\[(\S+)[ \t]+([^\]]*?)[ \t]*\]$")
 FIELD = re.compile(r"^([a-z][a-z0-9-]*)[ \t]*=[ \t]*(.*?)[ \t]*$")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SKIPPED = (".DS_Store",)
-# Claude Code runs these while it loads a skill, before any tool call the harness's hooks see: an inline placeholder is
-# recognised at a line start or after whitespace, a fenced one on a fence opened with "!".
-INLINE_SHELL = re.compile(r"(?:^|(?<=\s))!`")
-FENCED_SHELL = re.compile(r"^[ \t]*(?:`{3,}|~{3,})!", re.M)
-FRONT_KEY = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*)[ \t]*:")
+# Claude Code runs these while it loads a skill, before any tool call the harness's hooks see. Its patterns (2.1.322):
+# /```!\s*\n?[\s\S]*?\n?```/g anywhere in the text, and /(?<=^|\s)!`[^`]+`/gm, where JavaScript's \s also matches
+# U+FEFF and Python's doesn't. Tildes aren't Claude Code's, but cost nothing to refuse too.
+INLINE_SHELL = re.compile(r"(?:^|(?<=[\s\ufeff]))!`")
+FENCED_SHELL = re.compile(r"(?:`{3}|~{3})!")
+PLAIN_KEY = re.compile(r"^([^\s#'\"{}\[\],&*!|>%@`?:-][^:#]*?|-[^\s:#][^:#]*?)[ \t]*:(?:[ \t]|$)")
+SINGLE_KEY = re.compile(r"^'((?:[^']|'')*)'[ \t]*:(?:[ \t]|$)")
+DOUBLE_KEY = re.compile(r'^"([^"\\]*)"[ \t]*:(?:[ \t]|$)')
 
 
 def parse(text):
@@ -159,26 +162,71 @@ def disk_digest(path):
 
 
 def frontmatter(text):
-    """The top-level keys of a SKILL.md's frontmatter, lower case."""
-    lines = text.lstrip("﻿").splitlines()
+    """({top-level key, lower case: its value as written}, None), or (what it has so far, why the harness can't read
+    the rest). Claude Code reads the frontmatter as YAML; this reads the block mappings skills use (plain or quoted
+    keys, indented and block values), and anything else (a merge key, an explicit or escaped key, flow style, a
+    directive, a repeated key, no closing line) is unreadable: it could hold any key, a name or hooks among them."""
+    lines = text.lstrip("\ufeff").splitlines()
     while lines and not lines[0].strip():
         lines.pop(0)
     if not lines or lines[0].strip() != "---":
+        return {}, None
+    fields, key = {}, None
+    for n, line in enumerate(lines[1:], 2):
+        if line.strip() in ("---", "..."):
+            return fields, None
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line[0] in " \t" or line.startswith("- ") or line.strip() == "-":
+            if key is None:
+                return fields, "line %d of its frontmatter continues no key" % n
+            fields[key] += "\n" + line
+            continue
+        found = PLAIN_KEY.match(line) or SINGLE_KEY.match(line) or DOUBLE_KEY.match(line)
+        if not found:
+            return fields, "line %d of its frontmatter isn't a key the harness can read" % n
+        key = found.group(1).replace("''", "'") if found.re is SINGLE_KEY else found.group(1)
+        key = key.strip().lower()
+        if key == "<<" or key in fields:
+            return fields, "line %d of its frontmatter %s" % (n, "merges other keys in" if key == "<<"
+                                                             else "repeats the key %s" % key)
+        fields[key] = line[found.end():].strip()
+    return fields, "its frontmatter has no closing ---"
+
+
+def scalar(value):
+    """A one-line YAML scalar as a string, or None when it is something else (a block, a flow, an escape)."""
+    value = value.strip()
+    if "\n" in value or not value or value[0] in "|>[{&*!%@`":
+        return None
+    if value[0] == "'":
+        end = re.match(r"^'((?:[^']|'')*)'[ \t]*(?:#.*)?$", value)
+        return end.group(1).replace("''", "'") if end else None
+    if value[0] == '"':
+        end = re.match(r'^"([^"\\]*)"[ \t]*(?:#.*)?$', value)
+        return end.group(1) if end else None
+    return re.sub(r"[ \t]+#.*$", "", value).strip()
+
+
+def names(text):
+    """The names Claude Code may give the skill from its frontmatter, lower case: {} when it names none, None when the
+    harness can't tell (an unreadable frontmatter or name), so the skill could be called anything."""
+    fields, problem = frontmatter(text)
+    if problem:
+        return None
+    if "name" not in fields:
         return set()
-    keys = set()
-    for line in lines[1:]:
-        if line.strip() == "---":
-            break
-        key = FRONT_KEY.match(line)
-        if key:
-            keys.add(key.group(1).lower())
-    return keys
+    name = scalar(fields["name"])
+    return {name.lower()} if name else None
 
 
 def runs_on_load(text):
     """What a SKILL.md runs when Claude Code loads it, outside every tool call the hooks see."""
     found = []
-    if "hooks" in frontmatter(text):
+    fields, problem = frontmatter(text)
+    if problem:
+        found.append("may register hooks: %s" % problem)
+    if "hooks" in fields:
         found.append("registers hooks (frontmatter hooks:) that run commands for the rest of the session")
     if INLINE_SHELL.search(text) or FENCED_SHELL.search(text):
         found.append("runs shell commands while it loads (!`...` or a ```! block)")
@@ -188,7 +236,7 @@ def runs_on_load(text):
 def preapproves(text):
     """Why a SKILL.md grants permissions as it loads, or None: allowed-tools skips Claude Code's permission prompt for
     those tools, and a confirm contract relies on that prompt in supervised mode."""
-    keys = frontmatter(text)
-    if "allowed-tools" in keys or "allowed_tools" in keys:
+    fields, _ = frontmatter(text)
+    if "allowed-tools" in fields or "allowed_tools" in fields:
         return "pre-approves tools (frontmatter allowed-tools:), which skips the user's permission prompt"
     return None

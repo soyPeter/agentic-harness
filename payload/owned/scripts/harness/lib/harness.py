@@ -1133,6 +1133,10 @@ def skill_invoked(name):
             return None
         return skill_read(ENGINE_SKILLS / skill / "SKILL.md")
     path = skill_files().get(name)
+    if path is None:
+        # A frontmatter name: the skill counts as loaded under its folder's name, which routes use.
+        targets = [p for p, _ in skill_targets(name)]
+        path = next((f for f in skill_files().values() if f in targets), None) if len(targets) == 1 else None
     return skill_read(path) if path else None
 
 
@@ -3998,21 +4002,67 @@ def admission_problems(name, fields):
     return problems
 
 
-def skill_problem(name):
-    """Why the project skill name can't be loaded as guidance (ADR-006), or None."""
-    records, revocations, _ = admissions()
-    path = skill_files().get(name)
-    if path is None or not (records or revocations):
+SKILL_LISTING = (":(glob,icase)**/.claude/skills/*/SKILL.md", ":(glob,icase)**/.claude/commands/**/*.md",
+                 ":(glob,icase)**/.claude", ":(glob,icase)**/.claude/skills", ":(glob,icase)**/.claude/skills/*",
+                 ":(glob,icase)**/.claude/commands", ":(glob,icase)**/.claude/commands/**")
+
+
+def skill_documents():
+    """{SKILL.md or command file: its bundle folder relative to the root, or None for the engine's own}: what Claude
+    Code can load as a skill from the repository, at any depth (it finds nested .claude/skills folders as files there
+    are touched), in any letter case, ignored by git or not, through links too."""
+    if "documents" in ADMISSIONS_CACHE:
+        return ADMISSIONS_CACHE["documents"]
+    found = {}
+    if ENGINE != ROOT:
+        found.update((path, None) for path in sorted(ENGINE_SKILLS.glob("*/SKILL.md")))
+    listed = [ROOT / name for name in git("ls-files", "-c", "-o", "-z", "--", *SKILL_LISTING).split("\0") if name]
+    listed += list(SKILLS.glob("*/SKILL.md"))
+    for path in listed:
+        if path.is_dir():
+            listed.extend(p for p in path.glob("**/*.md") if p.is_file())
+            continue
+        parts = path.relative_to(ROOT).parts
+        lowered = [part.lower() for part in parts]
+        if len(parts) >= 4 and lowered[-1] == "skill.md" and lowered[-4:-2] == [".claude", "skills"]:
+            found.setdefault(path, path.parent.relative_to(ROOT).as_posix())
+        elif path.suffix.lower() == ".md" and ".claude" in lowered and "commands" in lowered[lowered.index(".claude"):]:
+            found.setdefault(path, path.relative_to(ROOT).as_posix())
+    ADMISSIONS_CACHE["documents"] = found
+    return found
+
+
+def document_names(path):
+    """The names a Skill call reaches path by, lower case, or None when it could be any name."""
+    named = admission.names(read(path))
+    if named is None:
         return None
-    try:
-        folder = path.parent.resolve().relative_to(ROOT).as_posix()
-    except ValueError:
+    is_skill = path.name.lower() == "skill.md"
+    return named | {(path.parent.name if is_skill else path.stem).lower()}
+
+
+def skill_targets(name):
+    """The skills and commands a Skill call to name may load. A plugin's or nested folder's namespace (src:n) is matched
+    by the part after its last colon, so whatever namespace Claude Code gives a repository skill, the call reaches it."""
+    wanted = {name.strip().lower(), name.strip().lower().rsplit(":", 1)[-1]}
+    targets = []
+    for path, folder in skill_documents().items():
+        named = document_names(path)
+        if named is None or wanted & named:
+            targets.append((path, folder))
+    return targets
+
+
+def bundle_problem(folder, names):
+    """Why the skill bundle at folder (relative to the root), known by names, isn't guidance now (ADR-006), or None."""
+    records, revocations, _ = admissions()
+    if not (records or revocations):
         return None
     problems = []
     for record, fields in sorted(records.items()):
         bundle = admission.bundle_path(fields.get("path")) or ""
-        if record == name or (bundle and (folder == bundle or folder.startswith(bundle + "/")
-                                          or bundle.startswith(folder + "/"))):
+        if record.lower() in names or (bundle and (folder == bundle or folder.startswith(bundle + "/")
+                                                   or bundle.startswith(folder + "/"))):
             problems.extend(admission_problems(record, fields))
     now = bundle_digest(folder) if revocations else None
     if now in revocations:
@@ -4020,20 +4070,41 @@ def skill_problem(name):
     return "; ".join(sorted(set(problems), key=problems.index)) or None
 
 
+def skill_problem(name):
+    """Why the project skill name can't be loaded as guidance (ADR-006), or None."""
+    path = skill_files().get(name)
+    if path is None:
+        return None
+    try:
+        folder = path.parent.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return None
+    return bundle_problem(folder, (document_names(path) or set()) | {name.lower()})
+
+
 def skill_tool_gate(tool_input):
     """The Skill tool loads a skill's text, runs its shell placeholders and registers its hooks, all outside the tool
-    calls these hooks see; a user's own /<skill> doesn't come through here."""
-    name = skill_invoked(str(tool_input.get("skill") or tool_input.get("name") or "").strip())
+    calls these hooks see; a user's own /<skill> doesn't come through here. Every skill or command the name can reach
+    counts, by its folder, its frontmatter name or any namespace."""
+    name = str(tool_input.get("skill") or tool_input.get("name") or tool_input.get("command") or "").strip()
+    name = name.lstrip("/").split()[0] if name.strip("/") else ""
     if not name:
         return
-    problem = skill_problem(name)
-    if problem:
+    unusable, runs = [], []
+    for path, folder in skill_targets(name):
+        if folder is not None:
+            problem = bundle_problem(folder, document_names(path) or {name.lower()})
+            if problem:
+                unusable.append("%s: %s" % (rel(str(path)), problem))
+        found = admission.runs_on_load(read(path))
+        if found:
+            runs.append("%s %s" % (rel(str(path)), " and ".join(found)))
+    if unusable:
         deny("Harness blocked the skill %s: it isn't admitted guidance now (ADR-006): %s. Read it as reference if you "
-             "need to, and tell the user." % (name, problem))
-    runs = admission.runs_on_load(read(skill_files()[name]))
+             "need to, and tell the user." % (name, "; ".join(unusable)))
     if runs:
-        deny("Harness blocked the skill %s: it %s, outside the harness's gates. Read its SKILL.md instead; the user "
-             "can invoke it themselves (/%s) or remove that part." % (name, " and ".join(runs), name))
+        deny("Harness blocked the skill %s: %s, outside the harness's gates. Read its SKILL.md instead; the user can "
+             "invoke it themselves (/%s) or remove that part." % (name, "; ".join(runs), name))
 
 
 def blocked_bundle_runs(prog, words, cwd):
@@ -4059,13 +4130,23 @@ def blocked_bundle_runs(prog, words, cwd):
             if problems:
                 return ["%s belongs to %s, which isn't admitted now (%s); its scripts don't run until the user reviews "
                         "it again in backbone/admissions.conf (ADR-006)." % (target, record, "; ".join(problems))]
-    parts = name.split("/")
-    if revocations and parts[:2] == [".claude", "skills"] and len(parts) > 3:
-        now = bundle_digest("/".join(parts[:3]))
+    folder = skill_folder(name)
+    if revocations and folder:
+        now = bundle_digest(folder)
         if now in revocations:
-            return ["%s belongs to %s, and %s (ADR-006)." % (target, "/".join(parts[:3]),
-                                                             revoked_message(now, revocations))]
+            return ["%s belongs to %s, and %s (ADR-006)." % (target, folder, revoked_message(now, revocations))]
     return []
+
+
+def skill_folder(name):
+    """The skill folder (<any>/.claude/skills/<skill>, in any letter case) that the repository path name is in, or
+    None."""
+    parts = name.split("/")
+    lowered = [part.lower() for part in parts]
+    for i in range(len(parts) - 2):
+        if lowered[i:i + 2] == [".claude", "skills"] and len(parts) > i + 3:
+            return "/".join(parts[:i + 3])
+    return None
 
 
 def admission_health():
@@ -4076,12 +4157,9 @@ def admission_health():
     for digest, fields in sorted(revocations.items()):
         issues.extend(("error", "backbone/admissions.conf: %s" % p) for p in fields["problems"])
     recorded = {admission.bundle_path(f.get("path")) for f in records.values()}
-    for name, path in sorted(skill_files().items()):
-        try:
-            folder = path.parent.resolve().relative_to(ROOT).as_posix()
-        except ValueError:
-            continue
-        if revocations and folder not in recorded and bundle_digest(folder) in revocations:
+    for path, folder in sorted(skill_documents().items()):
+        name = rel(str(path))
+        if revocations and folder and folder not in recorded and bundle_digest(folder) in revocations:
             issues.append(("error", "skill %s: %s" % (name, revoked_message(bundle_digest(folder), revocations))))
         runs = admission.runs_on_load(read(path))
         if runs:
@@ -4152,7 +4230,7 @@ def admission_verify(before, after, changed, allow_user_changes):
                             % (path, record, now or "gone", fields.get("digest") or "no digest"))
         if now in revocations:
             problems.append("%s: %s" % (path, revoked_message(now, revocations)))
-    folders = {"/".join(c.split("/")[:3]) for c in changed if c.startswith(".claude/skills/") and c.count("/") >= 3}
+    folders = set(filter(None, map(skill_folder, changed)))
     for folder in sorted(folders - checked):
         now = git_bundle_digest(after, folder)
         if now in revocations:
