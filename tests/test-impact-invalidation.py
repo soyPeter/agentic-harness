@@ -4,7 +4,7 @@
   nothing                                    current      current                            allowed
   a criterion, a constraint, an assumption,  stale        stale (another spec revision)      refused until the griller, the user's
   the Change-Class or any other spec line                                                    approval and the judge (lenses, tester)
-  outside the Approval section                                                               cover the current spec again
+  but an Approved-by line                                                                    cover the current spec again
   an ADR the spec references                 stale        stale                              refused until re-grilled and re-judged
   the code                                   current      stale (other code)                 refused until re-judged
   another task's spec                        current      current                            allowed
@@ -99,6 +99,8 @@ EDITS = {   # what the user changes in the spec, as (old text, new text)
 CODE = {"src/search.py": "def search(items, query):\n    return [i for i in items if query in i]\n",
         "tests/test_search.py": "# AC-{task}-1\ndef test_ac():\n    assert True\n"}
 STALE_SPEC = "changed after the judge passed"
+LATE_CRITERION = ("- AC-{task}-2 (REQ-{task}-1): Given a catalogue, when a user searches, then the results show within 1 "
+                  "second.\n").format(task=TASK)
 
 
 def environment(**settings):
@@ -192,10 +194,11 @@ class Project:
         return self.hook("grill-stop", {"agent_type": "griller", "last_assistant_message": verdict(
             {"verdict": "pass", "task": task, "questions": [], "summary": "s"})})
 
-    def judge_pass(self, task=TASK, **settings):
+    def judge_pass(self, task=TASK, criteria=(1,), **settings):
         return self.hook("judge-stop", {"agent_type": "judge", "last_assistant_message": verdict(
             {"verdict": "pass", "task": task, "findings": [], "summary": "s",
-             "criteria": [{"id": "AC-%s-1" % task, "met": True, "evidence": "src/search.py:1", "tests": ["test_ac"]}],
+             "criteria": [{"id": "AC-%s-%d" % (task, n), "met": True, "evidence": "src/search.py:1",
+                           "tests": ["test_ac"]} for n in criteria],
              "tests": {"command": "true", "result": "passed"}})}, **settings)
 
     def review_pass(self, lens, task=TASK, **settings):
@@ -500,6 +503,72 @@ class Scope(unittest.TestCase):
         self.assertIn(STALE_SPEC, out)
 
 
+class CriterionUnderApproval(unittest.TestCase):
+    """The template puts '## Approval' last, so a criterion appended at the end of a spec lands inside it. It is part
+    of what the griller, the user and the judge passed all the same."""
+
+    def setUp(self):
+        self.project = new_project(self)
+        self.project.add_task()
+        self.project.write(self.project.spec(), self.project.read(self.project.spec()) + LATE_CRITERION)
+        self.project.approve()
+        self.project.grill_pass()
+        code, out = self.project.harness("start", TASK)
+        assert code == 0, out
+        self.project.build()
+        self.project.write("tests/test_speed.py", "# AC-%s-2\ndef test_ac():\n    assert True\n" % TASK)
+        code, out = self.project.judge_pass(criteria=(1, 2))
+        assert "PASS" in out, out
+
+    def reword(self):
+        text = self.project.read(self.project.spec())
+        self.project.write(self.project.spec(), text.replace("within 1 second", "within 60 seconds"))
+
+    def test_rewording_it_makes_the_judge_pass_stale(self):
+        self.reword()
+
+        state = self.project.state()
+        code, out = self.project.finish()
+        receipt, refusal = self.project.harness("receipt", TASK)
+
+        self.assertFalse(state["grill"]["current"], state)
+        self.assertEqual(state["judge"]["stale"], "spec", state)
+        self.assertEqual(code, 1, out)
+        self.assertIn(STALE_SPEC, out)
+        self.assertEqual(receipt, 1, refusal)
+        self.assertNotIn("within 1 second", refusal)
+
+    def test_an_agent_cannot_reword_it_once_the_spec_is_approved(self):
+        code, out = self.project.hook("pre-tool-use", {"agent_id": "analyst", "tool_name": "Edit", "tool_input": {
+            "file_path": str(self.project.root / self.project.spec()), "old_string": "within 1 second",
+            "new_string": "within 60 seconds"}}, HARNESS_SKILL_GATE="off")
+
+        self.assertEqual(code, 2, out)
+        self.assertIn("approved and therefore frozen", out)
+
+    def test_its_words_count_when_policy_assesses_the_risk(self):
+        self.project.add_task("1.2")
+        text = self.project.read(self.project.spec("1.2")).replace("Change-Class: feature", "Change-Class: refactor")
+        self.project.write(self.project.spec("1.2"), text + "- AC-1.2-2 (REQ-1.2-1): Given a catalogue, when a user "
+                           "searches, then no password is shown.\n")
+        self.project.grill_pass("1.2")
+
+        code, out = self.project.harness("approve", "1.2", HARNESS_AUTONOMY="autonomous")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("the spec involves password", out)
+        self.assertNotIn("Approved-by:", self.project.read(self.project.spec("1.2")))
+
+    def test_verify_refuses_a_commit_that_rewords_it_under_the_same_approval(self):
+        self.project.commit("feat: start task 1.1")
+        self.reword()
+
+        code, out = self.project.verify()
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("approval was given on the earlier text", out)
+
+
 class Verify(unittest.TestCase):
     def setUp(self):
         self.project = new_project(self)
@@ -548,6 +617,7 @@ class Verify(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("approval was given on the earlier text", out)
         self.assertEqual(allowed, 0, after)
+
 
 
 @unittest.skipIf(given is None, "hypothesis is not installed (pip install -r tests/requirements.txt)")
@@ -609,7 +679,7 @@ class Properties(unittest.TestCase):
 
             code, out = self.project.verify()
 
-            frozen = approved_before and approval_after == "same" and edit not in (None, "note in Approval")
+            frozen = approved_before and approval_after == "same" and edit is not None
             self.assertEqual("approval was given on the earlier text" in out, frozen, out)
             self.assertEqual(code, 1 if frozen else 0, out)
 

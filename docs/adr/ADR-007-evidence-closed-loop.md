@@ -263,7 +263,7 @@ local audit did not use.
 | 4. Truthful states | `next` ends at `done` only after `delivered` (pushed, PR open, CI green); `delivered` is refused against a dirty or unpushed tree or red CI. Labels never approve. Merged, deployed, enabled and observed are not tracked. (`delivery_step`, `record_delivery`) | Covered up to delivery. Later states are absent, not misreported. Deferred |
 | 4. Failed or absent execution never passes | A failing or timed-out harness test run turns a claimed pass into a fail; a hand-written pass is re-derived and refused. (`effective_judge`; `run-tests.sh` "the judge's tests are run by the harness") | Covered when `HARNESS_TEST_CMD` is set |
 | 6. Bounded action | Grill, judge and lens round limits escalate to BLOCKED; the debugger runs before a fix; Orca stops a step that repeats without progress and retries a worker once; `STOP` halts everything; one `[WIP]` unless the user allows more. (`HARNESS_*_MAX_ROUNDS`, `escalate`, `coordinator.advance`) | Covered. Isolation beyond worktrees (ports, database, environment) is not verified: P3, not started |
-| DEFINE / change impact: grill | The grill pass is bound to the spec outside its Approval section and every referenced ADR. (`spec_fingerprint`, `start_problems`) | Covered |
+| DEFINE / change impact: grill | The grill pass is bound to the spec outside its Approval section and every referenced ADR. (`spec_fingerprint`, `start_problems`) | Partial. **Gap:** the gates read acceptance criteria from anywhere in the spec, and the template puts Approval last, so a criterion appended to a spec landed outside the fingerprint, the freeze and the risk assessment: reworded, it left the grill and judge passes current (found by the independent review of this slice). **Built** |
 | DEFINE / change impact: judge, reviews, tester | Bound to the code only. A changed criterion, constraint, assumption, Change-Class or ADR left the judge's pass current. `next` said `finish`, `finish` and verify accepted it, and the receipt showed the old evidence under the new text. | **Gap. Built** |
 | DEFINE / change impact: renewed approval | An approved spec is frozen for agents, so changing it means the user removes the approval. Nothing asked for the approval back before finishing: the start gate ran only when a task became `[WIP]`, and verify skipped `[WIP]` to `[x]` although HOOKS.md said it checked "every task that became `[WIP]` or `[x]`". | **Gap. Built** |
 | DEFINE / change impact: approval and ADRs | A change to a referenced ADR stales the grill and judge passes, but a user's `Approved-by:` line carries no fingerprint, so it isn't renewed. | Gap. Deferred: needs a decision on how a user's approval is bound |
@@ -290,8 +290,11 @@ local audit did not use.
   it counts as stale. Old entries are never rewritten: the new pass is appended after the stale one.
 - Finishing a task (the hook on `3-TASKS.md`, `finish`, pre-commit and CI `verify`) passes the start gate again. A spec
   whose approval was removed needs a current grill pass and the user's approval before the task can finish.
-- Verify refuses a commit that changes an approved spec outside its Approval section while its `Approved-by:` lines
-  stay as they were. That is the freeze, applied to changes made outside the hooks. The user approves the new text with
+- The spec fingerprint, the freeze on an approved spec and the risk assessment leave out only the `Approved-by:`
+  lines (and comments and blank lines in the Approval section), not the whole section. A criterion under
+  `## Approval` is part of what the griller, the user and the judge passed.
+- Verify refuses a commit that changes an approved spec, other than its `Approved-by:` lines, while those lines stay
+  as they were. That is the freeze, applied to changes made outside the hooks. The user approves the new text with
   a new line. In CI, the `harness-change-approved` label lets a deliberate change through.
 - `next` routes a changed `[WIP]` task to `grill`, then `approve`, then `test` and `judge`, each with a `reason`, and
   then to every review lens. `state --json` gives the judge verdict's `stale` (`code`, `spec` or `unrecorded`). The

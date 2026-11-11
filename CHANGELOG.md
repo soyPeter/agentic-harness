@@ -3,7 +3,7 @@
 ## Unreleased
 
 - **A spec change makes the evidence and approval given on the earlier text stale (ADR-007, Proposed; first slice).**
-  Judge, review and tester records now carry the spec fingerprint (the grill's: the spec outside its Approval section
+  Judge, review and tester records now carry the spec fingerprint (the grill's: the spec except its `Approved-by:` lines,
   and every ADR it references) next to the code fingerprint. A pass counts only on the code and the spec it judged, so
   a changed acceptance criterion, constraint, assumption, Change-Class or ADR sends the task back to the griller, the
   judge, the tester and every review lens even when the code is the same. Finishing a task (the hook, `finish`,
@@ -17,6 +17,14 @@
   history. Upgrade note: a judge, review or tester record from an earlier release has no spec fingerprint, so it
   counts as stale: run them again for tasks in progress. ADR-007's implementation notes hold the audit (P0) this
   slice came from, and what it leaves out.
+- **Text under a spec's `## Approval` heading is part of the spec (ADR-007).** The grill fingerprint, the freeze on an
+  approved spec, verify and the risk assessment left out the whole Approval section, but the gates read acceptance
+  criteria from anywhere in the spec, and the template puts Approval last, so a criterion appended to a spec landed
+  there: rewording it left the grill and judge passes current, an agent could change it after approval, and policy
+  approval didn't see a risk term in it. Only the `Approved-by:` lines (and comments and blank lines in that section)
+  are left out now. Upgrade note: a spec with other text under `## Approval` gets a new fingerprint, so its grill and
+  judge passes go stale: grill and judge it again (its approval stays). A note that goes with an approval belongs in
+  the `Approved-by:` line or in a comment.
 - **The harness as the gate inside the agent software factory (ADR-008, Proposed; docs only).**
   `docs/adr/ADR-008-harness-inside-agent-factory.md` decides how the harness sits inside an always-on factory that
   takes work from Slack, GitHub and Linear. The factory owns the doors, the sender check, identity and keys, lanes,

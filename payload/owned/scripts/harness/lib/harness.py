@@ -700,15 +700,22 @@ def approval_start(text):
     return m.start() if m else len(text)
 
 
-def without_approval(text):
-    """text outside its Approval section: what the grill fingerprint covers and approval freezes."""
-    return without_section(text, "Approval")
-
-
 def frozen_text(text):
-    """What the grill fingerprint covers and the freeze keeps: the spec outside its Approval section, or all of it when a
-    reader could read its sections differently, since then no section can be trusted."""
-    return text if spec_reading_problem(text) else without_approval(text)
+    """What the grill fingerprint covers and the freeze keeps: the spec without its Approved-by lines, or all of it when
+    a reader could read its sections differently, since then no section can be trusted. The rest of the Approval
+    section counts: the template puts it last, so a criterion appended to a spec lands there."""
+    if spec_reading_problem(text):
+        return text
+    view = outline(text)
+    bounds = section_bounds(view, "Approval")
+    if bounds is None:
+        return text
+    words = comment_free(text)
+    # Comments and blank lines are left out with the Approved-by lines, so a spec whose Approval section holds nothing
+    # else keeps the fingerprint it had when the whole section was left out: an upgrade doesn't stale its grill pass.
+    kept = [line for line, shown, said in zip(*(t[bounds[1]:bounds[2]].splitlines(True) for t in (text, view, words)))
+            if not APPROVAL_LINE.match(shown) and not blank_line(said)]
+    return text[:bounds[0]] + (text[bounds[0]:bounds[1]] + "".join(kept) if kept else "") + text[bounds[2]:]
 
 
 def approval_section(text):
@@ -1004,8 +1011,8 @@ def ears_problems(req, text):
 def change_class(text):
     """(class, declared, problem) from the spec's Change-Class: line. Without one the spec counts as feature;
     a value that isn't exactly one class, or two different values, is a problem and counts as feature too."""
-    # Not from the Approval section, where agents may still write once the spec is approved, nor from a code block or
-    # comment, where the line is an example.
+    # Not from the Approval section, which holds the user's approval, nor from a code block or comment, where the line
+    # is an example.
     values = [v.strip() for v in CHANGE_CLASS_LINE.findall(without_section(text, "Approval", view=outline(text)))]
     distinct = sorted({v.lower() for v in values})
     if reading_problem(text):   # a reader may take a line for code or a heading, so no class in it can be trusted
@@ -1089,7 +1096,7 @@ def validate_spec(task, text=None):
 
 
 def spec_fingerprint(task, text=None):
-    """Hash of the spec (without its Approval section) and of every ADR it references."""
+    """Hash of the spec (frozen_text: without its Approved-by lines) and of every ADR it references."""
     text = read(spec_path(task)) if text is None else text
     digest = hashlib.sha256(frozen_text(text).encode("utf-8"))
     for adr in spec_adrs(text):
@@ -2084,7 +2091,7 @@ def content_risks(text, changed=None):
     values = conf()
     # Skills only says which skills the agents load, and explaining why `security` isn't needed ("no auth or
     # personal data") would read as risk. What the work does is in the other sections and in the diff.
-    outside = without_approval(text)
+    outside = frozen_text(text)
     body = without_section(outside, "Skills", view=comment_free(outside))
     reasons = []
     unread = spec_reading_problem(text)
@@ -2808,8 +2815,8 @@ def spec_guard(before, after):
 
 
 def approval_reused(name, before, after):
-    """The freeze as verify sees it, for changes made outside the hooks: a spec that changes outside its Approval
-    section while its Approved-by lines stay as they were keeps an approval given on the earlier text (ADR-007)."""
+    """The freeze as verify sees it, for changes made outside the hooks: a spec whose text changes while its Approved-by
+    lines stay as they were keeps an approval given on the earlier text (ADR-007)."""
     if before is None or after is None:
         return None
     before, after = line_endings(before), line_endings(after)
@@ -2817,7 +2824,7 @@ def approval_reused(name, before, after):
             approval_lines(outline(before)) != approval_lines(outline(after)) or \
             frozen_text(before) == frozen_text(after):
         return None
-    return ("%s changed outside its Approval section while its Approved-by lines stayed the same, so the approval was "
+    return ("%s changed while its Approved-by lines stayed the same, so the approval was "
             "given on the earlier text. The user removes the approval before the spec changes and, once the griller "
             "has passed the new text, approves it with a new Approved-by line. A deliberate exception is committed "
             "with HARNESS_VERIFY=off (in CI, the harness-change-approved label)." % name)
