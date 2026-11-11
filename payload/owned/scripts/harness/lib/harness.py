@@ -4305,9 +4305,9 @@ def hook_pre_tool_use(data):
             deny("Harness blocked this command:\n%s\nIf the user really wants it, ask them to run it "
                  "themselves (in Claude Code: `! <command>`). Do not rephrase the command to get "
                  "around the rule." % "\n".join(problems))
-        if conf()["HARNESS_DELIVER"] == "external" and outward_actions(command):
-            deny("Harness blocked this command: %s" % EXTERNAL_REFUSAL.replace("the deliverer pushes", "no agent "
-                                                                                 "pushes"))
+        refusal = external_refusal(command) if conf()["HARNESS_DELIVER"] == "external" else None
+        if refusal:
+            deny("Harness blocked this command: %s" % refusal)
         if not autonomous():
             command_started(data)
         return
@@ -4681,8 +4681,9 @@ API_VALUE_FLAGS = ("-F", "-f", "-H", "-p", "-q", "-t", "-X", "--cache", "--field
                    "--jq", "--method", "--preview", "--raw-field", "--template")
 LABEL_VALUE_FLAGS = ("-c", "-d", "-R", "--color", "--description", "--repo")
 MERGE_REFUSAL = "it opens and updates the PR; merging is the user's call, like closing or approving it."
-EXTERNAL_REFUSAL = ("delivery is external here (HARNESS_DELIVER=external): the factory pushes and opens the PR from its "
-                    "trusted clone, so the deliverer pushes and opens nothing. Stop and report.")
+EXTERNAL_REFUSAL = ("delivery is external here (HARNESS_DELIVER=external): the factory pushes and talks to GitHub from "
+                    "its trusted clone, so no agent pushes or writes to GitHub (gh only reads, git doesn't push by "
+                    "any name). Stop and report")
 EXPANSION_REFUSAL = ("write the gh command out: an expansion ($... or `...`) outside a flag's value can add flags or "
                      "commands the harness can't read.")
 DELIVERY_GH_REFUSAL = ("it runs only the gh commands delivery needs: gh pr create, edit, view, checks and list, "
@@ -5614,8 +5615,10 @@ def role_command_refusal(agent, command, cwd=None):
     """Why agent may not run command, or None. The deliverer reaches GitHub, but the decisions there stay the user's."""
     if agent != "deliverer":
         return None
-    if conf()["HARNESS_DELIVER"] == "external" and outward_actions(command):
-        return EXTERNAL_REFUSAL
+    if conf()["HARNESS_DELIVER"] == "external":
+        refusal = external_refusal(command)
+        if refusal:
+            return refusal
     risk_added = set()
     targets = {b for b in ("main", "master", default_branch()) if b}
     on_default = git("rev-parse", "--abbrev-ref", "HEAD").strip() in targets
@@ -6065,6 +6068,43 @@ def outward_actions(command):
         if action:
             found.append((action, words))
     return found
+
+
+# Under HARNESS_DELIVER="external" the lane only reads GitHub: these gh subcommands (None: all of them), gh api reads,
+# and git without its push equivalents.
+EXTERNAL_GH_READS = {"pr": ("view", "checks", "list", "ls", "status", "diff"), "run": ("view", "list", "watch"),
+                     "repo": ("view",), "label": ("list",), "issue": ("view", "list", "status"),
+                     "release": ("view", "list"), "workflow": ("view", "list"), "auth": ("status",), "search": None,
+                     "status": None}
+GIT_PUSHES = ("push", "send-pack", "http-push")
+
+
+def external_refusal(command):
+    """Why a command is refused to every agent under external delivery, or None: the factory pushes and talks to
+    GitHub from its trusted clone, so the lane runs no gh write and no git push, by any name."""
+    if not re.search(r"(?<![\w.-])(git|gh)(?![\w.-])", command):
+        return None
+    for segment, words, why in gh_calls(command):
+        prog = program(words[program_index(words):])
+        if why and re.search(r"(?<![\w.-])(git|gh)(?![\w.-])", segment):
+            return "%s (%s)" % (EXTERNAL_REFUSAL, why.rstrip("."))
+        words = words[program_index(words):]
+        if prog == "gh":
+            name, sub, args = gh_parts(words)
+            reads = EXTERNAL_GH_READS.get(name, ())
+            if (name == "api" and api_write(args)) or (name != "api" and reads is not None and sub not in reads):
+                return EXTERNAL_REFUSAL
+        elif prog == "git":
+            options = words[1:words.index(git_subcommand(words))] if git_subcommand(words) in words else words[1:]
+            sub = git_subcommand(words)
+            if any(o.split("=", 1)[0] in ("-c", "--config-env", "--exec-path") for o in options) or sub in GIT_PUSHES:
+                return EXTERNAL_REFUSAL
+            if sub == "config" and not any(w in GIT_CONFIG_READS for w in words) and \
+                    len([w for w in words[words.index("config") + 1:] if not w.startswith("-")]) >= 2:
+                return EXTERNAL_REFUSAL
+            if sub and git("config", "--get", "alias." + sub).strip():
+                return EXTERNAL_REFUSAL
+    return None
 
 
 def log_outward(command, via, result):

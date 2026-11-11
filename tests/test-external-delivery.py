@@ -253,6 +253,25 @@ class ExternalDelivery(unittest.TestCase):
                     self.assertIn("HARNESS_DELIVER=external", answer.stderr)
         self.assertEqual(self.p.bash("git status --short", "implementer").returncode, 0)
 
+    def test_every_role_only_reads_github_and_pushes_nothing_in_external_mode(self):
+        refused = ("gh pr merge 9", "gh pr close 9", "gh pr ready 9", "gh pr review 9 --approve",
+                   "gh issue create -t x -b y", "gh release create v1", "gh workflow run deploy.yml",
+                   "gh api -X POST repos/o/r/pulls -f title=t", "gh repo edit --enable-auto-merge",
+                   "git -c alias.p=push p origin HEAD", "git send-pack origin HEAD", "git config alias.p push",
+                   "git --config-env=core.sshCommand=X fetch origin", "echo 9 | xargs gh pr merge")
+        allowed = ("gh pr view 9", "gh pr checks 9", "gh run view 1", "gh api repos/o/r/pulls/9", "git status",
+                   "git log -1", "git fetch origin", "git config --get user.name", "git diff HEAD~1")
+        for agent in ("implementer", None):
+            for command in refused:
+                with self.subTest(agent=agent, command=command):
+                    answer = self.p.bash(command, agent)
+
+                    self.assertEqual(answer.returncode, 2, answer.stderr)
+                    self.assertIn("HARNESS_DELIVER=external", answer.stderr)
+            for command in allowed:
+                with self.subTest(agent=agent, command=command):
+                    self.assertEqual(self.p.bash(command, agent).returncode, 0)
+
     def test_doctor_knows_the_delivery_modes(self):
         accepted = self.p.harness("doctor", check=False).stdout
         rejected = self.p.harness("doctor", check=False, env={"HARNESS_DELIVER": "factory"}).stdout
