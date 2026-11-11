@@ -275,7 +275,7 @@ class ExternalDelivery(unittest.TestCase):
                    "gh issue create -t x -b y", "gh release create v1", "gh workflow run deploy.yml",
                    "gh api -X POST repos/o/r/pulls -f title=t", "gh repo edit --enable-auto-merge",
                    "git -c alias.p=push p origin HEAD", "git send-pack origin HEAD", "git config alias.p push",
-                   "git --config-env=core.sshCommand=X fetch origin", "echo 9 | xargs gh pr merge")
+                   "git --config-env=user.name=X fetch origin", "echo 9 | xargs gh pr merge")
         allowed = ("gh pr view 9", "gh pr checks 9", "gh run view 1", "gh api repos/o/r/pulls/9", "git status",
                    "git log -1", "git fetch origin", "git config --get user.name", "git diff HEAD~1")
         for agent in ("implementer", None):

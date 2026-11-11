@@ -350,6 +350,12 @@ SPELLINGS = (
     "echo 'scripts/harness/lib/harness.py {c}' | xargs python3",
     "echo scripts/harness/lib/harness.py | xargs -I@ sh -c 'python3 @ {c}'",
     "find scripts -name harness.py -exec {{}} {c} \\;",
+    "echo 'python3 scripts/harness/lib/harness.py {c}' | sh",
+    "echo 'python3 scripts/harness/lib/harness.py {c}' | bash -s",
+    "env -S 'python3 scripts/harness/lib/harness.py {c}'",
+    "git -c alias.x='!python3 scripts/harness/lib/harness.py {c}' x",
+    "awk 'BEGIN{{system(\"python3 scripts/harness/lib/harness.py {c}\")}}'",
+    "python3 <(cat scripts/harness/lib/harness.py) {c}",
 )
 # Running the engine through code the hooks don't read, or from a copy, whatever the command.
 CODE_AND_COPIES = (
@@ -368,10 +374,14 @@ CODE_AND_COPIES = (
 # heredoc or here-string they can.
 STDIN_PROGRAMS = ("echo 'print(1)' | python3", "echo 'print(1)' | python3 -", "python3 < tool.py", "node < tool.js",
                   "python3 - <<< \"$(cat tool.py)\"", "find tests -name 'test_*.py' -exec python3 {} \\;",
-                  "ls *.sh | xargs -n1 bash", "git ls-files | xargs sh -c 'echo $0'", "timeout 9 python3 - < tool.py")
+                  "ls *.sh | xargs -n1 bash", "git ls-files | xargs sh -c 'echo $0'", "timeout 9 python3 - < tool.py",
+                  "echo ls | sh", "bash -s < cmds.txt", "awk '{system($0)}' cmds.txt", "git config alias.x '!ls'",
+                  "git -c core.sshCommand=x fetch origin", "python3 <(cat tool.py)", "source <(cat tool.sh)",
+                  "env -S 'python3 - < tool.py'")
 LITERAL_PROGRAMS = ("python3 - <<'EOF'\nprint(1)\nEOF", "python3 - <<< 'print(1)'", "python3 tools/x.py < input.txt",
                     "cat data.csv | python3 tools/x.py", "python3 --version", "node --version",
-                    "git ls-files '*.py' | xargs python3 -m pyflakes",
+                    "git ls-files '*.py' | xargs python3 -m pyflakes", "bash <<'EOF'\necho hi\nEOF",
+                    "awk '{print $1}' data.txt", "git -c user.name=x log -1", "git config user.name x",
                     "python3 -c \"print(open('scripts/harness/lib/harness.py').read()[:10])\"")
 ALLOWED = ("python3 scripts/harness/lib/harness.py next 1.1 --json", "python3 -B scripts/harness/lib/harness.py contract",
            "python3 scripts/harness/lib/harness.py escalate 1.1 --reason x",
@@ -484,7 +494,15 @@ class GitDirectory(unittest.TestCase):
                 (self.p, "rm -rf .gi?/harness"), (self.p, "truncate -s0 .gi*/harness/events.jsonl"),
                 (self.p, 'rm -f "$PWD/.git/harness/events.jsonl"'),
                 (self.lane, 'cd "$(git rev-parse --git-common-dir)" && rm -f harness/costs/task-1.1.jsonl'),
-                (self.p, "find .git/harness -type f | xargs rm"), (self.p, "ln -sf /dev/null .git/harness/events.jsonl")):
+                (self.p, "find .git/harness -type f | xargs rm"), (self.p, "ln -sf /dev/null .git/harness/events.jsonl"),
+                (self.p, 'D=.git; rm -rf "$D/harness"'), (self.p, 'export D=.git && rm -rf "$D/harness/costs"'),
+                (self.p, "pushd .git && rm -rf harness"),
+                (self.p, "find .git/harness -name '*.jsonl' -exec sed -i '' 's/1/0/' {} +"),
+                (self.p, 'for f in .git/harness/costs/*; do echo "{}" > "$f"; done'),
+                (self.p, "ls .git/harness/costs/* | xargs cp /dev/null"),
+                (self.p, 'find .git/harness -type f | while read f; do : > "$f"; done'),
+                (self.p, 'D=$(git rev-parse --git-common-dir); rm -rf "$D/harness"'),
+                (self.p, 'rm -rf "$UNSET_HARNESS_TEST_VARIABLE/harness"')):
             with self.subTest(command=command):
                 self.assertEqual(project.bash(command, "implementer").returncode, 2)
 
@@ -492,7 +510,15 @@ class GitDirectory(unittest.TestCase):
         for project, command in ((self.p, "cat .git/harness/events.jsonl"), (self.lane, "git status --short"),
                                  (self.p, "find src -name '*.pyc' -delete"), (self.p, 'rm -f "$TMPDIR/x.txt"'),
                                  (self.p, "rm -f build/*.o"), (self.p, 'rm -f "$PWD/build/x.o"'),
-                                 (self.p, "cd src && rm -f x.pyc"),
+                                 (self.p, "cd src && rm -f x.pyc"), (self.p, "find . -name '*.pyc' -delete"),
+                                 (self.p, "find . -name __pycache__ -exec rm -rf {} +"),
+                                 (self.p, "find . -path ./.git -prune -o -name '*.log' -exec rm -f {} +"),
+                                 (self.p, "find . -not -path './.git/*' -name '*.tmp' -delete"),
+                                 (self.p, "find . -name '*.o' -print0 | xargs -0 rm -f"),
+                                 (self.p, "git ls-files -z '*.pyc' | xargs -0 rm -f"),
+                                 (self.p, 'cd "$(mktemp -d)" && touch x'), (self.p, 'T=$(mktemp); echo x > "$T"'),
+                                 (self.p, 'for f in src/*.tmp; do rm -f "$f"; done'),
+                                 (self.p, 'OUT=build/out.txt; echo x > "$OUT"'),
                                  (self.p, "find .git -name '*.lock' -print"),
                                  (self.lane, "tail -3 %s" % shlex.quote(str(self.common / "harness/events.jsonl")))):
             with self.subTest(command=command):

@@ -1489,17 +1489,50 @@ def find_starts(words):
 UNKNOWN_DIR = "/.harness-unresolved-directory"   # the cwd after a cd the hooks can't resolve
 
 
-def shell_path(path, cwd):
-    """path as the shell would resolve it, $PWD and ~ included, against cwd: (absolute paths it can name, whether an
-    expansion is left that the hooks can't resolve). A glob gives the paths it matches now, dotfiles only by a dot."""
+TEMP_SUBSTITUTION = re.compile(r"\$\(\s*mktemp\b[^)]*\)|`\s*mktemp\b[^`]*`")
+TEMP_VARIABLE = re.compile(r"\$(?:\{(TMPDIR|TMP|TEMP)\}|(TMPDIR|TMP|TEMP)\b)")
+
+
+def shell_path(path, cwd, env=None):
+    """path as the shell would resolve it against cwd: variables the command assigned earlier (env; a loop's list,
+    or None when the hooks can't know the value), $PWD, a temp folder for $TMPDIR and $(mktemp), ~ and the
+    environment's variables: (the absolute paths it can name, whether an expansion is left that the hooks can't
+    resolve). A glob gives the paths it matches now, dotfiles only by a dot."""
     here = cwd if cwd and cwd != UNKNOWN_DIR else str(ROOT)
-    text = re.sub(r"\$(?:\{PWD\}|PWD\b)", lambda _: here, path)
-    text = os.path.expandvars(os.path.expanduser(text))
-    unresolved = bool(re.search(r"[$`]", text)) or (cwd == UNKNOWN_DIR and not os.path.isabs(text))
-    full = text if os.path.isabs(text) else os.path.join(here, text)
-    if any(c in full for c in "*?["):
-        return glob.glob(full), unresolved
-    return [full], unresolved
+    variants = [TEMP_SUBSTITUTION.sub(lambda _: os.path.join(tempfile.gettempdir(), "mktemp"), path)]
+    for name, value in (env or {}).items():
+        pattern = re.compile(r"\$(?:\{%s\}|%s(?![A-Za-z0-9_]))" % (re.escape(name), re.escape(name)))
+        expanded = []
+        for text in variants:
+            if not pattern.search(text) or value is None:
+                expanded.append(text)
+            else:
+                expanded.extend(pattern.sub(lambda _: item, text) for item in (value if isinstance(value, list)
+                                                                                else [value]))
+        variants = expanded
+    fulls, unresolved = [], False
+    for text in variants:
+        text = re.sub(r"\$(?:\{PWD\}|PWD(?![A-Za-z0-9_]))", lambda _: here, text)
+        text = TEMP_VARIABLE.sub(lambda m: os.environ.get(m.group(1) or m.group(2)) or tempfile.gettempdir(), text)
+        text = os.path.expandvars(os.path.expanduser(text))
+        unresolved = unresolved or bool(re.search(r"[$`]", text)) or (cwd == UNKNOWN_DIR and not os.path.isabs(text))
+        full = text if os.path.isabs(text) else os.path.join(here, text)
+        # A glob that matches nothing stays as written, as the shell leaves it.
+        fulls.extend((glob.glob(full) or [full]) if any(c in full for c in "*?[") else [full])
+    return fulls, unresolved
+
+
+def assigned_value(value, env):
+    """What VAR=value gives a later path: the text with earlier variables in it, a temp folder for $(mktemp), or None
+    for a command substitution whose output the hooks can't know."""
+    value = TEMP_SUBSTITUTION.sub(lambda _: os.path.join(tempfile.gettempdir(), "mktemp"), value)
+    if re.search(r"\$\(|`", value):
+        return None
+    for name, known in env.items():
+        if isinstance(known, str):
+            value = re.sub(r"\$(?:\{%s\}|%s(?![A-Za-z0-9_]))" % (re.escape(name), re.escape(name)),
+                           lambda _: known, value)
+    return value
 
 
 def reaches_git_dir(full):
@@ -1510,22 +1543,104 @@ def reaches_git_dir(full):
                for d in git_dirs())
 
 
-def git_dir_findings(prog, words, segment, cwd):
-    """Deletes and writes that can reach the git directory, which written_paths alone doesn't name: find -delete or
-    -exec rm from a folder that holds it, a glob that matches it, a path built from $VAR, $PWD or a command
-    substitution, a relative path after a cd the hooks can't resolve, and operands from git rev-parse."""
-    destroys = prog == "find" and ("-delete" in words or (any(w in FIND_EXEC for w in words)
-                                                           and any(program([w]) in MUTATORS for w in words)))
-    for path in written_paths(segment, words) + (find_starts(words) if destroys else []):
-        fulls, unresolved = shell_path(path, cwd)
-        walks = destroys and path in find_starts(words)
-        if unresolved and (GIT_DIR_HINT.search(path) or cwd == UNKNOWN_DIR):
+GIT_PATTERN = re.compile(r"(?:^|/|\*)\.git(?:/\*?)?$")
+GIT_NAMES = []   # every name in the git directories, read once per process
+# Names the harness and git create there that may not exist yet when a find is checked.
+GIT_RECORD_NAMES = {".git", "events.jsonl", "task-1.jsonl", "task-1.lock", "orca.lock", "adr.lock", "intake.lock",
+                    "snapshot.json", "STOP", "1", "1.1", "index", "index.lock", "HEAD", "config", "packed-refs",
+                    "ORIG_HEAD", "FETCH_HEAD", "x.pack", "x.idx", "1-1.log", "x.receipt.txt", "intake-next"}
+
+
+def writes_files(words):
+    """Whether a command writes or deletes the files it names: rm, mv, cp, ln, tee, dd, truncate, sed -i, perl -i."""
+    name = program(words)
+    writers = MUTATORS + COPY_PROGRAMS + ("dd", "tee", "shred", "patch")
+    return name in writers or (name in ("sed", "gsed", "perl") and any(
+        w.startswith(("-i", "-pi")) or w == "--in-place" for w in words[1:]))
+
+
+def git_dir_names():
+    """The names of every file and folder in the git directories (None when there are too many to read)."""
+    if not GIT_NAMES:
+        names, count = set(), 0
+        for top in git_dirs():
+            names.add(os.path.basename(top))
+            for _, dirs, files in os.walk(top) if os.path.isdir(top) else []:
+                names.update(dirs)
+                names.update(files)
+                count += len(dirs) + len(files)
+                if count > 200000:
+                    GIT_NAMES.append(None)
+                    return None
+        GIT_NAMES.append(names)
+    return GIT_NAMES[0]
+
+
+def find_walk_safe(words, starts):
+    """Whether a find that deletes or writes can't reach the git directory: its start folders don't hold it, its
+    expression prunes or excludes .git (-path ./.git -prune, -not -path './.git/*'), or its -name patterns match no
+    name in it. A negated -name could match anything."""
+    if not any(reaches_git_dir(f) for f in starts):
+        return True
+    if any(in_git_dir(f) for f in starts):
+        return False
+    expression = words[1 + len(find_starts(words)):]
+    for i, word in enumerate(expression[:-1]):
+        if word in ("-path", "-wholename", "-name", "-ipath", "-iname") and GIT_PATTERN.search(expression[i + 1]):
+            if expression[i + 2:i + 3] == ["-prune"] or expression[i - 1:i] in (["!"], ["-not"]):
+                return True
+    patterns, negated, i = [], False, 0
+    while i < len(expression):
+        word = expression[i]
+        if word in ("!", "-not"):
+            negated = True
+        elif word in ("-name", "-iname") and i + 1 < len(expression):
+            if negated:
+                return False
+            patterns.append((expression[i + 1], word == "-iname"))
+            i += 1
+        else:
+            negated = False
+        i += 1
+    names = git_dir_names()
+    if not patterns or names is None:
+        return False
+    names = names | GIT_RECORD_NAMES
+    return not any(fnmatch.fnmatchcase(n.lower() if folded else n, p.lower() if folded else p)
+                   for p, folded in patterns for n in names)
+
+
+def safe_producer(producer, cwd, env):
+    """Whether the command piped into xargs names no file in the git directory: a find that can't reach it, or git
+    listing tracked files."""
+    name = program(producer)
+    if name == "git":
+        return git_subcommand(producer) in ("ls-files", "ls-tree", "diff", "grep")
+    if name == "find":
+        starts = [f for start in find_starts(producer) for f in shell_path(start, cwd, env)[0]]
+        return find_walk_safe(producer, starts)
+    return False
+
+
+def git_dir_findings(prog, words, segment, cwd, env=None):
+    """Deletes and writes that can reach the git directory, which written_paths alone doesn't name: find -delete or a
+    writer run by -exec from a folder that holds it (unless the walk prunes .git or its names can't match), a glob
+    or a variable that resolves into it, $PWD, and a write whose target the hooks can't resolve at all."""
+    run, _ = runner_command(prog, words)
+    destroys = prog == "find" and ("-delete" in words or bool(run and writes_files(run[program_index(run):])))
+    starts = find_starts(words) if destroys else []
+    for path in written_paths(segment, words) + starts:
+        fulls, unresolved = shell_path(path, cwd, env)
+        if unresolved:
             return [GIT_DIR_REFUSAL % path if GIT_DIR_HINT.search(path) else
-                    "%s is in a folder from an expansion the hooks can't resolve (cd $(...)); name the folder." % path]
-        if any(reaches_git_dir(f) if walks else in_git_dir(f, cwd) for f in fulls):
-            return [GIT_DIR_REFUSAL % path if not walks else
-                    "find deletes from %s, which holds the git directory: start it in a folder that doesn't, or "
-                    "prune .git." % path]
+                    "it writes or deletes %s, a path from an expansion the hooks can't resolve (a command "
+                    "substitution, read, or a cd they can't follow): name the path." % path]
+        if path in starts:
+            if not find_walk_safe(words, fulls):
+                return ["find deletes or writes from %s, which holds the git directory: prune it (-path ./.git -prune "
+                        "-o ...), or start in a folder that doesn't hold it." % path]
+        elif any(in_git_dir(f, cwd) for f in fulls):
+            return [GIT_DIR_REFUSAL % path]
     if (prog in MUTATORS or prog in COPY_PROGRAMS or destroys) and GIT_SUBSTITUTION.search(segment):
         return [GIT_DIR_REFUSAL % "a path from git rev-parse"]
     return []
@@ -1646,6 +1761,35 @@ def written_paths(segment, words):
     return [p.strip("'\"") for p in paths]
 
 
+AWK_RUNS = re.compile(r"\bsystem\s*\(|\|\s*&?\s*getline|\b(?:print|printf)\b[^;}]*\|\s*&?\s*[\"\w$(]")
+# git settings whose value is a command git runs (an alias that starts with ! included).
+GIT_COMMAND_KEYS = re.compile(r"(?i)^(?:core\.(?:sshcommand|pager|editor|askpass|fsmonitor|gitproxy|hookspath)|"
+                              r"credential\.|diff\.external|diff\..+\.(?:textconv|command)|filter\.|"
+                              r"merge\..+\.driver|gpg\.(?:.+\.)?program|sequence\.editor|pager\.|web\.browser|"
+                              r"browser\.|uploadpack\.|receivepack\.|remote\..+\.(?:uploadpack|receivepack|proxy)|"
+                              r"ssh\.variant|interactive\.difffilter|man\.|core\.alternaterefscommand)")
+
+
+def git_command_config(words):
+    """Why a git call sets a command for git to run, or None: -c, --config-env or git config with an alias that starts
+    with ! or a key whose value git runs (core.sshCommand, core.pager, credential helpers, filters...)."""
+    pairs = []
+    for i, word in enumerate(words[1:], 1):
+        if word == "-c" and i + 1 < len(words):
+            pairs.append(words[i + 1].partition("=")[::2])
+        elif word.startswith("--config-env"):
+            pairs.append((word.split("=", 1)[-1].partition("=")[0], "!"))
+    if git_subcommand(words) == "config":
+        rest = [w for w in words[words.index("config") + 1:] if not w.startswith("-")]
+        if len(rest) >= 2 and not any(w in GIT_CONFIG_READS for w in words):
+            pairs.append((rest[0], rest[1]))
+    for key, value in pairs:
+        if GIT_COMMAND_KEYS.match(key) or (key.lower().startswith("alias.") and value.lstrip().startswith("!")):
+            return ("git %s=... sets a command git runs, which the hooks can't read; run the command itself, or "
+                    "--no-pager." % key)
+    return None
+
+
 def git_findings(words):
     args = words[1:]
     while args and args[0].startswith("-"):
@@ -1695,7 +1839,7 @@ ENGINE_MODULES = ("harness", "launcher", "thin")
 ENGINE_NAME = re.compile(r"\b(?:harness|launcher|thin)\.py\b")
 ENGINE_IMPORT = re.compile(r"\brunpy\b|\b(?:import|from)\s+(?:harness|launcher|thin)\b|"
                            r"\b(?:import_module|__import__)\s*\(\s*['\"](?:harness|launcher|thin)\b")
-CODE_RUNS = re.compile(r"\bexec(?:file)?\s*\(|\bcompile\s*\(|\bimportlib\b|\bsubprocess\b|\bchild_process\b|"
+CODE_RUNS = re.compile(r"\bexec(?:file)?\s*\(|\bcompile\s*\(|\bimportlib\b|\bsubprocess\b|\bchild_process\b|\bsystem\s*\(|"
                        r"\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\b(?:spawn|exec)Sync\b")
 USER_COMMAND_REFUSAL = ("harness.py %s is for the user, CI, an agent factory or an Orca automation's precheck, not "
                         "agents, however the engine is started: run, orca, orca-nightly, snapshot, linear, intake, "
@@ -1723,7 +1867,7 @@ def redirections(words):
     stand, a redirection before the command included."""
     kept, found, i = [], [], 0
     while i < len(words):
-        m = REDIRECTION.match(words[i])
+        m = REDIRECTION.match(words[i]) if not words[i].startswith(("<(", ">(")) else None
         if not m:
             kept.append(words[i])
             i += 1
@@ -1770,12 +1914,12 @@ def script_operand(words):
             i += 2
             continue
         if word == "-" or not word.startswith("-"):
-            return "" if word == "-" or STDIN_FILE.search(word) else word
+            return "" if word == "-" or STDIN_FILE.search(word) or word.startswith(("<(", ">(")) else word
         i += 1
     return ""
 
 
-def program_findings(prog, words):
+def program_findings(prog, words, producer=None, cwd=None, env=None):
     """A program the hooks can't read: an interpreter's program from stdin (a pipe or a file redirect; a literal
     heredoc or here-string is read), and a shell or interpreter a runner (xargs, parallel, find -exec) gives a program
     from its input. A program in a file runs as the repo's code, which the gates and the judge check."""
@@ -1783,7 +1927,8 @@ def program_findings(prog, words):
     command = command[program_index(command):]
     name = program(command)
     versions = VERSION_FLAGS + (("-v",) if name.startswith(SHORT_VERSION_FLAG) else ())
-    if is_runtime(name) and not any(w in versions for w in command[1:]) and script_operand(command) == "":
+    reader = is_runtime(name) or name in SHELLS + ("fish",)
+    if reader and not any(w in versions for w in command[1:]) and script_operand(command) == "":
         literal = any(op in ("<<", "<<-") or (op == "<<<" and not re.search(r"[$`]", target))
                       for op, target in redirects)
         if not literal:
@@ -1801,8 +1946,9 @@ def program_findings(prog, words):
             or module in ENGINE_MODULES + ("runpy",):
         return ["It runs a program or shell whose code comes from %s's input or search, which the hooks can't read; "
                 "run the script by its path, with its arguments written out." % prog]
-    if prog in ("xargs", "parallel") and name in MUTATORS:
-        return ["%s %s changes the files its input names, which the hooks can't read; name them." % (prog, name)]
+    if prog in ("xargs", "parallel") and writes_files(run) and not (producer and safe_producer(producer, cwd, env)):
+        return ["%s %s changes the files its input names, which the hooks can't read: name them, or pipe in a find "
+                "that prunes .git or git ls-files." % (prog, name)]
     return []
 
 
@@ -1842,22 +1988,53 @@ def shell_findings(command, cwd=None, depth=0):
     """Blocking problems with a shell command, beyond the @bash guardrail rules."""
     found = []
     command, bodies = split_heredocs(command)
+    if depth < 3:
+        for inner in scan_expansions(command)[0]:
+            found.extend(shell_findings(inner, cwd, depth + 1))
     segments = split_segments(command)
+    env, dirs = {}, []   # what the command itself assigns, and pushd's stack
     for index, (segment, op) in enumerate(segments):
         assignments, words = shell_words(segment)
+        while words and words[0] in SHELL_KEYWORDS:
+            words = words[1:]
         for assignment in assignments:
             if SETTING_ASSIGNMENT.match(assignment):
                 found.append("Setting %s from the shell overrides a harness setting or skips a check; only the user "
                              "may do that, in their own terminal." % assignment.split("=", 1)[0])
+        if not words:
+            for assignment in assignments:
+                name, _, value = assignment.partition("=")
+                env[name] = assigned_value(value, env)
+            continue
+        if words[0] in ("for", "select") and words[2:3] == ["in"]:
+            items = words[3:]
+            env[words[1]] = None if any(re.search(r"\$\(|`", w) for w in items) else items
+            continue
+        if words[0] == "read":
+            names = [w for w in words[1:] if not w.startswith("-")]
+            env.update({name: None for name in names})
+        if words[0] in ("-S", "--split-string") or words[0].startswith(("-S", "--split-string=")):
+            split = " ".join(([words[0][2:]] if words[0][:2] == "-S" and len(words[0]) > 2 else
+                              [words[0].split("=", 1)[1]] if "=" in words[0] else []) + words[1:])
+            if depth < 3:
+                found.extend(shell_findings(split, cwd, depth + 1))
+            continue
         prog = program(words)
-        if prog == "cd" and len(words) > 1:
-            fulls, unresolved = shell_path(words[1], cwd)
+        if prog in ("cd", "pushd"):
+            target = next((w for w in words[1:] if not w.startswith("-")), os.path.expanduser("~"))
+            fulls, unresolved = shell_path(target, cwd, env)
+            if prog == "pushd":
+                dirs.append(cwd)
             cwd = UNKNOWN_DIR if unresolved or len(fulls) != 1 else fulls[0]
             continue
+        if prog == "popd":
+            cwd = dirs.pop() if dirs else UNKNOWN_DIR
+            continue
+        producer = shell_words(segments[index - 1][0])[1] if index > 0 and segments[index - 1][1] == "|" else None
         found.extend(engine_findings(prog, words, written_paths(segment, words)))
-        found.extend(program_findings(prog, words))
-        found.extend(git_dir_findings(prog, words, segment, cwd))
-        for path in written_paths(segment, words):
+        found.extend(program_findings(prog, words, producer, cwd, env))
+        found.extend(git_dir_findings(prog, words, segment, cwd, env))
+        for path in [full for written in written_paths(segment, words) for full in shell_path(written, cwd, env)[0]]:
             label = install_path(path, cwd)
             if label:
                 found.append("%s is in %s, which decides this project's gates; agents may not change it."
@@ -1871,6 +2048,15 @@ def shell_findings(command, cwd=None, depth=0):
                              "(or not at all, for verdicts and user-only settings)." % name)
         if prog == "git":
             found.extend(git_findings(words))
+            configured = git_command_config(words)
+            if configured:
+                found.append(configured)
+        elif prog in ("awk", "gawk", "mawk", "nawk") and AWK_RUNS.search(segment):
+            found.append("awk runs a command (system(), or a pipe to or from one), which the hooks can't read; run the "
+                         "command itself.")
+        elif prog in ("source", ".") and (len(words) < 2 or script_operand(["sh"] + words[1:]) == ""):
+            found.append("%s runs commands from stdin or a process substitution, which the hooks can't read; source a "
+                         "file." % prog)
         elif prog == "gh" and profile() in NO_MERGE_PROFILES and (
                 words[1:3] == ["pr", "merge"] or (words[1:2] == ["api"] and any(MERGE_ENDPOINT.search(w) for w in words))):
             found.append("Merging is refused under HARNESS_PROFILE=%s: only a human merges, on GitHub." % profile())

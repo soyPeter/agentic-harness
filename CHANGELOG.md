@@ -39,16 +39,21 @@
   cost ledger (the implementer's scope didn't cover `.git/`), and from a linked worktree the shell could delete the
   ledger in the shared git directory by its absolute path. Every agent and the main session are now refused any write
   to `.git`, the worktree's git directory and the repository's common one, with the file tools or the shell, by a
-  relative or an absolute path, by a glob matching it, by `find -delete` or `-exec rm` from a folder that holds it
-  (`find . -name '*.jsonl' -delete`), by `$PWD/.git/...`, by a path built from `$VAR` or a command substitution
-  that points there, or after a `cd` into a folder the hooks can't resolve. Reads stay allowed. **Behaviour change:** a supervised session can no longer write
+  relative or an absolute path, by a glob matching it, by `find -delete` or a writer run by `find -exec` or `xargs` that
+  can reach it (`find . -name '*.jsonl' -delete`; pruning `.git`, or `-name` patterns that match nothing there, keep
+  `find . -name '*.pyc' -delete` allowed), by `$PWD/.git/...`, through a variable or loop the command sets, or after
+  `cd`, `pushd` or `popd`. A write or delete whose target can't be resolved at all (a command substitution other than
+  `mktemp`, a `read` variable, an unset variable) is refused. Reads stay allowed. **Behaviour change:** a supervised session can no longer write
   `.git/info/exclude`; use `.gitignore`.
 
-- **Agents run no program the hooks can't read.** For every agent, an interpreter reading its program from stdin (a
-  pipe or a file redirect) is refused unless the program is a literal heredoc or here-string, and `xargs`, `parallel`
+- **Agents run no program the hooks can't read.** For every agent, an interpreter or a shell reading its program
+  from stdin (a pipe, a file redirect, a process substitution) is refused unless the program is a literal heredoc or
+  here-string; `env -S` is read as the command it splits, `awk` may not run commands, and git may not be given one to
+  run (`git -c` or `git config` with a `!` alias, `core.sshCommand`, `core.pager`, helpers, filters). Previously and `xargs`, `parallel`
   and `find -exec` may not run a shell, or an interpreter whose program comes from their input, nor (`xargs`,
-  `parallel`) a command that changes the files their input names. **Behaviour change:** `echo 'print(1)' | python3`
-  and `find tests -name '*.py' -exec python3 {} \;` are refused; put the program in a file or a heredoc. Reading the
+  `parallel`) a writer unless a `find` that can't reach `.git`, or `git ls-files`, feeds them. **Behaviour change:**
+  `echo 'print(1)' | python3`, `echo ls | sh`, `find tests -name '*.py' -exec python3 {} \;`, `git -c core.pager=...`
+  and awk's `system()` are refused; put the program in a file or a heredoc, and use `--no-pager`. Reading the
   harness engine's text in `python3 -c` is allowed again; running or importing it stays refused.
 - **Agents can't start a user-only command by another spelling.** The shell gate refused `harness.py run`, `linear`,
   `intake` and the other user-only commands only when `harness.py` and the command were in fixed places, so
