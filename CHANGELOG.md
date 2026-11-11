@@ -5,19 +5,28 @@
 - **Third-party skills are reference until the user admits a reviewed copy (ADR-006, Proposed).** The user records a
   vendor's or an SDK's skill bundle in `backbone/admissions.conf` (new, user-only like `tools.conf`): its path, an
   Accepted ADR that names it, source, revision, digest, purpose, compatible versions, dependencies, data destinations
-  and license. `harness.py admission digest <path>` prints the digest of everything under the path (a link counts as
-  where it points; a link out of the bundle makes it inadmissible), and `harness.py admission` shows each record's
-  state. While the bytes match and no revocation names them, the bundle's skills load and satisfy routes as any skill
-  does; otherwise the bundle is reference: the Skill tool is refused, reading its SKILL.md doesn't count as loading it,
-  edits routed to it are refused, and its scripts don't run. A bundle whose SKILL.md registers hooks, runs shell
+  and license. `harness.py admission digest <path>` prints the digest of the files git sees under the path (tracked,
+  or untracked and not ignored; a link counts as where it points; a link out of the bundle makes it inadmissible),
+  and `harness.py admission` shows each record's state. While the bytes match and no revocation names them, the
+  bundle's skills load and satisfy routes as any skill does; otherwise the bundle is reference: the Skill tool is
+  refused, reading its SKILL.md doesn't count as loading it, edits routed to it are refused, and the shell checks
+  refuse agents' commands that run its files (by path, as a shell's or interpreter's operand, on its stdin or through
+  a pipe, through runners such as `timeout`, in any letter case), and, while such a bundle is present, commands whose
+  code comes from an expansion or substitution. A bundle whose SKILL.md registers hooks, runs shell
   placeholders or pre-approves tools isn't admissible: admission grants no command or permission, and the tool
   contracts, shell checks and role scopes govern every call whichever skills are loaded. `[revoke sha256:...]` blocks
-  those bytes anywhere under `.claude/skills/`, even with a matching record. verify refuses a commit whose admitted
+  those bytes in any `.claude/skills/` folder of the repository, even with a matching record; revocations are read
+  from the working copy, the index, HEAD and the default branch together, and a line of the file the harness can't
+  read blocks every project skill bundle until the user fixes it. Agents' git commands that would rewrite
+  `admissions.conf`, `tools.conf`, `harness.conf`, the lock or `escalations.md` (checkout, restore, stash, reset,
+  cherry-pick, revert, apply, am and others) are refused. verify refuses a commit whose admitted
   bundle doesn't match its record, one that changes the admissions (the user commits it with `HARNESS_VERIFY=off`; a
   pull request needs the `harness-change-approved` label), and, even with the label, one that brings revoked bytes
-  back or removes a revocation. doctor and the session-start note report the problems. Separately, agents' Skill
-  calls are refused for any skill whose SKILL.md registers hooks or runs `` !`...` `` placeholders: Claude Code runs
-  those as it loads the skill, outside every tool call the hooks see. Compatibility, dependencies and data
+  back or removes a revocation. doctor and the session-start note report the problems. Separately, an agent's Skill
+  call is refused when any skill or command in the repository the name can reach (folder name, frontmatter `name`,
+  nested `.claude/skills/`, namespace) registers hooks or runs `` !`...` `` or ```` ```! ```` placeholders, as
+  Claude Code finds them, or has a frontmatter the harness can't read: Claude Code runs those as it loads the skill,
+  outside every tool call the hooks see. Compatibility, dependencies and data
   destinations are recorded, not checked, and other plugins' bundles, outside the repository, can't be admitted; the
   ADR's implementation notes list what is deferred and why.
 
