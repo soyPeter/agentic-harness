@@ -1468,6 +1468,40 @@ def protected_path(path_str, cwd):
 
 GIT_DIR_REFUSAL = ("%s is in the git directory, which holds git's own data and the harness's records (events, cost "
                    "ledgers, run locks); agents don't write there.")
+# A path the hooks can't resolve (a $VAR or a command substitution) that still points at the git directory or the
+# harness's records in it.
+GIT_DIR_HINT = re.compile(r"git-dir|git-common-dir|rev-parse|(?:^|/)\.git(?:/|$)|\bGIT_(?:DIR|COMMON_DIR)\b|"
+                          r"(?:^|/)harness/(?:costs|locks|events|runs|sessions|receipts|intake|STOP)\b")
+GIT_SUBSTITUTION = re.compile(r"\$\([^)]*\bgit\b[^)]*\)|`[^`]*\bgit\b[^`]*`")
+
+
+def find_starts(words):
+    """The paths find searches: its operands before the first expression."""
+    starts = []
+    for word in words[1:]:
+        if word.startswith("-") or word in ("(", "!"):
+            break
+        starts.append(word)
+    return starts or ["."]
+
+
+def git_dir_findings(prog, words, segment, cwd):
+    """Deletes and writes into the git directory that written_paths can't name: find -delete or -exec rm under it, a
+    path built from $VAR or a command substitution that points at it, a mutating command whose operands come from
+    git rev-parse."""
+    found = []
+    destroys = prog == "find" and ("-delete" in words or (any(w in FIND_EXEC for w in words)
+                                                           and any(program([w]) in MUTATORS for w in words)))
+    paths = written_paths(segment, words) + (find_starts(words) if destroys else [])
+    for path in paths:
+        unresolved = re.search(r"[$`]", os.path.expandvars(path))
+        if (unresolved and GIT_DIR_HINT.search(path)) or (destroys and path in find_starts(words)
+                                                          and protected_path(path, cwd)):
+            found.append(GIT_DIR_REFUSAL % path if unresolved or in_git_dir(path, cwd) else
+                         "find deletes in %s, which only the Write and Edit tools change." % path)
+    if (prog in MUTATORS or prog in COPY_PROGRAMS or destroys) and GIT_SUBSTITUTION.search(segment):
+        found.append(GIT_DIR_REFUSAL % "a path from git rev-parse")
+    return found[:1]
 
 
 def thin_mode():
@@ -1733,6 +1767,7 @@ def shell_findings(command, cwd=None, depth=0):
         fed = index > 0 and segments[index - 1][1] == "|" and any(
             engine_script(w) for w in shell_words(segments[index - 1][0])[1])
         found.extend(engine_findings(prog, words, written_paths(segment, words), segment, fed))
+        found.extend(git_dir_findings(prog, words, segment, cwd))
         for path in written_paths(segment, words):
             label = install_path(path, cwd)
             if label:
@@ -5984,7 +6019,7 @@ CONTRACT_EVENTS = {
     "escalation": ["task", "escalation", "failure_class", "reason"], "proposal": ["failure_class"],
     "deliver": ["delivery", "branch", "base", "head", "pr", "checks", "findings", "owners"],
     "run-start": ["tasks"], "run-attempt": ["task", "attempt", "exit", "seconds", "state", "cost_usd", "turns"],
-    "run-budget": ["scope", "spent", "limit"], "run-halt": [], "run-agent-failed": ["task", "error"], "run-end": ["summary"],
+    "run-budget": ["scope", "spent", "limit"], "run-session": ["task", "session", "attempt"], "run-halt": [], "run-agent-failed": ["task", "error"], "run-end": ["summary"],
     "tamper": ["files", "command"], "block": ["reason", "detail"], "gate": ["gate"],
     "linear-import": ["task", "issue"], "outward": ["action", "via"],
     "intake": ["task", "contract", "source", "sender", "sender_verdict", "dedupe_key"],
@@ -6722,6 +6757,14 @@ def write_ledger(task, entry):
                      + "\n")
 
 
+def task_has_run(task):
+    """Whether the event log shows a runner session for task (a ledger can go missing; the log is a second record)."""
+    for line in read(events_file()).splitlines():
+        if '"task": %s' % json.dumps(task) in line and ('"run-session"' in line or '"run-attempt"' in line):
+            return True
+    return False
+
+
 def cost_or_none(task):
     try:
         return (task_cost(task) or {}).get("total_usd")
@@ -6878,7 +6921,10 @@ def run_command(argv):
                 outcome = "halted"
                 break
             try:
-                used = (task_cost(task) or {}).get("total_usd", 0.0)
+                ledger = task_cost(task)
+                if ledger is None and task_budget is not None and task_has_run(task):
+                    raise LedgerError("the cost ledger %s is missing, but the task has run before" % cost_ledger(task))
+                used = (ledger or {}).get("total_usd", 0.0)
             except LedgerError as exc:
                 if task_budget is None:
                     used = 0.0
@@ -6910,6 +6956,7 @@ def run_command(argv):
                 # Reserved before the session starts, so a run killed during it still counts it.
                 write_ledger(task, {"session": session, "attempt": attempt, "reserved_usd": None if task_budget is None
                                     else round(max(task_budget - used, 0.0), 6)})
+                log_event("run-session", task=task, session=session, attempt=attempt)
             except OSError as exc:
                 log_event("run-ledger", task=task, error=str(exc))
                 if task_budget is not None:

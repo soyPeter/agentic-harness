@@ -407,12 +407,21 @@ class GitDirectory(unittest.TestCase):
                 (self.p, "cp /dev/null .git/index"),
                 (self.lane, "rm -f %s" % shlex.quote(str(self.common / "harness/costs/task-1.1.jsonl"))),
                 (self.lane, "echo '{}' > %s" % shlex.quote(str(self.common / "harness/events.jsonl"))),
-                (self.lane, "truncate -s 0 %s" % shlex.quote(str(self.common / "harness/locks/task-1.1.lock")))):
+                (self.lane, "truncate -s 0 %s" % shlex.quote(str(self.common / "harness/locks/task-1.1.lock"))),
+                (self.p, "find .git/harness -name '*.jsonl' -delete"),
+                (self.p, "find .git -name '*.lock' -exec rm {} \\;"),
+                (self.lane, "find %s -type f -delete" % shlex.quote(str(self.common / "harness"))),
+                (self.lane, 'rm "$(git rev-parse --git-common-dir)/harness/costs/task-1.1.jsonl"'),
+                (self.lane, "rm -f `git rev-parse --git-dir`/../../harness/events.jsonl"),
+                (self.lane, "D=$(git rev-parse --git-common-dir); rm -f $D/harness/costs/task-1.1.jsonl"),
+                (self.lane, 'echo "{}" > "$GIT_DIR/harness/events.jsonl"')):
             with self.subTest(command=command):
                 self.assertEqual(project.bash(command, "implementer").returncode, 2)
 
     def test_reads_and_other_writes_are_allowed(self):
         for project, command in ((self.p, "cat .git/harness/events.jsonl"), (self.lane, "git status --short"),
+                                 (self.p, "find . -name '*.pyc' -delete"), (self.p, 'rm -f "$TMPDIR/x.txt"'),
+                                 (self.p, "find .git -name '*.lock' -print"),
                                  (self.lane, "tail -3 %s" % shlex.quote(str(self.common / "harness/events.jsonl")))):
             with self.subTest(command=command):
                 self.assertEqual(project.bash(command, "implementer").returncode, 0)

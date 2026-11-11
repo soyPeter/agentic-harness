@@ -192,6 +192,17 @@ class Runner(unittest.TestCase):
                 self.assertIn("cost ledger", entry["reason"])
                 self.assertIn("escalated    task %s" % task, result.stdout)
 
+    def test_a_missing_ledger_of_a_task_that_ran_stops_it(self):
+        task = self.new_task()
+        self.run_task(task, HARNESS_TASK_BUDGET_USD="25", HARNESS_RUN_ATTEMPTS="1")
+        self.unblock(task)
+        self.ledger(task).unlink()
+        again = self.run_task(task, HARNESS_TASK_BUDGET_USD="25", HARNESS_RUN_ATTEMPTS="1")
+        [entry] = self.escalations(task, "budget")
+
+        self.assertEqual(self.sessions(task), 1, again.stdout)
+        self.assertIn("is missing, but the task has run before", entry["reason"])
+
     def test_a_session_a_killed_run_left_counts_against_the_budget(self):
         task = self.new_task()
         started, release = self.p.base / ("started-" + task), self.p.base / ("release-" + task)
