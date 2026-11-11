@@ -301,14 +301,32 @@ local audit did not use.
 - `next` routes a changed `[WIP]` task to `grill`, then `approve`, then `test` and `judge`, each with a `reason`, and
   then to every review lens. `state --json` gives the judge verdict's `stale` (`code`, `spec` or `unrecorded`). The
   receipt refuses a pass on an earlier spec and names the spec and code it was judged on (`judged_on`).
-- Evidence: `tests/test-impact-invalidation.py` (26 tests, through the hooks and the CLI). Two property checks run
+- Evidence: `tests/test-impact-invalidation.py` (34 tests, through the hooks and the CLI). Two property checks run
   the rules as decision tables. A pass is current only when neither the code, the spec, nor an ADR changed and the
   record has a spec revision. An approval holds only for the text it was given on. Each of 20 targeted mutants of the
-  new checks (one check disabled at a time) fails a test. The full suite ran twice locally, green (see the commit).
+  first commit's checks, and of 3 of the range check's rules, fails a test (one check disabled at a time).
+
+**What counts as a change.** The ADR names criteria, constraints, assumptions, architecture and the risk boundary.
+The harness has no semantic diff of a spec, so the slice is coarser: any edit to the spec other than its
+`Approved-by:` lines, or to an ADR it references, makes the passes stale, a reworded Context sentence or a fixed typo
+included. That is the rule the grill fingerprint already followed. Narrowing it would take a fingerprint per section
+and a decision on which sections count, and an edit the harness wrongly ignored would let old evidence through, so it
+was not done.
+
+**Upgrade.** A judge, review or tester pass recorded by an earlier release carries no spec fingerprint, so it counts as
+stale after the upgrade: a task in progress goes back to the judge, the lenses and the tester. A spec with text under
+`## Approval` other than its `Approved-by:` lines gets a new grill fingerprint, so its grill pass goes stale too.
+
+**Who wrote the approval.** Verify reads git, which can't tell who wrote an `Approved-by:` line. A commit that changes
+an approved spec and the date on its approval line together passes verify, as it did before this slice: the line
+changed, so verify takes the approval as renewed. Through the file and shell tools an agent can't write that line
+(the freeze and the approval-line guard), and in autonomous mode the snapshot of protected files reports a spec
+written another way, such as by a script, as tampering and escalates the task. That snapshot is the backstop, not
+verify. In supervised mode it reports only what changed while an agent's command ran.
 
 This slice adds no semantic signal and no new state. It applies the existing fingerprint rule to the spec half of the
 evidence, and runs the existing start gate at finish. That is why it blocks rather than reports (the delegation plan
-keeps report-only for new semantic signals). Rollback is a revert of the commit. Records written in the meantime stay
+keeps report-only for new semantic signals). Rollback is a revert of its commits. Records written in the meantime stay
 readable by the older engine, which ignores `spec`.
 
 ### What was not built, and why
