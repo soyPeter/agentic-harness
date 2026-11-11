@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -355,6 +356,80 @@ class Admission(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertIn("%s: the bundle %s is revoked" % (BUNDLE, revoked), result.stdout)
         self.assertIn("removes the revocation of %s" % revoked, with_record.stdout)
+
+    def test_agents_cannot_undo_a_revocation_with_git(self):
+        self.project.admit()
+        before = self.project.commit("feat: admit vendor-sdk")
+        self.project.revoke(self.project.digest())
+        revoking = self.project.commit("fix: revoke vendor-sdk")
+        self.project.write("notes.txt", "x\n")
+        self.project.commit("docs: notes")
+        self.project.run("git", "checkout", "-q", "-b", "undo")
+        self.project.run("git", "checkout", before, "--", "backbone/admissions.conf")
+        undoing = self.project.commit("revert: the revocation")
+        self.project.run("git", "checkout", "-q", "main")
+        self.project.run("git", "diff", before, revoking, "--output", str(self.project.root.parent / "revoke.patch"))
+        self.project.run("git", "diff", revoking, before, "--output", str(self.project.root.parent / "undo.patch"))
+        self.project.run("git", "config", "alias.co", "checkout")
+        undo = shlex.quote(str(self.project.root.parent / "undo.patch"))
+        commands = (
+            "git checkout %s -- backbone/admissions.conf" % before,
+            "git checkout %s backbone/admissions.conf" % before,
+            "git checkout %s -- ." % before,
+            "git checkout %s -- 'backbone/*.conf'" % before,
+            "git checkout %s -- ':!src'" % before,
+            "git -C backbone checkout %s -- admissions.conf" % before,
+            "git checkout %s -- BACKBONE/admissions.conf" % before,
+            "git restore --source %s backbone/admissions.conf" % before,
+            "git restore -s %s -- backbone" % before,
+            "git reset --hard %s" % before,
+            "git reset %s -- backbone/admissions.conf" % before,
+            "git switch --detach %s" % before,
+            "git checkout %s" % before,
+            "git revert --no-edit %s" % revoking,
+            "git cherry-pick %s" % undoing,
+            "git cherry-pick main..undo",
+            "git checkout undo",
+            "git apply %s" % undo,
+            "git apply < %s" % undo,
+            "git am %s" % undo,
+            "git co %s -- backbone/admissions.conf" % before,
+            "git -c alias.put=checkout put %s -- backbone/admissions.conf" % before,
+            "git read-tree -u --reset %s" % before)
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command}),
+                                   "backbone/admissions.conf")
+        for command in ("git status", "git checkout -- .", "git reset HEAD -- notes.txt", "git stash push -m wip",
+                        "git checkout %s -- notes.txt" % before, "git log -p %s -- backbone" % before,
+                        "git cherry-pick %s" % self.project.run("git", "rev-parse", "HEAD").stdout.strip()):
+            with self.subTest(allowed=command):
+                result = self.project.hook("pre-tool-use", "Bash", {"command": command})
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_agents_cannot_discard_the_users_uncommitted_policy_changes_with_git(self):
+        self.project.admit()
+        self.project.commit("feat: admit vendor-sdk")
+        self.project.revoke(self.project.digest())
+        self.project.append("backbone/tools.conf", "\nmcp__vendor__charge   network   confirm\n")
+        for command in ("git stash", "git stash push backbone/admissions.conf", "git stash -u",
+                        "git checkout -- backbone/admissions.conf", "git restore backbone/tools.conf",
+                        "git checkout -- .", "git reset --hard", "git checkout-index -f -a"):
+            with self.subTest(command=command):
+                self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command}), "backbone/")
+
+    def test_a_revocation_holds_while_the_committed_or_the_working_file_has_it(self):
+        self.project.admit()
+        self.project.commit("feat: admit vendor-sdk")
+        admitted = (self.project.root / "backbone/admissions.conf").read_text()
+        self.project.revoke(self.project.digest())
+        self.project.commit("fix: revoke vendor-sdk")
+
+        self.project.write("backbone/admissions.conf", admitted)
+
+        self.assertRefused(self.project.invoke("vendor-sdk"), "revoked")
+        self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": "sh %s" % SCRIPT}), "revoked")
+        self.assertIn("revoked", self.project.harness("doctor").stdout)
 
     # --------------------------------------------------------------------- verify
     def test_a_commit_that_changes_admitted_bytes_needs_a_new_review(self):

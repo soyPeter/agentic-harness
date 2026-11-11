@@ -1599,6 +1599,263 @@ def git_findings(words):
     return found
 
 
+# The user's policy files: agents may not change them, and a git command that rewrites them from another revision, the
+# index, a stash or a patch would change them outside the hooks that refuse agents' edits.
+POLICY_FILES = ("backbone/tools.conf", "backbone/admissions.conf", "backbone/harness.conf",
+                "backbone/.harness-lock.json", "backbone/escalations.md")
+GIT_OPTION_ARGS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix",
+                   "--exec-path", "--list-cmds", "--attr-source")
+GIT_PLAIN = ("status", "log", "diff", "show", "add", "commit", "push", "fetch", "pull", "merge", "rebase", "branch",
+             "tag", "rev-parse", "rev-list", "ls-files", "ls-tree", "cat-file", "config", "remote", "blame", "grep",
+             "describe", "shortlog", "reflog", "worktree", "init", "clone", "help", "version", "notes", "bisect",
+             "format-patch", "diff-tree", "diff-index", "diff-files", "merge-base", "for-each-ref", "symbolic-ref",
+             "update-ref", "show-ref", "check-ignore", "check-attr", "var", "hash-object", "count-objects", "fsck",
+             "gc", "prune", "submodule", "archive", "bundle", "verify-commit", "verify-tag", "whatchanged", "range-diff",
+             "cherry", "name-rev", "stripspace", "interpret-trailers", "credential", "lfs", "maintenance")
+REV_OPTIONS = {"checkout": ("-b", "-B", "--orphan", "--conflict", "-t", "--track"),
+               "switch": ("-c", "-C", "--orphan", "--conflict", "-t", "--track"),
+               "restore": ("-s", "--source", "--conflict"),
+               "reset": (), "stash": ("-m", "--message"),
+               "cherry-pick": ("-m", "--mainline", "-s", "--strategy", "-X", "--strategy-option", "-S", "--gpg-sign"),
+               "revert": ("-m", "--mainline", "--strategy", "-X", "--strategy-option", "-S", "--gpg-sign"),
+               "read-tree": ("--prefix", "--index-output"), "checkout-index": ("--prefix", "--stage"),
+               "apply": ("-p", "-C", "--directory", "--exclude", "--include", "--whitespace", "--build-fake-ancestor"),
+               "am": ("-p", "-C", "--directory", "--exclude", "--include", "--whitespace", "--patch-format", "-S",
+                      "--resolvemsg"),
+               "clean": ("-e", "--exclude")}
+
+
+def git_option_parts(args, takes):
+    """(options, operands before --, operands after -- or None) for a git subcommand's arguments; takes are the
+    options that take the next word as their value."""
+    options, operands, after = [], [], None
+    i = 0
+    while i < len(args):
+        word = args[i]
+        if after is not None:
+            after.append(word)
+        elif word == "--":
+            after = []
+        elif word.startswith("-") and word != "-":
+            name = word.split("=", 1)[0]
+            if name in takes and "=" not in word and i + 1 < len(args) and not (len(name) == 2 and len(word) > 2):
+                options.append((name, args[i + 1]))
+                i += 1
+            else:
+                options.append((name, word.split("=", 1)[1] if "=" in word else (word[2:] if len(name) == 2 and
+                                                                                    len(word) > 2 else None)))
+        else:
+            operands.append(word)
+        i += 1
+    return options, operands, after
+
+
+def pathspec_covers(spec, cwd, path):
+    """Whether git's pathspec spec, given from cwd, can name the repository path path. Letter case is ignored (a
+    case-insensitive checkout matches either), and magic or exclusion this can't read covers everything."""
+    root = os.path.realpath(str(ROOT))
+    if spec.startswith(":"):
+        magic, _, rest = (spec[2:].partition(")") if spec.startswith(":(") else
+                          (spec[1:2] if spec[1:2] in "/!^" else "", "", spec[2:] if spec[1:2] in "/!^" else spec[1:]))
+        words = set(magic.replace("/", "top").replace("!", "exclude").replace("^", "exclude").split(","))
+        if "exclude" in words:
+            return False
+        if words - {"top", "icase", "glob", "literal", ""}:
+            return True
+        base = root if "top" in words else os.path.realpath(cwd)
+        spec = rest
+    else:
+        base = os.path.realpath(cwd)
+    full = os.path.normpath(os.path.join(base, spec)) if spec else base
+    if full != root and not full.startswith(root + os.sep):
+        return False
+    name = os.path.relpath(full, root).replace(os.sep, "/").lower()
+    target = path.lower()
+    if name == ".":
+        return True
+    if any(c in name for c in "*?["):
+        prefixes = [target] + ["/".join(target.split("/")[:i]) for i in range(1, target.count("/") + 1)]
+        return any(fnmatch.fnmatchcase(p, name) for p in prefixes)
+    return target == name or target.startswith(name.rstrip("/") + "/")
+
+
+def covered_policy_files(specs, cwd):
+    """The policy files a git command with pathspecs specs (None: the whole tree) can write. Only exclusions are a
+    whole tree less some paths, as git reads them."""
+    if specs is None or not [s for s in specs if not re.match(r"^:(!|\^|\([^)]*exclude)", s)]:
+        return list(POLICY_FILES)
+    return [p for p in POLICY_FILES if any(pathspec_covers(spec, cwd, p) for spec in specs)]
+
+
+def policy_changes(source, files):
+    """Which of files would change if git wrote them from source ("<rev>:" or ":" for the index): their content there
+    differs from the working copy, the index or HEAD."""
+    specs = [source + p for p in files] + [":" + p for p in files] + ["HEAD:" + p for p in files]
+    blobs = git_blobs(specs)
+    changed = []
+    for p in files:
+        try:
+            current = (ROOT / p).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            current = None
+        if len({blobs[source + p], blobs[":" + p], blobs["HEAD:" + p], current}) > 1:
+            changed.append(p)
+    return changed
+
+
+def touched_by(revisions):
+    """The paths the commits that revisions name change (a range lists each commit in it)."""
+    out = git("log", "--no-walk=unsorted", "--format=", "--name-only", "-m", *revisions) if revisions else ""
+    return {line for line in out.splitlines() if line}
+
+
+def patch_paths(path):
+    """The paths a patch or mailbox file names, or None when the harness can't read them: stdin, a missing file, or
+    an encoded mail body."""
+    try:
+        with open(path, "rb") as handle:
+            text = handle.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    if re.search(r"(?im)^content-transfer-encoding:\s*(base64|quoted-printable)", text):
+        return None
+    found = set()
+    for line in text.splitlines():
+        header = re.match(r"^(?:diff --git |--- |\+\+\+ |rename (?:from|to) |copy (?:from|to) )(.*)$", line)
+        if header:
+            found.update(w.strip('"') for w in header.group(1).split())
+    return found
+
+
+def git_policy_writes(words, cwd, depth=0):
+    """Why an agent's git command may rewrite a user's policy file, from another revision, the index, a stash or a
+    patch: the hooks refuse agents' edits to those files, and git would make the same edit outside them."""
+    cwd = cwd or str(ROOT)
+    args, aliases = words[1:], {}
+    while args and args[0].startswith("-"):
+        name, _, value = args[0].partition("=")
+        if name in GIT_OPTION_ARGS and not value and len(args) > 1:
+            value, args = args[1], args[2:]
+        else:
+            args = args[1:]
+        if name == "-C" or name == "--work-tree":
+            cwd = os.path.join(cwd, os.path.expanduser(value))
+        elif name == "-c" and value.lower().startswith("alias."):
+            key, _, command = value.partition("=")
+            aliases[key[6:].lower()] = command
+    if not args:
+        return []
+    sub, rest = args[0], args[1:]
+    alias = aliases.get(sub.lower())
+    if alias is None and sub not in GIT_PLAIN and sub not in REV_OPTIONS and depth < 3:
+        alias = git("config", "--get", "alias." + sub).strip() or None
+    if alias is not None and depth < 3:
+        if alias.startswith("!"):
+            return shell_findings(alias[1:] + " " + " ".join(shlex.quote(w) for w in rest), cwd, depth + 1)
+        try:
+            return git_policy_writes(["git"] + shlex.split(alias) + rest, cwd, depth + 1)
+        except ValueError:
+            return ["git %s is an alias the harness can't read." % sub]
+    if sub not in REV_OPTIONS:
+        return []
+    stdin, kept = None, []
+    for i, word in enumerate(rest):
+        redirect = re.match(r"^(\d*|&)(<|>>?|>&|<&)(.*)$", word)
+        if redirect:
+            target = redirect.group(3) or (rest[i + 1] if i + 1 < len(rest) else "")
+            stdin = target if redirect.group(2) == "<" and redirect.group(1) in ("", "0") else stdin
+            kept.append(None if redirect.group(3) else "skip")
+        elif kept and kept[-1] == "skip":
+            kept[-1] = None
+        else:
+            kept.append(word)
+    rest = [w for w in kept if w not in (None, "skip")]
+    options, operands, after = git_option_parts(rest, REV_OPTIONS[sub])
+    flags = {name for name, _ in options}
+    value = dict(options)
+    writes = []   # (source "<rev>:" or ":", pathspecs or None for the whole tree)
+    named = []    # policy files a command writes from a source the harness doesn't read
+    is_rev = lambda rev: bool(git("rev-parse", "--verify", "-q", rev + "^{tree}").strip())
+    if "--pathspec-from-file" in flags:
+        after = None
+    if sub == "checkout":
+        branch = value.get("-b") or value.get("-B") or value.get("--orphan")
+        if after is not None:
+            writes.append(((operands[0] + ":") if operands else ":", after or None))
+        elif branch is not None:
+            writes += [(operands[0] + ":", None)] if operands else []
+        elif operands and is_rev(operands[0]):
+            writes.append((operands[0] + ":", operands[1:] or None))
+        elif operands:
+            writes.append((":", operands))
+    elif sub == "switch":
+        start = [o for o in operands if o != "-"] or (["@{-1}"] if "-" in operands else [])
+        target = start[-1] if start else "HEAD"
+        if not (value.get("-c") or value.get("-C") or value.get("--orphan")) or start:
+            writes.append((target + ":", None))
+    elif sub == "restore":
+        source = value.get("-s") or value.get("--source")
+        staged_only = flags & {"-S", "--staged"} and not flags & {"-W", "--worktree"}
+        specs = operands + (after or [])
+        writes.append(((source + ":") if source else ("HEAD:" if staged_only else ":"), specs or None))
+    elif sub == "reset":
+        if flags & {"--soft"} and not after and len(operands) <= 1:
+            pass
+        else:
+            revision = operands[0] if operands and (after is not None or is_rev(operands[0])) else "HEAD"
+            specs = (after or []) + (operands[1:] if operands and revision == operands[0] else operands)
+            writes.append((revision + ":", specs or None))
+    elif sub == "stash":
+        action = operands[0] if operands else "push"
+        if action in ("push", "save") or not operands:
+            specs = (operands[1:] if action == "push" and operands else []) + (after or [])
+            writes.append(("HEAD:", specs or None))
+        elif action in ("pop", "apply", "branch"):
+            ref = (operands[2] if action == "branch" and len(operands) > 2 else
+                   operands[1] if action != "branch" and len(operands) > 1 else "stash@{0}")
+            changed = set(git("diff", "--name-only", ref + "^1", ref).split("\n"))
+            changed |= set(git("diff", "--name-only", ref + "^1", ref + "^2").split("\n"))
+            changed |= set(git("ls-tree", "-r", "--name-only", ref + "^3").split("\n"))
+            named += [p for p in POLICY_FILES if p in changed]
+            if action == "branch":
+                writes.append((ref + "^1:", None))
+    elif sub in ("cherry-pick", "revert"):
+        if not flags & {"--continue", "--abort", "--skip", "--quit"}:
+            named += [p for p in POLICY_FILES if p in touched_by(operands)]
+    elif sub in ("apply", "am"):
+        if not flags & {"--continue", "--abort", "--skip", "--quit", "--show-current-patch", "--stat", "--numstat",
+                        "--summary", "--check"} or "--apply" in flags:
+            patches = [o for o in operands + (after or []) if o != "-"] + ([stdin] if stdin else [])
+            if not patches or ("-" in operands and not stdin):
+                return ["git %s reads its patch from stdin, which the harness can't check for the user's policy files "
+                        "(%s); apply a patch file." % (sub, ", ".join(POLICY_FILES))]
+            for patch in patches:
+                paths = patch_paths(os.path.join(cwd, os.path.expanduser(patch)))
+                if paths is None:
+                    return ["git %s can't be checked: the harness can't read %s for the user's policy files." % (sub,
+                                                                                                                 patch)]
+                basenames = {p.rsplit("/", 1)[-1].lower() for p in paths}
+                named += [p for p in POLICY_FILES if p.rsplit("/", 1)[-1].lower() in basenames]
+    elif sub == "read-tree":
+        if operands:
+            writes.append((operands[-1] + ":", None))
+    elif sub == "checkout-index":
+        writes.append((":", None if flags & {"-a", "--all", "--stdin"} else operands + (after or [])))
+    elif sub == "clean":
+        if not flags & {"-n", "--dry-run"}:
+            specs = operands + (after or [])
+            untracked = [p for p in covered_policy_files(specs or None, cwd)
+                         if (ROOT / p).exists() and not git("ls-files", "--", p).strip()]
+            named += untracked
+    found = sorted(set(named))
+    for source, specs in writes:
+        found += [p for p in policy_changes(source, covered_policy_files(specs, cwd)) if p not in found]
+    if not found:
+        return []
+    return ["git %s would rewrite %s, which only the user changes (ADR-006): the hooks refuse agents' edits to it, "
+            "and this edit would bypass them. Ask the user." % (sub, ", ".join(found))]
+
+
 def code_findings(code, label):
     if PROTECTED_MENTION.search(code) and CODE_WRITES.search(code):
         return ["%s writes to harness-protected paths (backbone/, scripts/harness/, .claude/, git hooks, "
@@ -1638,6 +1895,7 @@ def shell_findings(command, cwd=None, depth=0):
                              "(or not at all, for verdicts and user-only settings)." % name)
         if prog == "git":
             found.extend(git_findings(words))
+            found.extend(git_policy_writes(words, cwd, depth))
         elif prog == "gh" and profile() in NO_MERGE_PROFILES and (
                 words[1:3] == ["pr", "merge"] or (words[1:2] == ["api"] and any(MERGE_ENDPOINT.search(w) for w in words))):
             found.append("Merging is refused under HARNESS_PROFILE=%s: only a human merges, on GitHub." % profile())
@@ -3934,10 +4192,43 @@ def adopt_command(argv):
 ADMISSIONS_CACHE = {}
 
 
+# Where else a revocation may stand: an agent can't edit the file, but the working copy could still be rolled back
+# outside the hooks, so a revocation in any of these keeps revoking.
+REVOCATION_SOURCES = (":", "HEAD:", "main:", "master:", "origin/main:", "origin/master:", "origin/HEAD:")
+
+
 def admissions():
+    """(records, revocations, errors): the records the working copy holds, and the revocations of the working copy,
+    the index, HEAD and the default branch together."""
     if "parsed" not in ADMISSIONS_CACHE:
-        ADMISSIONS_CACHE["parsed"] = admission.parse(read(ADMISSIONS_FILE))
+        records, revocations, errors = admission.parse(read(ADMISSIONS_FILE))
+        name = ADMISSIONS_FILE.relative_to(ROOT).as_posix()
+        for text in git_blobs([source + name for source in REVOCATION_SOURCES]).values():
+            for digest, fields in admission.parse(text or "")[1].items():
+                revocations.setdefault(digest, fields)
+        ADMISSIONS_CACHE["parsed"] = records, revocations, errors
     return ADMISSIONS_CACHE["parsed"]
+
+
+def git_blobs(specs):
+    """{"<rev>:<path>": its text, or None where git has nothing}, in one git call."""
+    try:
+        out = subprocess.run(["git", "cat-file", "--batch"], cwd=str(ROOT), capture_output=True, timeout=GIT_TIMEOUT,
+                             input="".join(spec + "\n" for spec in specs).encode()).stdout
+    except (subprocess.TimeoutExpired, OSError):
+        return {spec: None for spec in specs}
+    found, at = {}, 0
+    for spec in specs:
+        end = out.find(b"\n", at)
+        header = out[at:end].split() if end >= 0 else []
+        if len(header) != 3 or header[1] != b"blob":
+            found[spec] = None
+            at = end + 1 if end >= 0 else len(out)
+            continue
+        size = int(header[2])
+        found[spec] = out[end + 1:end + 1 + size].decode("utf-8", "replace")
+        at = end + 2 + size
+    return found
 
 
 def bundle_digest(rel_path):
