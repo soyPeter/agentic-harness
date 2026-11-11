@@ -1466,6 +1466,18 @@ def real_path(path):
     return REAL_PATHS[path]
 
 
+def lexical_name(path, cwd):
+    """path (absolute) relative to the project as written, symlinks not followed, or None outside it."""
+    path, root = os.path.normpath(path), real_path(str(ROOT))
+    spellings = {str(ROOT), root, os.environ.get("CLAUDE_PROJECT_DIR") or ""}
+    if cwd and real_path(cwd) == root:
+        spellings.add(os.path.normpath(cwd))
+    for spelling in sorted(s.rstrip(os.sep) for s in spellings if s):
+        if path == spelling or path.startswith(spelling + os.sep):
+            return os.path.relpath(path, spelling).replace(os.sep, "/")
+    return None
+
+
 def protected_path(path_str, cwd):
     """Repository-relative path if path_str points into a shell-protected harness path, else None."""
     if not path_str or path_str.startswith("-"):
@@ -1474,7 +1486,10 @@ def protected_path(path_str, cwd):
     if not os.path.isabs(path):
         path = os.path.join(cwd or str(ROOT), path)
     full, root = real_path(path), real_path(str(ROOT))
-    if full != root and not full.startswith(root + os.sep):
+    inside = full == root or full.startswith(root + os.sep)
+    if lexical_name(path, cwd) != (os.path.relpath(full, root).replace(os.sep, "/") if inside else None):
+        reads_state("a path it names goes through a symlink on this machine")
+    if not inside:
         return path_str if in_records(full) or evals_target(full) else None
     name = os.path.relpath(full, root).replace(os.sep, "/")
     # re.I: on a case-insensitive disk BACKBONE/x is backbone/x; elsewhere refusing it as well costs nothing.
@@ -7375,6 +7390,12 @@ def _capture_call(outcome, reason, causes):
 def prune_captures(folder, keep):
     """Keep at most keep captures in folder. A flood evicts itself: the next to go is the oldest of the session that
     has the most, and within it of the reason given most (a capture's name starts with both, hashed)."""
+    for temp in folder.glob("*.tmp"):   # a hook killed while writing its capture
+        try:
+            if time.time() - temp.stat().st_mtime > 300:
+                temp.unlink()
+        except OSError:
+            pass
     entries = []
     for path in folder.glob("*.json"):
         try:
@@ -7722,9 +7743,16 @@ def eval_replay(args):
     uncommitted = []
     if evals_target(folder) == os.path.join(real_path(str(ROOT)), EVALS_DIR):
         texts, uncommitted = committed_fixtures()
+        if not texts:
+            sys.stderr.write("eval replay: no fixtures committed in %s/%s\n" % (EVALS_DIR, (
+                " (the work tree has %s; only committed fixtures replay)" % ", ".join(uncommitted))
+                if uncommitted else ""))
+            return 1
+    elif not folder.is_dir():
+        sys.stderr.write("eval replay: no folder %s\n" % folder)
+        return 1
     else:
-        texts = [(path.relative_to(folder).as_posix(), path) for path in sorted(folder.rglob("*.json"))] \
-            if folder.is_dir() else []
+        texts = [(path.relative_to(folder).as_posix(), path) for path in sorted(folder.rglob("*.json"))]
     results = []
     with tempfile.TemporaryDirectory(prefix="harness-eval-") as temp:
         root, current = None, {}

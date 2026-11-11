@@ -426,6 +426,26 @@ class Capture(Project):
         result, data = self.replay(out)
         self.assertEqual((result.returncode, data["counts"]), (0, {"skipped": 4}), data)
 
+    def test_a_shell_refusal_that_followed_a_symlink_depends_on_the_disk(self):
+        os.symlink("backbone", str(self.project / "b"))
+        self.blocked(self.bash("echo x > b/notes.md"))
+        _, fixtures, _ = self.export("--refusals")
+        fixture = self.by_command(fixtures, "echo x > b/notes.md")
+        self.assertEqual(fixture["replay"]["state"], "dependent")
+        self.assertIn("symlink", fixture["replay"]["why"])
+
+    def test_a_capture_left_half_written_is_cleared(self):
+        self.blocked(self.bash("git reset --hard"))
+        (capture,) = (self.project / ".git/harness/captures").rglob("*.json")
+        stale, fresh = capture.parent / "tmpkilled.tmp", capture.parent / "tmpwriting.tmp"
+        for path in (stale, fresh):
+            path.write_text("{")
+        hour_ago = time.time() - 3600
+        os.utime(str(stale), (hour_ago, hour_ago))
+        self.blocked(self.bash("git reset --hard HEAD~2"))
+        self.assertFalse(stale.exists(), "a capture killed mid-write leaves a .tmp file, cleared later")
+        self.assertTrue(fresh.exists(), "one another hook may be writing now is left alone")
+
     def test_a_role_set_by_harness_role_replays_with_it(self):
         self.blocked(self.bash("gh pr merge 1", env={"HARNESS_ROLE": "deliverer"}))
         self.allowed(self.bash("gh pr merge 1"))
@@ -806,10 +826,19 @@ class Replay(Project):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(data["counts"], {"error": 1})
 
-    def test_a_folder_without_fixtures_replays_nothing(self):
-        result, data = self.replay(self.outside / "none")
+    def test_an_empty_folder_replays_nothing(self):
+        (self.outside / "empty").mkdir()
+        result, data = self.replay(self.outside / "empty")
         self.assertEqual(result.returncode, 0)
         self.assertEqual(data["results"], [])
+
+    def test_a_missing_folder_is_an_error_not_a_pass(self):
+        result = self.harness("eval", "replay", str(self.outside / "none"))
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("no folder", result.stderr)
+        result = self.harness("eval", "replay")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("no fixtures committed", result.stderr)
 
     def test_the_default_folder_is_backbone_evals(self):
         self.blocked(self.bash("git reset --hard"))
