@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **A spend cap per task that survives resumes (ADR-008, follow-up 3).** `HARNESS_TASK_BUDGET_USD` (user-only, set
+  by the factory for the `run` process) is what one task may spend across all its sessions. Each runner session's cost
+  goes to the task's ledger in the shared git directory (`.git/harness/costs/task-<id>.jsonl`), which outlives the run
+  and the worktree. Once the ledger reaches the budget, `run` starts no session for the task and escalates it with the
+  new kind `budget`. While a budget is set, a session that ends in an error naming HTTP 402 or a budget is taken for
+  the key proxy's refusal: the cost is recorded, the task is escalated (`budget`) and the run stops, since the day's
+  cap may refuse the next task too. `run-budget` events say which cap (`scope`: `run`, `task` or `proxy`), and the
+  receipt shows the task's cost (`cost` in `--json`). The per-day cap and booking each call before it goes out stay
+  with the factory's key proxy. `HARNESS_RUN_MAX_COST` is unchanged.
+
 - **A no-merge profile not tied to Triple (ADR-008, follow-up 10).** `HARNESS_PROFILE="no-merge"` (user-only, or added
   by the environment, which can't lift it) brings the `triple` profile's merge refusals to any project, such as the
   agent software factory's lanes, without Triple's catalog pack: the shell gate refuses `gh pr merge` and GitHub's

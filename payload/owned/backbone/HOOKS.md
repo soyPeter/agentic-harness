@@ -188,6 +188,7 @@ Logs go to `.git/harness/runs/<timestamp>/<task>-<attempt>.log`. Agents can't st
 - **Budgets.**
   - `HARNESS_RUN_TASK_TIMEOUT` per session and `HARNESS_RUN_ATTEMPTS` per task.
   - `HARNESS_RUN_MAX_COST`: dollars per run. The run stops before the next task once spent. Cost and turns are read from `--output-format json` output (the default command uses it).
+  - `HARNESS_TASK_BUDGET_USD`: dollars one task may spend across all its sessions, in every run and resume (the cap an agent factory sets for the `run` process, ADR-008 of the agentic-harness repository). Each session's cost goes to the task's ledger, `.git/harness/costs/task-<id>.jsonl` in the shared git directory, which outlives the run and the worktree. Before each session the runner adds up the ledger; once it reaches the budget, no session starts: the task is escalated with kind `budget` (class `permission_denied`) and the run goes on with the next task. While a budget is set, a session that ends in an error naming HTTP 402 or a budget, spend or cost cap is taken for the key proxy's refusal: the cost is recorded, the task is escalated with kind `budget` and the run stops (`cap-hit`), since the day's cap may refuse the next task too. Each check logs `run-budget` with `scope` `task` or `proxy` (`run` for `HARNESS_RUN_MAX_COST`). A session whose agent reports no cost (Codex) counts as nothing, so the ledger is a floor; the key proxy, which books each call before it goes out, is the enforcement. The per-day cap is the proxy's too. An invalid value is a doctor error, so `run` refuses to start. Agents can't change the setting or write the ledger.
   - Per session, add `--max-budget-usd <n>` to `HARNESS_AGENT_CMD`.
 - **`--worktree [--pr]`:** each task runs in its own worktree, on branch `harness/task-<id>` from the current HEAD. The base branch is left untouched.
   - A done task's branch is delivered by its own session (the deliver step, when `HARNESS_DELIVER` is on). With `--pr`, a blocked or escalated task's branch is pushed and a pull request opened too, for a person to look at.
@@ -372,6 +373,7 @@ Other writes (`gh pr comment`, `ci-protect`'s branch protection) are not `outwar
 - **Verified:** the harness's own test run, and each AC with its tests, evidence and the test files that mention it.
 - **Not verified:** ACs not met, NFRs no AC covers, and findings the judge left open.
 - **Sandbox:** where the judge pass was recorded (`sandbox` in the JSON; see Sandbox backend and evidence). A judge pass recorded before sandbox evidence existed says "not recorded" (`null`).
+- **Cost:** what the runner's sessions for the task cost, from its cost ledger (`cost` in the JSON: `total_usd`, `sessions`, `sessions_without_cost`; `null` when no runner session worked on the task).
 - **Decisions:** the ADRs the spec follows, the ADRs the task added or changed (with their status), and the assumptions with their sources.
 - **Risks**, headed by the spec's Change-Class (`change_class` in the JSON), and the number of grill, judge and debugger rounds.
 - **Approval needed:** ADRs that aren't Accepted and open escalations.
@@ -478,6 +480,7 @@ Two files of each kind apply: the core file in `scripts/harness/`, then the proj
 | `HARNESS_RUN_TASK_TIMEOUT` | `3600` | Seconds per agent session in a run. User-only |
 | `HARNESS_RUN_ATTEMPTS` | `2` | Sessions per task before the runner escalates it. User-only |
 | `HARNESS_RUN_MAX_COST` | empty (no limit) | Dollars per run; the runner stops before the next task once spent. User-only |
+| `HARNESS_TASK_BUDGET_USD` | empty (no limit) | Dollars per task, across runs and resumes, from the task's cost ledger; no session starts once it is reached (see Runner). User-only |
 | `HARNESS_SANDBOX_BACKEND` | `devcontainer` | Where the runner starts its sessions (ADR-003); `devcontainer` is the only backend. User-only |
 | `HARNESS_CI_JUDGE_CMD` | `claude -p --agent judge --dangerously-skip-permissions --output-format json` | The CI judge session. User-only |
 | `HARNESS_SKILL_MAX_AGE` | `180` | Days after which doctor flags a skill's `last-verified` date; `0` turns it off |

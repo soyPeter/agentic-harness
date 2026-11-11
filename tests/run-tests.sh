@@ -91,6 +91,7 @@ plugin-packaging|plugin manifests and OpenCode adapter (ADR-001)
 thin-regressions|thin: skill overrides, rule provenance and CI engine assets
 factory-contract|the factory contract: versioned JSON fields, events, outward writes, the per-task run lock (ADR-008)
 no-merge-profile|the no-merge profile: every merge path, per profile in harness.conf and the environment (ADR-008)
+task-budget|the per-task spend cap: the ledger across resumes, the proxy's refusal, cost on the receipt (ADR-008; properties need hypothesis)
 agent-hooks|agents' own hooks record verdicts and keep write scopes
 live-plugin|live: a plugin judge verdict is recorded (runs with HARNESS_E2E=1)
 sandbox-egress|live: the sandbox's allowlist, capabilities and evidence in a real container (runs with HARNESS_E2E=1)"

@@ -161,19 +161,23 @@ class Project(object):
                                                    "tests": ["test_contains"]}],
                                      "tests": {"command": "true", "result": "passed"}})}, check=True)
 
-    def judged_task(self, task, title="Customer search", source=""):
-        """task with a user-approved spec, [WIP], its code written and a judge pass on it (not committed)."""
-        self.write("backbone/specs/%s.md" % task, self.spec_text(task, title, source=source))
-        if "**Task %s:" % task not in self.read("backbone/3-TASKS.md"):
-            self.add_task(task, title)
-        self.grill_pass(task)
-        self.write("backbone/specs/%s.md" % task, self.read("backbone/specs/%s.md" % task)
-                   + "Approved-by: Ana (2026-11-01)\n")
-        self.set_marker(task, "WIP")
-        self.write("src/search.py", "def search(names, q):  # AC-%s-1\n    return [n for n in names if q.lower() in "
-                                    "n.lower()]\n" % task)
-        self.write("tests/test_search.py", "def test_contains():  # AC-%s-1\n    assert True\n" % task)
-        self.judge_pass(task)
+    def judged_task(self, *tasks, title="Customer search", source=""):
+        """Each task with a user-approved spec, [WIP], the code written and a judge pass on it (not committed). The
+        tasks are judged on the same code, so every pass stays current."""
+        for task in tasks:
+            self.write("backbone/specs/%s.md" % task, self.spec_text(task, title, source=source))
+            if "**Task %s:" % task not in self.read("backbone/3-TASKS.md"):
+                self.add_task(task, title)
+            self.grill_pass(task)
+            self.write("backbone/specs/%s.md" % task, self.read("backbone/specs/%s.md" % task)
+                       + "Approved-by: Ana (2026-11-01)\n")
+            self.set_marker(task, "WIP")
+        marks = " ".join("AC-%s-1" % task for task in tasks)
+        self.write("src/search.py", "def search(names, q):  # %s\n    return [n for n in names if q.lower() in "
+                                    "n.lower()]\n" % marks)
+        self.write("tests/test_search.py", "def test_contains():  # %s\n    assert True\n" % marks)
+        for task in tasks:
+            self.judge_pass(task)
 
     def events(self, kind=None):
         path = self.path / ".git/harness/events.jsonl"

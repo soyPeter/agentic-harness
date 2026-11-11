@@ -129,7 +129,7 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
                   "HARNESS_AUTONOMY", "HARNESS_AUTO_APPROVE", "HARNESS_RISK_TERMS", "HARNESS_RISK_PATHS",
                   "HARNESS_RISK_MAX_FILES", "HARNESS_DOC_PATHS", "HARNESS_GRILL_MAX_ROUNDS", "HARNESS_ESCALATE_GH",
                   "HARNESS_AGENT_CMD", "HARNESS_RUN_TASK_TIMEOUT", "HARNESS_RUN_ATTEMPTS",
-                  "HARNESS_RUN_MAX_COST", "HARNESS_CI_JUDGE_CMD",
+                  "HARNESS_RUN_MAX_COST", "HARNESS_TASK_BUDGET_USD", "HARNESS_CI_JUDGE_CMD",
                   "HARNESS_DECISION_PROVIDER", "HARNESS_DECISION_MODE", "HARNESS_DECISION_ADR",
                   "HARNESS_DECISION_CMD", "HARNESS_DECISION_MODEL", "HARNESS_DECISION_URL",
                   "HARNESS_KNOWLEDGE_ROOT", "HARNESS_KNOWLEDGE_TOOLS", "HARNESS_KNOWLEDGE_PATHS",
@@ -347,6 +347,7 @@ DEFAULTS = {
     "HARNESS_RUN_TASK_TIMEOUT": "3600",
     "HARNESS_RUN_ATTEMPTS": "2",
     "HARNESS_RUN_MAX_COST": "",
+    "HARNESS_TASK_BUDGET_USD": "",
     "HARNESS_SANDBOX_BACKEND": "devcontainer",
     "HARNESS_CI_JUDGE_CMD": "claude -p --agent judge --dangerously-skip-permissions --output-format json",
     "HARNESS_SKILL_MAX_AGE": "180",
@@ -3444,6 +3445,8 @@ def health():
         issues.append(("error", "HARNESS_REQ_STYLE must be one of %s" % "|".join(REQ_STYLES)))
     if values["HARNESS_PROFILE"] not in PROFILES:
         issues.append(("error", "HARNESS_PROFILE must be empty or one of %s" % "|".join(p for p in PROFILES if p)))
+    if values["HARNESS_TASK_BUDGET_USD"].strip() and dollars(values["HARNESS_TASK_BUDGET_USD"]) is None:
+        issues.append(("error", "HARNESS_TASK_BUDGET_USD must be empty or a number of dollars"))
     unusable = sandbox.problem(values["HARNESS_SANDBOX_BACKEND"])
     if unusable:
         issues.append(("error", unusable))
@@ -5784,7 +5787,8 @@ CONTRACT_COMMANDS = {
     "receipt": {"command": "receipt <task> --json",
                 "fields": ["task", "title", "objective", "base", "changed", "backbone_changed", "requirements",
                            "verified", "not_verified", "decisions", "change_class", "change_class_problem", "risks",
-                           "rounds", "judged_at", "sandbox", "approval", "approval_needed", "suggested_labels"]},
+                           "rounds", "judged_at", "sandbox", "approval", "approval_needed", "suggested_labels",
+                           "cost"]},
     "escalations": {"command": "escalations --json", "fields": ["escalations", "by_class"],
                     "entry_fields": ["task", "kind", "class", "playbook", "reason", "needed", "status", "at"]},
     "run": {"command": "run --only <task>"},
@@ -5798,7 +5802,7 @@ CONTRACT_EVENTS = {
     "escalation": ["task", "escalation", "failure_class", "reason"], "proposal": ["failure_class"],
     "deliver": ["delivery", "branch", "base", "head", "pr", "checks", "findings", "owners"],
     "run-start": ["tasks"], "run-attempt": ["task", "attempt", "exit", "seconds", "state", "cost_usd", "turns"],
-    "run-budget": ["spent", "limit"], "run-halt": [], "run-agent-failed": ["task", "error"], "run-end": ["summary"],
+    "run-budget": ["scope", "spent", "limit"], "run-halt": [], "run-agent-failed": ["task", "error"], "run-end": ["summary"],
     "tamper": ["files", "command"], "block": ["reason", "detail"], "gate": ["gate"],
     "linear-import": ["task", "issue"], "outward": ["action", "via"],
 }
@@ -6472,6 +6476,61 @@ def trust_problem(command=None):
             "agent commands other than Claude Code." % (ROOT, ROOT))
 
 
+def dollars(value):
+    value = (value or "").strip()
+    return float(value) if re.match(r"^\d+(\.\d+)?$", value) else None
+
+
+def cost_ledger(task):
+    """The task's cost ledger, one line per runner session, in the shared git directory: it outlives the worktree
+    and the run, so a resumed task counts what it spent before (ADR-008)."""
+    return orca_dir() / "costs" / ("task-%s.jsonl" % slug(task))
+
+
+def record_cost(task, attempt, cost, turns, log_path):
+    path = cost_ledger(task)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "task": task, "attempt": attempt,
+                                 "cost_usd": cost, "turns": turns, "log": str(log_path)}, sort_keys=True) + "\n")
+
+
+def task_cost(task):
+    """{total_usd, sessions, sessions_without_cost} from the task's ledger, or None when no session is recorded. A
+    session whose agent reported no cost (Codex prices nothing) counts as nothing."""
+    entries = []
+    for line in read(cost_ledger(task)).splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    if not entries:
+        return None
+    known = [e["cost_usd"] for e in entries if isinstance(e.get("cost_usd"), (int, float))
+             and not isinstance(e.get("cost_usd"), bool)]
+    return {"total_usd": round(sum(known), 6), "sessions": len(entries),
+            "sessions_without_cost": len(entries) - len(known)}
+
+
+BUDGET_REFUSAL = re.compile(r"(?i)\b402\b|payment required|\bbudget\b|\b(?:spend(?:ing)?|cost)[ _-]?(?:cap|limit)\b")
+
+
+def budget_refusal(log_path, code):
+    """The error a session ended with when the key proxy refused its model calls for a spending cap: HTTP 402, or an
+    error naming a budget or a spend or cost cap. None otherwise."""
+    data = session_result(log_path)
+    if data:
+        text = str(data.get("result") or "") if data.get("is_error") else ""
+    else:
+        errors = [e for e in jsonl_events(log_path) if e.get("type") in ("error", "turn.failed")]
+        text = " ".join(str(e.get("message") or e.get("error") or "") for e in errors)
+        if not text and code not in (0, None):
+            text = read(log_path)[-2000:]
+    return re.sub(r"\s+", " ", text).strip()[:300] if BUDGET_REFUSAL.search(text) else None
+
+
 def run_agent(prompt, log_path, timeout):
     values = conf()
     backend = sandbox.backend(values["HARNESS_SANDBOX_BACKEND"])
@@ -6529,12 +6588,13 @@ def run_command(argv):
     log_event("run-start", tasks=[t for t, _, _ in queue])
     summary = []
     max_cost = float(values["HARNESS_RUN_MAX_COST"]) if re.match(r"^\d+(\.\d+)?$", values["HARNESS_RUN_MAX_COST"]) else None
+    task_budget = dollars(values["HARNESS_TASK_BUDGET_USD"])
     spent = 0.0
     for task, title, state in queue:
         retry_note, last_signature = "", None
         if max_cost is not None and spent >= max_cost:
             print("run: budget reached ($%.2f of $%.2f); stopping before task %s" % (spent, max_cost, task))
-            log_event("run-budget", spent=spent, limit=max_cost)
+            log_event("run-budget", scope="run", spent=spent, limit=max_cost)
             summary.append((task, "budget"))
             break
         outcome = None
@@ -6544,6 +6604,16 @@ def run_command(argv):
                 log_event("run-halt")
                 outcome = "halted"
                 break
+            used = (task_cost(task) or {}).get("total_usd", 0.0)
+            if task_budget is not None and used >= task_budget:
+                print("run: task %s has spent $%.2f of its $%.2f budget (HARNESS_TASK_BUDGET_USD); not starting "
+                      "another session" % (task, used, task_budget))
+                log_event("run-budget", task=task, scope="task", spent=used, limit=task_budget)
+                escalate(task, "budget", "the task has spent $%.2f of its $%.2f budget (HARNESS_TASK_BUDGET_USD)"
+                         % (used, task_budget), "the user raises the task's budget, or drops the task",
+                         "permission_denied")
+                outcome = "escalated"
+                break
             resume = ("The task is already [WIP]: resume it." if task_state(task) == "wip"
                       else "The task is pending.")
             prompt = (RUN_PROMPT.format(task=task, title=title, state=resume) + retry_note).replace(
@@ -6551,13 +6621,29 @@ def run_command(argv):
             log_path = run_dir / ("%s-%d.log" % (slug(task), attempt))
             started_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             code, seconds = run_agent(prompt, log_path, timeout)
+            cost, turns = session_usage(log_path)
+            record_cost(task, attempt, cost, turns, log_path)
+            refusal = budget_refusal(log_path, code) if task_budget is not None else None
+            if refusal:
+                # The proxy refused for the task's cap or the day's: another session, or another task, is refused too.
+                print("run: the agent's model calls were refused for a spending cap (%s); stopping the run. Log: %s"
+                      % (refusal, log_path))
+                log_event("run-attempt", task=task, attempt=attempt, exit=code, seconds=seconds, state=task_state(task),
+                          uncommitted=bool(git("status", "--porcelain").strip()), cost_usd=cost, turns=turns,
+                          cause="cap-hit", step=None)
+                log_event("run-budget", task=task, scope="proxy", spent=task_cost(task)["total_usd"],
+                          limit=task_budget, error=refusal)
+                escalate(task, "budget", "the key proxy refused the session's model calls for a spending cap: %s"
+                         % refusal, "the user raises the cap (the task's or the day's), or drops the task",
+                         "permission_denied")
+                outcome = "cap-hit"
+                break
             failure = agent_start_failure(log_path, code)
             if failure:
                 print("run: the agent could not start (%s); stopping the run. Log: %s" % (failure, log_path))
                 log_event("run-agent-failed", task=task, error=failure)
                 outcome = "agent-failed"
                 break
-            cost, turns = session_usage(log_path)
             spent += cost or 0.0
             if halt_file().exists():
                 print("run: halted by %s during task %s" % (halt_file(), task))
@@ -6610,12 +6696,12 @@ def run_command(argv):
             if outcome == "done" and dirty:
                 outcome = "done-uncommitted"
         else:
-            if outcome not in ("done", "blocked", "agent-failed", "escalated"):
+            if outcome not in ("done", "blocked", "agent-failed", "escalated", "cap-hit"):
                 escalate(task, "runner", "no resolution after %d agent session(s) (last state: %s; logs: %s)"
                          % (attempts, outcome, run_dir), "a look at the run logs and the task's state")
                 outcome = "escalated"
         summary.append((task, outcome))
-        if outcome in ("halted", "agent-failed"):
+        if outcome in ("halted", "agent-failed", "cap-hit"):
             break
     log_event("run-end", summary=summary)
     for task, outcome in summary:
@@ -7430,6 +7516,7 @@ def receipt_data(task, base=None, code=None):
         "sandbox": sandbox.normalized(passed.get("sandbox")),
         "approval": approval_lines(approval_section(spec_text) or ""),
         "approval_needed": approval_needed,
+        "cost": task_cost(task),
     }
     data["suggested_labels"] = suggested_labels(spec_text, data["risks"])
     return data, None
@@ -7452,6 +7539,15 @@ def sandbox_lines(evidence):
     return lines
 
 
+def cost_lines(cost):
+    if not cost:
+        return ["not recorded: no runner session worked on this task"]
+    lines = ["$%.2f over %d session(s)" % (cost["total_usd"], cost["sessions"])]
+    if cost["sessions_without_cost"]:
+        lines.append("%d session(s) reported no cost, so the total is a floor" % cost["sessions_without_cost"])
+    return lines
+
+
 def receipt_text(d):
     lines = ["Receipt: Task %s: %s" % (d["task"], d["title"]), "",
              "OBJECTIVE", "  %s" % (d["objective"] or "(the spec has no Context section)"), "",
@@ -7462,6 +7558,7 @@ def receipt_text(d):
     sections = (("VERIFIED (judge pass %s, re-checked by the harness)" % d["judged_at"], d["verified"]),
                 ("NOT VERIFIED", d["not_verified"] or ["nothing outside the acceptance criteria"]),
                 ("SANDBOX (where the judge pass was recorded)", sandbox_lines(d["sandbox"])),
+                ("COST (the runner's agent sessions for this task)", cost_lines(d.get("cost"))),
                 ("DECISIONS", ["follows %s" % a for a in d["decisions"]["governing_adrs"]] +
                  ["ADR changed: %s" % a for a in d["decisions"]["adrs_changed"]] +
                  ["assumption %s" % a for a in d["decisions"]["assumptions"]]),
