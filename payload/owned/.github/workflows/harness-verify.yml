@@ -103,10 +103,19 @@ jobs:
             fi
             echo "Using pinned engine $commit from $pin_source."
           elif git cat-file -e "$BASE_REF:scripts/harness/lib" 2>/dev/null; then
-            if ! git archive "$BASE_REF" "${assets[@]}" | tar -x -C "$RUNNER_TEMP/trusted"; then
-              echo "::error::Cannot extract the base branch's verifier and required engine configuration."
+            # A file, not a pipe: bsdtar (macOS) stops reading at the end-of-archive marker, so a git archive still
+            # writing the padding after it would die of SIGPIPE, without a message.
+            archive="$RUNNER_TEMP/trusted.tar"
+            failed=
+            git archive "$BASE_REF" "${assets[@]}" > "$archive" || failed="git archive exited with $?"
+            if [[ -z "$failed" ]]; then
+              tar -x -f "$archive" -C "$RUNNER_TEMP/trusted" || failed="tar exited with $?"
+            fi
+            if [[ -n "$failed" ]]; then
+              echo "::error::Cannot extract the base branch's verifier and required engine configuration ($failed)."
               exit 1
             fi
+            rm -f "$archive"
             echo "Using the harness from $BASE_REF."
             engine="$RUNNER_TEMP/trusted/scripts/harness/lib/harness.py"
           else
@@ -225,10 +234,19 @@ jobs:
             fi
             echo "Using pinned engine $commit from $pin_source."
           elif git cat-file -e "$BASE_REF:scripts/harness/lib" 2>/dev/null; then
-            if ! git archive "$BASE_REF" "${assets[@]}" | tar -x -C "$RUNNER_TEMP/trusted"; then
-              echo "::error::Cannot extract the base branch's verifier and required engine configuration."
+            # A file, not a pipe: bsdtar (macOS) stops reading at the end-of-archive marker, so a git archive still
+            # writing the padding after it would die of SIGPIPE, without a message.
+            archive="$RUNNER_TEMP/trusted.tar"
+            failed=
+            git archive "$BASE_REF" "${assets[@]}" > "$archive" || failed="git archive exited with $?"
+            if [[ -z "$failed" ]]; then
+              tar -x -f "$archive" -C "$RUNNER_TEMP/trusted" || failed="tar exited with $?"
+            fi
+            if [[ -n "$failed" ]]; then
+              echo "::error::Cannot extract the base branch's verifier and required engine configuration ($failed)."
               exit 1
             fi
+            rm -f "$archive"
             echo "Using the harness from $BASE_REF."
             engine="$RUNNER_TEMP/trusted/scripts/harness/lib/harness.py"
           else

@@ -13,6 +13,14 @@
   routing per role in `run`, a security lens that risk switches on, resuming on review comments, KB note drafts,
   janitor lifecycle signals, a no-merge profile for lanes and lane sandbox evidence. No code changes.
 
+- **harness-verify's take step no longer fails at random on macOS.** It piped `git archive` into `tar -x`. bsdtar,
+  macOS's tar, stops reading at the end-of-archive marker, so on a busy runner a `git archive` still writing the
+  padding after it died of SIGPIPE: the step failed with "Cannot extract the base branch's verifier and required
+  engine configuration" and nothing else, as the macOS self-test jobs did now and then since the test files run in
+  parallel. The step now writes the archive to a file in `$RUNNER_TEMP` and unpacks that, and a failure names the
+  command and its exit status (`git archive exited with 128`). GNU tar reads a pipe to its end, so Ubuntu runners
+  were not affected. `HARNESS_STRESS=1` adds a stress check of the step to `tests/run-tests.sh`: on macOS it failed
+  about 1 step in 100 before the change.
 - **A macOS self-test job takes about 10 minutes instead of nearly 30, under its timeout.** `tests/run-tests.sh`
   runs the `tests/test-*.py` files alongside its shell sections, one per CPU at a time (`HARNESS_TEST_JOBS` sets
   how many), each with its own temporary folder, and reports them in a last section with each file's time; a test
