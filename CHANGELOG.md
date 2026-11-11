@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Agents write nothing in the git directory.** The file tools could write `.git/harness/events.jsonl` or a task's
+  cost ledger (the implementer's scope didn't cover `.git/`), and from a linked worktree the shell could delete the
+  ledger in the shared git directory by its absolute path. Every agent and the main session are now refused any write
+  to `.git`, the worktree's git directory and the repository's common one, with the file tools or the shell, by a
+  relative or an absolute path. Reads stay allowed.
+
 - **Agents can't start a user-only command by another spelling.** The shell gate refused `harness.py run`, `linear`,
   `intake` and the other user-only commands only when `harness.py` and the command were in fixed places, so
   `python3 -B -I .../harness.py intake`, the thin launcher, `-m harness`, a script or command from an expansion, a

@@ -8,6 +8,7 @@ would, through its commands, its hooks and its event log.
 """
 import json
 import os
+import shlex
 import subprocess
 import time
 import unittest
@@ -314,6 +315,64 @@ class UserOnlyCommands(unittest.TestCase):
                 answer = self.p.bash(command, "implementer")
 
                 self.assertEqual(answer.returncode, 0, answer.stderr)
+
+
+class GitDirectory(unittest.TestCase):
+    """The harness keeps its records (events, cost ledgers, run locks) in the shared git directory: agents write
+    nothing there, from the checkout or from a linked worktree, with the file tools or the shell."""
+
+    @classmethod
+    def setUpClass(cls):
+        # The skill gate would ask for code-quality before the control write to src/; these tests are about .git.
+        cls.p = Project("factory git directory ", HARNESS_SKILL_GATE="off")
+        cls.p.harness("contract")   # an event, so .git/harness exists
+        cls.common = cls.p.path / ".git"
+        lane = cls.p.base / "lane"
+        cls.p.command("git", "worktree", "add", "-q", "-b", "lane", str(lane))
+        cls.lane = Project.__new__(Project)
+        cls.lane.__dict__.update(cls.p.__dict__, path=lane, env=dict(cls.p.env, CLAUDE_PROJECT_DIR=str(lane)))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.p.cleanup()
+
+    def write(self, project, path, agent="implementer"):
+        return project.file_tool("Write", path, agent=agent, content="{}\n")
+
+    def test_the_file_tools_write_nothing_under_the_git_directory(self):
+        cases = {
+            "the event log": (self.p, ".git/harness/events.jsonl"),
+            "a cost ledger": (self.p, ".git/harness/costs/task-1.1.jsonl"),
+            "git's config": (self.p, ".git/config"),
+            "the shared git directory, by its absolute path": (self.lane, str(self.common / "harness/events.jsonl")),
+            "a ledger in it": (self.lane, str(self.common / "harness/costs/task-1.1.jsonl")),
+            "the worktree's .git file": (self.lane, ".git"),
+        }
+        for case, (project, path) in cases.items():
+            for agent in ("implementer", "tester", None):
+                with self.subTest(case=case, agent=agent):
+                    answer = self.write(project, path, agent)
+
+                    self.assertEqual(answer.returncode, 2, answer.stderr)
+                    self.assertIn("git directory", answer.stderr)
+
+    def test_the_shell_writes_nothing_under_the_git_directory(self):
+        for project, command in (
+                (self.p, "echo '{}' >> .git/harness/events.jsonl"),
+                (self.p, "rm -f .git/harness/costs/task-1.1.jsonl"),
+                (self.p, "cp /dev/null .git/index"),
+                (self.lane, "rm -f %s" % shlex.quote(str(self.common / "harness/costs/task-1.1.jsonl"))),
+                (self.lane, "echo '{}' > %s" % shlex.quote(str(self.common / "harness/events.jsonl"))),
+                (self.lane, "truncate -s 0 %s" % shlex.quote(str(self.common / "harness/locks/task-1.1.lock")))):
+            with self.subTest(command=command):
+                self.assertEqual(project.bash(command, "implementer").returncode, 2)
+
+    def test_reads_and_other_writes_are_allowed(self):
+        for project, command in ((self.p, "cat .git/harness/events.jsonl"), (self.lane, "git status --short"),
+                                 (self.lane, "tail -3 %s" % shlex.quote(str(self.common / "harness/events.jsonl")))):
+            with self.subTest(command=command):
+                self.assertEqual(project.bash(command, "implementer").returncode, 0)
+        self.assertEqual(self.write(self.lane, "src/tool.py").returncode, 0)
 
 
 class TaskLock(unittest.TestCase):

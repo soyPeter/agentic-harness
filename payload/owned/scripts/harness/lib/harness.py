@@ -156,7 +156,7 @@ KNOWLEDGE_PATH_KEYS = ("path", "paths", "note", "notes", "hub", "name", "file", 
 # them are refused: they would skip the gates (task states, approvals, verdicts, settings, skill state).
 SHELL_PROTECTED = (r"^backbone(/|$)", r"^scripts/harness(/|$)", r"^\.claude(/|$)", r"^\.codex(/|$)", r"^\.opencode(/|$)",
                    r"^(AGENTS|CLAUDE)\.md$", r"^\.githooks(/|$)",
-                   r"^\.git/(hooks|harness)(/|$)", r"^\.git/config$", r"^harness-attest\.pub$")
+                   r"^\.git(/|$)", r"^harness-attest\.pub$")
 # Thin mode (ADR-001): the launcher names the engine cache and the plugin it runs from. They decide the project's gates
 # but lie outside it, beyond the reach of the repository-relative protections.
 INSTALL_DIRS = (("HARNESS_ENGINES", "the harness engine cache"), ("HARNESS_PLUGIN_ROOT", "the harness plugin"))
@@ -1337,7 +1337,7 @@ MUTATORS = ("rm", "rmdir", "unlink", "mv", "chmod", "chown", "truncate", "tee", 
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 SETTING_ASSIGNMENT = re.compile(r"^(HARNESS_[A-Z0-9_]+|SKIP_BUILD)=")
 PROTECTED_MENTION = re.compile(r"(?:^|[\s'\"/=(:])(backbone/|scripts/harness/|\.claude/|AGENTS\.md|CLAUDE\.md"
-                               r"|\.git/(?:hooks|harness|config)|harness-attest\.pub)")
+                               r"|\.git/|harness-attest\.pub)")
 CODE_WRITES = re.compile(r"open\([^)]*,\s*['\"][wax+]|\.write_(text|bytes)\(|\bos\.(remove|unlink|rename|replace|"
                          r"chmod|truncate)\(|\bshutil\.(copy|move|rmtree)|\.(unlink|rename|touch|rmdir)\(|"
                          r"\bfs\.(writeFile|appendFile|unlink|rename|rm|copyFile)|\bFile\.(write|delete|rename)|"
@@ -1427,8 +1427,31 @@ def short_flags(words):
     return {c for w in words if w.startswith("-") and not w.startswith("--") for c in w[1:]}
 
 
+GIT_DIRS = []   # resolved once per process
+
+
+def git_dirs():
+    """The checkout's .git (a file in a linked worktree), its git directory and the repository's common one, where
+    git keeps its data and the harness its records: events, cost ledgers, run locks."""
+    if not GIT_DIRS:
+        found = {os.path.realpath(str(ROOT / ".git"))}
+        found.update(os.path.realpath(line) for line in git("rev-parse", "--path-format=absolute", "--absolute-git-dir",
+                                                            "--git-common-dir").splitlines() if line.strip())
+        GIT_DIRS.extend(sorted(found))
+    return GIT_DIRS
+
+
+def in_git_dir(path_str, cwd=None):
+    path = os.path.expandvars(os.path.expanduser(path_str))
+    if not os.path.isabs(path):
+        path = os.path.join(cwd or str(ROOT), path)
+    full = os.path.realpath(path)
+    return any(full == d or full.startswith(d + os.sep) for d in git_dirs())
+
+
 def protected_path(path_str, cwd):
-    """Repository-relative path if path_str points into a shell-protected harness path, else None."""
+    """Repository-relative path if path_str points into a shell-protected harness path (or the path itself, when it
+    is in a git directory outside the checkout), else None."""
     if not path_str or path_str.startswith("-"):
         return None
     path = os.path.expandvars(os.path.expanduser(path_str))
@@ -1436,9 +1459,13 @@ def protected_path(path_str, cwd):
         path = os.path.join(cwd or str(ROOT), path)
     full, root = os.path.realpath(path), os.path.realpath(str(ROOT))
     if full != root and not full.startswith(root + os.sep):
-        return None
+        return path_str if in_git_dir(full) else None
     name = os.path.relpath(full, root).replace(os.sep, "/")
     return name if any(re.search(p, name) for p in SHELL_PROTECTED) else None
+
+
+GIT_DIR_REFUSAL = ("%s is in the git directory, which holds git's own data and the harness's records (events, cost "
+                   "ledgers, run locks); agents don't write there.")
 
 
 def thin_mode():
@@ -1670,7 +1697,9 @@ def shell_findings(command, cwd=None, depth=0):
                              % (path, label))
                 continue
             name = protected_path(path, cwd)
-            if name:
+            if name and (name == ".git" or name.startswith(".git/") or in_git_dir(path, cwd)):
+                found.append(GIT_DIR_REFUSAL % name)
+            elif name:
                 found.append("Shell writes to %s skip the harness gates; change it with the Write or Edit tool "
                              "(or not at all, for verdicts and user-only settings)." % name)
         if prog == "git":
@@ -4208,6 +4237,8 @@ def hook_pre_tool_use(data):
     if not tool_input.get("file_path"):
         return
     path_str = tool_input["file_path"]
+    if in_git_dir(path_str, data.get("cwd")):
+        deny("Harness blocked this change: " + GIT_DIR_REFUSAL % path_str)
     label = install_path(path_str, data.get("cwd"))
     if label:
         deny("Harness blocked this change to %s: it is in %s, which decides this project's gates. The user changes "
