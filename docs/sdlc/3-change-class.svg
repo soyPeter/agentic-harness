@@ -43,7 +43,7 @@
 <text x="38" y="491.0" class="tiny" text-anchor="middle" transform="rotate(-90 38 491.0)">MORE ASSURANCE</text>
 <rect x="68" y="214" width="1402" height="128" rx="3" fill="#FAF9F6" stroke="#CFCBC3" stroke-width="1.5"/>
 <text x="92" y="262" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; font-size: 26px; fill: #262523;">docs</text>
-<text x="92" y="294" class="note"><tspan x="92" dy="0">Markdown, comments and other</tspan><tspan x="92" dy="21">docs nothing runs</tspan></text>
+<text x="92" y="294" class="note"><tspan x="92" dy="0">Markdown and other doc files;</tspan><tspan x="92" dy="21">code comments count as code</tspan></text>
 <g><rect x="380" y="261.0" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="380" y1="273.24" x2="398" y2="273.24" stroke="#E2602A" stroke-width="2"/><line x1="380" y1="282.76" x2="398" y2="282.76" stroke="#E2602A" stroke-width="2"/></g>
 <text x="420" y="260.0" class="item"><tspan x="420" dy="0">With the user's</tspan><tspan x="420" dy="24">(light) mark, if the</tspan><tspan x="420" dy="24">rules pass</tspan></text>
 <g><rect x="922" y="261.0" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="922" y1="273.24" x2="940" y2="273.24" stroke="#E2602A" stroke-width="2"/><line x1="922" y1="282.76" x2="940" y2="282.76" stroke="#E2602A" stroke-width="2"/></g>
@@ -91,10 +91,10 @@
 <text x="1391.1000000000001" y="709.0" class="code-s" text-anchor="middle" fill="#FFFFFF">risk:high</text>
 <rect x="642" y="214" width="254" height="554" rx="3" fill="#EFEDE8" stroke="#A9A49B" stroke-width="1.5"/>
 <g><circle cx="769.0" cy="421.0" r="26" fill="#FAF9F6" stroke="#E2602A" stroke-width="2.2"/><circle cx="769.0" cy="414.175" r="7.15" fill="none" stroke="#E2602A" stroke-width="1.9"/><path d="M755.675,436.4375 C756.8125,424.575 781.1875,424.575 782.325,436.4375" fill="none" stroke="#E2602A" stroke-width="1.9"/></g>
-<text x="769.0" y="481.0" class="item" text-anchor="middle"><tspan x="769.0" dy="0">A person writes</tspan><tspan x="769.0" dy="26">Approved-by for every</tspan><tspan x="769.0" dy="26">class. The approved</tspan><tspan x="769.0" dy="26">spec is frozen.</tspan></text>
+<text x="769.0" y="481.0" class="item" text-anchor="middle"><tspan x="769.0" dy="0">In supervised mode a</tspan><tspan x="769.0" dy="26">person writes</tspan><tspan x="769.0" dy="26">Approved-by for every</tspan><tspan x="769.0" dy="26">class. The approved</tspan><tspan x="769.0" dy="26">spec is frozen.</tspan></text>
 <rect x="1484" y="214" width="176" height="554" rx="3" fill="#EFEDE8" stroke="#A9A49B" stroke-width="1.5"/>
 <g><circle cx="1572.0" cy="421.0" r="26" fill="#FAF9F6" stroke="#E2602A" stroke-width="2.2"/><circle cx="1572.0" cy="414.175" r="7.15" fill="none" stroke="#E2602A" stroke-width="1.9"/><path d="M1558.675,436.4375 C1559.8125,424.575 1584.1875,424.575 1585.325,436.4375" fill="none" stroke="#E2602A" stroke-width="1.9"/></g>
-<text x="1572.0" y="481.0" class="item" text-anchor="middle"><tspan x="1572.0" dy="0">A person</tspan><tspan x="1572.0" dy="26">merges every</tspan><tspan x="1572.0" dy="26">PR. Labels</tspan><tspan x="1572.0" dy="26">never approve</tspan><tspan x="1572.0" dy="26">or merge.</tspan></text>
+<text x="1572.0" y="481.0" class="item" text-anchor="middle"><tspan x="1572.0" dy="0">Merging is a</tspan><tspan x="1572.0" dy="26">person's</tspan><tspan x="1572.0" dy="26">call; the</tspan><tspan x="1572.0" dy="26">deliverer</tspan><tspan x="1572.0" dy="26">can't merge.</tspan><tspan x="1572.0" dy="26">Labels never</tspan><tspan x="1572.0" dy="26">do.</tspan></text>
 <text x="48" y="832" class="label">WHATEVER THE CLASS</text>
 <g><rect x="48" y="856" width="18" height="34" rx="2" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5"/><line x1="48" y1="868.24" x2="66" y2="868.24" stroke="#E2602A" stroke-width="2"/><line x1="48" y1="877.76" x2="66" y2="877.76" stroke="#E2602A" stroke-width="2"/></g>
 <text x="88" y="878" class="note"><tspan x="88" dy="0">A risk term, a risk path or an ADR that isn't Accepted makes any spec not</tspan><tspan x="88" dy="23">low-risk.</tspan></text>
