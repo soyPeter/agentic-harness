@@ -267,8 +267,8 @@ Every case fails closed: no work starts, and nothing is pushed or merged that th
   a session reads (PR text, CI logs, vault notes), its tools stay held by the hooks: write scopes, guardrails, the
   deliverer's allowlist, protected paths, user-only settings and the read-only knowledge tools. An injected
   instruction can still steer the model within those tools; the judge, the lenses, the security lens, the CI floor
-  and the human review are the defence. Proposed ADR-006 (open PR #82) applies the same rule to third-party setup
-  resources: reference data, not authority.
+  and the human review are the defence. Proposed [ADR-006](ADR-006-external-agent-resource-admission.md) applies the
+  same rule to third-party setup resources: reference data, not authority.
 - **Cross-project leakage between lanes.** One lane holds one project's clone and nothing of another's (assumed).
   Harness state is per repository (`backbone/`, `.git/harness/`), and the knowledge source is configured per project
   (`HARNESS_KNOWLEDGE_ROOT`, `HARNESS_KNOWLEDGE_PATHS`). The engine cache is shared across projects and must be
@@ -349,5 +349,5 @@ Every case fails closed: no work starts, and nothing is pushed or merged that th
       NET_ADMIN or NET_RAW, `no-new-privileges`, the egress allowlist published), and `credential_mode: brokered`
       describes stand-in keys (ADR-003 follow-ups 2 and 9). Until then, thin-mode receipts from lanes say
       `isolation_class: none`.
-- Proposed ADR-007 (open PR #82) describes signal intake with a source reference and a deduplication key; follow-up 2
-  is the harness side of that for the factory's doors.
+- Proposed [ADR-007](ADR-007-evidence-closed-loop.md) describes signal intake with a source reference and a
+  deduplication key; follow-up 2 is the harness side of that for the factory's doors.
