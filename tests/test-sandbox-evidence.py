@@ -335,6 +335,105 @@ class Backend(Project):
         self.assertIn("verify: ok", verify.stdout)
 
 
+class Start(Project):
+    """HARNESS_SANDBOX_START=on: run on the host brings the project's sandbox up with the devcontainer CLI and runs each
+    session in it. The container itself is checked by HostRun in tests/test-sandbox-egress.py (HARNESS_E2E=1); these
+    checks cover what decides whether run may start at all.
+
+      HARNESS_SANDBOX_START  sandbox files  devcontainer and docker on the PATH  doctor  run
+      off                    any            any                                   ok      sessions run where run runs
+      on                     missing        any                                   error   refuses
+      on                     present        either missing                        error   refuses
+      on                     present        both                                  ok      starts the sandbox
+    """
+
+    def tools(self, *names, failing=False):
+        """A PATH with git and python3, and executables standing in for names: they succeed, or fail like a sandbox
+        that can't come up."""
+        folder = Path(tempfile.mkdtemp(prefix="tools ", dir=str(self.work)))
+        for tool in ("git", "python3"):
+            (folder / tool).symlink_to(shutil.which(tool))
+        for name in names:
+            script = folder / name
+            script.write_text("#!/bin/sh\necho \"${0##*/} $*\" >> '%s/calls'\n%s\n" % (
+                folder, 'echo \'{"outcome":"error","message":"the build failed"}\'; exit 1' if failing else "exit 0"))
+            script.chmod(0o755)
+        return str(folder)
+
+    def autonomous(self, *args, **environment):
+        trusted = {"projects": {str(self.project): {"hasTrustDialogAccepted": True}}}
+        home = Path(self.env["HOME"])
+        home.mkdir(exist_ok=True)
+        (home / ".claude.json").write_text(json.dumps(trusted))
+        return self.harness(*args, check=False, HARNESS_AUTONOMY="autonomous", HARNESS_VERIFY="block", **environment)
+
+    def test_doctor_needs_the_sandbox_files_and_both_tools_to_start_the_sandbox(self):
+        cases = ((self.tools(), "devcontainer"), (self.tools("devcontainer"), "docker"),
+                 (self.tools("docker"), "devcontainer"))
+        for path, missing in cases:
+            with self.subTest(missing=missing, path=path):
+                doctor = self.harness("doctor", check=False, HARNESS_SANDBOX_START="on", PATH=path)
+
+                self.assertEqual(doctor.returncode, 1, doctor.stdout)
+                self.assertIn("HARNESS_SANDBOX_START is on", doctor.stdout)
+                self.assertIn(missing, doctor.stdout)
+        self.assertNotIn("HARNESS_SANDBOX_START", self.harness("doctor", check=False, HARNESS_SANDBOX_START="on",
+                                                               PATH=self.tools("devcontainer", "docker")).stdout)
+        self.assertNotIn("HARNESS_SANDBOX_START", self.harness("doctor", check=False, PATH=self.tools()).stdout)
+
+    def test_doctor_needs_the_sandbox_files_to_start_the_sandbox(self):
+        config = self.project / DEVCONTAINER_REL
+        kept = config.read_bytes()
+        config.unlink()
+        self.addCleanup(config.write_bytes, kept)
+
+        doctor = self.harness("doctor", check=False, HARNESS_SANDBOX_START="on", PATH=self.tools("devcontainer", "docker"))
+
+        self.assertEqual(doctor.returncode, 1, doctor.stdout)
+        self.assertIn(DEVCONTAINER_REL, doctor.stdout)
+
+    def test_a_start_value_that_is_neither_on_nor_off_is_a_doctor_error(self):
+        doctor = self.harness("doctor", check=False, HARNESS_SANDBOX_START="yes")
+
+        self.assertEqual(doctor.returncode, 1, doctor.stdout)
+        self.assertIn("HARNESS_SANDBOX_START must be on or off", doctor.stdout)
+
+    def test_run_refuses_without_the_tools_to_start_the_sandbox(self):
+        run = self.autonomous("run", "--dry-run", HARNESS_SANDBOX_START="on", PATH=self.tools())
+
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("devcontainer", run.stdout)
+
+    def test_a_dry_run_says_it_would_start_the_sandbox(self):
+        run = self.autonomous("run", "--dry-run", HARNESS_SANDBOX_START="on", PATH=self.tools("devcontainer", "docker"))
+
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("would bring up .devcontainer/harness-agent/ with the devcontainer CLI", run.stdout)
+        self.assertIn("would resume task 7.1", run.stdout)
+
+    def test_run_refuses_to_run_worktrees_in_the_sandbox(self):
+        path = self.tools("devcontainer", "docker")
+
+        run = self.autonomous("run", "--worktree", HARNESS_SANDBOX_START="on", PATH=path)
+
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("--worktree", run.stdout)
+        self.assertFalse((Path(path) / "calls").exists(), "nothing was started")
+        self.assertNotIn("harness/task-", self.command("git", "branch", "--list").stdout)
+
+    def test_run_stops_before_any_session_when_the_sandbox_does_not_come_up(self):
+        path = self.tools("devcontainer", "docker", failing=True)
+
+        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
+
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("the sandbox could not start", run.stdout)
+        self.assertIn("the build failed", run.stdout)
+        calls = (Path(path) / "calls").read_text()
+        self.assertIn("devcontainer up --workspace-folder %s" % self.project, calls)
+        self.assertNotIn("devcontainer exec", calls)
+
+
 class Upgrade(Project):
     def keep_stale_devcontainer(self, text=STALE_DEVCONTAINER):
         (self.project / DEVCONTAINER_REL).write_text(text)

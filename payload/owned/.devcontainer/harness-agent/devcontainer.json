@@ -1,6 +1,7 @@
 // Agentic harness: sandbox for unattended runs (harness-owned).
 // Open the project in this container ("Dev Containers: Reopen in Container", then pick harness-agent),
 // or use the devcontainer CLI, and run: python3 scripts/harness/lib/harness.py run
+// Or let run on the host bring it up and run each session in it: HARNESS_SANDBOX_START="on" in backbone/harness.conf.
 // In a thin project, run: python3 ~/.agentic-harness/plugins/agentic-harness/plugin/launcher.py run
 // (thin-engine.py fetches the release the project pins when the container starts, and Claude Code loads it as the
 // plugin; HARNESS_ENGINE_SOURCE on the host names another repository to fetch it from).

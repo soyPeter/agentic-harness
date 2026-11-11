@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 EVIDENCE_FIELDS = ("backend", "isolation_class", "base_image_digest", "allowlist_hash", "region", "control_plane",
                    "credential_mode")
@@ -34,24 +35,38 @@ DENIALS_PATH = "/run/harness-egress/denials.jsonl"
 DENIALS_CITED = 10
 
 
-class Sandbox(object):
-    """One sandbox: the workspace its sessions run in, as the sandbox sees it."""
+# The sandbox a project carries, relative to its root; HARNESS_SANDBOX_START brings it up with the devcontainer CLI.
+DEVCONTAINER_CONFIG = ".devcontainer/harness-agent/devcontainer.json"
+# A build on a cold cache installs the agent CLI; a session's own timeout is enforced inside the container too.
+UP_SECONDS = 1800
+EXEC_GRACE_SECONDS = 60
 
-    def __init__(self, workspace):
+
+class SandboxError(Exception):
+    """The sandbox can't be used, and no session may run."""
+
+
+class Sandbox(object):
+    """One sandbox: the workspace its sessions run in, as the sandbox sees it. A sandbox the backend brought up has
+    its container, the workspace inside it and the agent command it defines."""
+
+    def __init__(self, workspace, container=None, remote_workspace=None, agent_command=None):
         self.workspace = Path(workspace)
+        self.container, self.remote_workspace, self.agent_command = container, remote_workspace, agent_command
 
 
 class SandboxBackend(object):
     """What every backend provides. `name` is the HARNESS_SANDBOX_BACKEND value that selects it."""
     name = None
 
-    def create(self, workspace):
-        """A Sandbox for the task's workspace."""
+    def create(self, workspace, env=None):
+        """A Sandbox for the task's workspace; env is the harness settings a check inside it gets. Raises SandboxError
+        when the sandbox can't be used."""
         raise NotImplementedError
 
-    def exec(self, sandbox, command, stdin=None, log=None, timeout=None):
-        """Run a shell command in the sandbox's workspace with stdin as its input and its output (stdout and stderr) to
-        the log file. The exit code, or None once the timeout stopped it."""
+    def exec(self, sandbox, command, stdin=None, log=None, timeout=None, env=None):
+        """Run a shell command in the sandbox's workspace with stdin as its input, env added to its environment and its
+        output (stdout and stderr) to the log file. The exit code, or None once the timeout stopped it."""
         raise NotImplementedError
 
     def copy_in(self, sandbox, host_path, sandbox_path):
@@ -75,21 +90,91 @@ class SandboxBackend(object):
 
 
 class Devcontainer(SandboxBackend):
-    """The local .devcontainer/harness-agent/ sandbox. The runner runs where its sessions run: inside the container when
-    the user started it there, otherwise on the host. So this backend starts and destroys nothing. HARNESS_SANDBOX_IMAGE
-    is set by the image's environment, which a host can set too, so the container is claimed only when the process
-    shows the container's restrictions and the egress container's list (isolation)."""
+    """The local .devcontainer/harness-agent/ sandbox. By default sessions run where the runner runs: inside the
+    container when the user started it there, otherwise on the host, and this backend starts and destroys nothing.
+    With start (HARNESS_SANDBOX_START=on) a runner on the host brings the project's sandbox up with the devcontainer CLI,
+    has the harness inside check it (harness: its command there) and runs each session in it, with the agent command
+    the sandbox defines, then stops the containers it started. HARNESS_SANDBOX_IMAGE is set by the image's environment,
+    which a host can set too, so the container is claimed only when the process shows the container's restrictions and
+    the egress container's list (isolation)."""
     name = "devcontainer"
 
-    def create(self, workspace):
-        return Sandbox(workspace)
+    def __init__(self, start=False, harness=None):
+        self.start, self.harness = start, harness
+        self.compose_project = None
 
-    def exec(self, sandbox, command, stdin=None, log=None, timeout=None):
+    def starts_sandbox(self):
+        return self.start and isolation()[0] != "container"
+
+    def create(self, workspace, env=None):
+        if not self.starts_sandbox():
+            return Sandbox(workspace)
+        problem = start_problem(workspace)
+        if problem:
+            raise SandboxError(problem)
+        running = self.containers(workspace, running=True)
         try:
-            return subprocess.run(command, shell=True, cwd=str(sandbox.workspace), input=stdin, stdout=log,
-                                  stderr=subprocess.STDOUT, text=True, timeout=timeout).returncode
+            up = subprocess.run(self.cli(workspace, "up"), capture_output=True, text=True, timeout=UP_SECONDS)
+        except subprocess.TimeoutExpired:
+            raise SandboxError("devcontainer up did not finish in %d seconds" % UP_SECONDS)
+        result = last_json(up.stdout)
+        if up.returncode != 0 or result.get("outcome") != "success":
+            raise SandboxError("devcontainer up failed: %s" % (result.get("message") or up.stderr.strip()[-600:]
+                                                                or "exit %d" % up.returncode))
+        if not running:
+            self.compose_project = result.get("composeProjectName")
+        box = Sandbox(workspace, result.get("containerId"), result.get("remoteWorkspaceFolder") or "/workspace")
+        checked = self.inside(box, "%s doctor" % self.harness, env)
+        if checked.returncode != 0:
+            self.teardown(box)
+            raise SandboxError("the harness inside the sandbox refuses it:\n%s" % checked.stdout.strip()[-1500:])
+        box.agent_command = self.inside(box, 'printf %s "$HARNESS_AGENT_CMD"').stdout.strip()
+        if not box.agent_command:
+            self.teardown(box)
+            raise SandboxError("the sandbox sets no HARNESS_AGENT_CMD (the agent service in docker-compose.yml)")
+        return box
+
+    def exec(self, sandbox, command, stdin=None, log=None, timeout=None, env=None):
+        if sandbox.container is None:
+            try:
+                return subprocess.run(command, shell=True, cwd=str(sandbox.workspace), input=stdin, stdout=log,
+                                      stderr=subprocess.STDOUT, text=True, timeout=timeout,
+                                      env=dict(os.environ, **(env or {}))).returncode
+            except subprocess.TimeoutExpired:
+                return None
+        # Stopping `devcontainer exec` on the host would leave the session running inside, so the timeout is enforced
+        # there; the host's own limit is only a backstop.
+        bounded = ["timeout", "-k", "10", str(timeout), "sh", "-c", command] if timeout else ["sh", "-c", command]
+        started = time.time()
+        try:
+            code = subprocess.run(self.in_workspace(sandbox, bounded, env), input=stdin, stdout=log,
+                                  stderr=subprocess.STDOUT, text=True,
+                                  timeout=timeout + EXEC_GRACE_SECONDS if timeout else None).returncode
         except subprocess.TimeoutExpired:
             return None
+        if timeout and code in (124, 137) and time.time() - started >= timeout:
+            return None
+        return code
+
+    def cli(self, workspace, command):
+        return ["devcontainer", command, "--workspace-folder", str(workspace),
+                "--config", str(Path(workspace) / DEVCONTAINER_CONFIG)]
+
+    def in_workspace(self, sandbox, argv, env=None):
+        remote_env = [arg for key, value in sorted((env or {}).items()) for arg in ("--remote-env", "%s=%s" % (key, value))]
+        return (self.cli(sandbox.workspace, "exec") + remote_env +
+                ["sh", "-c", 'cd "$1" && shift && exec "$@"', "sh", sandbox.remote_workspace] + argv)
+
+    def inside(self, sandbox, script, env=None):
+        return subprocess.run(self.in_workspace(sandbox, ["sh", "-c", script], env), capture_output=True, text=True,
+                              timeout=600)
+
+    def containers(self, workspace, running=False):
+        """The ids of the agent's container docker knows for the workspace."""
+        found = subprocess.run(["docker", "ps", "-q"] + ([] if running else ["-a"]) +
+                               ["--filter", "label=devcontainer.local_folder=%s" % workspace],
+                               capture_output=True, text=True)
+        return found.stdout.split()
 
     def copy_in(self, sandbox, host_path, sandbox_path):
         shutil.copy2(str(host_path), str(sandbox_path))
@@ -103,7 +188,15 @@ class Devcontainer(SandboxBackend):
         return published_hosts(ALLOWLIST_PATH)
 
     def teardown(self, sandbox):
-        pass
+        """Stops the containers this backend started, which ends whatever a session left running; a sandbox that was
+        already up stays as it was."""
+        if sandbox.container is None or not self.compose_project:
+            return
+        project = subprocess.run(["docker", "ps", "-q", "--filter",
+                                  "label=com.docker.compose.project=%s" % self.compose_project],
+                                 capture_output=True, text=True).stdout.split()
+        if project:
+            subprocess.run(["docker", "stop"] + project, capture_output=True, text=True)
 
     def identity(self):
         isolation_class, reason = isolation()
@@ -199,6 +292,33 @@ def egress_denials(path):
             "top": [{"kind": kind, "target": target, "count": count} for (kind, target), count in ranked]}
 
 
+def start_problem(workspace):
+    """Why a runner here can't bring the workspace's sandbox up (HARNESS_SANDBOX_START=on), or None."""
+    if isolation()[0] == "container":
+        return None
+    if not (Path(workspace) / DEVCONTAINER_CONFIG).is_file():
+        return ("HARNESS_SANDBOX_START is on, but %s is missing, so run has no sandbox to bring up (update.sh or pin "
+                "installs it)" % DEVCONTAINER_CONFIG)
+    missing = [tool for tool in ("devcontainer", "docker") if not shutil.which(tool)]
+    if missing:
+        return ("HARNESS_SANDBOX_START is on, but %s isn't on the PATH, so run can't bring the sandbox up (the "
+                "devcontainer CLI: npm install -g @devcontainers/cli; docker: Docker Desktop, OrbStack or Docker "
+                "Engine)" % " and ".join(missing))
+    return None
+
+
+def last_json(text):
+    """The JSON object on the last line of text that holds one, or {}."""
+    for line in reversed(text.strip().splitlines()):
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
 def unpublished_allowlist():
     """Why the harness-agent image has no readable egress allowlist at ALLOWLIST_PATH, or None. The image is the one the
     Dockerfile builds when HARNESS_SANDBOX_IMAGE is set, and then the egress container must have published the list."""
@@ -275,8 +395,8 @@ def problem(name):
             % (name or "empty", ", ".join(sorted(BACKENDS))))
 
 
-def backend(name):
-    return BACKENDS[name]()
+def backend(name, **options):
+    return BACKENDS[name](**options)
 
 
 def evidence(name):

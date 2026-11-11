@@ -11,7 +11,9 @@ from inside, as the agent (Restrictions needs only docker):
 - a denied connection is logged by the egress container, and the receipt cites the log;
 - a judge pass recorded inside records that sandbox, and the receipt shows it on the host;
 - in a thin project (ThinSandbox), the container fetches the pinned engine when it starts and Claude Code loads it as
-  the plugin, so the same holds through the launcher.
+  the plugin, so the same holds through the launcher;
+- with HARNESS_SANDBOX_START=on (HostRun), run on the host brings the sandbox up itself and runs each session in it,
+  stops the session inside when it times out, and stops the containers it started.
 Restrictions runs the harness-agent image directly, with the agent's restrictions and each one left out: the sandbox is
 recorded as a container only with all of them and the published allowlist at /run/harness-egress/allowlist. Schema work,
 which needs a container by default (HARNESS_SANDBOX_REQUIRE), starts and is judged there and then finishes on the host.
@@ -101,6 +103,8 @@ def docker(*args, input=None):
 @unittest.skipUnless(os.environ.get("HARNESS_E2E") == "1" and shutil.which("docker") and DEVCONTAINER,
                      "real container: set HARNESS_E2E=1 (needs docker running and the devcontainer CLI)")
 class Sandbox(unittest.TestCase):
+    UP = True   # brought up before the tests, as a user does
+
     @classmethod
     def setUpClass(cls):
         temp = tempfile.TemporaryDirectory(prefix="sandbox-e2e-")
@@ -120,6 +124,11 @@ class Sandbox(unittest.TestCase):
         cls.host("git", "init", "-q", "-b", "main")
         cls.install()
         cls.addClassCleanup(cls.remove_sandbox)
+        if cls.UP:
+            cls.up()
+
+    @classmethod
+    def up(cls):
         up = cls.host(DEVCONTAINER, "up", "--workspace-folder", str(cls.project), "--config", str(cls.config),
                       timeout=1800)
         cls.container = json.loads(up.stdout.strip().splitlines()[-1])["containerId"]
@@ -524,6 +533,93 @@ class ThinSandbox(Sandbox):
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
         self.assertEqual(receipt["sandbox"]["isolation_class"], "container", receipt["sandbox"]["isolation_reason"])
         self.assertEqual(receipt["sandbox"]["allowlist_hash"], DEFAULT_ALLOWLIST_HASH)
+
+
+AGENT = """import json, os, subprocess, sys, time
+prompt = sys.stdin.read()
+print(open("/proc/self/status").read())
+if "Task 7.2" in prompt:
+    time.sleep(600)
+report = %s
+subprocess.run(["python3", "-B", "scripts/harness/lib/harness.py", "hook", "judge-stop"], check=True, input=json.dumps(
+    {"hook_event_name": "SubagentStop", "agent_type": "judge", "stop_hook_active": False,
+     "last_assistant_message": "Done.\\n\\n```json\\n%%s\\n```" %% json.dumps(report)}), text=True,
+    env=dict(os.environ, CLAUDE_PROJECT_DIR="/workspace"))
+""" % repr(JUDGE_PASS)
+
+
+class HostRun(Sandbox):
+    """HARNESS_SANDBOX_START=on (ADR-003 follow-up 5). The sandbox's agent command is a stand-in agent, so no session
+    needs a model: it prints its process status and records a judge pass through the judge's hook for task 7.1, and
+    for task 7.2 it outlives its timeout."""
+    UP = False
+
+    @classmethod
+    def install(cls):
+        super().install()
+        compose = cls.project / ".devcontainer/harness-agent/docker-compose.yml"
+        compose.write_text(compose.read_text().replace(
+            "HARNESS_AGENT_CMD: claude -p --dangerously-skip-permissions --output-format json",
+            "HARNESS_AGENT_CMD: python3 -B /workspace/agent.py"))
+        (cls.project / "agent.py").write_text(AGENT)
+        (cls.project / "backbone/specs").mkdir(parents=True, exist_ok=True)
+        for task in ("7.1", "7.2"):
+            (cls.project / ("backbone/specs/%s.md" % task)).write_text(SPEC.replace("7.1", task))
+        tasks = cls.project / "backbone/3-TASKS.md"
+        tasks.write_text(tasks.read_text() + "- [ ] **Task 7.1: Customer search** (spec: backbone/specs/7.1.md)\n"
+                         "- [ ] **Task 7.2: Customer list** (spec: backbone/specs/7.2.md)\n")
+        cls.host("git", "add", "-A")
+        cls.host("git", "commit", "-qm", "docs: specs for tasks 7.1 and 7.2")
+        harness = ("python3", "-B", str(cls.project / "scripts/harness/lib/harness.py"))
+        for task in ("7.1", "7.2"):
+            cls.host(*harness, "hook", "grill-stop",
+                     input=stop_input("griller", {"verdict": "pass", "task": task, "questions": [], "summary": "s"}))
+            spec = cls.project / ("backbone/specs/%s.md" % task)
+            spec.write_text(spec.read_text() + "Approved-by: Ana (2026-11-01)\n")
+        tasks.write_text(tasks.read_text().replace("- [ ] **Task", "- [WIP] **Task"))
+        (cls.project / "src").mkdir(exist_ok=True)
+        (cls.project / "src/search.py").write_text(
+            "def search(names, q):  # AC-7.1-1\n    return [n for n in names if q.lower() in n.lower()]\n")
+        (cls.project / "tests").mkdir(exist_ok=True)
+        (cls.project / "tests/test_search.py").write_text(
+            "def test_contains():  # AC-7.1-1 AC-7.2-1\n    assert True\n")
+        cls.host("git", "add", "-A")
+        cls.host("git", "commit", "-qm", "feat: tasks 7.1 and 7.2 in progress")
+
+    def run_task(self, task, **settings):
+        env = dict(self.env, HARNESS_SANDBOX_START="on", HARNESS_AUTONOMY="autonomous", HARNESS_VERIFY="block",
+                   HARNESS_RUN_ATTEMPTS="1", HARNESS_ALLOW_PARALLEL_WIP="1", **settings)
+        return subprocess.run(["python3", "-B", str(self.project / "scripts/harness/lib/harness.py"), "run", "--only",
+                               task], cwd=self.project, env=env, capture_output=True, text=True, timeout=2400)
+
+    def running(self):
+        return docker("ps", "-q", "--filter", "label=devcontainer.local_folder=%s" % self.project).stdout.split()
+
+    def session_log(self, task):
+        return sorted((self.project / ".git/harness/runs").glob("*/%s-1.log" % task))[-1].read_text()
+
+    def test_a_run_brings_the_sandbox_up_runs_the_session_in_it_and_stops_it(self):
+        self.assertEqual(self.running(), [], "nothing runs before the run")
+
+        run = self.run_task("7.1")
+        receipt = json.loads(self.host("python3", "-B", str(self.project / "scripts/harness/lib/harness.py"),
+                                       "receipt", "7.1", "--json").stdout)
+
+        self.assertIn("run: task 7.1 attempt 1", run.stdout, run.stdout + run.stderr)
+        self.assertEqual(receipt["sandbox"]["isolation_class"], "container", receipt["sandbox"]["isolation_reason"])
+        self.assertIn("NoNewPrivs:\t1", self.session_log("7.1"))
+        self.assertEqual(self.running(), [], "the run stops the sandbox it started")
+
+    def test_a_session_that_outlives_its_timeout_is_stopped_inside_a_sandbox_that_was_already_up(self):
+        self.up()
+
+        run = self.run_task("7.2", HARNESS_RUN_TASK_TIMEOUT="5")
+        sessions = self.inside("ps -eo args | grep -c '[a]gent.py'")
+
+        self.assertIn("run: task 7.2 attempt 1", run.stdout, run.stdout + run.stderr)
+        self.assertIn("exit None", run.stdout)
+        self.assertEqual(sessions.stdout.strip(), "0", "the timed-out session still runs in the sandbox")
+        self.assertNotEqual(self.running(), [], "a sandbox that was up before the run stays up")
 
 
 class Tamper(Sandbox):

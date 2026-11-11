@@ -294,3 +294,13 @@ Still open after v1:
   `init-firewall.sh` redirects every DNS query from a process other than root to it (a `nat` rule), drops port 53 to
   anywhere else, and drops traffic to Docker's resolver (`127.0.0.11`, on any port) from anyone but root; the agent's
   container has no root. Still open: names resolve to addresses once, at start, and TLS and paths aren't inspected.
+- **5. `run` on the host starting the sandbox: done (2026-11-11).** With `HARNESS_SANDBOX_START=on` (user-only,
+  default `off`), the `devcontainer` backend's `create` brings `.devcontainer/harness-agent/` up with the devcontainer
+  CLI when the runner isn't already in it, has the harness inside run `doctor` and refuses every session when either
+  fails. `exec` runs each session in the agent's container with the agent command the sandbox defines and the harness
+  settings the user's environment sets, and enforces the session's timeout inside the container. `teardown` stops the
+  containers the backend started after every session; a sandbox that was already up stays up. `doctor` errors without
+  the devcontainer CLI, `docker` or the sandbox files, so `run` refuses; `run --worktree` is refused in this mode,
+  because a worktree's git metadata lies outside what the sandbox mounts. The default stays `off`: turning it on needs
+  Docker and the devcontainer CLI on every machine that runs `run`. The Compose project is named after the sandbox's
+  folder, so one project's sandbox runs per machine at a time.

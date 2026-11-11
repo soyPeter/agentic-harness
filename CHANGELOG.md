@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **`run` on the host can bring the sandbox up itself (ADR-003 follow-up 5).** With the new user-only
+  `HARNESS_SANDBOX_START=on` (default `off`), `run` brings `.devcontainer/harness-agent/` up with the devcontainer CLI
+  before each session, has the harness inside run `doctor`, and refuses every session when either fails. Each session
+  runs in the agent's container with the agent command the sandbox defines and the harness settings your environment
+  sets; its timeout is enforced inside the container, and the runner stops the containers it started after each
+  session (a sandbox that was already up stays up). `doctor` reports an error without the devcontainer CLI, `docker`
+  or the sandbox files, and `run --worktree` is refused in this mode. A dry run says it would bring the sandbox up.
+  `tests/test-sandbox-evidence.py` covers when `run` may start; `HostRun` in `tests/test-sandbox-egress.py`
+  (`HARNESS_E2E=1`) runs sessions in the real sandbox from the host, a timed-out one included.
+
 - **No data leaves the sandbox in DNS queries (ADR-003 follow-up 1).** `egress.py` now also answers DNS in the
   `egress` container: it resolves a name, over UDP or TCP, only when it is on the published allowlist (exactly, in any
   case), and answers NXDOMAIN otherwise, logging the name in the denial log. `init-firewall.sh` redirects every DNS

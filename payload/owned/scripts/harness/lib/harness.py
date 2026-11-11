@@ -135,7 +135,7 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
                   "HARNESS_TESTER", "HARNESS_ACCEPTANCE_PATHS", "HARNESS_ORCA_AGENTS", "HARNESS_ORCA_LAUNCH",
                   "HARNESS_SPEC_MAX_ITEMS", "HARNESS_LIGHT_LANE", "HARNESS_LIGHT_MAX_ITEMS", "HARNESS_LIGHT_MAX_FILES",
                   "HARNESS_REVIEW", "HARNESS_DELIVER", "HARNESS_PROFILE", "HARNESS_REQ_STYLE",
-                  "HARNESS_SANDBOX_BACKEND", "HARNESS_SANDBOX_REQUIRE")
+                  "HARNESS_SANDBOX_BACKEND", "HARNESS_SANDBOX_REQUIRE", "HARNESS_SANDBOX_START")
 # Organisation profiles (HARNESS_PROFILE, user-only). "triple": a supervised pilot where only a human merges, so the
 # coordinator's --merge and --trust and the scheduled backlog run are refused.
 PROFILES = ("", "triple")
@@ -155,6 +155,8 @@ SHELL_PROTECTED = (r"^backbone(/|$)", r"^scripts/harness(/|$)", r"^\.claude(/|$)
 # but lie outside it, beyond the reach of the repository-relative protections.
 INSTALL_DIRS = (("HARNESS_ENGINES", "the harness engine cache"), ("HARNESS_PLUGIN_ROOT", "the harness plugin"))
 INSTALL_SCRIPTS = ("harness.py", "launcher.py", "thin.py")
+# In the sandbox, where thin-engine.py links a thin project's pinned engine as the Claude Code plugin.
+SANDBOX_PLUGIN = "~/.agentic-harness/plugins/agentic-harness"
 # Codex and OpenCode plugins can't ship agents, so a thin session start installs the pinned engine's role agents where
 # each CLI loads user-level agents (ADR-001). A file there without this mark is the user's own and is left alone.
 USER_AGENTS = {"codex": (".codex/agents", ".toml", "Codex"), "opencode": (".opencode/agents", ".md", "OpenCode")}
@@ -347,6 +349,7 @@ DEFAULTS = {
     "HARNESS_RUN_MAX_COST": "",
     "HARNESS_SANDBOX_BACKEND": "devcontainer",
     "HARNESS_SANDBOX_REQUIRE": "schema=container",
+    "HARNESS_SANDBOX_START": "off",
     "HARNESS_CI_JUDGE_CMD": "claude -p --agent judge --dangerously-skip-permissions --output-format json",
     "HARNESS_SKILL_MAX_AGE": "180",
     "HARNESS_HOOK_SLOW": "5",
@@ -2670,7 +2673,8 @@ def sandbox_start_problem(task):
     """Why task can't start in the sandbox this process runs in, or None. A start is checked where it happens, so CI's
     verify, which runs elsewhere, never checks it."""
     return sandbox_refusal(task, sandbox.evidence(conf()["HARNESS_SANDBOX_BACKEND"]), "cannot start here",
-                           "this session's sandbox", "Start it inside the .devcontainer/harness-agent/ sandbox")
+                           "this session's sandbox", "Start it inside the .devcontainer/harness-agent/ sandbox (harness.py "
+                           "run brings it up with HARNESS_SANDBOX_START=on)")
 
 
 def sandbox_finish_problem(task, judged):
@@ -3506,6 +3510,12 @@ def health():
     unplugged = sandbox_plugin_problem()
     if unplugged:
         issues.append(("error", unplugged))
+    if values["HARNESS_SANDBOX_START"] not in ("on", "off"):
+        issues.append(("error", "HARNESS_SANDBOX_START must be on or off"))
+    elif values["HARNESS_SANDBOX_START"] == "on":
+        unstartable = sandbox.start_problem(ROOT)
+        if unstartable:
+            issues.append(("error", unstartable))
     stale = stale_sandbox_config()
     if stale:
         issues.append(("warn", stale))
@@ -6425,15 +6435,41 @@ def trust_problem(command=None):
             "agent commands other than Claude Code." % (ROOT, ROOT))
 
 
-def run_agent(prompt, log_path, timeout):
+def sandbox_harness_cli(launcher=False):
+    """The harness command inside the project's sandbox: a thin project's engine is the plugin thin-engine.py links
+    there, and its launcher checks the engine is the pinned one."""
+    if not thin_mode():
+        return "python3 scripts/harness/lib/harness.py"
+    return "python3 %s/%s" % (SANDBOX_PLUGIN, "plugin/launcher.py" if launcher else
+                              "payload/owned/scripts/harness/lib/harness.py")
+
+
+def run_backend(values):
+    return sandbox.backend(values["HARNESS_SANDBOX_BACKEND"], start=values["HARNESS_SANDBOX_START"] == "on",
+                           harness=sandbox_harness_cli(launcher=True))
+
+
+def session_settings():
+    """The harness settings this process's environment sets. Sessions in a sandbox the runner brought up get them too,
+    apart from the agent command, which the sandbox defines."""
+    return {key: os.environ[key] for key in DEFAULTS
+            if key in os.environ and key not in ("HARNESS_AGENT_CMD", "HARNESS_SANDBOX_START")}
+
+
+def run_agent(backend, prompt, log_path, timeout):
+    """(exit code or None, seconds) of one agent session through the backend. Raises sandbox.SandboxError before the
+    session when its sandbox can't be used."""
     values = conf()
-    backend = sandbox.backend(values["HARNESS_SANDBOX_BACKEND"])
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.time()
-    box = backend.create(ROOT)
+    settings = session_settings() if backend.starts_sandbox() else None
+    box = backend.create(ROOT, env=settings)
     try:
+        if box.container:
+            prompt = prompt.replace(harness_cli(), sandbox_harness_cli())
         with log_path.open("w", encoding="utf-8") as log:
-            code = backend.exec(box, values["HARNESS_AGENT_CMD"], stdin=prompt, log=log, timeout=timeout)
+            code = backend.exec(box, box.agent_command or values["HARNESS_AGENT_CMD"], stdin=prompt, log=log,
+                                timeout=timeout, env=settings)
     finally:
         backend.teardown(box)
     return code, round(time.time() - started, 1)
@@ -6454,7 +6490,15 @@ def run_command(argv):
     if errors:
         print("run: fix the harness first:\n  " + "\n  ".join(errors))
         return 1
-    problem = trust_problem() if not dry_run else None
+    backend = run_backend(values)
+    starting = backend.starts_sandbox()
+    if starting and "--worktree" in argv:
+        print("run: --worktree can't run in the sandbox run brings up (HARNESS_SANDBOX_START=on): a worktree's git "
+              "metadata lives in the main checkout, outside the folder the sandbox mounts. Run without --worktree, or "
+              "start run inside the sandbox")
+        return 1
+    # The sandbox trusts its own workspace (trust-workspace.py).
+    problem = trust_problem() if not dry_run and not starting else None
     if problem:
         print("run: " + problem)
         return 1
@@ -6463,11 +6507,14 @@ def run_command(argv):
         queue = [t for t in queue if t[0] == only]
     if max_tasks:
         queue = queue[:max_tasks]
-    # A session could neither start nor finish such a task: skip it before paying for one.
-    unsandboxed = {task: sandbox_refusal(task, sandbox.evidence(values["HARNESS_SANDBOX_BACKEND"]), "can't run here",
-                                         "the sandbox its sessions would run in",
-                                         "Run harness.py run inside the .devcontainer/harness-agent/ sandbox")
-                   for task, _, _ in queue}
+    # A session could neither start nor finish such a task: skip it before paying for one. Sessions in a sandbox run
+    # brings up are checked by the gates inside it.
+    unsandboxed = {} if starting else {
+        task: sandbox_refusal(task, sandbox.evidence(values["HARNESS_SANDBOX_BACKEND"]), "can't run here",
+                              "the sandbox its sessions would run in",
+                              "Run harness.py run inside the .devcontainer/harness-agent/ sandbox, or set "
+                              "HARNESS_SANDBOX_START=on")
+        for task, _, _ in queue}
     unsandboxed = {task: why for task, why in unsandboxed.items() if why}
     queue = [t for t in queue if t[0] not in unsandboxed]
     for task, why in unsandboxed.items():
@@ -6475,6 +6522,8 @@ def run_command(argv):
     if "--worktree" in argv and not dry_run:
         return run_worktrees(queue, "--pr" in argv) or (1 if unsandboxed else 0)
     if dry_run:
+        if starting:
+            print("run: would bring up .devcontainer/harness-agent/ with the devcontainer CLI and run each session in it")
         for task, title, state in queue:
             print("run: would %s task %s: %s" % ("resume" if state == "wip" else "start", task, title))
         return 0
@@ -6505,7 +6554,13 @@ def run_command(argv):
                 "python3 scripts/harness/lib/harness.py", harness_cli())
             log_path = run_dir / ("%s-%d.log" % (slug(task), attempt))
             started_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-            code, seconds = run_agent(prompt, log_path, timeout)
+            try:
+                code, seconds = run_agent(backend, prompt, log_path, timeout)
+            except sandbox.SandboxError as exc:
+                print("run: the sandbox could not start, so no session ran; stopping the run: %s" % exc)
+                log_event("run-sandbox-failed", task=task, error=str(exc)[:800])
+                outcome = "sandbox-failed"
+                break
             failure = agent_start_failure(log_path, code)
             if failure:
                 print("run: the agent could not start (%s); stopping the run. Log: %s" % (failure, log_path))
@@ -6570,7 +6625,7 @@ def run_command(argv):
                          % (attempts, outcome, run_dir), "a look at the run logs and the task's state")
                 outcome = "escalated"
         summary.append((task, outcome))
-        if outcome in ("halted", "agent-failed"):
+        if outcome in ("halted", "agent-failed", "sandbox-failed"):
             break
     log_event("run-end", summary=summary)
     for task, outcome in summary:

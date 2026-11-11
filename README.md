@@ -147,7 +147,9 @@ pass stale.
 - **Runner**: `harness.py run` drives ready tasks unattended (optionally one worktree, branch and PR per task, with a
   cost budget), one fresh agent session per task, with time and attempt budgets, escalating stalls. Sessions start
   through a sandbox backend (`HARNESS_SANDBOX_BACKEND`); the only one, `devcontainer`, runs them where the runner runs,
-  ideally inside `.devcontainer/harness-agent/`, whose outbound allowlist is enforced from a second container.
+  ideally inside `.devcontainer/harness-agent/`, whose outbound allowlist is enforced from a second container. With
+  `HARNESS_SANDBOX_START=on`, `run` on the host brings that sandbox up itself with the devcontainer CLI and runs each
+  session in it.
 - **Observability**: `harness.py report` summarises the event log, and `harness.py trace <id>` shows one task's
   history: the context and skills its agents loaded, the files they edited, what the hooks refused, test runs and
   verdicts.
