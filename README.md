@@ -444,7 +444,9 @@ VERSION, CHANGELOG.md
 - Run `tests/run-tests.sh` after every change. It installs into temporary repos and runs the whole pipeline (define,
   grill, approve, build, judge) plus every hook, rule and update path. Install the test-only tools first
   (`python3 -m pip install -r tests/requirements.txt`, in a virtual environment). The `tests/test-*.py` files run in
-  parallel, `HARNESS_TEST_JOBS` at a time (default: one per CPU).
+  parallel, `HARNESS_TEST_JOBS` at a time (default: one per CPU). `HARNESS_STRESS=1` adds a stress check of the
+  harness-verify step that takes the base branch's engine: it keeps every CPU busy for a few minutes, as on a loaded
+  macOS runner.
 - The property checks run every example by default (`HYPOTHESIS_PROFILE=thorough`). The required pull request jobs use
   `HYPOTHESIS_PROFILE=ci`, which runs a quarter of the examples for checks that start a process per example; the
   `nightly` workflow runs the full profile on Ubuntu and macOS every night.

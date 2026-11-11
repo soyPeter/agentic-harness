@@ -5,6 +5,7 @@
 #   The property checks need tests/requirements.txt installed; without it they are skipped.
 #   HYPOTHESIS_PROFILE=ci       fewer examples per property, as in the pull request jobs (default: thorough, all)
 #   HARNESS_TEST_JOBS=<n>       how many tests/test-*.py files run at once (default: one per CPU)
+#   HARNESS_STRESS=1            also runs the take step's stress check (a few minutes, every CPU busy)
 set -u
 
 HARNESS="$(cd "$(dirname "$0")/.." && pwd)"

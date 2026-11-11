@@ -145,7 +145,7 @@ class ThinRegressions(unittest.TestCase):
 
     def extract(self, check=True, source=None):
         runner = self.work / "runner temp"
-        runner.mkdir()
+        runner.mkdir(exist_ok=True)
         env = dict(self.env, BASE_REF="origin/review-base", RUNNER_TEMP=str(runner), GITHUB_ENV=str(runner / "github-env"))
         result = self.run_command("bash", "-e", "-o", "pipefail", "-c", self.extraction_script(source),
                                   env=env, check=check)
@@ -200,7 +200,25 @@ assert h['decisions'].load_definitions(str(h['DECISIONS_FILE']))['decisions']
         trusted, result = self.extract(check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("using the pull request's copy", result.stdout)
+        self.assertIn("(git archive exited with 128)", result.stdout)
+        self.assertIn("scripts/harness/decisions.json", result.stderr)
         self.assertFalse((trusted / "scripts/harness/decisions.json").exists())
+
+    def test_ci_fails_when_the_base_engine_cannot_be_unpacked(self):
+        if os.geteuid() == 0:
+            self.skipTest("root writes into a read-only folder")
+        self.install()
+        self.commit_base()
+        trusted = self.work / "runner temp/trusted"
+        trusted.mkdir(parents=True)
+        trusted.chmod(0o555)
+        self.addCleanup(trusted.chmod, 0o755)
+        _, result = self.extract(check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Cannot extract the base branch's verifier and required engine configuration (tar exited with",
+                      result.stdout)
+        self.assertNotIn("Using the harness", result.stdout)
+        self.assertFalse((self.work / "runner temp/github-env").exists())
 
     def test_ci_fetches_the_base_branch_pin_for_a_thin_project(self):
         source = self.work / "engine-source"
@@ -247,6 +265,36 @@ assert h['decisions'].load_definitions(str(h['DECISIONS_FILE']))['decisions']
         trusted, result = self.extract(source=source)
         self.assertIn("Using pinned engine %s from HEAD" % commit, result.stdout)
         self.assertTrue((trusted / "payload/owned/scripts/harness/lib/harness.py").is_file())
+
+    @unittest.skipUnless(os.environ.get("HARNESS_STRESS") == "1",
+                         "stress check (a few minutes, every CPU busy): set HARNESS_STRESS=1")
+    def test_ci_extraction_holds_on_a_busy_runner(self):
+        self.install()
+        self.commit_base()
+        stop = self.work / "stop"
+        # A loaded macOS runner: short-lived processes, as the suite's shell sections start them (the scheduler would
+        # demote a CPU-bound loop below a woken git archive), beside niced long-lived workers, as it runs a test file.
+        busy = [subprocess.Popen(["sh", "-c", 'while [ ! -e "$1" ]; do "$2"; done', "_", str(stop),
+                                  shutil.which("true")]) for _ in range(2 * os.cpu_count() + 4)]
+
+        def release():
+            stop.touch()
+            for process in busy:
+                process.wait()
+        self.addCleanup(release)
+        take = r'''for ((run = 0; run < 200; run++)); do
+  runner=$(mktemp -d "$1/runner.XXXXXX")
+  RUNNER_TEMP=$runner GITHUB_ENV=$runner/github-env bash -e -o pipefail -c "$2" > "$runner/out" 2>&1 \
+    && grep -q "Using the harness from origin/review-base." "$runner/out" || cat "$runner/out"
+  rm -rf "$runner"
+done'''
+        workers = [subprocess.Popen(["nice", "-n", "10", "bash", "-c", take, "_", str(self.work),
+                                     self.extraction_script()], cwd=self.project,
+                                    env=dict(self.env, BASE_REF="origin/review-base"),
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                   for _ in range(max(2, os.cpu_count() // 2))]
+        failed = "".join(worker.communicate()[0] for worker in workers)
+        self.assertEqual(failed.count("::error::"), 0, failed)
 
 
 if __name__ == "__main__":
