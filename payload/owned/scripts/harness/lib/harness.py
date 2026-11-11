@@ -1718,25 +1718,6 @@ def is_runtime(word):
     return name in INTERPRETERS or bool(RUNTIMES.fullmatch(name))
 
 
-def stdin_script(words, start):
-    """Whether the runtime at words[start] reads its script from stdin: an operand -, /dev/stdin or /dev/fd/N, or no
-    script operand at all (-c and -m name their code; --version and --help run nothing)."""
-    if any(w in VERSION_FLAGS for w in words[start + 1:]):
-        return False
-    i = start + 1
-    while i < len(words):
-        word = words[i]
-        if word in ("-c", "-m"):
-            return False
-        if word in ("-X", "-W"):
-            i += 2
-            continue
-        if word == "-" or not word.startswith("-"):
-            return word == "-" or bool(STDIN_FILE.search(word))
-        i += 1
-    return True
-
-
 def redirections(words):
     """(words without their redirections, [(operator, target)]): < x, 2>/dev/null, <<EOF and <<< text, wherever they
     stand, a redirection before the command included."""
@@ -1801,7 +1782,8 @@ def program_findings(prog, words):
     command, redirects = redirections(words)
     command = command[program_index(command):]
     name = program(command)
-    if is_runtime(name) and not any(w in VERSION_FLAGS for w in command[1:]) and script_operand(command) == "":
+    versions = VERSION_FLAGS + (("-v",) if name.startswith(SHORT_VERSION_FLAG) else ())
+    if is_runtime(name) and not any(w in versions for w in command[1:]) and script_operand(command) == "":
         literal = any(op in ("<<", "<<-") or (op == "<<<" and not re.search(r"[$`]", target))
                       for op, target in redirects)
         if not literal:
