@@ -233,3 +233,92 @@ Acceptance-case completeness and policy rollout criteria still need human agreem
   - Importing benchmark metrics as targets.
   - Asserting a compliance certification.
   - This proposal is not a code audit or an approval of any currently open PR.
+
+## Implementation notes (2026-11-11)
+This section records work done under the ADR while it stays Proposed. It does not accept the ADR. Acceptance is the
+maintainer's decision.
+
+**Authority.** The [delegation plan](../research/2026-11-delegation-contracts-qualification-plan.md) records the
+decision of 10 Nov 2026: run only the audits (P0 and the P0-V reuse map), and build nothing unless they show real gaps.
+The [Orca rollout plan](../research/2026-11-orca-self-rollout-plan.md) records the same rule (D13). P0 below is that
+audit. One gap it shows was built, as the first part of P1 ("invalidation and receipt binding"). Nothing else was built.
+The skeleton plan stays parked (D12) and is not touched.
+
+**Baseline.** main at `dd2f9e967b375f1dd589dfe980ad00e04aa7b91e` (11 Nov 2026), VERSION `0.30.0`. PR #56 (merged
+7 Nov 2026 as `c494efa`) and PR #52 (merged 7 Nov 2026 as `dec213c`) are both on main, so the reconciliation that P0
+names is done. Thin mode (ADR-001) shipped in 0.30.0, and this repository is self-enrolled at that pin. Method: read
+`harness.py` and `coordinator.py` with the tests that drive them. Every gap marked below was reproduced as a failing
+test on this baseline before any change (`tests/test-impact-invalidation.py`: 22 of its 26 tests fail there; the 4
+that pass are the controls, where nothing stale is reused). No row relies on the README alone. Forge rules on GitHub were not audited: that needs remote access, which this
+local audit did not use.
+
+### P0: invariants and interfaces against the current harness
+
+| ADR-007 requirement | What exists at the baseline (code; tests) | Status |
+|---|---|---|
+| 1. Human PR merge | The deliverer's gate refuses merges by command, API and MCP tool; the `triple` profile refuses `--merge`. (`role_command_refusal`, `MERGE_ENDPOINT`, `no_merge_refusal`; `test-deliverer-gate.py`) | Covered locally. Effective forge rules not audited |
+| 2. Independent JUDGE, same gates for people and agents | A separate judge agent, optionally on another model (`--agents judge=codex`). Verify re-checks the gates in pre-commit and in CI with the base branch's verifier. (`verify_changes`; `run-tests.sh` "verify", `test-attest.py`) | Partial. A commit could change an approved spec and keep its approval line: only the agents' file and shell tools were frozen (`spec_guard`). **Built** |
+| 3. Evidence binds the tested tree to what is delivered | The judge, review and tester records carry the code fingerprint. A commit binds by content (`tree_fingerprint` of the commit that finished the task). The harness's own test run is recorded (command, exit, time, output hash). Sandbox evidence (ADR-003). (`record_verdict`, `run_tests`, `done_commit`; `test-code-fingerprint.py`, `test-sandbox-evidence.py`) | Partial. **Gap:** no spec revision on judge, review or tester records, so a receipt mapped the judge's per-criterion claims onto the current spec text by id. **Built** |
+| 3. Explicit unknowns | NOT VERIFIED lists unmet criteria, NFRs without a criterion and open findings. | Partial. With `HARNESS_TEST_CMD` empty, the receipt doesn't say the harness ran no tests (doctor warns; autonomous mode refuses). Deferred |
+| 4. Truthful states | `next` ends at `done` only after `delivered` (pushed, PR open, CI green); `delivered` is refused against a dirty or unpushed tree or red CI. Labels never approve. Merged, deployed, enabled and observed are not tracked. (`delivery_step`, `record_delivery`) | Covered up to delivery. Later states are absent, not misreported. Deferred |
+| 4. Failed or absent execution never passes | A failing or timed-out harness test run turns a claimed pass into a fail; a hand-written pass is re-derived and refused. (`effective_judge`; `run-tests.sh` "the judge's tests are run by the harness") | Covered when `HARNESS_TEST_CMD` is set |
+| 6. Bounded action | Grill, judge and lens round limits escalate to BLOCKED; the debugger runs before a fix; Orca stops a step that repeats without progress and retries a worker once; `STOP` halts everything; one `[WIP]` unless the user allows more. (`HARNESS_*_MAX_ROUNDS`, `escalate`, `coordinator.advance`) | Covered. Isolation beyond worktrees (ports, database, environment) is not verified: P3, not started |
+| DEFINE / change impact: grill | The grill pass is bound to the spec outside its Approval section and every referenced ADR. (`spec_fingerprint`, `start_problems`) | Covered |
+| DEFINE / change impact: judge, reviews, tester | Bound to the code only. A changed criterion, constraint, assumption, Change-Class or ADR left the judge's pass current. `next` said `finish`, `finish` and verify accepted it, and the receipt showed the old evidence under the new text. | **Gap. Built** |
+| DEFINE / change impact: renewed approval | An approved spec is frozen for agents, so changing it means the user removes the approval. Nothing asked for the approval back before finishing: the start gate ran only when a task became `[WIP]`, and verify skipped `[WIP]` to `[x]` although HOOKS.md said it checked "every task that became `[WIP]` or `[x]`". | **Gap. Built** |
+| DEFINE / change impact: approval and ADRs | A change to a referenced ADR stales the grill and judge passes, but a user's `Approved-by:` line carries no fingerprint, so it isn't renewed. | Gap. Deferred: needs a decision on how a user's approval is bound |
+| DEFINE / change impact: dependencies | Assumption sources (`backbone/` notes, `vault:` notes) are not in the spec fingerprint. `(after: ...)` edges between tasks invalidate nothing. | Gap. Deferred: dependency scope is a design decision (Unresolved boundaries); the task dependency gate plan owns the edges |
+| DEFINE / immutable history | Verdict history is append-only (verify); an accepted ADR is frozen; approvals live in git history. | Covered |
+| DEFINE / preview before cascading edits | The harness never edits downstream artifacts. It only marks them stale. | Not applicable |
+| SIGNAL / TRIAGE | `linear import` records the source (`Linear: <id> (<url>)`, the ticket quoted as source material, not instructions) and refuses a second import of the same issue. (`linear_import`; `fake-linear.py` fixtures) There is no other source, no proceed, park or reject record, and no sender check. | Partial. Out of scope here: another agent is building intake as ADR-008 follow-up 2 (`harness.py intake`) |
+| RECORD / feedback | Events, `report` (lift, failure classes) and draft proposals after two occurrences, applied only through a task the user approves. Delivery outcomes are logged. No rollout or incident evidence, no attribution, no learning action per finding. | Partial. OBSERVE and attribution are P2 and need intake, replay and human decisions on data handling. Deferred |
+| Policy rollout: replay and shadow | None. | Gap. Out of scope here: another agent is building `eval replay` (ADR-002 (c)) |
+
+### P0-V: verifier lifecycle and evaluator reporting
+
+| Requirement | Reused | Status |
+|---|---|---|
+| Launch, Doctor | `doctor` checks the install, hooks, settings and autonomous prerequisites; `run_tests` runs `HARNESS_TEST_CMD` with a timeout; ADR-003 records the sandbox. Nothing checks a live instance's revision or tenant. | Covered at the harness level. Live instances are project-specific (P1-V, only for a project that has one) |
+| Drive | The judge drives the project's tests. No per-feature recipes. | Not a harness gap. A project fixture is needed first |
+| Evidence | Command, exit, time and output hash of the harness's own run, code fingerprint, sandbox, and now the spec fingerprint. A timeout is a fail. | Covered. NOT_RUN without a test command is the partial row above |
+| Cleanup | The harness owns no live resources. | Not applicable |
+| Evaluator reporting | `report` only. No labelled cases, confusion matrix, false blocks or missed defects. | Gap. Belongs to ADR-002 (c) `eval replay` |
+
+### What was built (P1, first slice)
+- Judge, review and tester records carry `spec`, the grill's fingerprint of the spec they covered. A pass is current only
+  on the code and the spec it judged. A record without `spec` (from an earlier release) can't show what it judged, so
+  it counts as stale. Old entries are never rewritten: the new pass is appended after the stale one.
+- Finishing a task (the hook on `3-TASKS.md`, `finish`, pre-commit and CI `verify`) passes the start gate again. A spec
+  whose approval was removed needs a current grill pass and the user's approval before the task can finish.
+- Verify refuses a commit that changes an approved spec outside its Approval section while its `Approved-by:` lines
+  stay as they were. That is the freeze, applied to changes made outside the hooks. The user approves the new text with
+  a new line. In CI, the `harness-change-approved` label lets a deliberate change through.
+- `next` routes a changed `[WIP]` task to `grill`, then `approve`, then `test` and `judge`, each with a `reason`, and
+  then to every review lens. `state --json` gives the judge verdict's `stale` (`code`, `spec` or `unrecorded`). The
+  receipt refuses a pass on an earlier spec and names the spec and code it was judged on (`judged_on`).
+- Evidence: `tests/test-impact-invalidation.py` (26 tests, through the hooks and the CLI). Two property checks run
+  the rules as decision tables. A pass is current only when neither the code, the spec, nor an ADR changed and the
+  record has a spec revision. An approval holds only for the text it was given on. Each of 20 targeted mutants of the
+  new checks (one check disabled at a time) fails a test. The full suite ran twice locally, green (see the commit).
+
+This slice adds no semantic signal and no new state. It applies the existing fingerprint rule to the spec half of the
+evidence, and runs the existing start gate at finish. That is why it blocks rather than reports (the delegation plan
+keeps report-only for new semantic signals). Rollback is a revert of the commit. Records written in the meantime stay
+readable by the older engine, which ignores `spec`.
+
+### What was not built, and why
+- **Signal intake and triage** (provenance, deduplication key): another agent is building it as ADR-008 follow-up 2.
+- **Replay and shadow evaluation, and evaluator reporting**: another agent is building `eval replay` (ADR-002 (c)).
+- **OBSERVE, attribution and one learning action per finding** (P2): they depend on intake and replay, and on human
+  decisions about client scope, attribution and data handling (Unresolved boundaries).
+- **Renewing a user's approval when a referenced ADR changes**: the grill and judge passes go stale today, but the
+  approval line has no fingerprint. Binding it (a fingerprinted line, or verify refusing an ADR change under an
+  approved spec) is a workflow decision for the maintainer.
+- **Assumption sources and task dependencies in the fingerprint**: dependency scope and legacy migration are left to
+  the workflow maintainer and an independent reviewer. `(after: ...)` edges belong to the task dependency gate plan.
+- **The judge's spec fingerprint in `trace export` and the attest statement**: ADR-004 and ADR-005 follow-ups are in
+  progress elsewhere, and the attest predicate is versioned (ADR-005 follow-up 6). Verify already refuses a range whose
+  judge pass is on an earlier spec, so an attested task's receipt is on its current spec.
+- **NOT VERIFIED without a test command**, and **states after delivery** (merged, deployed, enabled, observed):
+  small next candidates. The first is local. The second needs forge and deploy adapters (ADR-008).
+- **Isolation before parallelism** (P3): no demonstrated bottleneck. Orca keeps its current worktrees and two workers.
