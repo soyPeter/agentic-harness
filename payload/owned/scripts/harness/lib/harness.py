@@ -45,6 +45,7 @@ Usage:
   harness.py doctor
 """
 import fnmatch
+import glob
 import hashlib
 import hmac
 import json
@@ -1485,23 +1486,49 @@ def find_starts(words):
     return starts or ["."]
 
 
+UNKNOWN_DIR = "/.harness-unresolved-directory"   # the cwd after a cd the hooks can't resolve
+
+
+def shell_path(path, cwd):
+    """path as the shell would resolve it, $PWD and ~ included, against cwd: (absolute paths it can name, whether an
+    expansion is left that the hooks can't resolve). A glob gives the paths it matches now, dotfiles only by a dot."""
+    here = cwd if cwd and cwd != UNKNOWN_DIR else str(ROOT)
+    text = re.sub(r"\$(?:\{PWD\}|PWD\b)", lambda _: here, path)
+    text = os.path.expandvars(os.path.expanduser(text))
+    unresolved = bool(re.search(r"[$`]", text)) or (cwd == UNKNOWN_DIR and not os.path.isabs(text))
+    full = text if os.path.isabs(text) else os.path.join(here, text)
+    if any(c in full for c in "*?["):
+        return glob.glob(full), unresolved
+    return [full], unresolved
+
+
+def reaches_git_dir(full):
+    """Whether a delete or write at full can touch a git directory: it is one, is in one, or holds one (find walks
+    down from it)."""
+    real = os.path.realpath(full)
+    return any(real == d or real.startswith(d + os.sep) or d.startswith(real.rstrip(os.sep) + os.sep)
+               for d in git_dirs())
+
+
 def git_dir_findings(prog, words, segment, cwd):
-    """Deletes and writes into the git directory that written_paths can't name: find -delete or -exec rm under it, a
-    path built from $VAR or a command substitution that points at it, a mutating command whose operands come from
-    git rev-parse."""
-    found = []
+    """Deletes and writes that can reach the git directory, which written_paths alone doesn't name: find -delete or
+    -exec rm from a folder that holds it, a glob that matches it, a path built from $VAR, $PWD or a command
+    substitution, a relative path after a cd the hooks can't resolve, and operands from git rev-parse."""
     destroys = prog == "find" and ("-delete" in words or (any(w in FIND_EXEC for w in words)
                                                            and any(program([w]) in MUTATORS for w in words)))
-    paths = written_paths(segment, words) + (find_starts(words) if destroys else [])
-    for path in paths:
-        unresolved = re.search(r"[$`]", os.path.expandvars(path))
-        if (unresolved and GIT_DIR_HINT.search(path)) or (destroys and path in find_starts(words)
-                                                          and protected_path(path, cwd)):
-            found.append(GIT_DIR_REFUSAL % path if unresolved or in_git_dir(path, cwd) else
-                         "find deletes in %s, which only the Write and Edit tools change." % path)
+    for path in written_paths(segment, words) + (find_starts(words) if destroys else []):
+        fulls, unresolved = shell_path(path, cwd)
+        walks = destroys and path in find_starts(words)
+        if unresolved and (GIT_DIR_HINT.search(path) or cwd == UNKNOWN_DIR):
+            return [GIT_DIR_REFUSAL % path if GIT_DIR_HINT.search(path) else
+                    "%s is in a folder from an expansion the hooks can't resolve (cd $(...)); name the folder." % path]
+        if any(reaches_git_dir(f) if walks else in_git_dir(f, cwd) for f in fulls):
+            return [GIT_DIR_REFUSAL % path if not walks else
+                    "find deletes from %s, which holds the git directory: start it in a folder that doesn't, or "
+                    "prune .git." % path]
     if (prog in MUTATORS or prog in COPY_PROGRAMS or destroys) and GIT_SUBSTITUTION.search(segment):
-        found.append(GIT_DIR_REFUSAL % "a path from git rev-parse")
-    return found[:1]
+        return [GIT_DIR_REFUSAL % "a path from git rev-parse"]
+    return []
 
 
 def thin_mode():
@@ -1842,7 +1869,8 @@ def shell_findings(command, cwd=None, depth=0):
                              "may do that, in their own terminal." % assignment.split("=", 1)[0])
         prog = program(words)
         if prog == "cd" and len(words) > 1:
-            cwd = os.path.join(cwd or str(ROOT), os.path.expanduser(words[1]))
+            fulls, unresolved = shell_path(words[1], cwd)
+            cwd = UNKNOWN_DIR if unresolved or len(fulls) != 1 else fulls[0]
             continue
         found.extend(engine_findings(prog, words, written_paths(segment, words)))
         found.extend(program_findings(prog, words))
@@ -6892,8 +6920,15 @@ def write_ledger(task, entry):
                      + "\n")
 
 
+def run_marker(task):
+    return orca_dir() / "ran" / slug(task)
+
+
 def task_has_run(task):
-    """Whether the event log shows a runner session for task (a ledger can go missing; the log is a second record)."""
+    """Whether any record shows a runner session for task: its marker, a run log, or the event log. A ledger can go
+    missing; so can any one of these."""
+    if run_marker(task).exists() or glob.glob(str(events_file().parent / "runs" / "*" / ("%s-*.log" % slug(task)))):
+        return True
     for line in read(events_file()).splitlines():
         if '"task": %s' % json.dumps(task) in line and ('"run-session"' in line or '"run-attempt"' in line):
             return True
@@ -7092,6 +7127,8 @@ def run_command(argv):
                 write_ledger(task, {"session": session, "attempt": attempt, "reserved_usd": None if task_budget is None
                                     else round(max(task_budget - used, 0.0), 6)})
                 log_event("run-session", task=task, session=session, attempt=attempt)
+                run_marker(task).parent.mkdir(parents=True, exist_ok=True)
+                run_marker(task).touch()
             except OSError as exc:
                 log_event("run-ledger", task=task, error=str(exc))
                 if task_budget is not None:

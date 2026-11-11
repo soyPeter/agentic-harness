@@ -19,8 +19,9 @@
   before it starts, for what is left of `HARNESS_TASK_BUDGET_USD`, and settles it with the cost when it ends, so a
   run killed during a session still counts it. A ledger that can't be read or is corrupt read as $0 and then crashed
   the run; now, with a budget set, it stops the task before any session and escalates it (`budget`), as does a ledger
-  that can't be written, or one that is missing while the event log shows the task ran before (a new `run-session`
-  event marks each session as it starts). The receipt's `cost` adds `unsettled_sessions`, or `error` when the ledger can't be read.
+  that can't be written, or one that is missing while any record shows the task ran before (a
+  marker in `.git/harness/ran/`, a run log, or the new `run-session` event), so wiping the ledger and the event log
+  together doesn't reset the budget. The receipt's `cost` adds `unsettled_sessions`, or `error` when the ledger can't be read.
 
 - **delivery-record checks the trusted clone's verify, and can sign the record.** The report now carries `verify`:
   the range, head and exit status of the trusted clone's `verify --range`. `delivery-record` refuses it unless the
@@ -35,8 +36,9 @@
   cost ledger (the implementer's scope didn't cover `.git/`), and from a linked worktree the shell could delete the
   ledger in the shared git directory by its absolute path. Every agent and the main session are now refused any write
   to `.git`, the worktree's git directory and the repository's common one, with the file tools or the shell, by a
-  relative or an absolute path, by `find -delete` or `-exec rm`, or by a path built from `$VAR` or a command
-  substitution that points there. Reads stay allowed. **Behaviour change:** a supervised session can no longer write
+  relative or an absolute path, by a glob matching it, by `find -delete` or `-exec rm` from a folder that holds it
+  (`find . -name '*.jsonl' -delete`), by `$PWD/.git/...`, by a path built from `$VAR` or a command substitution
+  that points there, or after a `cd` into a folder the hooks can't resolve. Reads stay allowed. **Behaviour change:** a supervised session can no longer write
   `.git/info/exclude`; use `.gitignore`.
 
 - **Agents run no program the hooks can't read.** For every agent, an interpreter reading its program from stdin (a

@@ -203,6 +203,24 @@ class Runner(unittest.TestCase):
         self.assertEqual(self.sessions(task), 1, again.stdout)
         self.assertIn("is missing, but the task has run before", entry["reason"])
 
+    def test_wiping_the_ledger_and_the_event_log_doesnt_reset_the_budget(self):
+        task = self.new_task()
+        self.run_task(task, HARNESS_TASK_BUDGET_USD="25", HARNESS_RUN_ATTEMPTS="1")
+        self.unblock(task)
+        self.ledger(task).unlink()
+        events = self.p.path / ".git/harness/events.jsonl"
+        saved = events.read_text()
+        events.unlink()
+        try:
+            self.run_task(task, HARNESS_TASK_BUDGET_USD="25", HARNESS_RUN_ATTEMPTS="1")
+            [entry] = [e for e in self.p.json("escalations", "--json")["escalations"] if e["task"] == task
+                       and e["kind"] == "budget"]
+        finally:
+            events.write_text(saved + (events.read_text() if events.exists() else ""))
+
+        self.assertEqual(self.sessions(task), 1)
+        self.assertIn("is missing, but the task has run before", entry["reason"])
+
     def test_a_session_a_killed_run_left_counts_against_the_budget(self):
         task = self.new_task()
         started, release = self.p.base / ("started-" + task), self.p.base / ("release-" + task)
