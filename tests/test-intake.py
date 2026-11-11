@@ -262,6 +262,14 @@ class Intake(unittest.TestCase):
         self.assertIn("backbone/3-TASKS.md", tamper[0]["files"])
         self.assertEqual(blocked, "blocked")
 
+    def test_a_source_heading_without_a_sender_verdict_is_no_request(self):
+        self.p.write("backbone/specs/9.5.md", self.p.spec_text("9.5", source="## Source\n- The data comes from the "
+                                                                            "billing export.\n\n"))
+        self.p.add_task("9.5", "Ordinary spec")
+        risk = self.p.harness("risk", "9.5", check=False)
+
+        self.assertNotIn("untrusted sender", risk.stdout)
+
     def test_agents_may_not_run_intake(self):
         answer = self.p.bash("python3 scripts/harness/lib/harness.py intake request.json", "implementer")
 

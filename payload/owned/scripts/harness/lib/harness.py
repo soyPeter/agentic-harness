@@ -4231,7 +4231,6 @@ def hook_pre_tool_use(data):
         if conf()["HARNESS_DELIVER"] == "external" and outward_actions(command):
             deny("Harness blocked this command: %s" % EXTERNAL_REFUSAL.replace("the deliverer pushes", "no agent "
                                                                                  "pushes"))
-        log_outward(command, data.get("harness_role") or "session")
         if not autonomous():
             command_started(data)
         return
@@ -4481,6 +4480,9 @@ def post_tool_notes(data):
                       **{"class": contract["class"]})
     elif tool == "Bash":
         command = tool_input.get("command") or ""
+        response = data.get("tool_response") if isinstance(data.get("tool_response"), dict) else {}
+        failed = data.get("hook_event_name") == "PostToolUseFailure" or response.get("interrupted") is True
+        log_outward(command, data.get("harness_role") or "session", "failed" if failed else "succeeded")
         # Agents without a Read or Skill tool (Codex) load a skill by printing its SKILL.md.
         for skill in shell_skills(command, data.get("cwd")):
             remember_skill(data, skill)
@@ -5964,25 +5966,35 @@ OUTWARD_GH = {("pr", "create"): "pr-create", ("pr", "new"): "pr-create", ("pr", 
               ("label", "create"): "label-create"}
 
 
+def api_write(args):
+    """Whether gh api args send a request that can change something (any method but GET and HEAD)."""
+    flags, _ = gh_flags(args, API_VALUE_FLAGS)
+    method = next((value for name, value in reversed(flags) if name in ("-X", "--method")), None)
+    sends = any(name in ("-f", "-F", "--raw-field", "--field", "--input") for name, _ in flags)
+    return (method or ("POST" if sends else "GET")).upper() not in ("GET", "HEAD")
+
+
 def outward_actions(command):
-    """[(action, words)] for each push, PR create or edit and label create command makes."""
+    """[(action, words)] for each push, PR create or edit, label create and GitHub API write command makes, the gh and
+    git calls the deliverer's gate can't read included."""
     if not re.search(r"(?<![\w.-])(git|gh)(?![\w.-])", command):
         return []
     found = []
-    for _, words, why in gh_calls(command):
-        action = None if why else "push" if git_subcommand(words) == "push" else (
-            OUTWARD_GH.get(gh_parts(words)[:2]) if program(words) == "gh" else None)
+    for _, words, _ in gh_calls(command):
+        words = words[program_index(words):] if program(words) not in ("git", "gh") else words
+        parts = gh_parts(words) if program(words) == "gh" else (None, None, [])
+        action = "push" if git_subcommand(words) == "push" else OUTWARD_GH.get(parts[:2]) or (
+            "api-write" if parts[0] == "api" and api_write(parts[2]) else None)
         if action:
             found.append((action, words))
     return found
 
 
-def log_outward(command, via):
-    """An outward event for each push, PR create or edit and label create in a command the hooks let through. It is
-    logged before the command runs: the factory's own audit log has what came of it."""
+def log_outward(command, via, result):
+    """An outward event for each outward write in a Bash call that ran (post-tool-use), with how it ended."""
     try:
         for action, words in outward_actions(command):
-            log_event("outward", action=action, via=via, command=" ".join(words)[:500])
+            log_event("outward", action=action, via=via, result=result, command=" ".join(words)[:500])
     except Exception:   # the audit trail never fails the call it describes
         pass
 
@@ -6715,20 +6727,19 @@ def task_cost(task):
             + len([e for e in unsettled if not number(e.get("reserved_usd"))]),
             "unsettled_sessions": len(unsettled)}
 
-BUDGET_REFUSAL = re.compile(r"(?i)\b402\b|payment required|\bbudget\b|\b(?:spend(?:ing)?|cost)[ _-]?(?:cap|limit)\b")
+BUDGET_REFUSAL = re.compile(r"(?i)\b402\b|payment required")
 
 
 def budget_refusal(log_path, code):
-    """The error a session ended with when the key proxy refused its model calls for a spending cap: HTTP 402, or an
-    error naming a budget or a spend or cost cap. None otherwise."""
+    """The error a session ended with when the key proxy refused its model calls for a spending cap: an HTTP 402
+    (Payment Required) in the agent's own error report (Claude Code's result, a Codex or OpenCode error event), never
+    in free text the session printed. None otherwise."""
     data = session_result(log_path)
     if data:
         text = str(data.get("result") or "") if data.get("is_error") else ""
     else:
         errors = [e for e in jsonl_events(log_path) if e.get("type") in ("error", "turn.failed")]
         text = " ".join(str(e.get("message") or e.get("error") or "") for e in errors)
-        if not text and code not in (0, None):
-            text = read(log_path)[-2000:]
     return re.sub(r"\s+", " ", text).strip()[:300] if BUDGET_REFUSAL.search(text) else None
 
 
@@ -7984,13 +7995,15 @@ def source_section(text):
 
 
 def source_verdicts(text):
-    """The sender verdict each '## Source' section records ("" when one records none)."""
+    """The sender verdict of each '## Source' section that records one: a section without a "- Sender verdict:"
+    line is not provenance."""
     view = outline(text or "")
     found = []
     for m in heading_pattern("Source").finditer(view):
         end = SECTION_END.search(view, m.end())
         verdict = re.search(r"(?m)^- Sender verdict:[ \t]*(\S*)", view[m.end():end.start() if end else len(view)])
-        found.append(verdict.group(1) if verdict else "")
+        if verdict:
+            found.append(verdict.group(1))
     return found
 
 

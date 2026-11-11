@@ -197,23 +197,57 @@ class Outward(unittest.TestCase):
     def outward_since(self, count):
         return self.p.events("outward")[count:]
 
-    def test_the_deliverers_push_and_pr_calls_are_outward_events(self):
-        for command, action in (("git push -u origin HEAD", "push"),
+    def call(self, command, agent, failed=False):
+        """A Bash call through the hooks: pre-tool-use, then post-tool-use (PostToolUseFailure when failed) if it
+        was let through. The pre-tool-use answer."""
+        answer = self.p.bash(command, agent)
+        if answer.returncode == 0:
+            data = {"session_id": "s1", "agent_id": "a1", "agent_type": agent, "tool_name": "Bash",
+                    "hook_event_name": "PostToolUseFailure" if failed else "PostToolUse",
+                    "tool_input": {"command": command}}
+            self.p.hook("post-tool-use", data, check=True)
+        return answer
+
+    def test_the_deliverers_push_and_pr_calls_are_outward_events_once_they_ran(self):
+        for command, action in (("git push -u origin HEAD", "push"), ("command git push origin feat/x", "push"),
                                 ("gh pr create --base main --title t --body b --label risk:low", "pr-create"),
                                 ("gh pr edit 7 --add-label risk:low", "pr-edit"),
                                 ("gh label create risk:low --color 0E8A16", "label-create")):
             with self.subTest(command=command):
                 before = len(self.p.events("outward"))
-                answer = self.p.bash(command, "deliverer")
+                allowed = self.p.bash(command, "deliverer")
+                after_pre = self.outward_since(before)
+                self.call(command, "deliverer")
                 found = self.outward_since(before)
 
-                self.assertEqual(answer.returncode, 0, answer.stderr)
-                self.assertEqual([(e["action"], e["via"]) for e in found], [(action, "deliverer")])
-                self.assertEqual(found[0]["command"], command)
+                self.assertEqual(allowed.returncode, 0, allowed.stderr)
+                self.assertEqual(after_pre, [])
+                self.assertEqual([(e["action"], e["via"], e["result"]) for e in found],
+                                 [(action, "deliverer", "succeeded")])
+                self.assertEqual(found[0]["command"], command.replace("command ", "", 1))
+
+    def test_a_failed_push_is_recorded_as_failed(self):
+        before = len(self.p.events("outward"))
+        self.call("git push origin feat/x", "implementer", failed=True)
+
+        self.assertEqual([(e["action"], e["result"]) for e in self.outward_since(before)], [("push", "failed")])
+
+    def test_github_api_writes_are_outward_events(self):
+        for command in ("gh api repos/o/r/pulls -X POST -f title=t -f head=feat/x -f base=main",
+                        "gh api --method PATCH repos/o/r/pulls/7 -f title=t",
+                        "gh api repos/o/r/issues/7/labels -f 'labels[]=risk:low'"):
+            with self.subTest(command=command):
+                before = len(self.p.events("outward"))
+                self.call(command, "implementer")
+
+                self.assertEqual([e["action"] for e in self.outward_since(before)], ["api-write"])
+        before = len(self.p.events("outward"))
+        self.call("gh api repos/o/r/pulls/7", "implementer")
+        self.assertEqual(self.outward_since(before), [])
 
     def test_a_refused_call_is_no_outward_event(self):
         before = len(self.p.events("outward"))
-        answer = self.p.bash("gh pr merge 7", "deliverer")
+        answer = self.call("gh pr merge 7", "deliverer")
 
         self.assertEqual(answer.returncode, 2)
         self.assertEqual(self.outward_since(before), [])
@@ -221,13 +255,13 @@ class Outward(unittest.TestCase):
     def test_reads_are_no_outward_events(self):
         before = len(self.p.events("outward"))
         for command in ("git status --porcelain", "gh pr checks 7", "git fetch origin"):
-            self.assertEqual(self.p.bash(command, "deliverer").returncode, 0, command)
+            self.assertEqual(self.call(command, "deliverer").returncode, 0, command)
 
         self.assertEqual(self.outward_since(before), [])
 
     def test_a_push_from_another_role_is_an_outward_event_too(self):
         before = len(self.p.events("outward"))
-        self.p.bash("git push origin feat/x", "implementer")
+        self.call("git push origin feat/x", "implementer")
 
         self.assertEqual([(e["action"], e["via"]) for e in self.outward_since(before)], [("push", "implementer")])
 

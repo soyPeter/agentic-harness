@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Outward events say what ran; a Source heading and a budget word say less.** `outward` events are logged by
+  post-tool-use, once the call has run, with `result` (`succeeded` or `failed`), and cover spellings the deliverer's
+  gate can't read (`command git push`) and GitHub API writes (`api-write`). A `## Source` section without a
+  `- Sender verdict:` line is no longer taken for an untrusted request. The key proxy's refusal is recognised only
+  from an HTTP 402 in the agent's own error report, not from any mention of a budget in the session's output.
+
 - **One run per task on every runner path, and no pushes from any role under external delivery.** `run` without
   `--only` now locks each task it drives as `run --only` does, and `orca` leaves out (and holds) the tasks it drives,
   so one task can't run twice at once from any worktree. Under `HARNESS_DELIVER="external"` every agent and the main

@@ -143,6 +143,20 @@ class Runner(unittest.TestCase):
         self.assertIn("task %s attempt 2" % task, result.stdout)
         self.assertEqual(self.escalations(task, "budget"), [])
 
+    def test_only_a_structured_402_error_is_a_cap_hit(self):
+        for name, body in (
+                ("log-mentions-budget.sh", 'echo "the budget report is in docs/"; exit 1\n'),
+                ("error-names-budget.sh", 'echo \'{"type":"result","is_error":true,"total_cost_usd":0.1,'
+                                          '"num_turns":1,"result":"the budget module failed its tests"}\'; exit 1\n')):
+            with self.subTest(agent=name):
+                task = self.new_task()
+                agent = agent_script(self.p.base / name, body)
+                result = self.p.harness("run", "--only", task, check=False, env=dict(
+                    self.env, HARNESS_AGENT_CMD=agent, HARNESS_TASK_BUDGET_USD="25", HARNESS_RUN_ATTEMPTS="2"))
+
+                self.assertIn("task %s attempt 2" % task, result.stdout)
+                self.assertEqual(self.escalations(task, "budget"), [])
+
     def test_an_invalid_budget_stops_the_run_before_any_session(self):
         task = self.new_task()
         result = self.run_task(task, HARNESS_TASK_BUDGET_USD="25 dollars")
