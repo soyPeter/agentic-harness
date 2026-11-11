@@ -344,21 +344,39 @@ class Start(Project):
       off                    any            any                                   ok      sessions run where run runs
       on                     missing        any                                   error   refuses
       on                     present        either missing                        error   refuses
-      on                     present        both                                  ok      starts the sandbox
+      on                     not trusted    both                                  error   refuses, nothing started
+      on                     trusted        both                                  ok      starts the sandbox
+
+    devcontainer up runs parts of the sandbox's definition on the host (initializeCommand, the Compose file's mounts
+    and privileges), and an agent in the sandbox can write the workspace. So run trusts the definition only when it is
+    the running engine's own copy, kept outside the project, or one the user approved on this machine
+    (harness.py sandbox-approve), and agents may not change either.
     """
 
-    def tools(self, *names, failing=False):
-        """A PATH with git and python3, and executables standing in for names: they succeed, or fail like a sandbox
-        that can't come up."""
+    def tools(self, *names, failing=False, unisolated=False):
+        """A PATH with git, python3 and sh, and executables standing in for names: they succeed, or fail like a sandbox
+        that can't come up. unisolated: devcontainer brings up a "sandbox" that runs everything right here, on the
+        host."""
         folder = Path(tempfile.mkdtemp(prefix="tools ", dir=str(self.work)))
-        for tool in ("git", "python3"):
+        for tool in ("git", "python3", "sh"):
             (folder / tool).symlink_to(shutil.which(tool))
         for name in names:
             script = folder / name
-            script.write_text("#!/bin/sh\necho \"${0##*/} $*\" >> '%s/calls'\n%s\n" % (
-                folder, 'echo \'{"outcome":"error","message":"the build failed"}\'; exit 1' if failing else "exit 0"))
+            if unisolated and name == "devcontainer":
+                script.write_text(UNISOLATED_DEVCONTAINER % str(folder / "calls"))
+            else:
+                script.write_text("#!/bin/sh\necho \"${0##*/} $*\" >> '%s/calls'\n%s\n" % (
+                    folder, 'echo \'{"outcome":"error","message":"the build failed"}\'; exit 1' if failing
+                    else "exit 0"))
             script.chmod(0o755)
         return str(folder)
+
+    def approve(self):
+        approvals = Path(self.env["HOME"]) / ".agentic-harness/sandbox-approvals.json"
+        self.addCleanup(lambda: approvals.unlink() if approvals.exists() else None)
+        approved = self.harness("sandbox-approve", check=False)
+        self.assertEqual(approved.returncode, 0, approved.stdout + approved.stderr)
+        return approved.stdout
 
     def autonomous(self, *args, **environment):
         trusted = {"projects": {str(self.project): {"hasTrustDialogAccepted": True}}}
@@ -377,6 +395,7 @@ class Start(Project):
                 self.assertEqual(doctor.returncode, 1, doctor.stdout)
                 self.assertIn("HARNESS_SANDBOX_START is on", doctor.stdout)
                 self.assertIn(missing, doctor.stdout)
+        self.approve()
         self.assertNotIn("HARNESS_SANDBOX_START", self.harness("doctor", check=False, HARNESS_SANDBOX_START="on",
                                                                PATH=self.tools("devcontainer", "docker")).stdout)
         self.assertNotIn("HARNESS_SANDBOX_START", self.harness("doctor", check=False, PATH=self.tools()).stdout)
@@ -405,6 +424,7 @@ class Start(Project):
         self.assertIn("devcontainer", run.stdout)
 
     def test_a_dry_run_says_it_would_start_the_sandbox(self):
+        self.approve()
         run = self.autonomous("run", "--dry-run", HARNESS_SANDBOX_START="on", PATH=self.tools("devcontainer", "docker"))
 
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
@@ -412,6 +432,7 @@ class Start(Project):
         self.assertIn("would resume task 7.1", run.stdout)
 
     def test_run_refuses_to_run_worktrees_in_the_sandbox(self):
+        self.approve()
         path = self.tools("devcontainer", "docker")
 
         run = self.autonomous("run", "--worktree", HARNESS_SANDBOX_START="on", PATH=path)
@@ -422,6 +443,7 @@ class Start(Project):
         self.assertNotIn("harness/task-", self.command("git", "branch", "--list").stdout)
 
     def test_run_stops_before_any_session_when_the_sandbox_does_not_come_up(self):
+        self.approve()
         path = self.tools("devcontainer", "docker", failing=True)
 
         run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
@@ -432,6 +454,100 @@ class Start(Project):
         calls = (Path(path) / "calls").read_text()
         self.assertIn("devcontainer up --workspace-folder %s" % self.project, calls)
         self.assertNotIn("devcontainer exec", calls)
+
+
+    def test_a_sandbox_definition_this_machine_has_not_approved_starts_nothing(self):
+        path = self.tools("devcontainer", "docker")
+
+        doctor = self.harness("doctor", check=False, HARNESS_SANDBOX_START="on", PATH=path)
+        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
+
+        self.assertEqual(doctor.returncode, 1, doctor.stdout)
+        self.assertIn("harness.py sandbox-approve", doctor.stdout)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertFalse((Path(path) / "calls").exists(), "devcontainer ran for an unapproved definition")
+
+    def test_a_definition_changed_after_its_approval_starts_nothing(self):
+        self.approve()
+        config = self.project / DEVCONTAINER_REL
+        kept = config.read_text()
+        self.addCleanup(config.write_text, kept)
+        for change in ('"initializeCommand": "touch /tmp/escaped",\n  "name"', '"name"'):
+            with self.subTest(change=change):
+                config.write_text(kept.replace('"name"', change, 1) + ("\n" if change == '"name"' else ""))
+                path = self.tools("devcontainer", "docker")
+
+                run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
+
+                self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+                self.assertIn("sandbox-approve", run.stdout)
+                self.assertFalse((Path(path) / "calls").exists(), "devcontainer ran for a changed definition")
+
+    def test_a_file_added_to_the_sandbox_folder_needs_approval_too(self):
+        self.approve()
+        extra = self.project / ".devcontainer/harness-agent/.env"
+        extra.write_text("COMPOSE_FILE=elsewhere.yml\n")
+        self.addCleanup(extra.unlink)
+
+        doctor = self.harness("doctor", check=False, HARNESS_SANDBOX_START="on", PATH=self.tools("devcontainer", "docker"))
+
+        self.assertEqual(doctor.returncode, 1, doctor.stdout)
+        self.assertIn("sandbox-approve", doctor.stdout)
+
+    def test_approving_names_the_definition_it_trusts(self):
+        out = self.approve()
+
+        self.assertIn(".devcontainer/harness-agent/", out)
+        self.assertRegex(out, r"sha256:[0-9a-f]{64}")
+        self.assertIn("devcontainer.json", out)
+
+    def test_run_refuses_a_sandbox_that_does_not_isolate_the_session(self):
+        self.approve()
+        path = self.tools("devcontainer", "docker", unisolated=True)
+
+        run = self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=path)
+
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("isolation_class none", run.stdout)
+        self.assertNotIn("attempt 1", run.stdout)
+
+    def test_agents_cannot_change_the_sandbox_definition_or_approve_it(self):
+        config = self.project / DEVCONTAINER_REL
+        approvals = Path(self.env["HOME"]) / ".agentic-harness/sandbox-approvals.json"
+        writes = {
+            "relative": {"tool_name": "Write", "tool_input": {"file_path": DEVCONTAINER_REL, "content": "{}"}},
+            "absolute": {"tool_name": "Edit", "tool_input": {"file_path": str(config), "old_string": '"name"',
+                                                             "new_string": '"initializeCommand": "id", "name"'}},
+            "the approvals": {"tool_name": "Write", "tool_input": {"file_path": str(approvals), "content": "{}"}},
+            "shell": {"tool_name": "Bash", "tool_input": {"command": "echo '{}' > %s" % DEVCONTAINER_REL}},
+            "compose": {"tool_name": "Bash", "tool_input": {
+                "command": "sed -i 's/cap_drop/cap_add/' .devcontainer/harness-agent/docker-compose.yml"}},
+            "a script": {"tool_name": "Bash", "tool_input": {"command": "python3 -c \"open('.devcontainer/"
+                                                                        "harness-agent/Dockerfile', 'a').write('x')\""}},
+            "approve": {"tool_name": "Bash", "tool_input": {
+                "command": "python3 scripts/harness/lib/harness.py sandbox-approve"}},
+        }
+        for name, call in writes.items():
+            with self.subTest(write=name):
+                hook = self.harness("hook", "pre-tool-use", input=json.dumps(dict(call, agent_id="a1")), check=False)
+
+                self.assertEqual(hook.returncode, 2, hook.stdout + hook.stderr)
+
+
+UNISOLATED_DEVCONTAINER = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(%r, "a") as calls:
+    calls.write(" ".join(["devcontainer"] + args) + "\\n")
+if args[0] == "up":
+    print(json.dumps({"outcome": "success", "containerId": "here", "composeProjectName": "here",
+                      "remoteWorkspaceFolder": args[args.index("--workspace-folder") + 1]}))
+    sys.exit(0)
+rest = args[1:]
+while rest and rest[0].startswith("--"):
+    rest = rest[2:]
+os.execvp(rest[0], rest)
+"""
 
 
 class Upgrade(Project):

@@ -97,8 +97,8 @@ class Devcontainer(SandboxBackend):
     restrictions and the egress container's list (isolation)."""
     name = "devcontainer"
 
-    def __init__(self, start=False, harness=None):
-        self.start, self.harness = start, harness
+    def __init__(self, start=False, harness=None, reference=None):
+        self.start, self.harness, self.reference = start, harness, reference
         self.compose_project = None
 
     def starts_sandbox(self):
@@ -107,7 +107,7 @@ class Devcontainer(SandboxBackend):
     def create(self, workspace, env=None):
         if not self.starts_sandbox():
             return Sandbox(workspace)
-        problem = start_problem(workspace)
+        problem = start_problem(workspace, self.reference)
         if problem:
             raise SandboxError(problem)
         running = self.containers(workspace, running=True)
@@ -122,6 +122,11 @@ class Devcontainer(SandboxBackend):
         if not running:
             self.compose_project = result.get("composeProjectName")
         box = Sandbox(workspace, result.get("containerId"), result.get("remoteWorkspaceFolder") or "/workspace")
+        isolated, reason = self.probe(box)
+        if isolated != "container":
+            self.teardown(box)
+            raise SandboxError("the sandbox devcontainer up brought up doesn't isolate its sessions: isolation_class %s "
+                               "(%s)" % (isolated, reason))
         checked = self.inside(box, "%s doctor" % self.harness, env)
         if checked.returncode != 0:
             self.teardown(box)
@@ -167,6 +172,17 @@ class Devcontainer(SandboxBackend):
     def inside(self, sandbox, script, env=None):
         return subprocess.run(self.in_workspace(sandbox, ["sh", "-c", script], env), capture_output=True, text=True,
                               timeout=600)
+
+    def probe(self, sandbox):
+        """(isolation_class, reason) of a process in the sandbox, worked out by this module's own code, not by the
+        harness inside, which the workspace holds."""
+        source = Path(__file__).read_text(encoding="utf-8") + "\nprint(json.dumps(isolation()))\n"
+        try:
+            found = subprocess.run(self.in_workspace(sandbox, ["python3", "-B", "-"]), input=source,
+                                   capture_output=True, text=True, timeout=120)
+            return tuple(last_json_value(found.stdout))
+        except (subprocess.TimeoutExpired, TypeError, ValueError):
+            return "unknown", "the isolation check didn't answer"
 
     def containers(self, workspace, running=False):
         """The ids of the agent's container docker knows for the workspace."""
@@ -291,8 +307,9 @@ def egress_denials(path):
             "top": [{"kind": kind, "target": target, "count": count} for (kind, target), count in ranked]}
 
 
-def start_problem(workspace):
-    """Why a runner here can't bring the workspace's sandbox up (HARNESS_SANDBOX_START=on), or None."""
+def start_problem(workspace, reference=None):
+    """Why a runner here can't bring the workspace's sandbox up (HARNESS_SANDBOX_START=on), or None. reference: the
+    engine's own copy of the definition, when an agent in the sandbox can't write it."""
     if isolation()[0] == "container":
         return None
     if not (Path(workspace) / DEVCONTAINER_CONFIG).is_file():
@@ -303,19 +320,83 @@ def start_problem(workspace):
         return ("HARNESS_SANDBOX_START is on, but %s isn't on the PATH, so run can't bring the sandbox up (the "
                 "devcontainer CLI: npm install -g @devcontainers/cli; docker: Docker Desktop, OrbStack or Docker "
                 "Engine)" % " and ".join(missing))
-    return None
+    folder = Path(workspace) / DEVCONTAINER_CONFIG.rsplit("/", 1)[0]
+    digest = definition_digest(folder)
+    if reference is not None and definition_digest(reference) == digest:
+        return None
+    if approved_definitions().get(os.path.realpath(str(workspace))) == digest:
+        return None
+    return ("HARNESS_SANDBOX_START is on, but this machine doesn't trust the sandbox's definition (%s/, %s): it isn't "
+            "the harness's own copy, and you haven't approved it. devcontainer up runs parts of it on this host, and an "
+            "agent in the sandbox can write the workspace, so run brings up only a definition you approved. Review the "
+            "folder, then run harness.py sandbox-approve in your own terminal"
+            % (DEVCONTAINER_CONFIG.rsplit("/", 1)[0], digest))
+
+
+def definition_files(folder):
+    """[(path relative to folder, sha256 of its content or of a symlink's target)] for every file in the sandbox's
+    folder, sorted."""
+    found = []
+    for path in sorted(Path(folder).rglob("*")):
+        if path.is_symlink():
+            found.append((path.relative_to(folder).as_posix(),
+                          "symlink:" + hashlib.sha256(os.readlink(str(path)).encode("utf-8")).hexdigest()))
+        elif path.is_file():
+            found.append((path.relative_to(folder).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()))
+    return found
+
+
+def definition_digest(folder):
+    """sha256 over the sandbox's folder: every file's path and content, so an added, changed or removed file changes
+    it."""
+    listing = "".join("%s %s\n" % (digest, name) for name, digest in definition_files(folder))
+    return "sha256:" + hashlib.sha256(listing.encode("utf-8")).hexdigest()
+
+
+def definition_differences(folder, reference):
+    """The files of folder that are missing from reference or differ from it, and reference's files folder lacks."""
+    ours, theirs = dict(definition_files(folder)), dict(definition_files(reference))
+    return sorted(name for name in set(ours) | set(theirs) if ours.get(name) != theirs.get(name))
+
+
+def approvals_file():
+    """Where this machine's user records the sandbox definitions they approved: outside every project, so no agent in a
+    sandbox can reach it."""
+    return Path(os.path.expanduser("~/.agentic-harness/sandbox-approvals.json"))
+
+
+def approved_definitions():
+    try:
+        data = json.loads(approvals_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    projects = data.get("projects") if isinstance(data, dict) else None
+    return projects if isinstance(projects, dict) else {}
+
+
+def approve_definition(workspace, digest):
+    projects = approved_definitions()
+    projects[os.path.realpath(str(workspace))] = digest
+    approvals_file().parent.mkdir(parents=True, exist_ok=True)
+    approvals_file().write_text(json.dumps({"projects": projects}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def last_json(text):
     """The JSON object on the last line of text that holds one, or {}."""
+    value = last_json_value(text, dict)
+    return value if value is not None else {}
+
+
+def last_json_value(text, kind=list):
+    """The JSON value of kind on the last line of text that holds one, or None."""
     for line in reversed(text.strip().splitlines()):
         try:
             value = json.loads(line)
         except ValueError:
             continue
-        if isinstance(value, dict):
+        if isinstance(value, kind):
             return value
-    return {}
+    return None
 
 
 def unpublished_allowlist():

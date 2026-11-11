@@ -297,6 +297,13 @@ Still open after v1:
   because a worktree's git metadata lies outside what the sandbox mounts. The default stays `off`: turning it on needs
   Docker and the devcontainer CLI on every machine that runs `run`. The Compose project is named after the sandbox's
   folder, so one project's sandbox runs per machine at a time.
+  A review found that an agent in the sandbox could edit the definition `devcontainer up` reads on the host (an
+  `initializeCommand` runs there) and have the next session's `up` run it. So before every `up` the backend checks
+  the definition's folder against a digest this machine trusts: the running engine's own copy when the engine lives
+  outside the project (thin mode), or one the user approved with `harness.py sandbox-approve`, kept in
+  `~/.agentic-harness/sandbox-approvals.json`, which no sandbox mounts. The lock isn't the anchor, because it lives in
+  the workspace the agent can write. After `up`, the host's own code checks that a process in the agent's container is
+  isolated. Agents can't write the definition or the approvals, or run `sandbox-approve`.
 - **6. Orca's workers inside a backend's sandbox: deferred (2026-11-11).** Orca starts each worker itself, on the host,
   in the task's worktree. Running workers in the sandbox needs Orca to launch them through the sandbox (a launch command
   per agent that goes through `devcontainer exec`) and worktrees whose git metadata the sandbox can see: a worktree's

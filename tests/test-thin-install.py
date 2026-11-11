@@ -549,6 +549,29 @@ console.log(JSON.stringify(texts));
         self.assertNotIn(missing, doctor("%s:%s" % (unreadable, pinned)))
         self.assertNotIn("Traceback", doctor("%s:%s" % (unreadable, pinned)))
 
+    def test_run_trusts_the_pinned_releases_own_sandbox_and_only_an_approved_edit_of_it(self):
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        stubs = self.work / "stubs"
+        stubs.mkdir()
+        for name in ("devcontainer", "docker"):
+            (stubs / name).write_text("#!/bin/sh\nexit 0\n")
+            (stubs / name).chmod(0o755)
+        env = dict(self.env, HARNESS_SANDBOX_START="on", PATH="%s:%s" % (stubs, self.env["PATH"]),
+                   HOME=str(self.work / "home"))
+
+        def doctor():
+            return self.run_at(self.project, "python3", "-B", str(LAUNCHER), "doctor", env=env, check=False).stdout
+
+        as_released = doctor()
+        self.edit_allowlist()
+        edited = doctor()
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "sandbox-approve", env=env)
+        approved = doctor()
+
+        self.assertNotIn("sandbox-approve", as_released)
+        self.assertIn("sandbox-approve", edited)
+        self.assertNotIn("sandbox-approve", approved)
+
 
 if __name__ == "__main__":
     unittest.main()

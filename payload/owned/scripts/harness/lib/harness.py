@@ -25,6 +25,7 @@ Usage:
   harness.py escalations                                          (open escalations for the user)
   harness.py risk <task-id>
   harness.py run [--max-tasks N] [--only <task>] [--worktree [--pr]] [--dry-run]   (autonomous, unattended)
+  harness.py sandbox-approve                                      (trust the sandbox's definition on this machine)
   harness.py report [--days N] [--json | --rules]                 (events: verdicts, gates, rules, lift, candidates)
   harness.py receipt <task-id> [--base <rev>] [--json]            (what the harness can prove about a judged task)
   harness.py linear import <ISSUE> --task <id> [--light] [--from F] | linear receipt <task> [--status S]
@@ -149,7 +150,7 @@ KNOWLEDGE_PATH_KEYS = ("path", "paths", "note", "notes", "hub", "name", "file", 
 # Paths an agent may change only through the file tools, where the hooks see the change. Shell writes to
 # them are refused: they would skip the gates (task states, approvals, verdicts, settings, skill state).
 SHELL_PROTECTED = (r"^backbone(/|$)", r"^scripts/harness(/|$)", r"^\.claude(/|$)", r"^\.codex(/|$)", r"^\.opencode(/|$)",
-                   r"^(AGENTS|CLAUDE)\.md$", r"^\.githooks(/|$)",
+                   r"^(AGENTS|CLAUDE)\.md$", r"^\.githooks(/|$)", r"^\.devcontainer/harness-agent(/|$)",
                    r"^\.git/(hooks|harness)(/|$)", r"^\.git/config$", r"^harness-attest\.pub$")
 # Thin mode (ADR-001): the launcher names the engine cache and the plugin it runs from. They decide the project's gates
 # but lie outside it, beyond the reach of the repository-relative protections.
@@ -157,6 +158,8 @@ INSTALL_DIRS = (("HARNESS_ENGINES", "the harness engine cache"), ("HARNESS_PLUGI
 INSTALL_SCRIPTS = ("harness.py", "launcher.py", "thin.py")
 # In the sandbox, where thin-engine.py links a thin project's pinned engine as the Claude Code plugin.
 SANDBOX_PLUGIN = "~/.agentic-harness/plugins/agentic-harness"
+# devcontainer up runs parts of the sandbox's definition on the host, so only the user changes or approves it.
+SANDBOX_DEFINITION = ".devcontainer/harness-agent/"
 # Codex and OpenCode plugins can't ship agents, so a thin session start installs the pinned engine's role agents where
 # each CLI loads user-level agents (ADR-001). A file there without this mark is the user's own and is left alone.
 USER_AGENTS = {"codex": (".codex/agents", ".toml", "Codex"), "opencode": (".opencode/agents", ".md", "OpenCode")}
@@ -1334,7 +1337,7 @@ MUTATORS = ("rm", "rmdir", "unlink", "mv", "chmod", "chown", "truncate", "tee", 
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 SETTING_ASSIGNMENT = re.compile(r"^(HARNESS_[A-Z0-9_]+|SKIP_BUILD)=")
 PROTECTED_MENTION = re.compile(r"(?:^|[\s'\"/=(:])(backbone/|scripts/harness/|\.claude/|AGENTS\.md|CLAUDE\.md"
-                               r"|\.git/(?:hooks|harness|config)|harness-attest\.pub)")
+                               r"|\.git/(?:hooks|harness|config)|harness-attest\.pub|\.devcontainer/harness-agent)")
 CODE_WRITES = re.compile(r"open\([^)]*,\s*['\"][wax+]|\.write_(text|bytes)\(|\bos\.(remove|unlink|rename|replace|"
                          r"chmod|truncate)\(|\bshutil\.(copy|move|rmtree)|\.(unlink|rename|touch|rmdir)\(|"
                          r"\bfs\.(writeFile|appendFile|unlink|rename|rm|copyFile)|\bFile\.(write|delete|rename)|"
@@ -1532,6 +1535,9 @@ def install_path(path_str, cwd):
         agent = os.path.realpath(str(agent))
         if full == agent or agent.startswith(full.rstrip(os.sep) + os.sep):
             return "the harness's role agents"
+    approvals = os.path.realpath(str(sandbox.approvals_file()))
+    if full == approvals or approvals.startswith(full.rstrip(os.sep) + os.sep):
+        return "the sandbox definitions approved on this machine"
     return None
 
 
@@ -1584,7 +1590,8 @@ def git_findings(words):
 def code_findings(code, label):
     if PROTECTED_MENTION.search(code) and CODE_WRITES.search(code):
         return ["%s writes to harness-protected paths (backbone/, scripts/harness/, .claude/, git hooks, "
-                "harness-attest.pub); use the Write/Edit tools so the gates see the change." % label]
+                "harness-attest.pub, the sandbox's definition); use the Write/Edit tools so the gates see the change."
+                % label]
     return []
 
 
@@ -1614,7 +1621,10 @@ def shell_findings(command, cwd=None, depth=0):
                              % (path, label))
                 continue
             name = protected_path(path, cwd)
-            if name:
+            if name and name.startswith(SANDBOX_DEFINITION.rstrip("/")):
+                found.append("%s is the sandbox's definition, which runs partly on the host: only the user changes "
+                             "it." % name)
+            elif name:
                 found.append("Shell writes to %s skip the harness gates; change it with the Write or Edit tool "
                              "(or not at all, for verdicts and user-only settings)." % name)
         if prog == "git":
@@ -1633,12 +1643,12 @@ def shell_findings(command, cwd=None, depth=0):
             found.extend(shell_findings(" ".join(words[1:]), cwd, depth + 1))
         elif prog in INTERPRETERS:
             command = next((w for w in words[2:4] if w in ("run", "ci-judge", "ci-protect", "orca", "orca-nightly",
-                                                         "snapshot", "linear")), None)
+                                                         "snapshot", "linear", "sandbox-approve")), None)
             # these dry runs change nothing
             planning = command in ("orca", "orca-nightly", "linear") and "--dry-run" in words
             if any(w.endswith("harness.py") for w in words[1:3]) and command and not planning:
-                found.append("harness.py run, orca, orca-nightly, snapshot, linear, ci-judge and ci-protect are for the "
-                             "user, CI or an Orca automation's precheck, not agents.")
+                found.append("harness.py run, orca, orca-nightly, snapshot, linear, sandbox-approve, ci-judge and "
+                             "ci-protect are for the user, CI or an Orca automation's precheck, not agents.")
             flag = next((f for f in ("-c", "-e", "-pe", "-ne") if f in words), None)
             if flag and words.index(flag) + 1 < len(words):
                 found.extend(code_findings(words[words.index(flag) + 1], "That %s one-liner" % prog))
@@ -3515,7 +3525,7 @@ def health():
     if values["HARNESS_SANDBOX_START"] not in ("on", "off"):
         issues.append(("error", "HARNESS_SANDBOX_START must be on or off"))
     elif values["HARNESS_SANDBOX_START"] == "on":
-        unstartable = sandbox.start_problem(ROOT)
+        unstartable = sandbox.start_problem(ROOT, sandbox_reference())
         if unstartable:
             issues.append(("error", unstartable))
     stale = stale_sandbox_config()
@@ -4218,6 +4228,10 @@ def hook_pre_tool_use(data):
     if path == LOCK_FILE.relative_to(ROOT).as_posix():
         deny("Harness blocked this change to %s: the lock is written by the installer and harness.py adopt only."
              % path)
+    if path.startswith(SANDBOX_DEFINITION):
+        deny("Harness blocked this change to %s: it is the sandbox's definition, and devcontainer up runs parts of it "
+             "on the host (harness.py run, with HARNESS_SANDBOX_START=on). Only the user changes it, and approves the "
+             "change with harness.py sandbox-approve." % path)
     if path == ".githooks/pre-commit" and lock().get("mode") == "thin":
         deny("Harness blocked this change to %s: in thin mode it is the shim that runs the pinned engine's checks, "
              "written by init --thin only." % path)
@@ -6446,9 +6460,41 @@ def sandbox_harness_cli(launcher=False):
                               "payload/owned/scripts/harness/lib/harness.py")
 
 
+def sandbox_reference():
+    """The engine's own copy of the sandbox's definition, when the engine lives outside the project (thin mode): an
+    agent in the sandbox can't write it, so a definition equal to it needs no approval."""
+    folder = ENGINE / SANDBOX_DEFINITION
+    root = os.path.realpath(str(ROOT))
+    engine = os.path.realpath(str(ENGINE))
+    if engine == root or engine.startswith(root + os.sep) or not folder.is_dir():
+        return None
+    return folder
+
+
 def run_backend(values):
     return sandbox.backend(values["HARNESS_SANDBOX_BACKEND"], start=values["HARNESS_SANDBOX_START"] == "on",
-                           harness=sandbox_harness_cli(launcher=True))
+                           harness=sandbox_harness_cli(launcher=True), reference=sandbox_reference())
+
+
+def sandbox_approve_command(_argv):
+    """The user's command: trust the sandbox's definition, as it is now, for this project on this machine."""
+    folder = ROOT / SANDBOX_DEFINITION
+    if not folder.is_dir():
+        print("sandbox-approve: %s is missing; nothing to approve" % SANDBOX_DEFINITION)
+        return 1
+    digest = sandbox.definition_digest(folder)
+    reference = sandbox_reference()
+    print("sandbox-approve: %s of %s is %s:" % (SANDBOX_DEFINITION, ROOT, digest))
+    differs = sandbox.definition_differences(folder, reference) if reference else None
+    for name, file_digest in sandbox.definition_files(folder):
+        note = ""
+        if differs is not None:
+            note = "  (differs from the harness's copy)" if name in differs else "  (as the harness ships it)"
+        print("  %s %s%s" % (file_digest[:19], name, note))
+    sandbox.approve_definition(ROOT, digest)
+    print("Approved on this machine: harness.py run brings up only this definition (HARNESS_SANDBOX_START=on). "
+          "Approve again after you change it, or after an update or pin changes it.")
+    return 0
 
 
 def session_settings():
@@ -8207,6 +8253,8 @@ def main(argv):
         return escalations_command()
     if argv[1:2] == ["run"]:
         return run_command(argv[2:])
+    if argv[1:2] == ["sandbox-approve"]:
+        return sandbox_approve_command(argv[2:])
     if argv[1:2] == ["state"]:
         return state_command(argv[2:])
     if argv[1:2] == ["orca"]:

@@ -18,6 +18,13 @@
   or the sandbox files, and `run --worktree` is refused in this mode. A dry run says it would bring the sandbox up.
   `tests/test-sandbox-evidence.py` covers when `run` may start; `HostRun` in `tests/test-sandbox-egress.py`
   (`HARNESS_E2E=1`) runs sessions in the real sandbox from the host, a timed-out one included.
+  - `devcontainer up` runs parts of the sandbox's definition on the host, and an agent in the sandbox can write the
+    workspace, so `run` brings up only a definition this machine trusts: the engine's own copy in thin mode, or one
+    you approved with the new `harness.py sandbox-approve` (recorded in `~/.agentic-harness/sandbox-approvals.json`).
+    A changed, added or removed file in `.devcontainer/harness-agent/` stops the run before `up`, and `doctor` says
+    so. After `up`, the host's own code checks that the agent's container isolates its sessions. Agents can't change
+    the definition, write the approvals or run `sandbox-approve`. **Upgrading:** approve a full install's sandbox once
+    before turning `HARNESS_SANDBOX_START` on, and again after you or an update change it.
 
 - **No data leaves the sandbox in DNS queries (ADR-003 follow-up 1).** `egress.py` now also answers DNS in the
   `egress` container: it resolves a name, over UDP or TCP, only when it is on the published allowlist (exactly, in any

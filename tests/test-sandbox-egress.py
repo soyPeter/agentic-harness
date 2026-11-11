@@ -585,12 +585,30 @@ class HostRun(Sandbox):
             "def test_contains():  # AC-7.1-1 AC-7.2-1\n    assert True\n")
         cls.host("git", "add", "-A")
         cls.host("git", "commit", "-qm", "feat: tasks 7.1 and 7.2 in progress")
+        # The approval goes to a HOME of the test's own; docker keeps reading the user's configuration.
+        cls.run_env = dict(cls.env, HOME=str(cls.project.parent / "home"),
+                           DOCKER_CONFIG=os.environ.get("DOCKER_CONFIG") or os.path.expanduser("~/.docker"))
+        cls.host("python3", "-B", str(cls.project / "scripts/harness/lib/harness.py"), "sandbox-approve",
+                 env=cls.run_env)
 
     def run_task(self, task, **settings):
-        env = dict(self.env, HARNESS_SANDBOX_START="on", HARNESS_AUTONOMY="autonomous", HARNESS_VERIFY="block",
+        env = dict(self.run_env, HARNESS_SANDBOX_START="on", HARNESS_AUTONOMY="autonomous", HARNESS_VERIFY="block",
                    HARNESS_RUN_ATTEMPTS="1", HARNESS_ALLOW_PARALLEL_WIP="1", **settings)
         return subprocess.run(["python3", "-B", str(self.project / "scripts/harness/lib/harness.py"), "run", "--only",
                                task], cwd=self.project, env=env, capture_output=True, text=True, timeout=2400)
+
+    def test_a_definition_changed_after_its_approval_never_reaches_the_host(self):
+        config = self.project / ".devcontainer/harness-agent/devcontainer.json"
+        approved = config.read_text()
+        self.addCleanup(config.write_text, approved)
+        escaped = self.project.parent / "escaped"
+        config.write_text(approved.replace('"name"', '"initializeCommand": "touch %s",\n  "name"' % escaped, 1))
+
+        run = self.run_task("7.1")
+
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("sandbox-approve", run.stdout)
+        self.assertFalse(escaped.exists(), "the changed definition ran a command on the host")
 
     def running(self):
         return docker("ps", "-q", "--filter", "label=devcontainer.local_folder=%s" % self.project).stdout.split()
