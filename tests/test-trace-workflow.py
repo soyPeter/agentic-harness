@@ -16,6 +16,8 @@ import tempfile
 import textwrap
 import unittest
 
+from attest_support import FakeTokenService, left_in
+
 HARNESS = Path(__file__).resolve().parents[1]
 WORKFLOW = HARNESS / "payload/owned/.github/workflows/harness-verify.yml"
 TAKE_BASE = "Take the verifier from the base branch"
@@ -259,8 +261,8 @@ class SignedExport(Steps):
         (runner / "cosign").symlink_to(cosign)
 
         written = self.step(root, WRITE_EXPORT, runner, ENGINE_SCRIPT=engine)
-        signed = self.step(root, SIGN_EXPORT, runner, HARNESS_ATTEST_KEY=(keys / "cosign.key").read_text(),
-                           COSIGN_PASSWORD="pw")
+        signed = self.step(root, SIGN_EXPORT, runner, ATTEST_MODE="key",
+                           HARNESS_ATTEST_KEY=(keys / "cosign.key").read_text(), COSIGN_PASSWORD="pw")
 
         self.assertEqual(written.returncode, 0, written.stdout + written.stderr)
         self.assertEqual(signed.returncode, 0, signed.stdout + signed.stderr)
@@ -279,10 +281,71 @@ class SignedExport(Steps):
     def test_without_an_export_the_signing_step_signs_nothing(self):
         runner = self.runner(self.project)
 
-        signed = self.step(self.project, SIGN_EXPORT, runner, HARNESS_ATTEST_KEY="unused", COSIGN_PASSWORD="pw")
+        signed = self.step(self.project, SIGN_EXPORT, runner, ATTEST_MODE="key", HARNESS_ATTEST_KEY="unused",
+                           COSIGN_PASSWORD="pw")
 
         self.assertEqual(signed.returncode, 0, signed.stdout + signed.stderr)
         self.assertEqual(list(runner.iterdir()), [])
+
+    def signable_export(self, name):
+        cosign = shutil.which("cosign")
+        if cosign is None:
+            self.skipTest("cosign is not installed (brew install cosign); the signing step needs it")
+        root = self.clone(name)
+        runner, engine = self.take_engine(root, self.adopted, take=TAKE_PUSHED)
+        (runner / "cosign").symlink_to(cosign)
+        written = self.step(root, WRITE_EXPORT, runner, ENGINE_SCRIPT=engine)
+        self.assertEqual(written.returncode, 0, written.stdout + written.stderr)
+        return cosign, root, runner
+
+    def test_the_kms_mode_signs_the_export_with_the_reference_and_a_fresh_token_it_leaves_to_no_later_step(self):
+        cosign, root, runner = self.signable_export("signed-kms")
+        keys = self.work / "kms-keys"
+        keys.mkdir()
+        run(keys, cosign, "generate-key-pair", COSIGN_PASSWORD="")
+        service = FakeTokenService(self, vault_token="a-vault-token")
+        address = service.settings["ACTIONS_ID_TOKEN_REQUEST_URL"].split("/token", 1)[0]
+        before = (runner / "github-env").read_text()
+
+        signed = self.step(root, SIGN_EXPORT, runner, ATTEST_MODE="kms", ATTEST_KMS_KEY=str(keys / "cosign.key"),
+                           ATTEST_KMS_CLOUD="vault", ATTEST_VAULT_ADDR=address, ATTEST_VAULT_ROLE="harness-attest",
+                           ATTEST_OIDC_AUDIENCE=address, COSIGN_PASSWORD="", GITHUB_ENV=str(runner / "github-env"),
+                           **service.settings)
+
+        self.assertEqual(signed.returncode, 0, signed.stdout + signed.stderr)
+        self.assertEqual(service.audiences, [address])
+        self.assertEqual(service.logins, [{"role": "harness-attest", "jwt": "a.github.oidc.token"}])
+        self.assertEqual((runner / "github-env").read_text(), before)
+        self.assertEqual(left_in(runner, "a.github.oidc.token", "a-vault-token"), [])
+        check = run(self.work, cosign, "verify-blob", "--key", keys / "cosign.pub", "--bundle", runner / BUNDLE,
+                    "--insecure-ignore-tlog", runner / EXPORT, check=False)
+        self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+
+    def test_the_export_signing_never_falls_back_to_keyless(self):
+        _, root, runner = self.signable_export("no-fallback")
+        cases = {"kms without a reference": dict(ATTEST_MODE="kms", ATTEST_KMS_KEY=""),
+                 "key without the secret": dict(ATTEST_MODE="key", HARNESS_ATTEST_KEY=""),
+                 "no mode": dict(ATTEST_MODE=""), "an unknown mode": dict(ATTEST_MODE="sigstore")}
+        for case, ci in cases.items():
+            with self.subTest(case=case):
+                signed = self.step(root, SIGN_EXPORT, runner, COSIGN_PASSWORD="", **ci)
+
+                self.assertNotEqual(signed.returncode, 0, signed.stdout)
+                self.assertFalse((runner / BUNDLE).exists())
+
+    def test_the_export_is_signed_by_the_verdict_attestation_s_signer(self):
+        branches = dict(re.findall(r"^  (\w+)\)\n((?:    .*\n)+?)    ;;", step_script(SIGN_EXPORT), re.M))
+
+        self.assertEqual(sorted(branches), ["key", "keyless", "kms"])
+        self.assertIn("--key env://HARNESS_ATTEST_KEY", branches["key"])
+        self.assertIn('--key "$ATTEST_KMS_KEY"', branches["kms"])
+        for mode in ("key", "kms"):
+            self.assertIn('--signing-config "$RUNNER_TEMP/signing-config.json"', branches[mode])
+        self.assertNotIn("--key", branches["keyless"])
+        self.assertNotIn("--signing-config", branches["keyless"])
+        for name in (WRITE_EXPORT, SIGN_EXPORT, UPLOAD_EXPORT):
+            self.assertIn("if: env.ATTEST == 'true'\n", step_text(name))
+        self.assertNotIn("secrets.", step_text(WRITE_EXPORT))
 
     def test_the_push_job_signs_the_export_last_with_the_checked_key_and_keeps_it(self):
         sign, upload = step_text(SIGN_EXPORT), step_text(UPLOAD_EXPORT)

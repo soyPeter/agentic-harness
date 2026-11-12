@@ -79,6 +79,8 @@ PY_TESTS="change-class|the class table through risk, approve, next, start, finis
 deliverer-gate|the deliverer's gate: every way of running a command, and its properties (with hypothesis)
 thin-convert|update.sh --to-thin and --to-full, there and back (ADR-001)
 attest|attest: the verdict statement harness-verify signs, and its bytes (ADR-005)
+attest-signing|attest job: the merged pull request's approval, KMS and keyless signing (ADR-005; properties need hypothesis)
+attest-verify|attest verify and attest policy: a consumer's check of a signed statement, v1 and v0.1 (ADR-005)
 spec-structure|spec structure: lists, quotes, HTML blocks, setext and sections as Markdown reads them (properties need hypothesis and markdown-it-py)
 triage-labels|receipt: suggested labels for each Change-Class and risk (ADR-002)
 trace-export|trace export: ReqIF, .reqifz, needs.json and the HTML matrix, and trace link (ADR-004; properties need hypothesis)
