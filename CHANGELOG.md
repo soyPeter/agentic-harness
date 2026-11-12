@@ -31,17 +31,23 @@
     absolute interpreter and no environment, that the agent's container isolates its sessions. Each session gets a
     fresh `~/.claude` (a tmpfs over every named volume the agent writes to), so Claude Code's credentials must come
     from the environment (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`); the image's root-owned managed settings
-    keep the harness's hooks on whatever a user settings file says. Only the shipped definition counts as a `container`: in thin mode
-    `run` compares it with the release's copy and allows only the values of `HARNESS_FIREWALL_ALLOW` and
-    `HARNESS_AGENT_CMD`, the base image and a `workspaceFolder` under `/workspace`. Anything else makes it `custom`, a
-    new isolation class below `container`: `run` brings it up once you approved it, and its judge passes record
-    `custom`, so the default gate refuses schema work there; a full install's definitions are always `custom`. Even
+    keep the harness's hooks on whatever a user settings file says. Only the shipped definition counts as a
+    `container`: in thin mode `run` compares its files byte for byte with the release's copy (as bytes split on `\n`,
+    not as Docker, Compose or the devcontainer CLI would read them) and allows only a `HARNESS_FIREWALL_ALLOW` host
+    list in double quotes, resource limits (`cpus`, `mem_limit`, `memswap_limit`, `pids_limit`) right after a
+    service's `build: .` line, another tag or digest of the base image's repository in the Dockerfile's
+    `ARG HARNESS_SANDBOX_IMAGE=` line, and a `workspaceFolder` under `/workspace`. Anything else, the agent command
+    `HARNESS_AGENT_CMD` included, makes it `custom`, a new isolation class below `container`: `run` brings it up once
+    you approved it, and its judge passes record `custom`, so the default gate refuses schema work there; a full
+    install's definitions are always `custom`, and so is a container no `run` marked as brought up from the shipped
+    definition (one an editor opened, say). `run` prints the class the host found in each session's sandbox. Even
     approved, a definition that reads files outside its folder (`extends`, `include`, `env_file`, `secrets`,
     `configs`, an outside build context) or acts on the host (`initializeCommand`, `mounts`, `runArgs` and the like in
     `devcontainer.json`) stops the run, and a docker buildx file entitlement failure says what to do. In a full install `run` executes the
     workspace's own `scripts/harness/`, which the sandbox can write too: use thin mode with `HARNESS_SANDBOX_START=on`. Agents can't change
     the definition, write the approvals or run `sandbox-approve`. **Upgrading:** approve a full install's sandbox once
-    before turning `HARNESS_SANDBOX_START` on, and again after you or an update change it.
+    before turning `HARNESS_SANDBOX_START` on, and again after you or an update change it; in a thin project, a
+    sandbox whose agent command you changed in `docker-compose.yml` now needs your approval too, and records `custom`.
 
 - **No data leaves the sandbox in DNS queries (ADR-003 follow-up 1).** `egress.py` now also answers DNS in the
   `egress` container: it resolves a name, over UDP or TCP, only when it is on the published allowlist (exactly, in any

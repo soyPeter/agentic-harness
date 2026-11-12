@@ -353,12 +353,31 @@ Still open after v1:
   `configs`, an outside build context; JSON Compose files are checked parsed, so escaped keys count),
   `devcontainer.json` keys that act on the host (`initializeCommand`, `mounts`, `runArgs` and the like), relative
   binds the private copy can't reproduce and binds of `~/.agentic-harness`.
+  A sixth review found that the comparison split lines with Python's `splitlines()`, which also breaks at `\f`, `\r`,
+  `\x1c` and the like, while Docker breaks a Dockerfile only at `\n`: a form feed in place of the newline before
+  `COPY managed-settings.json` folded that instruction into the comment above it, and the definition still counted as
+  shipped while its image had no managed settings. The comparison is now of bytes, split on `\n` only, with every byte
+  of every other line compared; it is still a text comparison, not one of the resolved configuration (`docker compose
+  config` needs Docker, and `sandbox-approve` and `doctor` classify the definition without it), so anything Docker,
+  Compose or the devcontainer CLI would read differently from the shipped bytes is `custom`. The allowed values are now
+  patterns of printable ASCII: a double-quoted host list for `HARNESS_FIREWALL_ALLOW`, another tag or digest of the
+  shipped image's repository (not another registry or name), and a `workspaceFolder` under `/workspace` with no `.`
+  or `..` segment; resource limits (`cpus`, `mem_limit`, `memswap_limit`, `pids_limit`), which only lower what a
+  container may use, may be added on the lines right after a service's `build: .`. `HARNESS_AGENT_CMD` is no longer
+  allowed: it decides what runs in the container, the harness's hooks included. A property check changes one byte of
+  a shipped file anywhere outside the allowed values and expects `custom`. A container with the agent's restrictions
+  but no marker from `run` (an editor's, say) used to record `container`; it now records `custom`, since nothing says
+  which definition it came from, and `run` and `doctor` inside any container no longer try to start a sandbox.
   Limits: in a full install, `run` on the host executes the workspace's own `scripts/harness/`, which an agent in the
   sandbox can write too, so the approval protects thin installs, whose engine lives outside the project; use thin mode
   with `HARNESS_SANDBOX_START=on`. Other spellings of `harness.py sandbox-approve` in an agent's shell command (a
   split path, `xargs`, `runpy`) are the class PR #90 refuses for every user-only command through its `USER_COMMANDS`
   list. PR #90 merged first, and the merge of main into this branch added `sandbox-approve` to `USER_COMMANDS`, so
-  every spelling it refuses is refused for `sandbox-approve` too.
+  every spelling it refuses is refused for `sandbox-approve` too. One spelling it doesn't refuse yet, for any
+  user-only command: `timeout`, `stdbuf` or `caffeinate` before an interpreter given the engine's path in a variable
+  (`timeout 5 python3 $H sandbox-approve`). PR #96 adds generic wrapper unwrapping to the shell checks on main; this
+  change depends on it rather than adding a second unwrapping, and its test of those spellings is skipped until #96
+  lands.
 - **6. Orca's workers inside a backend's sandbox: deferred (2026-11-11).** Orca starts each worker itself, on the host,
   in the task's worktree. Running workers in the sandbox needs Orca to launch them through the sandbox (a launch command
   per agent that goes through `devcontainer exec`) and worktrees whose git metadata the sandbox can see: a worktree's
