@@ -914,6 +914,17 @@ class MatrixLink(TracedProject):
         spec.write_text(spec.read_text().replace(
             "PRD: none\n", "PRD: none\nLinear: DIS-142 (https://linear.app/x/issue/DIS-142)\n", 1))
         harness = str(root / "scripts/harness/lib/harness.py")
+        # Linking the ticket changes the spec, so the task goes back to the judge, as after an import (ADR-007).
+        tasks = root / "backbone/3-TASKS.md"
+        tasks.write_text(tasks.read_text().replace("- [x] **Task 7.2:", "- [WIP] **Task 7.2:", 1))
+        self.command("python3", "-B", harness, "hook", "judge-stop", cwd=root, env={"CLAUDE_PROJECT_DIR": str(root)},
+                     input=json.dumps({
+                         "hook_event_name": "SubagentStop", "agent_type": "judge", "stop_hook_active": False,
+                         "last_assistant_message": final_message({
+                             "verdict": "pass", "task": "7.2", "summary": "s", "findings": [],
+                             "criteria": [{"id": "AC-7.2-1", "met": True, "evidence": "src/search.py:2",
+                                           "tests": ["test_email"]}],
+                             "tests": {"command": "true", "result": "passed"}})}))
 
         preview = self.command("python3", "-B", harness, "linear", "receipt", "7.2", "--matrix", MATRIX_URL,
                                "--dry-run", cwd=root).stdout

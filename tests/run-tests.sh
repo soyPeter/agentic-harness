@@ -79,6 +79,7 @@ PY_TESTS="change-class|the class table through risk, approve, next, start, finis
 deliverer-gate|the deliverer's gate: every way of running a command, and its properties (with hypothesis)
 thin-convert|update.sh --to-thin and --to-full, there and back (ADR-001)
 attest|attest: the verdict statement harness-verify signs, and its bytes (ADR-005)
+impact-invalidation|impact invalidation: a spec change stales its verdicts, receipt and approval (ADR-007; properties need hypothesis)
 spec-structure|spec structure: lists, quotes, HTML blocks, setext and sections as Markdown reads them (properties need hypothesis and markdown-it-py)
 triage-labels|receipt: suggested labels for each Change-Class and risk (ADR-002)
 trace-export|trace export: ReqIF, .reqifz, needs.json and the HTML matrix, and trace link (ADR-004; properties need hypothesis)
@@ -1325,6 +1326,7 @@ step=$($AH next 8.1 --json)
 expect 0 "next: after the tester, the implementer" python3 -c 'import json,sys; sys.exit(json.loads(sys.argv[1])["role"] not in ("implementer","judge"))' "$step"
 T2="$WORK/tester-only"; new_repo "$T2"; "$HARNESS/bootstrap.sh" "$T2" --name t2 >/dev/null
 mkdir -p "$T2/backbone/specs"; printf '%s\n' "$SPEC_TEXT" | sed -e "s/2\.1/7.1/g" -e 's/^- python: all code$/- code-quality: all code/' > "$T2/backbone/specs/7.1.md"
+echo "Approved-by: test (2026-11-11)" >> "$T2/backbone/specs/7.1.md"   # a [WIP] task's spec stays approved
 printf -- '- [WIP] **Task 7.1: Item** (spec: backbone/specs/7.1.md)\n' >> "$T2/backbone/3-TASKS.md"
 printf '%s' "$(python3 -c 'import json; print(json.dumps({"agent_type":"griller","last_assistant_message":"```json\n"+json.dumps({"verdict":"pass","task":"7.1","questions":[],"summary":"s"})+"\n```"}))')" | python3 "$T2/scripts/harness/lib/harness.py" hook grill-stop >/dev/null 2>&1
 git -C "$T2" add -A && HARNESS_VERIFY=off git -C "$T2" commit -qm "chore: fixture"
@@ -2619,9 +2621,10 @@ printf '# ADR-002: Search index\n\n## Status\nProposed\n\n## Context\nc\n\n## De
 out=$($CH receipt 7.1; echo "exit=$?")
 contains "receipt: refused without a judge pass" "no judge pass" "$out"
 contains "receipt: the refusal exits non-zero" "exit=1" "$out"
-hook "$C" judge-stop "$(stop_json judge '```json
+J71='```json
 {"verdict":"pass","task":"7.1","criteria":[{"id":"AC-7.1-1","met":true,"evidence":"src/search.py:2","tests":["test_contains"]},{"id":"AC-7.1-2","met":true,"evidence":"src/search.py:2","tests":["test_short"]}],"findings":[{"severity":"minor","file":"src/search.py","line":2,"issue":"No docstring","fix":"Add one"}],"tests":{"command":"true","result":"passed"},"summary":"s"}
-```')" >/dev/null
+```'
+hook "$C" judge-stop "$(stop_json judge "$J71")" >/dev/null
 out=$($CH receipt 7.1; echo "exit=$?")
 contains "receipt: names the task" "Task 7.1: Customer search" "$out"
 contains "receipt: states the objective from the spec" "Support needs to find customers by name." "$out"
@@ -2678,6 +2681,8 @@ expect 0 "import --from reads an issue saved from the Linear MCP server" $CH lin
 contains "--from must hold the named issue" "holds DIS-7, not DIS-8" "$($CH linear import DIS-8 --task 7.6 --from "$WORK/dis-7.json" 2>&1)"
 contains "receipt: a spec without a Linear line is refused" "has no 'Linear: <ISSUE-ID>' line" "$(LINEAR_API_KEY=lin_test_key $CH linear receipt 7.1 2>&1)"
 perl -pi -e 's{^PRD: none$}{PRD: none\nLinear: DIS-142 (https://linear.app/triple/issue/DIS-142)}' "$C/backbone/specs/7.1.md"
+# Linking the ticket changes the spec, so the judge passes it again, as it would after an import.
+hook "$C" judge-stop "$(stop_json judge "$J71")" >/dev/null
 out=$(LINEAR_API_KEY=lin_test_key $CH linear receipt 7.1 --status "In Review" --dry-run 2>&1; echo "exit=$?")
 contains "receipt --dry-run shows the comment" "Would comment on DIS-142" "$out"
 contains "with the harness receipt in it" "Receipt: Task 7.1: Customer search" "$out"
@@ -2779,7 +2784,7 @@ for id in 10.1 10.2 10.3; do
     10.3) ljudge $id fail ;;
   esac
   if [ $id = 10.3 ]; then $LH escalate 10.3 --kind runner --reason "stalled" >/dev/null; continue; fi
-  expect 0 "fixture: task $id finishes" hook "$L" pre-tool-use "$(edit_json "$LT" "- [WIP] **Task $id:" "- [x] **Task $id:")"
+  HARNESS_SPEC_GATE=off expect 0 "fixture: task $id finishes" hook "$L" pre-tool-use "$(edit_json "$LT" "- [WIP] **Task $id:" "- [x] **Task $id:")"
   lmark $id x
 done
 $LH escalate 10.2 --kind runner --reason "stalled earlier" >/dev/null

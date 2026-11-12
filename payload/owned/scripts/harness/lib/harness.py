@@ -710,15 +710,22 @@ def approval_start(text):
     return m.start() if m else len(text)
 
 
-def without_approval(text):
-    """text outside its Approval section: what the grill fingerprint covers and approval freezes."""
-    return without_section(text, "Approval")
-
-
 def frozen_text(text):
-    """What the grill fingerprint covers and the freeze keeps: the spec outside its Approval section, or all of it when a
-    reader could read its sections differently, since then no section can be trusted."""
-    return text if spec_reading_problem(text) else without_approval(text)
+    """What the grill fingerprint covers and the freeze keeps: the spec without its Approved-by lines, or all of it when
+    a reader could read its sections differently, since then no section can be trusted. The rest of the Approval
+    section counts: the template puts it last, so a criterion appended to a spec lands there."""
+    if spec_reading_problem(text):
+        return text
+    view = outline(text)
+    bounds = section_bounds(view, "Approval")
+    if bounds is None:
+        return text
+    words = comment_free(text)
+    # Comments and blank lines are left out with the Approved-by lines, so a spec whose Approval section holds nothing
+    # else keeps the fingerprint it had when the whole section was left out: an upgrade doesn't stale its grill pass.
+    kept = [line for line, shown, said in zip(*(t[bounds[1]:bounds[2]].splitlines(True) for t in (text, view, words)))
+            if not APPROVAL_LINE.match(shown) and not blank_line(said)]
+    return text[:bounds[0]] + (text[bounds[0]:bounds[1]] + "".join(kept) if kept else "") + text[bounds[2]:]
 
 
 def approval_section(text):
@@ -1014,8 +1021,8 @@ def ears_problems(req, text):
 def change_class(text):
     """(class, declared, problem) from the spec's Change-Class: line. Without one the spec counts as feature;
     a value that isn't exactly one class, or two different values, is a problem and counts as feature too."""
-    # Not from the Approval section, where agents may still write once the spec is approved, nor from a code block or
-    # comment, where the line is an example.
+    # Not from the Approval section, which holds the user's approval, nor from a code block or comment, where the line
+    # is an example.
     values = [v.strip() for v in CHANGE_CLASS_LINE.findall(without_section(text, "Approval", view=outline(text)))]
     distinct = sorted({v.lower() for v in values})
     if reading_problem(text):   # a reader may take a line for code or a heading, so no class in it can be trusted
@@ -1099,7 +1106,7 @@ def validate_spec(task, text=None):
 
 
 def spec_fingerprint(task, text=None):
-    """Hash of the spec (without its Approval section) and of every ADR it references."""
+    """Hash of the spec (frozen_text: without its Approved-by lines) and of every ADR it references."""
     text = read(spec_path(task)) if text is None else text
     digest = hashlib.sha256(frozen_text(text).encode("utf-8"))
     for adr in spec_adrs(text):
@@ -2136,6 +2143,15 @@ def consecutive_fails(history):
     return fails
 
 
+def spec_stale(task, entry, current=None):
+    """Why a judge, review or tester record doesn't cover task's current spec (and its ADRs): "spec" when it was
+    recorded on another revision, "unrecorded" when it carries none, or None when it covers it. A record from before
+    verdicts carried the spec revision can't show what it judged, so it never counts as current (ADR-007)."""
+    if not entry.get("spec"):
+        return "unrecorded"
+    return None if entry["spec"] == (current or spec_fingerprint(task)) else "spec"
+
+
 def code_fingerprint(include_backbone=False):
     """Git tree hash of the working tree, hashed from the files' content (tracked and untracked, ignores respected),
     excluding backbone/ unless include_backbone. Identical code gives an identical hash, committed or not."""
@@ -2366,7 +2382,8 @@ def record_verdict(data, kind):
             if report["test_run"] is not None:
                 verdict, reasons = effective_judge(task, report)
         details = {"criteria": report.get("criteria"), "findings": report.get("findings"), "tests": report.get("tests"),
-                   "test_run": report.get("test_run"), "sandbox": sandbox.evidence(conf()["HARNESS_SANDBOX_BACKEND"])}
+                   "test_run": report.get("test_run"), "sandbox": sandbox.evidence(conf()["HARNESS_SANDBOX_BACKEND"]),
+                   "spec": spec_fingerprint(task)}
     history = verdict_history(task, kind)
     entry = {"verdict": verdict, "claimed": report.get("verdict"), "reasons": reasons, "fingerprint": fingerprint,
              "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "summary": report.get("summary")}
@@ -2518,7 +2535,7 @@ def content_risks(text, changed=None):
     values = conf()
     # Skills only says which skills the agents load, and explaining why `security` isn't needed ("no auth or
     # personal data") would read as risk. What the work does is in the other sections and in the diff.
-    outside = without_approval(text)
+    outside = frozen_text(text)
     body = without_section(outside, "Skills", view=comment_free(outside))
     reasons = []
     unread = spec_reading_problem(text)
@@ -3070,8 +3087,9 @@ def light_drift(task):
             "line, then have the architect and the griller review the spec." % (task, "; ".join(why)))
 
 
-def start_problems(task):
-    """Why task cannot be [WIP] (or done): spec, grill and approval. None when it may start."""
+def start_problems(task, action="start"):
+    """Why task cannot start (become [WIP]) or, with action "finish", leave [WIP]: spec, grill and approval. None when
+    it may."""
     spec = spec_rel(task)
     if task in blocked_tasks(read(TASKS)):
         return ("Task %s is BLOCKED by an escalation; the user resolves it in backbone/escalations.md and "
@@ -3080,41 +3098,49 @@ def start_problems(task):
     history = verdict_history(task, "grill")
     last = history[-1] if history else None
     if invalid:
-        return ("Task %s cannot start: %s is not ready:\n      - %s\n    The analyst writes requirements "
+        return ("Task %s cannot %s: %s is not ready:\n      - %s\n    The analyst writes requirements "
                 "and acceptance criteria, the architect the ADRs and Architecture section."
-                % (task, spec, "\n      - ".join(invalid)))
+                % (task, action, spec, "\n      - ".join(invalid)))
+    approval = approved(read(spec_path(task)))
+    renew = ("Task %s cannot finish: its spec is no longer approved. The approval was removed, so the spec may have "
+             "changed since the task started: ask the user to review %s and approve it again ('Approved-by: <name> "
+             "(<date>)' under '## Approval'); agents cannot." % (task, spec)) if action == "finish" else None
     note = ""
     if light_marked(task):
         reasons = light_reasons(task)
         if not reasons:
-            return None if approved(read(spec_path(task))) else (
+            return None if approval else renew or (
                 "Task %s cannot start: the user has not approved the spec (light lane: no grilling needed). Ask them "
                 "to review %s and add 'Approved-by: <name> (<date>)' under '## Approval' themselves." % (task, spec))
         note = " It is marked (light), but %s, so it goes through the griller." % "; ".join(reasons)
     if last is None:
-        return ("Task %s cannot start: the spec has not been grilled. Ask the griller agent to review %s.%s"
-                % (task, spec, note))
+        return ("Task %s cannot %s: the spec has not been grilled. Ask the griller agent to review %s.%s"
+                % (task, action, spec, note))
     if last.get("verdict") != "pass":
-        return ("Task %s cannot start: the griller failed the spec (%s). Take its open questions to the user (have "
+        return ("Task %s cannot %s: the griller failed the spec (%s). Take its open questions to the user (have "
                 "the analyst or architect apply the recommendations marked apply without asking), update the spec "
-                "and grill again." % (task, "; ".join(last.get("reasons") or [])[:400]))
+                "and grill again." % (task, action, "; ".join(last.get("reasons") or [])[:400]))
     if last.get("fingerprint") != spec_fingerprint(task):
-        return "Task %s cannot start: the spec or its ADRs changed after the griller passed it. Grill again." % task
+        return ("Task %s cannot %s: the spec or its ADRs changed after the griller passed it. Grill again."
+                % (task, action))
     report = dict(last, verdict=last.get("claimed"))
     rederived, reasons = effective_grill(task, report)
     if rederived != "pass":
-        return "Task %s cannot start: the recorded grill pass does not hold up (%s)." % (task, "; ".join(reasons)[:400])
-    if not approved(read(spec_path(task))):
-        return ("Task %s cannot start: the user has not approved the spec. Ask them to review %s and add "
-                "'Approved-by: <name> (<date>)' under '## Approval' themselves; agents cannot." % (task, spec))
+        return ("Task %s cannot %s: the recorded grill pass does not hold up (%s)."
+                % (task, action, "; ".join(reasons)[:400]))
+    if not approval:
+        return renew or ("Task %s cannot start: the user has not approved the spec. Ask them to review %s and add "
+                         "'Approved-by: <name> (<date>)' under '## Approval' themselves; agents cannot." % (task, spec))
     return None
 
 
 def start_gate(before, after):
-    """Starting a task requires a valid spec, a current griller pass and the user's approval."""
+    """Starting a task, and finishing one, requires a valid spec, a current griller pass and the user's approval: a
+    spec that changed during the build needs both again (ADR-007)."""
     if not gate_on("HARNESS_SPEC_GATE"):
         return None
     problems = [p for p in (start_problems(task) for task in started_tasks(before, after)) if p]
+    problems += [p for p in (start_problems(task, "finish") for task in finished_tasks(before, after)) if p]
     return "\n".join("  - " + p for p in problems) if problems else None
 
 
@@ -3141,6 +3167,13 @@ def judge_problems(task, current, max_rounds):
     rederived, why = effective_judge(task, report)
     if rederived != "pass":
         return "The recorded judge pass for task %s does not hold up: %s." % (task, "; ".join(why)[:400])
+    stale = spec_stale(task, last)
+    if stale == "spec":
+        return ("The spec of task %s changed after the judge passed it (an acceptance criterion, constraint, "
+                "assumption or ADR may differ from what was judged). Run the judge again on the current spec." % task)
+    if stale:
+        return ("The judge pass for task %s records no spec revision (it predates spec-bound verdicts), so it can't "
+                "show which spec it judged. Run the judge again." % task)
     review = review_problems(task, current, max_rounds)
     if review:
         return review
@@ -3189,6 +3222,9 @@ def review_problems(task, current, max_rounds):
                                 "then judge and review again." % (lens, task, issues))
         elif current and last.get("fingerprint") != current:
             problems.append("The code changed after the %s review of task %s passed. Review it again." % (lens, task))
+        elif spec_stale(task, last):
+            problems.append("The spec changed after the %s review of task %s passed (or the review records no spec "
+                            "revision). Review it again." % (lens, task))
     return " ".join(problems) or None
 
 
@@ -3207,6 +3243,10 @@ def acceptance_problem(task):
     if acceptance_fingerprint(task) != history[-1].get("fingerprint"):
         return ("The acceptance tests of task %s changed after the tester recorded them. Only the tester may change "
                 "them: restore them (git checkout -- <file>), or ask the tester to revise and re-record them."
+                % task)
+    if spec_stale(task, history[-1]):
+        return ("The spec of task %s changed after the tester recorded its acceptance tests (or the record has no "
+                "spec revision). Ask the tester to check them against the current criteria and record them again."
                 % task)
     return None
 
@@ -3242,6 +3282,50 @@ def spec_guard(before, after):
         return ("  - This spec is approved and therefore frozen. If it must change, ask the user to remove their "
                 "approval first; it will need grilling and approval again.")
     return None
+
+
+def approval_reused(name, before, after):
+    """The freeze as verify sees it, for changes made outside the hooks: a spec whose text changes while its Approved-by
+    lines stay as they were keeps an approval given on the earlier text (ADR-007)."""
+    if before is None or after is None:
+        return None
+    before, after = line_endings(before), line_endings(after)
+    if not approved(before) or approved(after) != approved(before) or \
+            approval_lines(outline(before)) != approval_lines(outline(after)) or \
+            frozen_text(before) == frozen_text(after):
+        return None
+    return ("%s changed while its Approved-by lines stayed the same, so the approval was "
+            "given on the earlier text. The user removes the approval before the spec changes and, once the griller "
+            "has passed the new text, approves it with a new Approved-by line. A deliberate exception is committed "
+            "with HARNESS_VERIFY=off (in CI, the harness-change-approved label)." % name)
+
+
+def approval_state(text):
+    if text is None:
+        return None
+    text = line_endings(text)
+    return approved(text), approval_lines(outline(text))
+
+
+def reused_approvals(steps):
+    """approval_reused over steps ((revision, its parents, the paths it changes), oldest first): a step that changes an
+    approved spec's text but keeps its Approved-by lines is refused unless a later step changes those lines. A range is
+    checked step by step, since its two ends can show the same line although the user removed the approval with the
+    change and gave it again later. A merge is refused only when it reuses the approval of every parent."""
+    pending = {}
+    for rev, parents, names in steps:
+        for name in names:
+            if not re.match(r"^backbone/specs/[^/]+\.md$", name):
+                continue
+            after = show(rev, name)
+            befores = [show(parent, name) for parent in parents]
+            if all(approval_state(before) != approval_state(after) for before in befores):
+                pending.pop(name, None)
+            label = "%s (commit %s)" % (name, rev[:12]) if rev else name
+            reused = [approval_reused(label, before, after) for before in befores]
+            if reused and all(reused):
+                pending[name] = reused[0]
+    return [pending[name] for name in sorted(pending)]
 
 
 def user_only_change(before, after):
@@ -3345,6 +3429,12 @@ def verify_changes(before, after, changed, done_fingerprint, allow_user_changes=
             problem = start_problems(task)
             if problem:
                 problems.append(problem)
+        for task in sorted((new_done - old_done) & old_wip):
+            problem = start_problems(task, "finish")
+            if problem:
+                problems.append(problem)
+    if before and not allow_user_changes:
+        problems.extend(reused_approvals(range_steps(before, after) if after else [(after, [before], changed)]))
     if values["HARNESS_JUDGE_GATE"] != "off":
         max_rounds = int(values["HARNESS_JUDGE_MAX_ROUNDS"] or 2)
         for task in sorted(new_done - old_done):
@@ -3431,6 +3521,14 @@ def verify_range(spec, allow_user_changes=False):
     changed = diff_names(base, tip)
     return verify_changes(base, tip, changed, lambda task: tree_fingerprint(done_commit(task, commits, tip)),
                           allow_user_changes)
+
+
+def range_steps(base, tip):
+    """The commits of base..tip, oldest first, each with its parents and the specs it changes (reused_approvals)."""
+    lines = [line.split() for line in git("rev-list", "--reverse", "--parents", "%s..%s" % (base, tip)).splitlines()]
+    return [(line[0], line[1:], sorted({name for parent in line[1:]
+                                        for name in diff_names(parent, line[0], "--", "backbone/specs")}))
+            for line in lines if line]
 
 
 def done_commit(task, commits, tip):
@@ -5993,18 +6091,20 @@ def task_status(task, fingerprint=code_fingerprint):
     state = task_state(task)
     exists = spec_path(task).is_file()
     text = read(spec_path(task)) if exists else ""
+    spec = spec_fingerprint(task, text)
     grill = verdict_history(task, "grill")
     judge = verdict_history(task, "judge")
     last_grill, last_judge = (grill[-1] if grill else None), (judge[-1] if judge else None)
+    stale = last_judge and ("code" if last_judge.get("fingerprint") != fingerprint()
+                            else spec_stale(task, last_judge, spec))
     return {
         "task": task, "title": task_title(task), "state": state, "spec": spec_rel(task) if exists else None,
         "change_class": change_class(text)[0] if exists else None,
         "spec_problems": validate_spec(task) if exists else ["no spec yet"],
         "grill": last_grill and {"verdict": last_grill.get("verdict"),
-                                 "current": last_grill.get("fingerprint") == spec_fingerprint(task)},
+                                 "current": last_grill.get("fingerprint") == spec},
         "approved": bool(exists and approved(text)),
-        "judge": last_judge and {"verdict": last_judge.get("verdict"),
-                                 "current": last_judge.get("fingerprint") == fingerprint()},
+        "judge": last_judge and {"verdict": last_judge.get("verdict"), "current": not stale, "stale": stale or None},
         "escalations": [e for e in open_escalations() if re.search(r"\bTask %s:" % re.escape(task), e)],
     }
 
@@ -6083,17 +6183,30 @@ def next_step(task, fingerprint=code_fingerprint):
                                                    and s["grill"]["verdict"] == "pass"):
         return dict(step, step="grill", role="griller", reason="the spec changed during the build (an answered "
                                                                  "question); grill it again before going on")
+    if s["spec"] and not s["approved"] and gate_on("HARNESS_SPEC_GATE"):
+        reason = ("the spec is no longer approved: its approval was removed, so the spec may have changed since the "
+                  "task started")
+        if autonomous():
+            return dict(step, step="approve", role=None, reason=reason,
+                        command="python3 scripts/harness/lib/harness.py approve %s" % task)
+        return dict(step, step="approve", role=None, reason=reason,
+                    needed="the user's Approved-by: line in %s again" % s["spec"])
+    spec = spec_fingerprint(task)
     if tester_on():
         tests = verdict_history(task, "tests")
-        if not tests or acceptance_fingerprint(task) != tests[-1].get("fingerprint"):
-            return dict(step, step="test", role="tester",
-                        reason="no acceptance tests yet" if not tests else "the acceptance tests changed since the "
-                                                                          "tester recorded them")
+        reason = ("no acceptance tests yet" if not tests else
+                  "the acceptance tests changed since the tester recorded them"
+                  if acceptance_fingerprint(task) != tests[-1].get("fingerprint") else
+                  "the spec changed since the tester recorded the acceptance tests (or the record has no spec "
+                  "revision)" if spec_stale(task, tests[-1], spec) else None)
+        if reason:
+            return dict(step, step="test", role="tester", reason=reason)
     judge = s["judge"]
     if judge and judge["current"] and judge["verdict"] == "pass" and review_on():
         current = fingerprint()
         reviews = lens_reviews(task)
-        on_current = {lens: e for lens, e in reviews.items() if e and e.get("fingerprint") == current}
+        on_current = {lens: e for lens, e in reviews.items()
+                      if e and e.get("fingerprint") == current and not spec_stale(task, e, spec)}
         failed = [lens for lens, e in on_current.items() if e.get("verdict") != "pass"]
         if failed:
             return dict(step, step="fix", role="implementer", reason="must-fix findings from the %s review"
@@ -6119,7 +6232,10 @@ def next_step(task, fingerprint=code_fingerprint):
                     **({"needs": owners} if owners else {}))
     if not judge and not code_changed():
         return dict(step, step="implement", role="implementer")
-    return dict(step, step="judge", role="judge", reason="no judge verdict on the current code")
+    reason = {"spec": "the spec changed after the judge's last verdict: judge the task against the current spec",
+              "unrecorded": "the judge's last verdict records no spec revision (it predates spec-bound verdicts): "
+                            "judge it again"}.get((judge or {}).get("stale"), "no judge verdict on the current code")
+    return dict(step, step="judge", role="judge", reason=reason)
 
 
 def latest_delivery(head, signed=False, task=None):
@@ -6216,7 +6332,7 @@ def start_command(task):
 
 
 def finish_command(task):
-    problems = set_task_marker(task, "x", (blocked_guard, judge_gate))
+    problems = set_task_marker(task, "x", (blocked_guard, start_gate, judge_gate))
     print("finish: task %s is [x]; commit it with its code, tests, spec and verdicts" % task if not problems
           else "finish: task %s can't finish:\n%s" % (task, "\n".join(problems)))
     return 1 if problems else 0
@@ -6229,7 +6345,14 @@ def state_command(argv):
         print(json.dumps({"autonomous": autonomous(), "tasks": states, "halted": halt_file().exists()}, indent=2))
         return 0
     for s in states:
-        print("%-8s %-8s %s" % (s["task"], s["state"], s["title"]))
+        notes = []
+        if s["state"] == "wip" and s["judge"] and s["judge"]["stale"]:
+            notes.append("judge %s on %s" % (s["judge"]["verdict"], {
+                "code": "earlier code", "spec": "an earlier spec", "unrecorded": "an unrecorded spec revision"}[
+                s["judge"]["stale"]]))
+        if s["state"] == "wip" and s["spec"] and not s["approved"]:
+            notes.append("not approved")
+        print("%-8s %-8s %s%s" % (s["task"], s["state"], s["title"], "  (%s)" % "; ".join(notes) if notes else ""))
     return 0
 
 
@@ -8211,6 +8334,12 @@ def receipt_data(task, base=None, code=None):
         return None, "no spec at %s" % spec_rel(task)
     if passed.get("fingerprint") != (code or code_fingerprint()):
         return None, "the code changed after the judge passed task %s; judge it again first" % task
+    stale = spec_stale(task, passed)
+    if stale == "spec":
+        return None, "the spec changed after the judge passed task %s; judge it again first" % task
+    if stale:
+        return None, ("the judge pass of task %s records no spec revision (it predates spec-bound verdicts); judge it "
+                      "again first" % task)
     body = comment_free(spec_text)
     title = re.match(r"^#\s+Spec\s+\S+:\s*(.+)$", body.strip().splitlines()[0]) if body.strip() else None
     base = receipt_base(task, spec_text, base)
@@ -8275,6 +8404,7 @@ def receipt_data(task, base=None, code=None):
         "risks": risk_reasons(task, base),
         "rounds": {"grill": len(grills), "judge": len(judge), "debug": len(verdict_history(task, "debug"))},
         "judged_at": passed.get("at"),
+        "judged_on": {"spec": passed.get("spec"), "code": passed.get("fingerprint")},
         "sandbox": sandbox.normalized(passed.get("sandbox")),
         "approval": approval_lines(approval_section(spec_text) or ""),
         "approval_needed": approval_needed,
@@ -8330,7 +8460,8 @@ def receipt_text(d):
     lines += ["  %-8s %s" % (c["status"], c["path"]) for c in d["changed"]] or ["  (no code changes)"]
     if d["backbone_changed"]:
         lines.append("  backbone: %s" % ", ".join(c["path"] for c in d["backbone_changed"]))
-    sections = (("VERIFIED (judge pass %s, re-checked by the harness)" % d["judged_at"], d["verified"]),
+    sections = (("VERIFIED (judge pass %s on spec %s and code %s, re-checked by the harness)"
+                 % (d["judged_at"], d["judged_on"]["spec"][:12], (d["judged_on"]["code"] or "?")[:12]), d["verified"]),
                 ("NOT VERIFIED", d["not_verified"] or ["nothing outside the acceptance criteria"]),
                 ("SANDBOX (where the judge pass was recorded)", sandbox_lines(d["sandbox"])),
                 ("COST (the runner's agent sessions for this task)", cost_lines(d.get("cost"))),
@@ -9183,8 +9314,8 @@ def record_tests(data):
         deny("No acceptance test file (HARNESS_ACCEPTANCE_PATHS) mentions %s yet. Write a test for each, naming its "
              "AC id, then stop again." % ", ".join(missing))
     history = verdict_history(task, "tests")
-    entry = {"fingerprint": acceptance_fingerprint(task), "files": covered, "missing": missing,
-             "red": report.get("red"), "problems": report.get("problems") or [],
+    entry = {"fingerprint": acceptance_fingerprint(task), "spec": spec_fingerprint(task), "files": covered,
+             "missing": missing, "red": report.get("red"), "problems": report.get("problems") or [],
              "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "summary": report.get("summary")}
     history.append(entry)
     VERDICTS.mkdir(parents=True, exist_ok=True)
@@ -9246,7 +9377,7 @@ def record_review(data):
     verdict = "fail" if any(f.get("severity") == "must-fix" for f in findings) else "pass"
     history = verdict_history(task, "review")
     history.append({"lens": lens, "verdict": verdict, "claimed": report.get("verdict"),
-                    "fingerprint": code_fingerprint(), "findings": findings,
+                    "fingerprint": code_fingerprint(), "spec": spec_fingerprint(task), "findings": findings,
                     "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "summary": report.get("summary")})
     VERDICTS.mkdir(parents=True, exist_ok=True)
     verdict_path(task, "review").write_text(json.dumps({"task": task, "kind": "review", "history": history}, indent=2)

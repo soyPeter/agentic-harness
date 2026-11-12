@@ -41,8 +41,8 @@ Every task goes through five phases. You, the main session, are the **orchestrat
 | | `architect` | ADRs in `backbone/adr/`; the spec's Architecture and Skills sections | — |
 | | `griller` | Questions and a verdict on the spec and ADRs | **Start gate:** a task can only become `[WIP]` with a valid spec, a griller **pass** on its current text and ADRs, and the **user's** `Approved-by:` line |
 | 2. Build | `implementer` | Code and tests; tests mention the AC ids they prove | **Skill gate:** a file can't be edited until every skill routed to it (and every skill in the spec) has been loaded in that session |
-| 3. Judge | `judge` | A verdict on requirements, ACs and tests | **Judge gate:** a task can only become `[x]` with a judge **pass** on the current code, every AC traced to a test |
-| | `reviewer` × 3 | One verdict per lens (correctness, structure, lean), run in parallel | The judge gate also needs a pass from every lens on the current code |
+| 3. Judge | `judge` | A verdict on requirements, ACs and tests | **Judge gate:** a task can only become `[x]` with a judge **pass** on the current code and spec, every AC traced to a test, and the spec still grilled and approved |
+| | `reviewer` × 3 | One verdict per lens (correctness, structure, lean), run in parallel | The judge gate also needs a pass from every lens on the current code and spec |
 | 4. Record | `scribe` | `6-MEMORY.md` entries; ADRs for emergent decisions | — |
 | 5. Deliver | `deliverer` | The push, the PR and a CI watch; it never edits or merges | **Pre-push:** pushed commits pass verify, reviews included. A task is `done` once its `HEAD` is delivered with CI green |
 
