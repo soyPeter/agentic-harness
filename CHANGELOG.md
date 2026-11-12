@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- **Agents can no longer switch the harness off through the CLIs' user configuration (security fix).** Before,
+  the hooks protected the project's `.claude/settings.json`, `.codex/` and `.opencode/`, but not the CLIs' user- and
+  machine-level configuration. An agent could write `{"disableAllHooks": true}` (or an `env` block with `PYTHONPATH`
+  and a `sitecustomize.py`) to `~/.claude/settings.json`, with Write or the shell, and Claude Code applied it within
+  the same session. Now:
+  - the file tools, `apply_patch` and shell commands are refused, in every role, on Claude Code's `~/.claude`
+    settings, `~/.claude.json`, hooks, agents, skills, commands, plugins, rules and `CLAUDE.md`; Codex's
+    `config.toml`, profiles, `hooks.json`, `AGENTS.md`, rules, agents and prompts; all of OpenCode's
+    `~/.config/opencode`; the managed settings folders; and `~/.agentic-harness`. Also under `$CLAUDE_CONFIG_DIR`,
+    `$CODEX_HOME`, `$OPENCODE_CONFIG_DIR`, `$XDG_CONFIG_HOME` and `$OPENCODE_CONFIG`, through symlinks, `~` and
+    `$HOME`. The `claude plugin|mcp|config` and `codex mcp|features` commands that change them are refused too.
+    Reading them still works, and so does the rest of `~/.claude` (transcripts, auto-memory).
+  - Session start, `doctor`, `run` and `orca` report as errors, and `run` and `orca` refuse to start on:
+    `disableAllHooks`; managed `allowManagedHooksOnly` without the harness; an `env` block setting `PYTHON*`,
+    `PATH`, `LD_*`/`DYLD_*`, `BASH_ENV`, `GIT_DIR` and the like, or `HARNESS_*`; permission rules that pre-allow
+    changing these files or harness files; the plugin turned off in thin mode; Codex hooks switched off or a
+    hijacking `shell_environment_policy`; an OpenCode plugin removal. A change to a setting that runs a command or
+    adds hooks (`apiKeyHelper`, `statusLine`, user hooks, plugins, MCP servers, Codex `hooks.json` and `notify`,
+    OpenCode plugins) since the user last accepted it is an error too. The new user-only command `harness.py
+    accept-agent-config` accepts it, and the first check in a repository accepts what it finds.
+  - A new Claude Code `ConfigChange` hook (in `.claude/settings.json` and the plugin) keeps such a change from
+    taking effect in a running session.
+  - The installed `.claude/settings.json` (and a thin project's) sets `"disableAllHooks": false`, which outranks a
+    `true` in the user's settings.
+  - Every hook wiring runs `python3 -I`: the settings hooks, agent frontmatter hooks, the plugin's Claude Code and
+    Codex hooks, `.codex/hooks.json`, the OpenCode plugin, the git hooks and the launcher's engine.
+  - HOOKS.md and the README describe what stays open, and recommend a root-owned `managed-settings.json` with
+    `"disableAllHooks": false` for unattended runs.
+  **Upgrading:** update the project (or move the pin) to get the new settings hooks. Codex asks you to trust the
+  project's changed hooks again in `/hooks`. The first session start or `doctor` after the update records the
+  current user configuration as accepted. Check it first if agents ran unattended before this release.
+
 - **Outward events say what ran; a Source heading and a budget word say less.** `outward` events are logged by
   post-tool-use, once the call has run, with `result` (`succeeded`, `failed`, or `unknown` where the agent CLI doesn't
   say: Codex, OpenCode's version 1 API; the OpenCode adapter now passes OpenCode's status), and cover spellings the deliverer's

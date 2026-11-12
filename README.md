@@ -377,6 +377,19 @@ has it and every agent loads it:
 The hard floor stays CI: an agent without hooks, or a human with `--no-verify`, still can't merge past
 `harness-verify` once the branch is protected.
 
+**The agent CLIs' own configuration.** A user-level setting can switch the hooks off in every project: Claude Code's
+`disableAllHooks` (reloaded within a running session), an `env` block that every hook process inherits, or a hook,
+plugin or helper command of its own. So agents may read `~/.claude`, `~/.claude.json`, `~/.codex`,
+`~/.config/opencode`, the managed settings and `~/.agentic-harness`, but not change them. Session start, `doctor`,
+`run` and `orca` report a configuration that turns the harness off as an error, and `run` and `orca` then refuse to
+start. A change to a command-running setting (`apiKeyHelper`, hooks, plugins, MCP servers) is an error until you
+accept it with `harness.py accept-agent-config`. Claude Code's `ConfigChange` hook stops such a change from taking
+effect mid-session, and every hook runs `python3 -I`, so `PYTHONPATH` and similar variables can't hijack the engine.
+These are still hooks that a user-level setting could reach. The only hooks no user-level setting can switch off are
+managed ones: for unattended runs, install a root-owned `managed-settings.json` with `"disableAllHooks": false` (and
+the plugin force-enabled for thin projects). The snippet and the full list are in
+[HOOKS.md](payload/owned/backbone/HOOKS.md#the-agent-clis-own-configuration).
+
 The guard's limits, which the plugin's check shares: it needs `python3` and `git` on the PATH, and when its own lookup
 fails (no git, a broken config) it lets the call through rather than stop every agent on the machine. It checks the
 repository of each file a tool writes and, for shell commands, the working directory plus every path and `cd` target
