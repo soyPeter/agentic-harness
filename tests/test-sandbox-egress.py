@@ -9,14 +9,16 @@ from inside, as the agent (Restrictions needs only docker):
 - the agent's container holds neither NET_ADMIN nor NET_RAW, and nothing the agent runs changes the rules in force,
   the allowlist the evidence is taken from or the egress container's log of what it denied;
 - a denied connection is logged by the egress container, and the receipt cites the log;
-- a judge pass recorded inside records that sandbox, and the receipt shows it on the host;
+- a judge pass recorded inside records that sandbox, and the receipt shows it on the host: custom, since nothing says
+  which definition a sandbox brought up without harness.py run came from;
 - in a thin project (ThinSandbox), the container fetches the pinned engine when it starts and Claude Code loads it as
   the plugin, so the same holds through the launcher;
 - with HARNESS_SANDBOX_START=on (HostRun), run on the host brings the sandbox up itself, from a checked copy of its
   definition, runs each session in it, stops a session that times out and stops the containers afterwards; it refuses
   a definition changed after the user approved it, and a sandbox someone else already brought up.
 Restrictions runs the harness-agent image directly, with the agent's restrictions and each one left out: the sandbox is
-recorded as a container only with all of them and the published allowlist at /run/harness-egress/allowlist. Schema work
+recorded as a container only with all of them, the published allowlist at /run/harness-egress/allowlist and the marker
+run mounts for the shipped definition (custom without it). Schema work
 that needs a container (HARNESS_SANDBOX_REQUIRE=schema=container) starts and is judged there and then finishes on the
 host.
 The containers, images and volumes a class created are removed afterwards. The harness-agent-claude-config volume,
@@ -43,6 +45,7 @@ DEFAULT_ALLOWLIST_HASH = "sha256:0e8bb6fbde0f567902ea181ebaaabe69c10a830267e395f
 DEFAULT_PUBLISHED = "\n".join(DEFAULT_HOSTS) + "\n"
 EGRESS_ALLOWLIST = "/run/harness-egress/allowlist"
 EGRESS_DENIALS = "/run/harness-egress/denials.jsonl"
+DEFINITION_MARKER = "/run/harness-sandbox/definition"
 UNROUTABLE = "192.0.2.1"   # TEST-NET-1: no DNS involved, and nothing answers there anyway
 BLOCKED = "https://example.com"
 ALLOWED = "https://api.github.com/zen"
@@ -297,10 +300,11 @@ class Allowlist(Sandbox):
         self.assertEqual({key: receipt["sandbox"][key] for key in ("backend", "isolation_class", "base_image_digest",
                                                                    "allowlist_hash", "region", "control_plane",
                                                                    "credential_mode")}, {
-            "backend": "devcontainer", "isolation_class": "container", "base_image_digest": pinned.group(1),
+            "backend": "devcontainer", "isolation_class": "custom", "base_image_digest": pinned.group(1),
             "allowlist_hash": DEFAULT_ALLOWLIST_HASH, "region": "local", "control_plane": "local",
             "credential_mode": "login"})
         self.assertIn("in a container", receipt["sandbox"]["isolation_reason"])
+        self.assertIn("nothing says which definition", receipt["sandbox"]["isolation_reason"])
         denials = receipt["sandbox"]["egress_denials"]
         self.assertGreaterEqual(denials["count"], 1)
         self.assertIn({"kind": "connect", "target": "%s:443/tcp" % UNROUTABLE},
@@ -362,6 +366,8 @@ class Restrictions(unittest.TestCase):
         cls.egress = cls.work / "egress"
         cls.egress.mkdir()
         (cls.egress / "allowlist").write_text(DEFAULT_PUBLISHED)
+        cls.marker = cls.work / "definition"
+        cls.marker.write_text("shipped\n")
         # The agent's user in the container writes the verdict into this folder, which the host's user owns.
         cls.host("chmod", "-R", "a+rwX", str(cls.project))
 
@@ -391,17 +397,21 @@ class Restrictions(unittest.TestCase):
                             "--json")
         return json.loads(receipt.stdout)["sandbox"]
 
-    def restricted(self):
-        """The flags and environment the agent's container runs with (docker-compose.yml)."""
+    def restricted(self, marked=True):
+        """The flags and environment the agent's container runs with (docker-compose.yml), with the marker harness.py
+        run mounts for the shipped definition, or without it, as an editor brings the sandbox up."""
         flags = ["--user", "agent", "--security-opt", "no-new-privileges", "--cap-drop=NET_ADMIN",
                  "--cap-drop=NET_RAW", "-v", "%s:/run/harness-egress:ro" % self.egress]
+        flags += ["-v", "%s:%s:ro" % (self.marker, DEFINITION_MARKER)] if marked else []
         return flags, {"HARNESS_SANDBOX_IMAGE": self.image_reference(), "HARNESS_EGRESS_ALLOWLIST": EGRESS_ALLOWLIST}
 
-    def sandbox(self, *, drop=(), add=(), allowlist=EGRESS_ALLOWLIST, mounted=True):
+    def sandbox(self, *, drop=(), add=(), allowlist=EGRESS_ALLOWLIST, mounted=True, marked=True):
         flags = ["--user", "agent", "--security-opt", "no-new-privileges"]
         flags += ["--cap-drop=%s" % cap for cap in drop] + ["--cap-add=%s" % cap for cap in add]
         if mounted:
             flags += ["-v", "%s:/run/harness-egress:ro" % self.egress]
+        if marked:
+            flags += ["-v", "%s:%s:ro" % (self.marker, DEFINITION_MARKER)]
         environment = {"HARNESS_SANDBOX_IMAGE": self.image_reference()}
         if allowlist is not None:
             environment["HARNESS_EGRESS_ALLOWLIST"] = allowlist
@@ -417,6 +427,19 @@ class Restrictions(unittest.TestCase):
 
         self.assertEqual(sandbox["isolation_class"], "container", sandbox["isolation_reason"])
         self.assertEqual(sandbox["allowlist_hash"], DEFAULT_ALLOWLIST_HASH)
+
+    def test_the_same_container_without_runs_marker_of_the_shipped_definition_is_custom(self):
+        sandbox = self.sandbox(drop=("NET_ADMIN", "NET_RAW"), marked=False)
+
+        self.assertEqual(sandbox["isolation_class"], "custom", sandbox["isolation_reason"])
+        self.assertIn(DEFINITION_MARKER, sandbox["isolation_reason"])
+
+    def test_inside_a_sandbox_run_did_not_mark_doctor_does_not_ask_to_start_another(self):
+        flags, environment = self.restricted(marked=False)
+        result = self.run_in_container(flags, ["doctor"], dict(environment, HARNESS_SANDBOX_START="on"))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("ERROR", result.stdout)
 
     def test_net_admin_added_back_is_not_a_container_even_though_the_process_cannot_use_it(self):
         sandbox = self.sandbox(add=("NET_ADMIN",))
@@ -545,7 +568,8 @@ class ThinSandbox(Sandbox):
         receipt = json.loads(self.host(*launcher, "receipt", "7.1", "--json", env=self.on_host).stdout)
 
         self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
-        self.assertEqual(receipt["sandbox"]["isolation_class"], "container", receipt["sandbox"]["isolation_reason"])
+        self.assertEqual(receipt["sandbox"]["isolation_class"], "custom", receipt["sandbox"]["isolation_reason"])
+        self.assertIn("nothing says which definition", receipt["sandbox"]["isolation_reason"])
         self.assertEqual(receipt["sandbox"]["allowlist_hash"], DEFAULT_ALLOWLIST_HASH)
 
 
@@ -703,17 +727,17 @@ THIN_AGENT = AGENT.replace('["python3", "-B", "scripts/harness/lib/harness.py", 
 
 class ThinHostRun(Sandbox):
     """HARNESS_SANDBOX_START=on in a thin project, whose engine keeps a copy of the shipped definition outside the
-    project: run vouches for the shipped definition with only the allowed differences (here, the agent command, a
-    stand-in agent) as a container, and records an approved definition with anything else as custom."""
+    project: run vouches for the shipped definition with only the allowed differences (here, an allowlisted host and a
+    memory limit) as a container, and records an approved definition with anything else (here, the agent command, a
+    stand-in agent) as custom."""
     UP = False
 
     @classmethod
     def install(cls):
         ThinSandbox.install.__func__(cls)
         compose = cls.project / ".devcontainer/harness-agent/docker-compose.yml"
-        compose.write_text(compose.read_text().replace(
-            "HARNESS_AGENT_CMD: claude -p --dangerously-skip-permissions --output-format json",
-            "HARNESS_AGENT_CMD: python3 -B /workspace/agent.py"))
+        compose.write_text(compose.read_text().replace('HARNESS_FIREWALL_ALLOW: ""', 'HARNESS_FIREWALL_ALLOW: "pypi.org"')
+                           .replace("  agent:\n    build: .\n", "  agent:\n    build: .\n    mem_limit: 4g\n"))
         (cls.project / "agent.py").write_text(THIN_AGENT)
         (cls.project / "backbone/specs").mkdir(parents=True, exist_ok=True)
         (cls.project / "backbone/specs/7.1.md").write_text(SPEC)
@@ -736,36 +760,42 @@ class ThinHostRun(Sandbox):
                            DOCKER_CONFIG=os.environ.get("DOCKER_CONFIG") or os.path.expanduser("~/.docker"),
                            HARNESS_ENGINE_SOURCE="/workspace/.harness-release")
 
-    def run_and_receipt(self):
+    def run_task(self, **settings):
         tasks = self.project / "backbone/3-TASKS.md"
         # An earlier run escalated the task (out of [WIP], BLOCKED); the user takes it back.
         taken_back = re.sub(r"(?m)^(.*\*\*Task 7\.1: .*?)\s+[-\u2014]+\s+BLOCKED:.*$", r"\1", tasks.read_text())
         tasks.write_text(taken_back.replace("- [ ] **Task 7.1", "- [WIP] **Task 7.1"))
         env = dict(self.run_env, HARNESS_SANDBOX_START="on", HARNESS_AUTONOMY="autonomous", HARNESS_VERIFY="block",
-                   HARNESS_RUN_ATTEMPTS="1", HARNESS_TEST_CMD="true")
+                   HARNESS_RUN_ATTEMPTS="1", HARNESS_TEST_CMD="true", **settings)
         run = subprocess.run(list(self.launcher) + ["run", "--only", "7.1"], cwd=self.project, env=env,
                              capture_output=True, text=True, timeout=2400)
         self.assertIn("run: task 7.1 attempt 1", run.stdout, run.stdout + run.stderr)
-        return json.loads(self.host(*self.launcher, "receipt", "7.1", "--json", env=self.on_host).stdout)["sandbox"]
+        return run.stdout
 
     def test_a_the_shipped_definition_with_an_allowed_difference_is_a_container(self):
-        sandbox = self.run_and_receipt()
+        # The shipped agent command runs Claude Code, which this token can't sign in with: the session fails, and
+        # what the host found in its sandbox is what counts here.
+        out = self.run_task(CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-test-token", HARNESS_RUN_TASK_TIMEOUT="300")
 
-        self.assertEqual(sandbox["isolation_class"], "container", sandbox["isolation_reason"])
-        self.assertIn("from the shipped definition", sandbox["isolation_reason"])
+        self.assertIn("isolation_class container (", out)
+        self.assertIn("from the shipped definition", out)
 
-    def test_b_an_approved_definition_with_anything_else_is_custom(self):
-        dockerfile = self.project / ".devcontainer/harness-agent/Dockerfile"
-        shipped = dockerfile.read_text()
-        self.addCleanup(dockerfile.write_text, shipped)
-        dockerfile.write_text(shipped + "RUN true\n")
-        self.host("git", "-c", "core.hooksPath=/dev/null", "commit", "-qam", "build: a toolchain step in the sandbox")
+    def test_b_an_approved_definition_with_another_agent_command_is_custom(self):
+        compose = self.project / ".devcontainer/harness-agent/docker-compose.yml"
+        allowed = compose.read_text()
+        self.addCleanup(compose.write_text, allowed)
+        compose.write_text(allowed.replace(
+            "HARNESS_AGENT_CMD: claude -p --dangerously-skip-permissions --output-format json",
+            "HARNESS_AGENT_CMD: python3 -B /workspace/agent.py"))
+        self.host("git", "-c", "core.hooksPath=/dev/null", "commit", "-qam", "build: a stand-in agent in the sandbox")
         self.host(*self.launcher, "sandbox-approve", env=self.run_env)
 
-        sandbox = self.run_and_receipt()
+        out = self.run_task()
+        sandbox = json.loads(self.host(*self.launcher, "receipt", "7.1", "--json", env=self.on_host).stdout)["sandbox"]
 
+        self.assertIn("isolation_class custom (", out)
         self.assertEqual(sandbox["isolation_class"], "custom", sandbox["isolation_reason"])
-        self.assertIn("Dockerfile", sandbox["isolation_reason"])
+        self.assertIn("docker-compose.yml", sandbox["isolation_reason"])
 
 
 class Tamper(Sandbox):

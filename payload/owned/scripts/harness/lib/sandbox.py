@@ -76,11 +76,13 @@ class SandboxError(Exception):
 
 class Sandbox(object):
     """One sandbox: the workspace its sessions run in, as the sandbox sees it. A sandbox the backend brought up has
-    its container, the workspace inside it and the agent command it defines."""
+    its container, the workspace inside it, the agent command it defines and the (isolation_class, reason) the host
+    found in it."""
 
     def __init__(self, workspace, container=None, remote_workspace=None, agent_command=None):
         self.workspace = Path(workspace)
         self.container, self.remote_workspace, self.agent_command = container, remote_workspace, agent_command
+        self.isolation = None
 
 
 class SandboxBackend(object):
@@ -133,7 +135,7 @@ class Devcontainer(SandboxBackend):
         self.private = self.config = None
 
     def starts_sandbox(self):
-        return self.start and isolation()[0] != "container"
+        return self.start and isolation()[0] == "none"
 
     def create(self, workspace, env=None):
         if not self.starts_sandbox():
@@ -167,7 +169,7 @@ class Devcontainer(SandboxBackend):
                 ". docker buildx refused to read the build file the devcontainer CLI writes outside the build context "
                 "(its file entitlement check, ADR-003): run again, and if it keeps failing, build with "
                 "BUILDX_BAKE_ENTITLEMENTS_FS=0 set" if entitlement else ""))
-        isolated, reason = self.probe(box)
+        isolated, reason = box.isolation = self.probe(box)
         if isolated not in ("container", "custom"):
             self.teardown(box)
             raise SandboxError("the sandbox devcontainer up brought up doesn't isolate its sessions: isolation_class %s "
@@ -306,8 +308,9 @@ BACKENDS = {Devcontainer.name: Devcontainer}
 def isolation():
     """(isolation_class, reason): the boundary this process runs behind. Only a Linux process in a container, with the
     restrictions the agent's container is started with (no-new-privileges, no network or system capabilities), and
-    with the egress container's allowlist published at ALLOWLIST_PATH, is a container. Anything else is none, and the
-    reason says which check failed."""
+    with the egress container's allowlist published at ALLOWLIST_PATH, and brought up by harness.py run from the
+    shipped definition (DEFINITION_MARKER), is a container. With all of that but the marker, it is custom; anything
+    else is none, and the reason says which check failed."""
     if not os.environ.get("HARNESS_SANDBOX_IMAGE"):
         return "none", "not in the harness-agent image (HARNESS_SANDBOX_IMAGE is unset)"
     unverified = "HARNESS_SANDBOX_IMAGE is set, but "
@@ -337,7 +340,8 @@ def isolation():
     try:
         marked = Path(DEFINITION_MARKER).read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError):
-        return "container", reason
+        return "custom", reason + ", but nothing says which definition it was brought up from (%s, which harness.py " \
+            "run mounts, can't be read), so it isn't known to be the shipped one" % DEFINITION_MARKER
     if marked == "shipped":
         return "container", reason + ", brought up by harness.py run from the shipped definition"
     # The host wrote the marker; only control characters need keeping out of the evidence.
@@ -399,7 +403,7 @@ def printable(text, limit=255):
 def start_problem(workspace, reference=None):
     """Why a runner here can't bring the workspace's sandbox up (HARNESS_SANDBOX_START=on), or None. reference: the
     engine's own copy of the definition, when an agent in the sandbox can't write it."""
-    if isolation()[0] == "container":
+    if isolation()[0] != "none":
         return None
     if not (Path(workspace) / DEVCONTAINER_CONFIG).is_file():
         return ("HARNESS_SANDBOX_START is on, but %s is missing, so run has no sandbox to bring up (update.sh or pin "

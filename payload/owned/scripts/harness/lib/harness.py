@@ -7385,6 +7385,8 @@ def run_agent(backend, prompt, log_path, timeout):
     try:
         if box.container:
             prompt = prompt.replace(harness_cli(), sandbox_harness_cli())
+        if box.isolation:
+            print("run: the session's sandbox is up: isolation_class %s (%s)" % box.isolation)
         with log_path.open("w", encoding="utf-8") as log:
             code = backend.exec(box, box.agent_command or values["HARNESS_AGENT_CMD"], stdin=prompt, log=log,
                                 timeout=timeout, env=settings)

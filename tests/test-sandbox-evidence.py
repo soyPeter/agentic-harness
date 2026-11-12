@@ -25,6 +25,7 @@ DOCKER_CONFIG = os.environ.get("DOCKER_CONFIG") or os.path.expanduser("~/.docker
 DEVCONTAINER_REL = ".devcontainer/harness-agent/devcontainer.json"
 # Where the egress container publishes its allowlist, read-only, in the agent's container (docker-compose.yml).
 EGRESS_ALLOWLIST = "/run/harness-egress/allowlist"
+DEFINITION_MARKER = "/run/harness-sandbox/definition"
 SANDBOX_ENVIRONMENT = ("HARNESS_SANDBOX_IMAGE", "HARNESS_EGRESS_ALLOWLIST", "HARNESS_SANDBOX_BACKEND",
                        "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
 # The allowlist init-firewall.sh enforces with an empty HARNESS_FIREWALL_ALLOW, as the egress container may write it:
@@ -107,6 +108,14 @@ def devcontainer_config(project):
     """The installed .devcontainer/harness-agent/devcontainer.json, its // comment lines dropped (JSONC)."""
     text = (project / ".devcontainer/harness-agent/devcontainer.json").read_text()
     return json.loads("\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//")))
+
+
+def marked_definition():
+    """What the marker harness.py run mounts into the agent's container says, or None when there is none."""
+    try:
+        return Path(DEFINITION_MARKER).read_text().strip()
+    except OSError:
+        return None
 
 
 class Project(unittest.TestCase):
@@ -218,15 +227,26 @@ class Evidence(Project):
         self.assertEqual({key: data["sandbox"][key] for key in ON_THE_HOST}, ON_THE_HOST)
         self.assertIn("nothing isolated the session from the host", text)
 
-    @unittest.skipUnless(os.environ.get("HARNESS_SANDBOX_IMAGE") and os.path.isfile(EGRESS_ALLOWLIST),
-                         "runs inside the harness-agent sandbox, where the egress container publishes its allowlist")
-    def test_inside_the_harness_agent_sandbox_a_judge_pass_is_a_container(self):
+    @unittest.skipUnless(os.environ.get("HARNESS_SANDBOX_IMAGE") and os.path.isfile(EGRESS_ALLOWLIST) and
+                         marked_definition() == "shipped",
+                         "runs inside the harness-agent sandbox harness.py run brought up from the shipped definition")
+    def test_inside_the_sandbox_run_brought_up_from_the_shipped_definition_a_judge_pass_is_a_container(self):
         _, data = self.judged(HARNESS_SANDBOX_IMAGE=self.harness_agent_image(),
                               HARNESS_EGRESS_ALLOWLIST=EGRESS_ALLOWLIST)
 
         self.assertEqual(data["sandbox"]["isolation_class"], "container", data["sandbox"]["isolation_reason"])
         self.assertEqual(data["sandbox"]["allowlist_hash"], DEFAULT_ALLOWLIST_HASH)
         self.assertIn("in a container", data["sandbox"]["isolation_reason"])
+
+    @unittest.skipUnless(os.environ.get("HARNESS_SANDBOX_IMAGE") and os.path.isfile(EGRESS_ALLOWLIST) and
+                         marked_definition() is None,
+                         "runs inside the harness-agent sandbox opened without harness.py run (an editor, say)")
+    def test_inside_a_sandbox_nothing_says_the_definition_of_a_judge_pass_is_custom(self):
+        _, data = self.judged(HARNESS_SANDBOX_IMAGE=self.harness_agent_image(),
+                              HARNESS_EGRESS_ALLOWLIST=EGRESS_ALLOWLIST)
+
+        self.assertEqual(data["sandbox"]["isolation_class"], "custom", data["sandbox"]["isolation_reason"])
+        self.assertIn(DEFINITION_MARKER, data["sandbox"]["isolation_reason"])
 
     def test_the_evidence_never_holds_a_credential(self):
         self.judged(HARNESS_SANDBOX_IMAGE=self.harness_agent_image(), ANTHROPIC_API_KEY="sk-ant-api03-secret-key")
