@@ -1868,6 +1868,49 @@ def agent_config_path(path_str, cwd, whole=False):
     return None
 
 
+def extraction_folders(prog, words):
+    """The folders an archive extraction writes into ("." for the current one): names from the archive, which the
+    hooks can't read, so a folder that holds the CLIs' configuration (the home folder) counts as written whole. ditto
+    copies a folder's contents the same way."""
+    args = words[1:]
+    flags = short_flags(args)
+    if prog in ("tar", "bsdtar", "gtar"):
+        bundled = args[:1] and not args[0].startswith("-") and "x" in args[0]
+        if not (bundled or "x" in flags or {"--extract", "--get"} & set(args)):
+            return []
+        return flag_values(args, "-C", "--directory") or ["."]
+    if prog == "unzip":
+        return [] if flags & set("lvtpZ") else flag_values(args, "-d") or ["."]
+    operands = [w for w in args if not w.startswith("-")]
+    if prog == "ditto":
+        return operands[-1:] if len(operands) > 1 else []
+    if prog in ("7z", "7za", "7zz"):
+        if operands[:1] not in (["x"], ["e"]):
+            return []
+        return [w[2:] for w in args if w.startswith("-o") and len(w) > 2] or ["."]
+    operands = [w for w in args if not w.startswith("-")]
+    if prog in ("cpio", "bsdcpio"):
+        return operands[-1:] if "p" in flags else ["."] if "i" in flags or "--extract" in args else []
+    if prog == "pax":
+        return operands[-1:] if {"r", "w"} <= flags else ["."] if "r" in flags else []
+    return []
+
+
+def flag_values(args, *names):
+    """The values args give the flags names: --flag value, --flag=value, -f value or -fvalue."""
+    values = []
+    for i, word in enumerate(args):
+        for name in names:
+            if word == name:
+                values.append(args[i + 1] if i + 1 < len(args) else "")
+            elif name.startswith("--") and word.startswith(name + "="):
+                values.append(word[len(name) + 1:])
+            elif not name.startswith("--") and word.startswith(name) and len(word) > len(name) \
+                    and not word.startswith("--"):
+                values.append(word[len(name):])
+    return values
+
+
 def config_operands(segment, words):
     """[(path, whole)] a shell segment may change: its redirection targets, and every word of a program that doesn't
     only read (cp and the like: their target, and what lands in a target folder)."""
@@ -1881,9 +1924,12 @@ def config_operands(segment, words):
     sub = CONFIG_COMMANDS.get(prog, {}).get(operands[0] if operands else "")
     if prog in CONFIG_COMMANDS and not sub:
         return found
+    found += [(folder, True) for folder in extraction_folders(prog, words)]
     if prog in ("cp", "install", "rsync", "scp", "ln", "mv") and len(operands) > 1:
         target, sources = operands[-1], operands[:-1]
         found += [(target, False)] + [(os.path.join(target, os.path.basename(s.rstrip("/"))), False) for s in sources]
+        if prog in ("cp", "rsync", "scp") and any(s.endswith(("/", "/.")) for s in sources):
+            found.append((target, True))   # a folder's contents land in the target, whatever their names
         if prog in ("ln", "mv"):
             found += [(s, True) for s in sources]
         return found

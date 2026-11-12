@@ -237,6 +237,21 @@ class WritesToAgentConfiguration(Fixture):
                 with self.subTest(path=str(path)):
                     self.assertAllowed(self.pre_tool_use("Write", {"file_path": str(path), "content": "{}"}))
 
+    def test_extracting_or_syncing_into_the_home_folder_may_change_it(self):
+        for command in ("tar -xf evil.tar -C ~", "tar xzf evil.tgz -C $HOME", "tar --extract -f evil.tar --directory ~",
+                        "tar -x -f evil.tar -C ~/.config", "bsdtar -xf evil.tar -C ~", "cd ~ && tar -xf evil.tar",
+                        "unzip -o evil.zip -d ~", "cd && unzip evil.zip", "unzip evil.zip -d ~/.config",
+                        "ditto -x -k evil.zip ~", "ditto evil ~", "7z x evil.7z -o%s" % shlex.quote(str(self.home)),
+                        "rsync -a evil/ ~/", "rsync -a evil/ ~", "cp -R evil/. ~", "cp -R evil/ ~",
+                        "cd ~ && cpio -id < evil.cpio"):
+            with self.subTest(command=command):
+                self.assertRefused(self.bash(command), command)
+        for command in ("tar -czf backup.tgz -C ~ notes", "tar -tf evil.tar", "tar -xf a.tar -C ~/notes",
+                        "tar -xf a.tar", "unzip a.zip -d ~/notes", "unzip -l a.zip", "rsync -a src ~/notes/",
+                        "cp -R src ~/"):
+            with self.subTest(command=command):
+                self.assertAllowed(self.bash(command), command)
+
     def test_the_rest_of_the_home_folder_is_left_alone(self):
         for path in (self.home / "notes.txt", self.home / ".claude/projects/x/memory/note.md",
                      self.home / ".claude/todos/x.json", self.home / ".config/other/x.json"):
