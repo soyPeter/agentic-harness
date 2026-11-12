@@ -14,10 +14,11 @@ only).
 
 ![The factory: signals, define, build, judge and deliver, merge and observe, with people setting the rules above](docs/sdlc/1-factory.svg)
 
-- **People set the rules.** Only the user accepts an ADR, writes the tool contracts in `tools.conf`, or changes the
-  user-only keys of `harness.conf`: the gate switches, risk rules, autonomy mode and profile. Hooks refuse agents'
-  edits to them, and verify refuses commits that change the user-only settings or contracts. Skill routes and
-  guardrails come from the packs an accepted ADR adopts and the rules agreed at setup.
+- **People set the rules.** Only the user accepts an ADR, writes the tool contracts in `tools.conf`, admits or
+  revokes third-party skills in `admissions.conf`, or changes the user-only keys of `harness.conf`: the gate switches,
+  risk rules, autonomy mode and profile. Hooks refuse agents' edits to them, and verify refuses commits that change the
+  user-only settings, contracts or admissions. Skill routes and guardrails come from the packs an accepted ADR adopts
+  and the rules agreed at setup.
 - **Signals.** Work starts from a person, a Linear ticket (`harness.py linear import`) or the task list. The harness's
   own feedback adds more: escalations, red CI, failure-class proposals and `harness.py report` candidates. Production
   incidents are not a signal yet.
@@ -54,6 +55,11 @@ only).
   says what each MCP or other tool does (read, write with its path field, exec, network, agent, and whether it needs
   the user); a write tool's paths get the same gates as Write and Edit. In supervised mode a tool with no contract runs
   with a warning; in autonomous mode it is refused.
+- **Third-party skills** ([ADR-006](docs/adr/ADR-006-external-agent-resource-admission.md), Proposed): a vendor's
+  setup prompt, skill or plugin is reference until the user admits a reviewed copy in `backbone/admissions.conf`, with
+  its decision, source, revision, digest, purpose, compatibility, dependencies, data destinations and license. Changed
+  bytes lose the admission until the user reviews them again, a revoked bundle stays blocked (a rollback can't bring
+  it back), and admission grants no tool or permission. Agents can't invoke a skill that runs commands as it loads.
 - **Guardrails** throughout: destructive commands, secrets and project rules are blocked. Each agent can only write
   its own files, and the main session only orchestrates. Shell commands can't write harness state or switch off
   checks, and a script that does is caught: reported in supervised mode, escalated in autonomous mode. One task is

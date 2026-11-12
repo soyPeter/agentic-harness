@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+- **Third-party skills are reference until the user admits a reviewed copy (ADR-006, Proposed).** The user records a
+  vendor's or an SDK's skill bundle in `backbone/admissions.conf` (new, user-only like `tools.conf`): its path, an
+  Accepted ADR that names it, source, revision, digest, purpose, compatible versions, dependencies, data destinations
+  and license. `harness.py admission digest <path>` prints the digest of the files git sees under the path (tracked,
+  or untracked and not ignored; a link counts as where it points; a link out of the bundle makes it inadmissible),
+  and `harness.py admission` shows each record's state. While the bytes match and no revocation names them, the
+  bundle's skills load and satisfy routes as any skill does; otherwise the bundle is reference: the Skill tool is
+  refused, reading its SKILL.md doesn't count as loading it, edits routed to it are refused, and the shell checks
+  refuse agents' commands that run its files (by path, as a shell's or interpreter's operand with its options read as the
+  shell reads them (`sh -e f`, `bash -o errexit f`), on its stdin or through a pipe, through runners such as `timeout`,
+  `xargs` and `find -exec`, in any letter case of the path or the shell), and, while such a bundle is present, commands whose
+  code comes from an expansion or substitution, or from a relative path after a `cd` the hooks can't resolve. A bundle whose SKILL.md registers hooks, runs shell
+  placeholders or pre-approves tools isn't admissible, and a file under an admitted bundle that its
+  digest doesn't cover (one git ignores) doesn't run: admission grants no command or permission, and the tool
+  contracts, shell checks and role scopes govern every call whichever skills are loaded. `[revoke sha256:...]` blocks
+  those bytes in any `.claude/skills/` folder of the repository, even with a matching record; revocations are read
+  from the working copy, the index, HEAD, the default branch and every commit the reflogs record together (so a
+  rebase or reset that drops a local revocation doesn't lift it; agents' `filter-branch`, `filter-repo`, `reflog
+  expire`/`delete` and `gc.reflogExpire*` settings are refused), and a line of the file that is neither an exact
+  section header nor `key = value` (a header with a trailing comment, say) blocks every project skill bundle, and
+  fails verify, until the user fixes it. Agents' git commands that would rewrite
+  `admissions.conf`, `tools.conf`, `harness.conf`, the lock or `escalations.md` (checkout, restore, stash, reset,
+  cherry-pick, revert, apply, am and others) are refused. verify refuses a commit whose admitted
+  bundle doesn't match its record, one that changes the admissions (the user commits it with `HARNESS_VERIFY=off`; a
+  pull request needs the `harness-change-approved` label), and, even with the label, one that brings revoked bytes
+  back or removes a revocation. doctor and the session-start note report the problems. Separately, an agent's Skill
+  call is refused when any skill or command in the repository the name can reach (folder name, frontmatter `name`,
+  nested `.claude/skills/`, namespace) registers hooks or runs `` !`...` `` or ```` ```! ```` placeholders, as
+  Claude Code finds them, or has a frontmatter the harness can't read (a `...` document end included): Claude Code runs those as it loads the skill,
+  outside every tool call the hooks see. Compatibility, dependencies and data
+  destinations are recorded, not checked, and other plugins' bundles, outside the repository, can't be admitted; the
+  ADR's implementation notes list what is deferred and why.
+
 - **Outward events say what ran; a Source heading and a budget word say less.** `outward` events are logged by
   post-tool-use, once the call has run, with `result` (`succeeded`, `failed`, or `unknown` where the agent CLI doesn't
   say: Codex, OpenCode's version 1 API; the OpenCode adapter now passes OpenCode's status), and cover spellings the deliverer's
