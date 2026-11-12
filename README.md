@@ -70,6 +70,9 @@ only).
   merge, approve or close, and its git ref commands (checkout, merge, reset, push and the like) may not name the default
   branch, which changes only through the PR. Finishing, committing and pushing (pre-push hook) all refuse a task
   without its review passes. Both are on by default (`HARNESS_REVIEW`, `HARNESS_DELIVER`, user-only).
+  `HARNESS_DELIVER="external"` is for a lane without GitHub credentials: the task stops at the deliver step,
+  `delivery-plan` tells an agent factory what to push and open from its trusted clone, and `delivery-record` records
+  the outcome.
 
 ## Who decides, by Change-Class
 
@@ -140,7 +143,10 @@ pass stale.
   worktree per task. Questions between agents are answered from the sources into the spec, and the agent can differ per
   role.
 - **Coordinator API**: `state`, `next`, `questions`, `start` and `finish` let a coordinator (Orca, a script) drive
-  tasks without knowing the workflow.
+  tasks without knowing the workflow. `contract --json` states the versioned contract an outside runner (the agent
+  software factory of ADR-008) relies on: those answers' JSON fields and the event kinds, each event carrying `v`.
+  `intake <request.json>` turns a request from the factory's doors into a task, with its provenance in a frozen
+  `## Source` section; an untrusted sender's task waits for a person.
 - **Knowledge source** (opt-in, user-only): in autonomous mode, griller questions `backbone/` can't answer are looked up
   in a read-only notes vault behind an MCP server (`knowledge`). Clear answers are recorded with a `vault:<path>`
   citation the harness checks; the rest are escalated.
@@ -387,14 +393,16 @@ A profile is an organisation policy on top of the gates. Set it in `backbone/har
 
 ```sh
 ./enroll.sh /path/to/repo --profile triple      # writes HARNESS_PROFILE="triple"
+./enroll.sh /path/to/repo --profile no-merge    # writes HARNESS_PROFILE="no-merge"
 ```
 
 | Profile | Effect |
 |---|---|
 | (empty) | The default: no extra policy |
 | `triple` | A supervised pilot where only a human merges. `harness.py orca` refuses `--merge` and `--trust` (use `--pr`, which opens pull requests and never merges), `orca-nightly` refuses to start, and `enroll` refuses `--automation` and `--protect` before changing anything. Its catalog pack, `triple`, adds the Linear, EARS and Disputes/PCI layers (see `catalog/triple/README.md`). |
+| `no-merge` | The merge refusals of `triple` for any organisation, such as an agent factory's lanes (ADR-008), without Triple's catalog pack. `enroll` refuses `--automation` and allows `--protect`. |
 
-`HARNESS_PROFILE=triple` or `TRIPLE_MODE=1` in the environment adds the profile to any project. Unlike other keys, the environment can't lift a profile that `harness.conf` sets: `HARNESS_PROFILE=` in a shell leaves it in force. Doctor reports an unknown profile.
+`HARNESS_PROFILE=triple`, `HARNESS_PROFILE=no-merge` or `TRIPLE_MODE=1` in the environment adds the profile to any project. Unlike other keys, the environment can't lift a profile that `harness.conf` sets: `HARNESS_PROFILE=` in a shell leaves it in force. Doctor reports an unknown profile.
 
 ## What gets installed
 
