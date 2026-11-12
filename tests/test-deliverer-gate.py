@@ -402,7 +402,9 @@ DEFAULT_BRANCH_MOVES = ("git checkout main && git merge feat/x && git push origi
                         "git push origin HEAD:heads/main", "git push origin HEAD:refs/heads/main",
                         "git push origin HEAD:$'main'", 'git push origin HEAD:"$(echo main)"',
                         "git push origin HEAD:`echo main`", 'git push origin "HEAD:main"', "git push origin :main",
-                        "git push origin main")
+                        "git push origin main", "git $(echo push) origin main", "P=push; git $P origin main",
+                        'set -- push origin main; git "$@"', 'f() { git "$@"; }; f push origin main',
+                        "git `echo push` origin main", "for s in status push; do git $s origin main; done")
 # Globs and braces that the shell expands into words the harness can't read, in gh and git calls and in a command's
 # name; the others are literal text (a glob in ls's argument, a placeholder in a gh api endpoint).
 GLOB_REFUSED = ("gh pr view 7 --json labels *", "git push origin HEAD *", "git fetch origin *", "env ?h pr merge 7",
@@ -424,7 +426,8 @@ DELIVERER_FLOW = ("python3 scripts/harness/lib/harness.py verify --range origin/
                   "python3 scripts/harness/lib/harness.py receipt 2.1 --base main",
                   "gh pr create --base main --title t --body-file - <<'EOF'\nWhat it does.\nEOF",
                   "gh api repos/o/r/pulls/7", "git push -u origin HEAD", "git merge-base origin/main HEAD",
-                  "git log origin/main..HEAD --oneline", "git checkout feat/x", "gh pr checks 7 --watch")
+                  "git log origin/main..HEAD --oneline", "git checkout feat/x", "gh pr checks 7 --watch",
+                  "S=status; git $S", "for s in status log; do git $s -1; done")
 
 
 class DelivererRound3(GateProject):

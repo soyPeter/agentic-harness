@@ -1535,6 +1535,160 @@ def assigned_value(value, env):
     return value
 
 
+ASSIGNED = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\+?)=(.*)$", re.S)
+SHELL_VARIABLE = re.compile(r"\$(?:\{([^}]*)\}|([A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-]))")
+DECLARATIONS = ("export", "local", "declare", "typeset", "readonly")
+
+
+def positional_env(args):
+    """The variables set -- args, or a function called with args, gives its commands: $@ and $* (a list, one path per
+    argument), $# and $1 to $9; an argument the hooks can't know stays as written, so a path from it is unresolved."""
+    env = {"@": list(args), "*": list(args), "#": str(len(args))}
+    env.update((str(n), args[n - 1] if n <= len(args) else "") for n in range(1, 10))
+    return env
+
+
+def note_shell_state(segment, env):
+    """Records in env what a segment sets for the commands after it: assignments (export, local and declare too), a
+    loop's list, read's variables (unknown) and set's positional parameters. Returns whether that is all it does."""
+    words = command_words(shell_split(segment))
+    if not words:
+        return True
+    declared = words[1:] if words[0] in DECLARATIONS else words
+    if all(ASSIGNED.match(w) for w in declared):
+        for word in declared:
+            name, append, value = ASSIGNED.match(word).groups()
+            env[name] = None if append else assigned_value(value, env)
+        return True
+    if words[0] in DECLARATIONS:
+        for word in words[1:]:
+            match = ASSIGNED.match(word)
+            if match:
+                env[match.group(1)] = None
+        return True
+    if words[0] in ("for", "select") and words[2:3] == ["in"]:
+        items = words[3:]
+        env[words[1]] = None if any(re.search(r"\$\(|`", w) for w in items) else items
+        return True
+    if words[0] == "read":
+        env.update((name, None) for name in words[1:] if not name.startswith("-"))
+        return False
+    if words[0] == "set":
+        args, i = words[1:], 0
+        while i < len(args) and args[i][:1] in "-+" and args[i] != "--":
+            i += 2 if args[i][1:] and args[i].endswith("o") else 1
+        if i < len(args):
+            args = args[i + (args[i] == "--"):]
+            env.update(positional_env([w if re.search(r"[$`]", w) is None else "$(unknown)" for w in args]))
+        return True
+    return False
+
+
+def resolved_texts(text, env):
+    """The texts a word can be once the shell expands its variables (its quotes already removed), or None when it holds
+    an expansion the hooks can't resolve to text: a command substitution, $'...', or a variable the command doesn't
+    set to text. A loop variable gives one text per item; a name the command doesn't set is read from the
+    environment."""
+    if re.search(r"\$[('\"]|`", text):
+        return None
+    texts = [text]
+    for m in reversed(list(SHELL_VARIABLE.finditer(text))):
+        name = m.group(1) if m.group(1) is not None else m.group(2)
+        if name in env:
+            value = env[name]
+        else:
+            value = os.environ.get(name) if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) else None
+        if isinstance(value, list):
+            items = [" ".join(value)] if name in ("@", "*") else value
+        else:
+            items = [value]
+        if any(item is None or re.search(r"[$`]", item) for item in items) or len(texts) * len(items) > 64:
+            return None
+        texts = [t[:m.start()] + item + t[m.end():] for t in texts for item in items]
+    return texts
+
+
+LITERAL_MARKS = {"$": "\x00", "`": "\x01"}
+
+
+def literal_marked(text):
+    """text with each $ and ` the shell leaves as written (in single quotes, or escaped) replaced by a mark, so that
+    after quote removal the $ and ` left are the ones the shell expands. unmarked() puts them back."""
+    out, quote, i = [], None, 0
+    while i < len(text):
+        ch = text[i]
+        if quote == "'":
+            out.append(LITERAL_MARKS.get(ch, ch))
+            quote = None if ch == "'" else quote
+        elif ch == "\\" and text[i + 1:i + 2] in LITERAL_MARKS:
+            out.append(LITERAL_MARKS[text[i + 1]])
+            i += 1
+        elif ch == "\\":
+            out.append(text[i:i + 2])
+            i += 1
+        else:
+            out.append(ch)
+            if ch == '"':
+                quote = None if quote else '"'
+            elif ch == "'" and quote is None:
+                quote = "'"
+        i += 1
+    return "".join(out)
+
+
+def unmarked(text):
+    for ch, mark in LITERAL_MARKS.items():
+        text = text.replace(mark, ch)
+    return text
+
+
+FUNCTION_HEAD = re.compile(r"\s*(?:(?:then|do|else|!)\s+|[{(]\s*)*(?:function\s+([^\s(){}<>;&|]+)(?:\s*\(\s*\))?"
+                           r"|([^\s(){}<>;&|=$`'\"]+)\s*\(\s*\))\s*")
+FUNCTION_WORD = re.compile(r"^[^\s(){}<>;&|=$`'\"]+\(\)[({]?(.*)$", re.S)
+
+
+def function_bodies(command):
+    """{name: body} for each function command defines: name() { ...; }, name() ( ... ), function name { ...; }. The
+    body is None when it is another compound command (if, while...) or isn't closed: the hooks don't read it."""
+    found, pos = {}, 0
+    for segment, _ in split_segments(command):
+        start = command.find(segment, pos)
+        pos = start + len(segment)
+        m = FUNCTION_HEAD.match(segment)
+        if not m:
+            continue
+        at = start + m.end()
+        opening = command[at:at + 1]
+        end = closing_paren(command, at, "{}" if opening == "{" else "()") if opening and opening in "{(" else None
+        found[m.group(1) or m.group(2)] = command[at + 1:end] if end is not None and end < len(command) else None
+    return found
+
+
+def command_words(words):
+    """The words of the command a segment runs: shell keywords and a function definition's head (f() {, function f
+    {) dropped, so a function's body is checked as the commands it is."""
+    while words:
+        head = FUNCTION_WORD.match(words[0])
+        if words[0] in SHELL_KEYWORDS:
+            words = words[1:]
+        elif words[0] == "function" and len(words) > 1:
+            words = words[2:]
+            words = words[1:] if words[:1] == ["()"] else words[2:] if words[:2] == ["(", ")"] else words
+        elif head:
+            words = ([head.group(1)] if head.group(1) else []) + words[1:]
+        elif words[1:2] == ["()"] or words[1:3] == ["(", ")"]:
+            words = words[2 if words[1] == "()" else 3:]
+        else:
+            break
+    return words
+
+
+HIDDEN_PROGRAM_REFUSAL = ("%s runs a program from a command substitution or a variable the hooks can't resolve to "
+                          "text, which they can't read: write the commands out.")
+FUNCTION_REFUSAL = ("It calls %s, a function whose body the hooks can't read, or that calls functions deeper than they "
+                    "follow: define it as %s() { ...; }, or write its commands out.")
+
+
 def reaches_git_dir(full):
     """Whether a delete or write at full can touch a git directory: it is one, is in one, or holds one (find walks
     down from it)."""
@@ -1984,35 +2138,30 @@ def engine_findings(prog, words, written):
     return []
 
 
-def shell_findings(command, cwd=None, depth=0):
-    """Blocking problems with a shell command, beyond the @bash guardrail rules."""
+def shell_findings(command, cwd=None, depth=0, env=None, functions=None):
+    """Blocking problems with a shell command, beyond the @bash guardrail rules. env and functions are the variables
+    and functions the shell running it has (a function's call passes its own)."""
     found = []
     command, bodies = split_heredocs(command)
+    functions = dict(functions or {}, **function_bodies(command))
     if depth < 3:
         for inner in scan_expansions(command)[0]:
-            found.extend(shell_findings(inner, cwd, depth + 1))
+            found.extend(shell_findings(inner, cwd, depth + 1, functions=functions))
     segments = split_segments(command)
-    env, dirs = {}, []   # what the command itself assigns, and pushd's stack
+    env, dirs = dict(env or {}), []   # what the command itself assigns, and pushd's stack
     for index, (segment, op) in enumerate(segments):
         assignments, words = shell_words(segment)
-        while words and words[0] in SHELL_KEYWORDS:
-            words = words[1:]
+        words = command_words(words)
         for assignment in assignments:
             if SETTING_ASSIGNMENT.match(assignment):
                 found.append("Setting %s from the shell overrides a harness setting or skips a check; only the user "
                              "may do that, in their own terminal." % assignment.split("=", 1)[0])
-        if not words:
-            for assignment in assignments:
-                name, _, value = assignment.partition("=")
-                env[name] = assigned_value(value, env)
+        if note_shell_state(segment, env) or not words:
             continue
-        if words[0] in ("for", "select") and words[2:3] == ["in"]:
-            items = words[3:]
-            env[words[1]] = None if any(re.search(r"\$\(|`", w) for w in items) else items
-            continue
-        if words[0] == "read":
-            names = [w for w in words[1:] if not w.startswith("-")]
-            env.update({name: None for name in names})
+        if re.search(r"[$`]", words[0]):
+            # A command named by a variable the command set, such as "$@" in a function's body, is that command.
+            texts = resolved_texts(words[0], env)
+            words = (texts[0].split() + words[1:]) if texts and len(texts) == 1 and texts[0].strip() else words
         if words[0] in ("-S", "--split-string") or words[0].startswith(("-S", "--split-string=")):
             split = " ".join(([words[0][2:]] if words[0][:2] == "-S" and len(words[0]) > 2 else
                               [words[0].split("=", 1)[1]] if "=" in words[0] else []) + words[1:])
@@ -2030,6 +2179,13 @@ def shell_findings(command, cwd=None, depth=0):
         if prog == "popd":
             cwd = dirs.pop() if dirs else UNKNOWN_DIR
             continue
+        if prog in functions:
+            if functions[prog] is None or depth >= 3:
+                found.append(FUNCTION_REFUSAL % (prog, prog))
+            else:
+                args = [(resolved_texts(w, env) or [w])[0] if re.search(r"[$`]", w) else w for w in words[1:]]
+                found.extend(shell_findings(functions[prog], cwd, depth + 1, dict(env, **positional_env(args)),
+                                            functions))
         producer = shell_words(segments[index - 1][0])[1] if index > 0 and segments[index - 1][1] == "|" else None
         found.extend(engine_findings(prog, words, written_paths(segment, words)))
         found.extend(program_findings(prog, words, producer, cwd, env))
@@ -2064,11 +2220,15 @@ def shell_findings(command, cwd=None, depth=0):
             start = next((w for w in words[1:] if not w.startswith("-")), ".")
             if start.rstrip("/") in ("", "~", "$HOME", "${HOME}") or (start.startswith("/") and start.count("/") <= 1):
                 found.append("find ... -delete on %s deletes from the filesystem root or home." % start)
-        elif prog in SHELLS and depth < 3:
-            if "-c" in words and words.index("-c") + 1 < len(words):
-                found.extend(shell_findings(words[words.index("-c") + 1], cwd, depth + 1))
-        elif prog == "eval" and depth < 3:
-            found.extend(shell_findings(" ".join(words[1:]), cwd, depth + 1))
+        elif (prog in SHELLS or prog == "eval") and depth < 3:
+            marked = command_words(shell_words(literal_marked(segment))[1])
+            marked = marked if len(marked) == len(words) else words
+            source = shell_script(marked)[0] if prog in SHELLS else " ".join(marked[1:]) or None
+            texts = None if source is None else resolved_texts(source, env)
+            if source is not None and texts is None:
+                found.append(HIDDEN_PROGRAM_REFUSAL % prog)
+            for text in texts or []:
+                found.extend(shell_findings(unmarked(text), cwd, depth + 1, functions=functions))
         elif prog in INTERPRETERS or RUNTIMES.fullmatch(prog):
             flag = next((f for f in ("-c", "-e", "-pe", "-ne") if f in words), None)
             if flag and words.index(flag) + 1 < len(words):
@@ -5124,8 +5284,9 @@ def scan_expansions(text, quotes=True):
     return commands, bare
 
 
-def closing_paren(text, start):
-    """The index of the ) that closes the ( at text[start] (quotes and nested $(...) included), or len(text)."""
+def closing_paren(text, start, pair="()"):
+    """The index of the ) that closes the ( at text[start] (quotes and nested $(...) included), or len(text). With
+    pair="{}", the } that closes a {."""
     depth, quote, i = 0, None, start
     while i < len(text):
         ch = text[i]
@@ -5140,9 +5301,9 @@ def closing_paren(text, start):
                 i = closing_paren(text, i + 1)
         elif ch in "'\"":
             quote = ch
-        elif ch == "(":
+        elif ch == pair[0]:
             depth += 1
-        elif ch == ")":
+        elif ch == pair[1]:
             depth -= 1
             if depth == 0:
                 return i
@@ -5913,9 +6074,15 @@ def role_command_refusal(agent, command, cwd=None):
     written = written_files(command)
     calls = gh_calls(command)
     switches = any(git_subcommand(words) in BRANCH_CHANGES for _, words, _ in calls)
+    env = {}
     for segment, words, why in calls:
+        note_shell_state(segment, env)
+        expanded = git_word_lists(words, env)[0] if program(words) == "git" else [words]
+        if expanded is None:
+            return GIT_EXPANSION_REFUSAL
         refusal = (why or program_refusal(words) or gh_refusal(segment, words, cwd, risk_added)
-                   or git_refusal(segment, words, targets, on_default) or written_run_refusal(words, written))
+                   or next(filter(None, (git_refusal(segment, w, targets, on_default) for w in expanded)), None)
+                   or written_run_refusal(words, written))
         if not refusal and switches and git_subcommand(words) == "push":
             refusal = PUSH_AFTER_SWITCH_REFUSAL
         if refusal:
@@ -6372,10 +6539,48 @@ GIT_PUSHES = {"push": None, "send-pack": None, "http-push": None, "subtree": Non
               "lfs": ("push",)}
 
 
+def git_word_lists(words, env):
+    """(the word lists a git call can run once the shell expands its words, whether a word after the subcommand is
+    left unexpanded), or (None, True) when git's options or its subcommand hold an expansion the hooks can't resolve
+    to text. The -C folder may be anything."""
+    at = 1
+    while at < len(words) and words[at].startswith("-"):
+        at += 2 if words[at] == "-C" else 1
+    lists, unresolved = [[]], False
+    for i, word in enumerate(words):
+        texts = resolved_texts(word, env) if re.search(r"[$`]", word) else [word]
+        if texts is None:
+            if i <= at and words[i - 1:i] != ["-C"]:
+                return None, True
+            unresolved = True
+        splits = [[word]] if texts is None or texts == [word] else [text.split() for text in texts]
+        lists = [found + split for found in lists for split in splits]
+        if len(lists) > 64:
+            return None, True
+    return lists, unresolved
+
+
+def external_git_refusal(words, unresolved):
+    """Whether a git call (its words expanded) may push or change what git runs, under external delivery."""
+    sub = git_subcommand(words)
+    options = words[1:words.index(sub)] if sub in words else words[1:]
+    pushes = sub in GIT_PUSHES and (GIT_PUSHES[sub] is None or unresolved or any(w in GIT_PUSHES[sub] for w in words))
+    if any(o.split("=", 1)[0] in ("-c", "--config-env", "--exec-path") for o in options) or pushes:
+        return True
+    if sub == "config" and not any(w in GIT_CONFIG_READS for w in words) and \
+            len([w for w in words[words.index("config") + 1:] if not w.startswith("-")]) >= 2:
+        return True
+    return bool(sub and git("config", "--get", "alias." + sub).strip())
+
+
 def external_refusal(command):
     """Why a command is refused to every agent under external delivery, or None: the factory pushes and talks to
-    GitHub from its trusted clone, so the lane runs no gh write and no git push, by any name."""
+    GitHub from its trusted clone, so the lane runs no gh write and no git push, by any name. A git subcommand from a
+    variable is read as the command sets it (P=push; git $P, set -- push; git "$@"), and refused when the hooks can't
+    resolve it."""
+    env = {}
     for segment, words, why in gh_calls(command):
+        note_shell_state(segment, env)
         prog = program(words[program_index(words):])
         if why:
             return "%s (%s)" % (EXTERNAL_REFUSAL, why.rstrip("."))
@@ -6389,15 +6594,8 @@ def external_refusal(command):
             if (name == "api" and api_write(args)) or (name != "api" and reads is not None and sub not in reads):
                 return EXTERNAL_REFUSAL
         elif prog == "git":
-            options = words[1:words.index(git_subcommand(words))] if git_subcommand(words) in words else words[1:]
-            sub = git_subcommand(words)
-            pushes = sub in GIT_PUSHES and (GIT_PUSHES[sub] is None or any(w in GIT_PUSHES[sub] for w in words))
-            if any(o.split("=", 1)[0] in ("-c", "--config-env", "--exec-path") for o in options) or pushes:
-                return EXTERNAL_REFUSAL
-            if sub == "config" and not any(w in GIT_CONFIG_READS for w in words) and \
-                    len([w for w in words[words.index("config") + 1:] if not w.startswith("-")]) >= 2:
-                return EXTERNAL_REFUSAL
-            if sub and git("config", "--get", "alias." + sub).strip():
+            lists, unresolved = git_word_lists(words, env)
+            if lists is None or any(external_git_refusal(expanded, unresolved) for expanded in lists):
                 return EXTERNAL_REFUSAL
     return None
 

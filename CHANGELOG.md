@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Shell functions, hidden -c programs and git subcommands from variables.** Three spellings got past the agent shell
+  gate. A function body (`f() { rm -rf .git/harness; }; f`, `function f { ...; }`, `f() ( ... )`) is now checked as
+  the commands it is, and again at each call with the call's arguments; calling a function whose body the hooks can't
+  read is refused. `sh -c`, `bash -lc` and `eval` are read with the variables the command sets resolved, and refused
+  when their program comes from a command substitution or a variable the hooks can't resolve (`sh -c "$(echo ... |
+  base64 -d)"`). Under external delivery, and in the deliverer's gate, a git subcommand from a variable is read as
+  the command sets it (`P=push; git $P`, `set -- push; git "$@"`, a loop's list) and refused when it can't be
+  resolved (`git $(echo push)`). These checks stay defence in depth: credentials, CI's verify and human review are
+  the boundaries.
+
 - **Outward events say what ran; a Source heading and a budget word say less.** `outward` events are logged by
   post-tool-use, once the call has run, with `result` (`succeeded`, `failed`, or `unknown` where the agent CLI doesn't
   say: Codex, OpenCode's version 1 API; the OpenCode adapter now passes OpenCode's status), and cover spellings the deliverer's

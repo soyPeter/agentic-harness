@@ -295,7 +295,13 @@ class ExternalDelivery(unittest.TestCase):
                    "git submodule foreach git push", "git lfs push origin HEAD", "echo HEAD | xargs git push origin",
                    "sh -c 'git push origin HEAD'", "find . -maxdepth 0 -exec gh pr merge 9 \\;",
                    "gi''t push origin HEAD", "G=git; $G push origin HEAD", "\"git\" push origin HEAD",
-                   "g\\it push origin HEAD", "G=gh; $G pr merge 9")
+                   "g\\it push origin HEAD", "G=gh; $G pr merge 9", "git $(echo push) origin HEAD",
+                   "git `echo push` origin HEAD", "P=push; git $P origin HEAD", "export P=push; git \"$P\" origin HEAD",
+                   "set -- push origin HEAD; git \"$@\"", "set push; git $1 origin HEAD",
+                   "git \"$(printf pu)sh\" origin HEAD", "for s in status push; do git $s origin HEAD; done",
+                   "f() { git \"$@\"; }; f push origin HEAD", "git $UNSET_HARNESS_TEST_VARIABLE origin HEAD",
+                   "read s; git $s origin HEAD", "git -C . $(echo push) origin HEAD", "S=$(echo push); git $S",
+                   "git lfs $(echo push) origin HEAD")
         for agent in ("implementer", "deliverer", None):
             for command in refused:
                 with self.subTest(agent=agent, command=command):
@@ -303,6 +309,19 @@ class ExternalDelivery(unittest.TestCase):
 
                     self.assertEqual(answer.returncode, 2, answer.stderr)
         self.assertEqual(self.p.bash("git submodule status", "implementer").returncode, 0)
+
+    def test_everyday_commands_and_git_subcommands_the_hooks_resolve_are_allowed_in_external_mode(self):
+        for command in ("S=status; git $S", "for s in status log; do git $s -1; done", "set -- status; git \"$@\"",
+                        "git -C \"$(git rev-parse --show-toplevel)\" status", "for f in src/*.py; do wc -l \"$f\"; done",
+                        "cd \"$(git rev-parse --show-toplevel)\" && make test",
+                        "git commit -m \"$(cat <<'EOF'\nfeat: search\n\nBody.\nEOF\n)\"", "make test",
+                        "pytest -q tests", "npm test", "sed -i.bak 's/a/b/' src/app.py",
+                        "echo done | tee -a logs/run.log", "D=build; rm -rf \"$D\"", "pushd src && make && popd",
+                        "git log -1 --format=%H", "f() { git status; }; f"):
+            with self.subTest(command=command):
+                answer = self.p.bash(command, "implementer")
+
+                self.assertEqual(answer.returncode, 0, answer.stderr)
 
     def test_doctor_knows_the_delivery_modes(self):
         accepted = self.p.harness("doctor", check=False).stdout
