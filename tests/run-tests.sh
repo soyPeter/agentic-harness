@@ -96,6 +96,7 @@ task-budget|the per-task spend cap: the ledger across resumes, the proxy's refus
 intake|intake: provenance, dedupe, the trusted-sender verdict, request text as data (ADR-008; properties need hypothesis)
 external-delivery|delivery from a trusted clone: ready-to-deliver, delivery-plan, delivery-record (ADR-008)
 agent-hooks|agents' own hooks record verdicts and keep write scopes
+agent-config|the agent CLIs' own configuration: agents can't change it, a setting that turns the harness off is an error, hooks run python3 -I
 live-plugin|live: a plugin judge verdict is recorded (runs with HARNESS_E2E=1)
 sandbox-egress|live: the sandbox's allowlist, capabilities and evidence in a real container (runs with HARNESS_E2E=1)"
 PY_WORK="$WORK/py"

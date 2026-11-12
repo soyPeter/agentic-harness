@@ -107,7 +107,7 @@ def plugin_entries(version):
     return {"extraKnownMarketplaces": {"agentic-harness": {"source": {"source": "github",
                                                                       "repo": "soyPeter/agentic-harness",
                                                                       "ref": "v" + version}}},
-            "enabledPlugins": {PLUGIN: True}}
+            "enabledPlugins": {PLUGIN: True}, "disableAllHooks": False}
 
 
 def run(cwd, env, *args, check=True, input=None):

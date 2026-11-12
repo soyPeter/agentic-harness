@@ -119,6 +119,8 @@ def plugin_settings(data, version):
     markets[MARKETPLACE] = {"source": {"source": "github", "repo": "soyPeter/agentic-harness",
                                        "ref": "v" + version}}
     plugins[PLUGIN] = True
+    # Claude Code reads the highest-precedence value, so this keeps the plugin's hooks on against a user-level true.
+    data["disableAllHooks"] = False
     return data
 
 
@@ -130,6 +132,8 @@ def without_plugin(data):
             del entries[name]
             if not entries:
                 del data[key]
+    if data.get("disableAllHooks") is False:
+        del data["disableAllHooks"]
     return data
 
 

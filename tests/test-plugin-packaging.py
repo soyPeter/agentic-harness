@@ -63,7 +63,7 @@ class PluginPackaging(unittest.TestCase):
             with self.subTest(role=role):
                 commands = commands_claude_runs("SubagentStop", "agentic-harness:" + role)
 
-                self.assertEqual(commands, ['python3 "${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py" hook subagent-stop'])
+                self.assertEqual(commands, ['python3 -I "${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py" hook subagent-stop'])
 
     def test_claude_records_no_other_agent(self):
         self.assertEqual(commands_claude_runs("SubagentStop", "agentic-harness:implementer"), [])

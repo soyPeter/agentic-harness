@@ -46,4 +46,4 @@ if subprocess.run(["git", "-C", str(cache), "status", "--porcelain", "--untracke
     sys.exit("harness: the cached engine %s has local changes, so it is not the pinned release; delete it to fetch "
              "it again" % cache)
 os.environ["HARNESS_ROOT"] = str(root)
-os.execv(sys.executable, [sys.executable, str(script), "git", "pre-commit"])
+os.execv(sys.executable, [sys.executable, "-I", str(script), "git", "pre-commit"])
