@@ -767,14 +767,12 @@ class ThinHostRun(Sandbox):
         tasks.write_text(taken_back.replace("- [ ] **Task 7.1", "- [WIP] **Task 7.1"))
         env = dict(self.run_env, HARNESS_SANDBOX_START="on", HARNESS_AUTONOMY="autonomous", HARNESS_VERIFY="block",
                    HARNESS_RUN_ATTEMPTS="1", HARNESS_TEST_CMD="true", **settings)
-        run = subprocess.run(list(self.launcher) + ["run", "--only", "7.1"], cwd=self.project, env=env,
-                             capture_output=True, text=True, timeout=2400)
-        self.assertIn("run: task 7.1 attempt 1", run.stdout, run.stdout + run.stderr)
-        return run.stdout
+        return subprocess.run(list(self.launcher) + ["run", "--only", "7.1"], cwd=self.project, env=env,
+                              capture_output=True, text=True, timeout=2400).stdout
 
     def test_a_the_shipped_definition_with_an_allowed_difference_is_a_container(self):
-        # The shipped agent command runs Claude Code, which this token can't sign in with: the session fails, and
-        # what the host found in its sandbox is what counts here.
+        # The shipped agent command runs Claude Code, which this token can't sign in with: run stops at "the agent
+        # could not start", and what the host found in the sandbox before the session is what counts here.
         out = self.run_task(CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-test-token", HARNESS_RUN_TASK_TIMEOUT="300")
 
         self.assertIn("isolation_class container (", out)
@@ -793,6 +791,7 @@ class ThinHostRun(Sandbox):
         out = self.run_task()
         sandbox = json.loads(self.host(*self.launcher, "receipt", "7.1", "--json", env=self.on_host).stdout)["sandbox"]
 
+        self.assertIn("run: task 7.1 attempt 1", out)
         self.assertIn("isolation_class custom (", out)
         self.assertEqual(sandbox["isolation_class"], "custom", sandbox["isolation_reason"])
         self.assertIn("docker-compose.yml", sandbox["isolation_reason"])
