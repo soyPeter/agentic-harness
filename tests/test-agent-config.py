@@ -324,17 +324,39 @@ class ConfigurationThatTurnsTheHarnessOff(Fixture):
         self.write(self.home / ".claude/settings.json", {"env": {"PYTHONDONTWRITEBYTECODE": "1", "FOO": "bar"}})
         self.assertNoAgentConfigError()
 
-    def test_permissions_that_allow_changing_protected_files(self):
+    def assertWarning(self, needle):
+        result = self.doctor()
+        warnings = [line for line in result.stdout.splitlines() if line.startswith("warn")]
+        self.assertTrue(any(needle in line for line in warnings), "no warn with %r in:\n%s" % (needle, result.stdout))
+        return result
+
+    def test_allow_rules_for_protected_files_are_a_warning_since_the_hooks_still_run(self):
         for rule in ("Edit(~/.claude/**)", "Write(//%s/.claude.json)" % str(self.home).lstrip("/"),
                      "Bash(rm -rf ~/.codex:*)", "Edit(backbone/**)", "Write(scripts/harness/**)",
                      "Edit(backbone/.verdicts/**)", "Edit(~/**)", "Edit(.claude/settings.local.json)"):
             with self.subTest(rule=rule):
                 self.write(self.home / ".claude/settings.json", {"permissions": {"allow": [rule]}})
-                self.assertError(rule)
+                result = self.assertWarning(rule)
+                self.assertIn("hooks still", result.stdout)
+                self.assertNoAgentConfigError()
         self.write(self.home / ".claude/settings.json", {"permissions": {"allow": [
             "Bash(npm test)", "Bash(scripts/harness/doctor.sh)", "Edit(src/**)", "Edit(.claude/skills/**)", "Edit(**)",
-            "Edit(backbone/3-TASKS.md)", "Write(~/notes/**)"]}})
-        self.assertNoAgentConfigError()
+            "Edit(backbone/3-TASKS.md)", "Write(~/notes/**)", "Bash(python3:*)", "Bash(node *)", "Bash(bash:*)"]}})
+        result = self.doctor()
+        self.assertEqual([line for line in result.stdout.splitlines() if "allows" in line], [], result.stdout)
+
+    def test_a_common_allow_rule_does_not_stop_run(self):
+        self.write(self.home / ".claude/settings.json", {"permissions": {"allow": ["Bash(python3:*)"]}})
+        result = self.harness("run", "--dry-run", HARNESS_AUTONOMY="autonomous", HARNESS_TEST_CMD="true",
+                              HARNESS_SKIP_TRUST_CHECK="1")
+        self.assertNotIn("fix the harness first", result.stdout)
+        self.assertNotIn("python3", "\n".join(l for l in result.stdout.splitlines() if l.startswith("ERROR")))
+
+    def test_doctor_runs_without_deprecation_warnings(self):
+        self.write(self.home / ".claude/settings.json", {"permissions": {"allow": ["Edit(src/**)", "Bash(npm test)"]}})
+        result = self.harness("doctor", PYTHONWARNINGS="error::DeprecationWarning")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertNotIn("DeprecationWarning", result.stderr)
 
     def test_codex_hooks_switched_off(self):
         for text in ("[features]\nhooks = false\n", "[features]\ncodex_hooks = false\n", "features.hooks = false\n",

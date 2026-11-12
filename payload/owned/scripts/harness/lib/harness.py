@@ -4238,8 +4238,10 @@ def allow_rule_protected(rule):
         return False
     tool, spec = m.groups()
     if tool == "Bash":
-        return bool(shell_findings(re.sub(r":?\*+$", "", spec)))
-    prefix = re.split(r"[*?\[{]", spec, 1)[0]
+        # A prefix rule matches the command with arguments after it: python3:* is not python3 reading stdin.
+        command = re.sub(r"(?::\*|\s+\*)$", " x", spec)
+        return bool(shell_findings(command))
+    prefix = re.split(r"[*?\[{]", spec, maxsplit=1)[0]
     if not prefix.strip("./"):
         return False
     if prefix.startswith("//"):
@@ -4276,8 +4278,11 @@ def agent_config_problems(changes=True):
         permissions = data.get("permissions") if isinstance(data.get("permissions"), dict) else {}
         for rule in permissions.get("allow") or [] if isinstance(permissions.get("allow"), list) else []:
             if allow_rule_protected(rule):
-                issues.append(("error", "%s allows %s without asking: it names files the harness's gates depend on "
-                                        "(the CLIs' configuration or harness files). Remove the rule." % (where, rule)))
+                issues.append(("warn", "%s allows %s without asking. The harness's hooks still check each such call "
+                                       "and refuse what they refuse; the rule only skips Claude Code's own prompt, "
+                                       "which is the last check left if the hooks are ever off. It covers the CLIs' "
+                                       "configuration, harness files or a command the hooks refuse; consider removing "
+                                       "it." % (where, rule)))
         if name == "managed settings" and data.get("allowManagedHooksOnly") is True and HOOK_MARK not in json.dumps(
                 data.get("hooks") or {}) and "launcher.py" not in json.dumps(data.get("hooks") or {}):
             issues.append(("error", "%s sets allowManagedHooksOnly, which skips the project's and the plugin's hooks, "
