@@ -14,7 +14,8 @@
   shell reads them (`sh -e f`, `bash -o errexit f`), on its stdin or through a pipe, through runners such as `timeout`,
   `xargs` and `find -exec`, in any letter case of the path or the shell), and, while such a bundle is present, commands whose
   code comes from an expansion or substitution. A bundle whose SKILL.md registers hooks, runs shell
-  placeholders or pre-approves tools isn't admissible: admission grants no command or permission, and the tool
+  placeholders or pre-approves tools isn't admissible, and a file under an admitted bundle that its
+  digest doesn't cover (one git ignores) doesn't run: admission grants no command or permission, and the tool
   contracts, shell checks and role scopes govern every call whichever skills are loaded. `[revoke sha256:...]` blocks
   those bytes in any `.claude/skills/` folder of the repository, even with a matching record; revocations are read
   from the working copy, the index, HEAD, the default branch and every commit the reflogs record together (so a
@@ -29,7 +30,7 @@
   back or removes a revocation. doctor and the session-start note report the problems. Separately, an agent's Skill
   call is refused when any skill or command in the repository the name can reach (folder name, frontmatter `name`,
   nested `.claude/skills/`, namespace) registers hooks or runs `` !`...` `` or ```` ```! ```` placeholders, as
-  Claude Code finds them, or has a frontmatter the harness can't read: Claude Code runs those as it loads the skill,
+  Claude Code finds them, or has a frontmatter the harness can't read (a `...` document end included): Claude Code runs those as it loads the skill,
   outside every tool call the hooks see. Compatibility, dependencies and data
   destinations are recorded, not checked, and other plugins' bundles, outside the repository, can't be admitted; the
   ADR's implementation notes list what is deferred and why.

@@ -183,8 +183,11 @@ def frontmatter(text):
         return {}, None
     fields, key = {}, None
     for n, line in enumerate(lines[1:], 2):
-        if line.strip() in ("---", "..."):
+        if line.strip() == "---":
             return fields, None
+        if line.strip() == "...":
+            # Claude Code's frontmatter runs to the first ---, so its YAML parser still gets what follows.
+            return fields, "line %d of its frontmatter ends a YAML document (...), and what follows may be read" % n
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         if line[0] in " \t" or line.startswith("- ") or line.strip() == "-":

@@ -4693,6 +4693,10 @@ def blocked_bundle_of(name):
             problems = admission_problems(record, fields)
             if problems:
                 return record, "it isn't admitted now (%s)" % "; ".join(problems)
+            listed = bundle_files(bundle) if name != bundle else None
+            if not (ROOT / name).exists() or (listed is not None and name[len(bundle) + 1:] not in listed):
+                return record, ("%s isn't one of the reviewed files its digest covers (git ignores it, or it isn't "
+                                "there)" % name)
     revoked = revoked_digest(folder) if folder else None
     if revoked:
         return folder, revoked_message(revoked, revocations)

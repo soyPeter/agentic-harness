@@ -211,11 +211,13 @@ table and lists now say what holds, and the fixes are in the same pull request.
   no SKILL.md in it registers hooks, runs placeholders or pre-approves tools. Then its skills load and satisfy routes
   as any skill does. Otherwise it is reference: the Skill tool is refused, reading its SKILL.md doesn't count as
   loading it, edits routed to it are refused (parked for the user), and the shell checks refuse an agent's command
-  that runs one of its files: by path, as a shell's, interpreter's or `source`'s operand or option value, on a
-  shell's stdin (`sh < f`, `cat f | sh`), through runners (`timeout`, `nice`, `env`), in any letter case; and,
+  that runs one of its files: by path, as a shell's, interpreter's or `source`'s operand or option value (the
+  shell's options read as it reads them: `sh -e f`, `bash -o errexit f`), on a shell's stdin (`sh < f`, `cat f |
+  sh`), through runners (`timeout`, `nice`, `env`, `xargs`, `find -exec`), in any letter case; and,
   while such a bundle is in the repository, a command whose code comes from an expansion, glob or substitution. A
   script that another program starts (a Makefile, a script outside the bundle, a test runner) still runs: the shell
-  checks read command lines, not what programs do.
+  checks read command lines, not what programs do. An admitted bundle's files run only when its digest covers them:
+  a file git ignores, or one that isn't there, under an admitted bundle is refused.
 - Updates and revocation are changes: verify refuses committed bundle bytes that don't match their record, and, even
   with `--allow-user-changes`, revoked bytes coming back (as files, or files and record) and a removed revocation. A
   revocation also blocks the same bytes in another skill folder, in any `.claude/skills/` of the repository.
@@ -225,7 +227,8 @@ table and lists now say what holds, and the fixes are in the same pull request.
   refused when any of them isn't admitted guidance, or registers hooks or runs placeholders as Claude Code 2.1.322
   finds them (a ```` ```! ```` anywhere in the text, `` !` `` after whitespace), admitted or not. Frontmatter keys may
   be quoted; a frontmatter the harness can't read (merge keys, explicit or escaped keys, flow style, repeated keys)
-  counts as registering hooks.
+  counts as registering hooks, and so does a `...` document end, since Claude Code's frontmatter runs to the
+  first `---` and its YAML parser reads what follows.
 - Tests show admission grants nothing: in autonomous mode, a tool without a contract, a `confirm` tool, a write tool
   into `backbone/`, `curl … | sh`, an edit of `tools.conf` and a `HARNESS_*=` assignment get the same refusals with
   the admitted skill loaded and without it.

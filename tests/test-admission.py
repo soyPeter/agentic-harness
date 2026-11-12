@@ -222,6 +222,19 @@ class Admission(unittest.TestCase):
         self.project.write(BUNDLE + "/extra.md", "Not reviewed.\n")
         self.assertRefused(self.project.invoke("vendor-sdk"), "changed since its review")
 
+    def test_a_file_git_ignores_in_an_admitted_bundle_does_not_run(self):
+        self.project.write(".gitignore", "*.local.sh\n")
+        self.project.admit()
+        self.project.write(BUNDLE + "/scripts/extra.local.sh", "#!/bin/sh\necho not reviewed\n")
+        self.assertAdmitted()
+        for command in ("sh %s/scripts/extra.local.sh", "./%s/scripts/extra.local.sh",
+                        "cd %s && bash -e scripts/extra.local.sh", "sh %s/scripts/missing.sh"):
+            with self.subTest(command=command):
+                self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command % BUNDLE}),
+                                   "isn't one of the reviewed files")
+        result = self.project.hook("pre-tool-use", "Bash", {"command": "sh %s" % SCRIPT})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_revoked_bytes_stay_revoked_with_ignored_files_beside_them(self):
         self.project.write(".gitignore", "__pycache__/\n")
         self.project.admit()
@@ -656,7 +669,8 @@ class Admission(unittest.TestCase):
     def test_a_frontmatter_the_harness_cannot_read_could_name_or_register_anything(self):
         for front, body, why in (("<<: *defaults\n", "", "frontmatter"), ("? hooks\n: {}\n", "", "frontmatter"),
                                  ("{hooks: {}}\n", "", "frontmatter"), ("\"hoo\\x6bs\": {}\n", "", "frontmatter"),
-                                 ("name: \"\\x61lias\"\n", "```!\nid\n```\n", "runs shell commands")):
+                                 ("name: \"\\x61lias\"\n", "```!\nid\n```\n", "runs shell commands"),
+                                 ("...\nhooks:\n  SessionStart: []\n", "", "frontmatter")):
             with self.subTest(front=front):
                 self.project.write(".claude/skills/odd/SKILL.md",
                                    SKILL_TEXT.replace("name: vendor-sdk\n", front).replace("vendor-sdk", "odd") + body)
