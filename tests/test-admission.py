@@ -400,7 +400,8 @@ class Admission(unittest.TestCase):
                 self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command % SCRIPT}),
                                    "revoked")
         for command in ("find .claude -name '*.sh' -exec sh {} \\;", "find . -exec bash -e {} +",
-                        "ls .claude/skills/*/scripts/*.sh | xargs sh", "xargs -a list.txt sh"):
+                        "ls .claude/skills/*/scripts/*.sh | xargs sh", "xargs -a list.txt sh",
+                        "cd \"$D\" && sh scripts/setup.sh", "cd \"$D\" && ./setup.sh"):
             with self.subTest(unreadable=command):
                 self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command}), "can't tell")
         for command in ("sh -e build.sh", "bash -o errexit -c 'echo hi'", "find . -name '*.md' -exec cat {} \\;",

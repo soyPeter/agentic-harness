@@ -5074,32 +5074,15 @@ def command_code(words):
     return ([words[0]] if "/" in words[0] else []), False, None
 
 
-XARGS_VALUES = ("-I", "-J", "-L", "-n", "-P", "-s", "-E", "-e", "-a", "-d", "-R", "-S", "--arg-file", "--delimiter",
-                "--max-args", "--max-procs", "--max-lines", "--max-chars", "--replace")
-
-
 def runner_words(words):
-    """(the command xargs, parallel or find -exec runs, the token it puts its arguments at, whether xargs reads them
-    from a file) or None for any other command."""
+    """(the command xargs, parallel or find -exec runs, the token it puts its arguments at, whether its arguments come
+    from somewhere other than a pipe) or None for any other command."""
     prog = program(words)
-    if prog in ("xargs", "parallel"):
-        i, token, from_file = 1, "{}", False
-        while i < len(words) and words[i].startswith("-"):
-            flag = words[i]
-            name = flag[:2] if not flag.startswith("--") else flag.split("=", 1)[0]
-            from_file |= name in ("-a", "--arg-file")
-            if name in ("-I", "-J", "--replace"):
-                token = flag[2:] if name != "--replace" and flag[2:] else (
-                    flag.split("=", 1)[1] if "=" in flag else words[i + 1] if i + 1 < len(words) else "")
-            attached = (name != flag and not flag.startswith("--")) or "=" in flag
-            i += 1 if attached or name not in XARGS_VALUES else 2
-        return words[i:], token, from_file
-    if prog == "find":
-        at = next((i for i, w in enumerate(words) if w in ("-exec", "-execdir", "-ok", "-okdir")), None)
-        if at is not None:
-            end = next((j for j in range(at + 1, len(words)) if words[j] in (";", "+")), len(words))
-            return words[at + 1:end], "{}", True
-    return None
+    run, token = runner_command(prog, words)
+    if run is None:
+        return None
+    options = words[1:len(words) - len(run)]
+    return run, token, prog == "find" or any(w == "-a" or w.startswith(("-a", "--arg-file")) for w in options)
 
 
 def code_files(segment, words, piped):
@@ -5197,6 +5180,7 @@ def blocked_bundle_runs(segment, words, cwd, piped=()):
         return []
     names, unreadable = code_files(segment, words, piped)
     root = os.path.realpath(str(ROOT))
+    unreadable |= cwd == UNKNOWN_DIR and any(not os.path.isabs(os.path.expanduser(t)) for t in names)
     for target in names:
         full = true_case(os.path.realpath(os.path.join(cwd or str(ROOT), os.path.expanduser(target))))
         if not full.startswith(root + os.sep):

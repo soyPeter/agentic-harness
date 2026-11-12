@@ -13,7 +13,7 @@
   refuse agents' commands that run its files (by path, as a shell's or interpreter's operand with its options read as the
   shell reads them (`sh -e f`, `bash -o errexit f`), on its stdin or through a pipe, through runners such as `timeout`,
   `xargs` and `find -exec`, in any letter case of the path or the shell), and, while such a bundle is present, commands whose
-  code comes from an expansion or substitution. A bundle whose SKILL.md registers hooks, runs shell
+  code comes from an expansion or substitution, or from a relative path after a `cd` the hooks can't resolve. A bundle whose SKILL.md registers hooks, runs shell
   placeholders or pre-approves tools isn't admissible, and a file under an admitted bundle that its
   digest doesn't cover (one git ignores) doesn't run: admission grants no command or permission, and the tool
   contracts, shell checks and role scopes govern every call whichever skills are loaded. `[revoke sha256:...]` blocks
