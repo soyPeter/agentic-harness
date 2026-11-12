@@ -30,6 +30,127 @@
   are left out now. Upgrade note: a spec with other text under `## Approval` gets a new fingerprint, so its grill and
   judge passes go stale: grill and judge it again (its approval stays). A note that goes with an approval belongs in
   the `Approved-by:` line or in a comment.
+
+- **Outward events say what ran; a Source heading and a budget word say less.** `outward` events are logged by
+  post-tool-use, once the call has run, with `result` (`succeeded`, `failed`, or `unknown` where the agent CLI doesn't
+  say: Codex, OpenCode's version 1 API; the OpenCode adapter now passes OpenCode's status), and cover spellings the deliverer's
+  gate can't read (`command git push`) and GitHub API writes (`api-write`). A `## Source` section without a
+  `- Sender verdict:` line is no longer taken for an untrusted request. The key proxy's refusal is recognised only
+  from an HTTP 402 in the agent's own error report, not from any mention of a budget in the session's output.
+
+- **One run per task on every runner path, and no pushes from any role under external delivery.** `run` without
+  `--only` now locks each task it drives as `run --only` does, and `orca` leaves out (and holds) the tasks it drives,
+  so one task can't run twice at once from any worktree. Under `HARNESS_DELIVER="external"`, where the boundary is that the
+  lane holds no push credential, the hooks add defence in depth for every agent and the main session, not only the
+  deliverer: `gh` runs its read subcommands and `gh api` reads only, and git runs no push-capable subcommand (`push`,
+  `send-pack`, `http-push`, `subtree`, `submodule foreach`, `lfs push`), no `-c`, `--config-env` or `--exec-path`, no
+  config write or alias, no `git-*` program directly, and no git or gh through `xargs`, `parallel` or `find -exec`;
+  each command is classified by its parsed words (`gi''t push` is `git push`), and a command named by an expansion
+  (`G=git; $G push`) is refused. `ci-judge` refuses to start with `HARNESS_DELIVERY_KEY` set, like `run` and `orca`.
+
+- **The task's cost ledger fails closed and counts a killed session.** `run` reserves each session in the ledger
+  before it starts, for what is left of `HARNESS_TASK_BUDGET_USD`, and settles it with the cost when it ends, so a
+  run killed during a session still counts it. A ledger that can't be read or is corrupt read as $0 and then crashed
+  the run; now, with a budget set, it stops the task before any session and escalates it (`budget`), as does a ledger
+  that can't be written, or one that is missing while any record shows the task ran before (a
+  marker in `.git/harness/ran/`, a run log, or the new `run-session` event), so wiping the ledger and the event log
+  together doesn't reset the budget. The receipt's `cost` adds `unsettled_sessions`, or `error` when the ledger can't be read.
+
+- **delivery-record checks the trusted clone's verify, and can sign the record.** The report now carries `verify`:
+  the range, head and exit status of the trusted clone's `verify --range`. `delivery-record` refuses it unless the
+  verified head is the task's `HEAD` and the range ends there, and `delivered` needs verify to have passed. With
+  `HARNESS_DELIVERY_KEY` set (a secret in the factory's environment, only for `delivery-record` and `next`), the
+  record is signed and `next` counts only signed records, each for its own task, so a line an agent's own code appends to the event log can't
+  mark a task delivered. `run` and `orca` refuse to start while the key is in their environment, since a session could read it from
+  its parent process. Without the key, `next` trusts
+  every record, as before.
+
+- **Agents write nothing in the git directory.** The file tools could write `.git/harness/events.jsonl` or a task's
+  cost ledger (the implementer's scope didn't cover `.git/`), and from a linked worktree the shell could delete the
+  ledger in the shared git directory by its absolute path. Every agent and the main session are now refused any write
+  to `.git`, the worktree's git directory and the repository's common one, with the file tools or the shell, by a
+  relative or an absolute path, by a glob matching it, by `find -delete` or a writer run by `find -exec` or `xargs` that
+  can reach it (`find . -name '*.jsonl' -delete`; pruning `.git`, or `-name` patterns that match nothing there, keep
+  `find . -name '*.pyc' -delete` allowed), by `$PWD/.git/...`, through a variable or loop the command sets, or after
+  `cd`, `pushd` or `popd`. A write or delete whose target can't be resolved at all (a command substitution other than
+  `mktemp`, a `read` variable, an unset variable) is refused. Reads stay allowed. **Behaviour change:** a supervised session can no longer write
+  `.git/info/exclude`; use `.gitignore`.
+
+- **Agents run no program the hooks can't read.** For every agent, an interpreter or a shell reading its program
+  from stdin (a pipe, a file redirect, a process substitution) is refused unless the program is a literal heredoc or
+  here-string; `env -S` is read as the command it splits, `awk` may not run commands, and git may not be given one to
+  run (`git -c` or `git config` with a `!` alias, `core.sshCommand`, `core.pager`, helpers, filters). `xargs`,
+  `parallel` and `find -exec` may not run a shell, or an interpreter whose program comes from their input, nor (`xargs`,
+  `parallel`) a writer unless a `find` that can't reach `.git`, or `git ls-files`, feeds them. **Behaviour change:**
+  `echo 'print(1)' | python3`, `echo ls | sh`, `find tests -name '*.py' -exec python3 {} \;`, `git -c core.pager=...`
+  and awk's `system()` are refused; put the program in a file or a heredoc, and use `--no-pager`. Reading the
+  harness engine's text in `python3 -c` is allowed again; running or importing it stays refused.
+- **Agents can't start a user-only command by another spelling.** The shell gate refused `harness.py run`, `linear`,
+  `intake` and the other user-only commands only when `harness.py` and the command were in fixed places, so
+  `python3 -B -I .../harness.py intake`, the thin launcher, `-m harness`, a script or command from an expansion, a
+  shell function, `xargs` or `find -exec`, the engine's source on an interpreter's stdin, `-c` code with `runpy`, or a
+  copy of the engine went through; an agent in autonomous mode could file
+  a trusted task with `intake`. The gate now finds the engine and its command wherever they are, refuses running the
+  engine from code and copying, linking or aliasing it, and keeps the dry runs allowed. `intake` and `linear import`
+  no longer refresh the out-of-band snapshot, so if an agent runs them anyway, their writes show as tampering and the
+  task in progress is escalated (autonomous mode).
+
+- **Delivery from a trusted clone (ADR-008, follow-up 4).** `HARNESS_DELIVER="external"` (user-only) is for a lane
+  that holds no GitHub credential. `next` returns `deliver` with no role and `external: true` for a finished,
+  committed task, and `run` ends it there with outcome `ready-to-deliver` instead of retrying or escalating it.
+  `harness.py delivery-plan <id> [--base <branch>] [--pr-labels a,b] [--json]` says what the factory pushes and opens:
+  the branch, base, head commit, PR title and body (the receipt and the reviews' follow-ups) and the labels to add and
+  remove, under the deliverer's rules (only the receipt's `risk:*` and `class:*` labels, one `risk:*` label that only
+  goes up); an escalated task gets a draft PR naming the escalation. `harness.py delivery-record <id> <report.json>`,
+  refused to agents, records the trusted clone's outcome as the `deliver` event `next` reads, with the checks the
+  deliverer's report gets: the pushed head is the task's `HEAD`, `delivered` needs green or no checks, and `hold` and
+  `ci-failed` need findings with owners. In external mode a deliverer in the lane pushes nothing and its report isn't
+  recorded. Doctor checks `HARNESS_DELIVER` is `on`, `off` or `external`.
+
+- **Intake with provenance and the trusted-sender verdict (ADR-008, follow-up 2).** `harness.py intake <request.json>
+  [--json]` turns a request from an agent factory's doors (Slack, GitHub, Linear, the clock) into a pending task. It
+  allocates the id (`intake.<n>`) under a lock shared by the repository's worktrees, writes a draft spec whose frozen
+  `## Source` section records the contract version, door, channel, message, URL, sender, the factory's sender verdict,
+  when it arrived, the dedupe key and the text's SHA-256, quotes the request in Context as source material, adds the
+  task line and logs an `intake` event. The same `dedupe_key` returns the existing task and writes nothing. An
+  `untrusted` sender's task is escalated (kind `intake`) and, once a person resolves that, its Source counts as a risk,
+  so policy approval never reaches it. Request text is data from any sender: the quote is escaped so that a heading,
+  fence, comment, HTML or approval line in it stays text, and the title keeps only plain characters, so it can't mark
+  the task `(light)` or BLOCKED. The hooks refuse any change to a `## Source` section, and `verify` refuses one in a
+  range. `linear import` writes the same section (`--sender`, `--sender-verdict`; trusted by default, since the user
+  runs it) and keeps the same plain characters of a ticket's title: a ticket titled `... (light)` could put its task
+  on the light lane before. The analyst keeps Source and rewrites Context. Agents can't run `intake`.
+
+- **A spend cap per task that survives resumes (ADR-008, follow-up 3).** `HARNESS_TASK_BUDGET_USD` (user-only, set
+  by the factory for the `run` process) is what one task may spend across all its sessions. Each runner session's cost
+  goes to the task's ledger in the shared git directory (`.git/harness/costs/task-<id>.jsonl`), which outlives the run
+  and the worktree. Once the ledger reaches the budget, `run` starts no session for the task and escalates it with the
+  new kind `budget`. While a budget is set, a session that ends in an error naming HTTP 402 or a budget is taken for
+  the key proxy's refusal: the cost is recorded, the task is escalated (`budget`) and the run stops, since the day's
+  cap may refuse the next task too. `run-budget` events say which cap (`scope`: `run`, `task` or `proxy`), and the
+  receipt shows the task's cost (`cost` in `--json`). The per-day cap and booking each call before it goes out stay
+  with the factory's key proxy. `HARNESS_RUN_MAX_COST` is unchanged.
+
+- **A no-merge profile not tied to Triple (ADR-008, follow-up 10).** `HARNESS_PROFILE="no-merge"` (user-only, or added
+  by the environment, which can't lift it) brings the `triple` profile's merge refusals to any project, such as the
+  agent software factory's lanes, without Triple's catalog pack: the shell gate refuses `gh pr merge` and GitHub's
+  merge API for every agent, the tool gate refuses merge tools, `orca` refuses `--merge` and `--trust`, and
+  `orca-nightly` refuses to start. `enroll --profile no-merge` writes it and refuses `--automation`, whose schedule
+  merges unattended, but allows `--protect`, which requires the harness checks. Doctor accepts it.
+  `tests/test-no-merge-profile.py` runs the whole decision table: each merge path, for each profile in `harness.conf`
+  and in the environment.
+
+- **A versioned contract for an outside runner (ADR-008, follow-up 1).** `harness.py contract [--json]` states the
+  contract versions the engine serves (version 1) and declares what a runner such as the agent software factory may
+  rely on: the fields `next`, `state`, `receipt` and `escalations` always answer with, the steps `next` returns, and
+  the event kinds with their fields. Within a version fields are only added. `harness.py escalations --json` lists the
+  open escalations with `task`, `kind`, `class`, `playbook`, `reason`, `needed`, `status` and `at`, and the count per
+  failure class. Every event in `.git/harness/events.jsonl` carries `v`, the contract version. A new `outward` event
+  records each outward write: a push, a pull request created or edited, or a label created by a Bash call the hooks let
+  through (with the agent's role), and the GitHub issue, push, pull request and Linear comment the harness makes
+  itself. `run --only <id>` holds a per-task lock in the shared git directory, so a second run of the same task from
+  any worktree is refused (`run: locked`). `tests/test-factory-contract.py` pins the version 1 fields.
+
 - **The traceability matrix comes with each pull request, and the export can be archived and signed (ADR-004,
   follow-ups).** `harness-verify` writes the HTML matrix of a pull request that verifies with the base branch's
   engine, the one that verified it, so the pull request can't change what describes it, and uploads it as the
