@@ -385,6 +385,9 @@ plugin or helper command of its own. So agents may read `~/.claude`, `~/.claude.
 start. A change to a command-running setting (`apiKeyHelper`, hooks, plugins, MCP servers) is an error until you
 accept it with `harness.py accept-agent-config`. Claude Code's `ConfigChange` hook stops such a change from taking
 effect mid-session, and every hook runs `python3 -I`, so `PYTHONPATH` and similar variables can't hijack the engine.
+Agents can't start a nested `claude`, `codex` or `opencode` session that leaves the hooks out either (`--bare`,
+`--settings '{"disableAllHooks":true}'`, `--setting-sources user`, `codex -c features.hooks=false`, a moved config
+folder).
 These are still hooks that a user-level setting could reach. The only hooks no user-level setting can switch off are
 managed ones: for unattended runs, install a root-owned `managed-settings.json` with `"disableAllHooks": false` (and
 the plugin force-enabled for thin projects). The snippet and the full list are in

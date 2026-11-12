@@ -12,16 +12,25 @@
     `config.toml`, profiles, `hooks.json`, `AGENTS.md`, rules, agents and prompts; all of OpenCode's
     `~/.config/opencode`; the managed settings folders; and `~/.agentic-harness`. Also under `$CLAUDE_CONFIG_DIR`,
     `$CODEX_HOME`, `$OPENCODE_CONFIG_DIR`, `$XDG_CONFIG_HOME` and `$OPENCODE_CONFIG`, through symlinks, `~` and
-    `$HOME`. The `claude plugin|mcp|config` and `codex mcp|features` commands that change them are refused too.
-    Reading them still works, and so does the rest of `~/.claude` (transcripts, auto-memory).
+    `$HOME`, and spelled in any case on a disk that ignores case (macOS: `~/.CLAUDE/Settings.json`). The
+    `claude plugin|mcp|config` and `codex mcp|features` commands that change them are refused too, and so is an
+    archive extracted, or a folder's contents copied, into the home folder or `~/.config` (`tar -x -C ~`,
+    `unzip -d ~`, `rsync -a dir/ ~`). Reading them still works, and so does the rest of `~/.claude` (transcripts,
+    auto-memory).
+  - Agents can't start a nested agent session without the harness's hooks: `claude --bare`, `--safe-mode`,
+    `--restricted`, `--setting-sources` without `project`, `--settings` that turns hooks off or names a file,
+    `--agents` redefining a harness role; `codex -c features.hooks=false` (and other `-c` overrides of hooks, project
+    trust or the shell environment), `--disable hooks`, `exec --ignore-user-config`; `opencode --pure`; or any of them
+    with `CLAUDE_CODE_SIMPLE`, a moved home or config folder, `PATH` or `PYTHON*` set for it, also through `npx`.
   - Session start, `doctor`, `run` and `orca` report as errors, and `run` and `orca` refuse to start on:
     `disableAllHooks`; managed `allowManagedHooksOnly` without the harness; an `env` block setting `PYTHON*`,
-    `PATH`, `LD_*`/`DYLD_*`, `BASH_ENV`, `GIT_DIR` and the like, or `HARNESS_*`; permission rules that pre-allow
-    changing these files or harness files; the plugin turned off in thin mode; Codex hooks switched off or a
+    `PATH`, `LD_*`/`DYLD_*`, `BASH_ENV`, `GIT_DIR` and the like, or `HARNESS_*`; the plugin turned off in thin mode; Codex hooks switched off or a
     hijacking `shell_environment_policy`; an OpenCode plugin removal. A change to a setting that runs a command or
     adds hooks (`apiKeyHelper`, `statusLine`, user hooks, plugins, MCP servers, Codex `hooks.json` and `notify`,
     OpenCode plugins) since the user last accepted it is an error too. The new user-only command `harness.py
-    accept-agent-config` accepts it, and the first check in a repository accepts what it finds.
+    accept-agent-config` accepts it, and the first check in a repository accepts what it finds. A permission
+    `allow` rule that pre-allows changing these files or harness files is a warning, not an error: the hooks still
+    check those calls.
   - A new Claude Code `ConfigChange` hook (in `.claude/settings.json` and the plugin) keeps such a change from
     taking effect in a running session.
   - The installed `.claude/settings.json` (and a thin project's) sets `"disableAllHooks": false`, which outranks a
