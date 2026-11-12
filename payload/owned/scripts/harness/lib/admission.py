@@ -64,10 +64,14 @@ def parse(text):
                 current = None
             continue
         field = FIELD.match(line)
-        if current is None:
+        if not field:
+            # It may be a section header written slightly wrong (a trailing comment, a missing bracket), which would
+            # otherwise read as a bad line of the section before it and hide a revocation.
+            errors.append("line %d: '%s' is neither [admit <name>], [revoke sha256:<64 hex digits>] nor 'key = value'"
+                          % (n, line[:40]))
+            current = None
+        elif current is None:
             errors.append("line %d: '%s' is outside an [admit ...] or [revoke ...] section" % (n, line[:40]))
-        elif not field:
-            current["problems"].append("line %d is not 'key = value'" % n)
         elif field.group(1) in current:
             current["problems"].append("%s is given twice (line %d)" % (field.group(1), n))
         elif field.group(2):

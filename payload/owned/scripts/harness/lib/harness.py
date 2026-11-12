@@ -4645,7 +4645,8 @@ def admission_verify(before, after, changed, allow_user_changes):
     if old_text is None and new_text is None:
         return []
     old, new = admission.parse(old_text or ""), admission.parse(new_text or "")
-    problems = []
+    problems = ["%s %s: any line the harness can't read may be a revocation, so no project skill bundle is guidance "
+                "until the user fixes it (ADR-006)." % (name, e) for e in new[2]]
     if name in changed and before and not allow_user_changes and admission.content(old) != admission.content(new):
         problems.append("the admissions change (%s). Admitting or revoking a third-party resource is the user's "
                         "decision, committed with HARNESS_VERIFY=off git commit ... (ADR-006)." % name)

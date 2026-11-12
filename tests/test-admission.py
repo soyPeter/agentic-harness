@@ -390,6 +390,29 @@ class Admission(unittest.TestCase):
         self.assertRefused(self.project.edit_vendor_code(), "can't read")
         self.assertEqual(self.project.invoke("adr-writing").returncode, 0)
 
+    def test_a_section_header_the_harness_cannot_read_blocks_every_project_skill_bundle(self):
+        self.project.admit()
+        self.project.write(".claude/skills/plain/SKILL.md", SKILL_TEXT.replace("vendor-sdk", "plain"))
+        self.project.write(".claude/skills/plain/run.sh", "#!/bin/sh\necho plain\n")
+        admitted = self.project.commit("feat: admit vendor-sdk")
+        record = (self.project.root / "backbone/admissions.conf").read_text()
+        plain = self.project.digest(".claude/skills/plain")
+        for header in ("[revoke %s]   # leaks keys", "[revoke %s", "[ revoke %s]", "revoke %s", "[revoke %s] [x]"):
+            with self.subTest(header=header):
+                self.project.write("backbone/admissions.conf",
+                                   record + "\n" + header % plain + "\nreason = leaks keys\n")
+                self.project.commit("fix: revoke plain")
+
+                self.assertRefused(self.project.invoke("plain"), "can't read")
+                self.assertRefused(self.project.hook("pre-tool-use", "Bash",
+                                                     {"command": "sh .claude/skills/plain/run.sh"}), "can't read")
+                doctor = self.project.harness("doctor")
+                self.assertEqual(doctor.returncode, 1, doctor.stdout)
+                self.assertIn("backbone/admissions.conf line", doctor.stdout)
+                verify = self.project.harness("verify", "--range", admitted + "..HEAD", "--allow-user-changes")
+                self.assertEqual(verify.returncode, 1, verify.stdout)
+                self.assertIn("backbone/admissions.conf line", verify.stdout)
+
     def test_a_revoked_bundle_copied_under_another_name_is_blocked(self):
         self.project.admit()
         self.project.revoke(self.project.digest())
