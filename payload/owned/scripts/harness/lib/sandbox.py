@@ -55,10 +55,16 @@ FILE_KEY_NAMES = ("extends", "include", "env_file", "secrets", "configs")
 # Where run tells the agent's container which definition it was brought up from (a read-only bind of a file in the
 # run's private folder): "shipped", or "custom: <why>".
 DEFINITION_MARKER = "/run/harness-sandbox/definition"
-# The only lines of the shipped definition that may differ in one that still counts as the shipped one: the hosts the
-# egress container allows, the agent command, and the base image.
-ALLOWED_LINES = {"docker-compose.yml": re.compile(r"^([ \t]*(?:HARNESS_FIREWALL_ALLOW|HARNESS_AGENT_CMD):)"),
-                 "Dockerfile": re.compile(r"^(ARG HARNESS_SANDBOX_IMAGE=)")}
+# A definition counts as the shipped one only when its files are the shipped ones byte for byte, apart from these.
+# Lines are split on \n alone: Docker splits a Dockerfile only there, so a line split anywhere else (\f, \r, \x1c)
+# would hide a change from the comparison. Every byte of a line not listed here is compared, and an allowed value
+# holds only printable ASCII, so no other line break or escape reaches YAML, JSON or Docker.
+# The hosts the egress container allows, as one double-quoted, space-separated list.
+FIREWALL_ALLOW = re.compile(rb'"[A-Za-z0-9.:/ -]*"')
+WORKSPACE_FOLDER = re.compile(rb'"/workspace(?:/(?!\.{1,2}[/"])[A-Za-z0-9_.-]+)*",')
+# Resource limits only lower what the container may use; they may be added right after a service's build line.
+RESOURCE_LIMIT = re.compile(rb'    (cpus|mem_limit|memswap_limit|pids_limit): ("?)[0-9]+(?:\.[0-9]+)?[bkmg]?\2')
+LIMITS_AFTER = {"docker-compose.yml": b"    build: ."}
 # A build on a cold cache installs the agent CLI; a session's own timeout is enforced inside the container too.
 UP_SECONDS = 1800
 EXEC_GRACE_SECONDS = 60
@@ -427,8 +433,10 @@ def untrusted_definition(folder, workspace, reference):
 
 def custom_reason(folder, reference):
     """Why the definition in folder isn't the shipped one in reference, with only the allowed differences, or None.
-    Allowed: the values of HARNESS_FIREWALL_ALLOW and HARNESS_AGENT_CMD in the Compose file, the base image in the
-    Dockerfile, and a workspaceFolder under /workspace. Anything else, a file added or removed included, is custom."""
+    The files are compared byte for byte, not as Docker, Compose or the devcontainer CLI would read them; allowed: the
+    value of HARNESS_FIREWALL_ALLOW and resource limits after a service's build line in the Compose file, another tag
+    or digest of the base image's repository in the Dockerfile, and a workspaceFolder under /workspace. Anything else,
+    a file added or removed included, is custom."""
     if reference is None:
         return ("run has no copy of the shipped definition outside the project to compare it with (a full install's "
                 "only copy is the one the agent can write)")
@@ -440,46 +448,58 @@ def custom_reason(folder, reference):
         if ours[name] == theirs[name]:
             continue
         try:
-            mine, shipped = (Path(base, name).read_text(encoding="utf-8") for base in (folder, reference))
-        except (OSError, UnicodeDecodeError):
+            mine, shipped = (Path(base, name).read_bytes() for base in (folder, reference))
+        except OSError:
             return "%s can't be read" % name
-        if name == "devcontainer.json":
-            problem = devcontainer_difference(mine, shipped)
-        elif name in ALLOWED_LINES:
-            problem = line_difference(mine, shipped, ALLOWED_LINES[name])
-        else:
-            problem = "it differs"
+        problem = byte_difference(name, mine, shipped) if name in ALLOWED_VALUES else "it differs"
         if problem:
             return "%s: %s" % (name, problem)
     return None
 
 
-def devcontainer_difference(mine, shipped):
-    try:
-        ours, theirs = jsonc_loads(mine), jsonc_loads(shipped)
-    except ValueError:
-        return "it can't be parsed"
-    if not isinstance(ours, dict) or not isinstance(theirs, dict):
-        return "it isn't an object"
-    folder = str(ours.pop("workspaceFolder", "/workspace"))
-    theirs.pop("workspaceFolder", None)
-    if folder != "/workspace" and not (folder.startswith("/workspace/") and ".." not in folder.split("/")):
-        return "workspaceFolder %s isn't under /workspace" % folder
-    keys = sorted(key for key in set(ours) | set(theirs) if ours.get(key) != theirs.get(key))
-    return "%s differ" % ", ".join(keys) if keys else None
+def same_repository(shipped):
+    """The pattern for another tag or digest of the image repository the shipped reference names."""
+    name = shipped.split(b"@", 1)[0]
+    tag = name.rfind(b":")
+    repository = name[:tag] if tag > name.rfind(b"/") else name
+    return re.compile(re.escape(repository) +
+                      rb"(?=[:@])(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?")
 
 
-def line_difference(mine, shipped, allowed):
-    ours, theirs = mine.splitlines(), shipped.splitlines()
-    if len(ours) != len(theirs):
-        return "lines added or removed"
-    for number, (line, original) in enumerate(zip(ours, theirs), 1):
-        if line == original:
+# Per file: the start of a shipped line whose value may change, and the pattern the new value must match, given the
+# shipped value.
+ALLOWED_VALUES = {"docker-compose.yml": ((b"      HARNESS_FIREWALL_ALLOW: ", lambda shipped: FIREWALL_ALLOW),),
+                  "Dockerfile": ((b"ARG HARNESS_SANDBOX_IMAGE=", same_repository),),
+                  "devcontainer.json": ((b'  "workspaceFolder": ', lambda shipped: WORKSPACE_FOLDER),)}
+
+
+def byte_difference(name, mine, shipped):
+    """Why the file name's bytes, mine, aren't the shipped ones with only the allowed differences, or None."""
+    ours, theirs = mine.split(b"\n"), shipped.split(b"\n")
+    at = 0
+    for original in theirs:
+        if at == len(ours):
+            return "lines removed"
+        line, at = ours[at], at + 1
+        if line != original and not allowed_value(name, line, original):
+            return "line %d differs" % at
+        if original != LIMITS_AFTER.get(name):
             continue
-        match, expected = allowed.match(line), allowed.match(original)
-        if not (match and expected and match.group(1) == expected.group(1)):
-            return "line %d differs" % number
-    return None
+        limited = set()
+        while at < len(ours) and RESOURCE_LIMIT.fullmatch(ours[at]):
+            key = RESOURCE_LIMIT.fullmatch(ours[at]).group(1)
+            if key in limited:
+                return "line %d sets %s again" % (at + 1, key.decode())
+            limited.add(key)
+            at += 1
+    return "lines added" if at != len(ours) else None
+
+
+def allowed_value(name, line, original):
+    for start, pattern in ALLOWED_VALUES.get(name, ()):
+        if original.startswith(start) and line.startswith(start):
+            return bool(pattern(original[len(start):]).fullmatch(line[len(start):]))
+    return False
 
 
 def private_runs():

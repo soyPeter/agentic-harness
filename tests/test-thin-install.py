@@ -8,11 +8,21 @@ import subprocess
 import tempfile
 import unittest
 
+from hypothesis_profiles import examples
+
+try:
+    from hypothesis import given, settings, strategies as st
+except ImportError:
+    given = None
+
 
 ROOT = Path(__file__).resolve().parents[1]
 ENGINE = ROOT / "payload/owned/scripts/harness/lib/harness.py"
 LAUNCHER = ROOT / "plugin/launcher.py"
 SANDBOX = ".devcontainer/harness-agent"
+# Where a value the shipped definition lets the user change starts; it runs to the end of that line.
+ALLOWED_VALUE_AFTER = {"docker-compose.yml": b"HARNESS_FIREWALL_ALLOW: ", "Dockerfile": b"ARG HARNESS_SANDBOX_IMAGE=",
+                       "devcontainer.json": b'"workspaceFolder": '}
 
 
 def sha256(path):
@@ -577,21 +587,40 @@ console.log(JSON.stringify(texts));
         self.assertNotIn("sandbox-approve", approved)
 
     def test_only_the_shipped_definition_with_its_allowed_differences_counts_as_a_container(self):
-        """The release's own definition, with only the allowlist, the agent command, the base image and a workspace
-        subfolder changed, is the sandbox a judge pass may call a container; anything else is custom, which runs
-        once approved but records isolation_class custom."""
+        """The release's own definition, byte for byte, with only the allowlist, resource limits, the base image's tag
+        or digest and a workspace subfolder changed, is the sandbox a judge pass may call a container; anything else
+        is custom, which runs once approved but records isolation_class custom."""
         self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
         folder = self.project / SANDBOX
         compose, config, dockerfile = (folder / "docker-compose.yml", folder / "devcontainer.json",
                                        folder / "Dockerfile")
-        agent = "  agent:\n    build: .\n"
+        agent, egress = "  agent:\n    build: .\n", "  egress:\n    build: .\n"
+        image = "ARG HARNESS_SANDBOX_IMAGE=node:22-bookworm@sha256:"
         cases = (   # (file, old, new, the class sandbox-approve names)
             (compose, None, None, "shipped"),
             (compose, 'HARNESS_FIREWALL_ALLOW: ""', 'HARNESS_FIREWALL_ALLOW: "pypi.org repo.maven.apache.org"', "shipped"),
-            (compose, "HARNESS_AGENT_CMD: claude -p --dangerously-skip-permissions --output-format json",
-             "HARNESS_AGENT_CMD: codex exec --dangerously-bypass-hook-trust", "shipped"),
-            (dockerfile, "node:22-bookworm@sha256:", "node:22-bookworm-slim@sha256:", "shipped"),
+            (dockerfile, image, "ARG HARNESS_SANDBOX_IMAGE=node:22-bookworm-slim@sha256:", "shipped"),
+            (dockerfile, "\nFROM", " \nFROM", "custom"),
+            (dockerfile, image, "ARG HARNESS_SANDBOX_IMAGE=docker.io/library/node:22-bookworm@sha256:", "custom"),
+            (dockerfile, image, "ARG HARNESS_SANDBOX_IMAGE=ghcr.io/someone/node:22-bookworm@sha256:", "custom"),
+            (dockerfile, image, "ARG HARNESS_SANDBOX_IMAGE=node-evil:22-bookworm@sha256:", "custom"),
             (config, '"workspaceFolder": "/workspace"', '"workspaceFolder": "/workspace/app"', "shipped"),
+            (config, '"workspaceFolder": "/workspace"', '"workspaceFolder": "/workspace/../etc"', "custom"),
+            (compose, agent, agent + "    mem_limit: 4g\n    cpus: 2\n    pids_limit: 512\n", "shipped"),
+            (compose, egress, egress + '    mem_limit: "512m"\n', "shipped"),
+            (compose, agent, agent + "    mem_limit: 4g # and more\n", "custom"),
+            (compose, agent, agent + "    cpus: 2\n    cpus: 2\n", "custom"),
+            (compose, "    cap_drop: [NET_ADMIN, NET_RAW]\n", "    cap_drop: [NET_ADMIN, NET_RAW]\n    cpus: 2\n",
+             "custom"),
+            # The agent command decides what runs in the container, the harness's hooks included.
+            (compose, "HARNESS_AGENT_CMD: claude -p --dangerously-skip-permissions --output-format json",
+             "HARNESS_AGENT_CMD: codex exec --dangerously-bypass-hook-trust", "custom"),
+            # Docker splits a Dockerfile only on \n: with a form feed, the COPY is part of the comment above it.
+            (dockerfile, "\nCOPY managed-settings.json", "\fCOPY managed-settings.json", "custom"),
+            (dockerfile, "USER agent\n", "USER agent\r\n", "custom"),
+            (compose, 'HARNESS_FIREWALL_ALLOW: ""', 'HARNESS_FIREWALL_ALLOW: ""\r    privileged: true', "custom"),
+            (compose, 'HARNESS_FIREWALL_ALLOW: ""', "HARNESS_FIREWALL_ALLOW: ~", "custom"),
+            (config, '"name": "harness-agent"', '"name":  "harness-agent"', "custom"),
             (compose, agent, agent + "    privileged: true\n", "custom"),
             (compose, agent, agent + "    env_file: [/etc/hosts]\n", "custom"),
             (compose, "      - ../..:/workspace:cached\n",
@@ -606,22 +635,50 @@ console.log(JSON.stringify(texts));
             (folder / "egress.py", "LOG = ", "LOG = LOG_PATH = ", "custom"),
         )
         for path, old, new, expected in cases:
-            kept = path.read_text()
+            kept = path.read_bytes()
             with self.subTest(file=path.name, change=new):
                 if old is not None:
-                    self.assertIn(old, kept)
-                    path.write_text(kept.replace(old, new, 1))
+                    self.assertIn(old.encode(), kept)
+                    path.write_bytes(kept.replace(old.encode(), new.encode(), 1))
                 approved = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "sandbox-approve",
                                        env=dict(self.env, HOME=str(self.work / "home")))
 
                 self.assertIn("definition: %s" % expected, approved.stdout)
-            path.write_text(kept)
+            path.write_bytes(kept)
         extra = folder / "notes.txt"
         extra.write_text("an extra file\n")
         approved = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "sandbox-approve",
                                env=dict(self.env, HOME=str(self.work / "home")))
         self.assertIn("definition: custom", approved.stdout)
         self.assertIn("notes.txt", approved.stdout)
+
+    if given is not None:
+        @settings(max_examples=examples(80), deadline=None)
+        @given(data=st.data(), name=st.sampled_from(sorted(p.name for p in (ROOT / "payload/owned" / SANDBOX).iterdir())),
+               change=st.sampled_from(("replace", "insert", "delete")))
+        def test_any_byte_changed_outside_the_allowed_values_makes_the_definition_custom(self, data, name, change):
+            if not (self.project / SANDBOX).is_dir():
+                self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+            path = self.project / SANDBOX / name
+            shipped = path.read_bytes()
+            prefix = ALLOWED_VALUE_AFTER.get(name)
+            start = shipped.index(prefix) + len(prefix) if prefix else len(shipped) + 1
+            end = shipped.index(b"\n", start) if prefix else start
+            last = len(shipped) if change == "insert" else len(shipped) - 1
+            at = data.draw(st.integers(0, last).filter(lambda i: not start <= i <= end if change == "insert"
+                                                       else not start <= i < end), label="at")
+            byte = bytes([data.draw(st.integers(0, 255).filter(lambda b: change != "replace" or b != shipped[at]),
+                                    label="byte")])
+            changed = {"replace": shipped[:at] + byte + shipped[at + 1:], "insert": shipped[:at] + byte + shipped[at:],
+                       "delete": shipped[:at] + shipped[at + 1:]}[change]
+            path.write_bytes(changed)
+            try:
+                approved = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "sandbox-approve",
+                                       env=dict(self.env, HOME=str(self.work / "home")), check=False)
+            finally:
+                path.write_bytes(shipped)
+
+            self.assertIn("definition: custom", approved.stdout, approved.stdout + approved.stderr)
 
 
 if __name__ == "__main__":
