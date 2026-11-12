@@ -357,7 +357,8 @@ Still open after v1:
   sandbox can write too, so the approval protects thin installs, whose engine lives outside the project; use thin mode
   with `HARNESS_SANDBOX_START=on`. Other spellings of `harness.py sandbox-approve` in an agent's shell command (a
   split path, `xargs`, `runpy`) are the class PR #90 refuses for every user-only command through its `USER_COMMANDS`
-  list; whichever of the two merges second must add `sandbox-approve` to that list.
+  list. PR #90 merged first, and the merge of main into this branch added `sandbox-approve` to `USER_COMMANDS`, so
+  every spelling it refuses is refused for `sandbox-approve` too.
 - **6. Orca's workers inside a backend's sandbox: deferred (2026-11-11).** Orca starts each worker itself, on the host,
   in the task's worktree. Running workers in the sandbox needs Orca to launch them through the sandbox (a launch command
   per agent that goes through `devcontainer exec`) and worktrees whose git metadata the sandbox can see: a worktree's
