@@ -324,7 +324,8 @@ class ThinInstall(unittest.TestCase):
                           "new_string": "b"})):
             with self.subTest(tool=tool, tool_input=tool_input):
                 self.assert_hook(2, tool, tool_input)
-        self.assert_hook(0, "Write", {"file_path": str(self.work / "codex/agents/mine.toml"), "content": ""})
+        # The user's own agents there are Codex's configuration too, which agents don't change either.
+        self.assert_hook(2, "Write", {"file_path": str(self.work / "codex/agents/mine.toml"), "content": ""})
 
     def test_opencode_sessions_get_the_session_start_context(self):
         self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")

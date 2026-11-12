@@ -1,26 +1,29 @@
 {
   "hooks": {
     "SessionStart": [
-      {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook session-start", "timeout": 15}]}
+      {"hooks": [{"type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook session-start", "timeout": 15}]}
     ],
     "SubagentStart": [
-      {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook subagent-start", "timeout": 15}]}
+      {"hooks": [{"type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook subagent-start", "timeout": 15}]}
     ],
     "PreToolUse": [
-      {"matcher": "^(?!(Read|Grep|Glob|LS|TodoWrite)$)", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook pre-tool-use", "timeout": 30}]},
-      {"matcher": "Write|Edit|MultiEdit|Bash", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook machine-guard", "timeout": 10}]}
+      {"matcher": "^(?!(Read|Grep|Glob|LS|TodoWrite)$)", "hooks": [{"type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook pre-tool-use", "timeout": 30}]},
+      {"matcher": "Write|Edit|MultiEdit|Bash", "hooks": [{"type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook machine-guard", "timeout": 10}]}
     ],
     "PostToolUse": [
-      {"matcher": "^(?!(Grep|Glob|LS|TodoWrite)$)", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook post-tool-use", "timeout": 30}]}
+      {"matcher": "^(?!(Grep|Glob|LS|TodoWrite)$)", "hooks": [{"type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook post-tool-use", "timeout": 30}]}
     ],
     "PostToolUseFailure": [
-      {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook post-tool-use", "timeout": 30}]}
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook post-tool-use", "timeout": 30}]}
     ],
     "SubagentStop": [
-      {"matcher": "^(agentic-harness:)?(griller|judge|tester|debugger|reviewer|deliverer)$", "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook subagent-stop", "timeout": 1200}]}
+      {"matcher": "^(agentic-harness:)?(griller|judge|tester|debugger|reviewer|deliverer)$", "hooks": [{"type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook subagent-stop", "timeout": 1200}]}
+    ],
+    "ConfigChange": [
+      {"hooks": [{"type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook config-change", "timeout": 15}]}
     ],
     "Stop": [
-      {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook stop", "timeout": 1200}]}
+      {"hooks": [{"type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/plugin/launcher.py\" hook stop", "timeout": 1200}]}
     ]
   }
 }
