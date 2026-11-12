@@ -216,7 +216,9 @@ class PullRequestMatrix(Steps):
         root = self.clone("old-engine")
         run(root, "git", "checkout", "-q", "-b", "old", self.adopted)
         engine = root / "scripts/harness/lib/harness.py"
-        engine.write_text(engine.read_text().replace('    if argv[:1] == ["export"]:\n', "    if False:\n", 1))
+        export = 'def trace_command(argv):\n    if argv[:1] == ["export"]:\n'
+        self.assertIn(export, engine.read_text(), "the engine's trace export isn't where this test disables it")
+        engine.write_text(engine.read_text().replace(export, "def trace_command(argv):\n    if False:\n"))
         self.commit(root, "chore: an engine from before trace export")
         run(root, "git", "checkout", "-q", "main")
 

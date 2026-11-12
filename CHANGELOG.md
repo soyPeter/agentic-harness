@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- **Refused hook calls can be replayed against a rule or engine change (ADR-002 follow-up (c)).** When a hook refuses
+  a call, the harness keeps its input in `.git/harness/captures/` (never committed), and it keeps the 20 newest
+  distinct allowed calls per gate, so a false block can be measured too; an allowed file change keeps only its path,
+  size and digest, never its content, and isn't replayed. Secrets are replaced first, by shape (private-key and other
+  non-public `BEGIN` blocks, AWS, GitHub, GitLab, Anthropic, OpenAI-style, Stripe, Google, npm and Slack tokens, JWTs,
+  32+ character runs that look random), by flag (`-p<password>`, `-u user:<password>`, `--password <value>`, passwords
+  and token-like user names in URLs) and by name: any value given to a name or field holding key, token, secret, pass,
+  pwd, credential, auth or cookie, in any case, quoted values whole. A token keeps its prefix and length, so the rule
+  that refused it still fires. The project and home folders become placeholders. Every pattern is linear and text is
+  cut before it is redacted, and a hook writes its refusal before it captures the call, so capture never delays an
+  answer past Claude Code's hook timeout. At most 100 refusals are kept per gate; a flood evicts its own captures first
+  (the session with the most, then the reason given most). An input over 64 KiB keeps only its metadata. Each capture
+  says whether its outcome depends only on the input and the rules (shell checks, guardrail rules, tool contracts,
+  protected paths, scopes, the deliverer's gate) or also on state (the task, spec, verdict and skill gates, the kill
+  switch, install folders, GitHub labels, a path through a symlink), and why. `harness.py report --json` gives each
+  harness candidate an `id`, `kind`, `reason`, `tasks` and its captures by id and digest; the text report prints the
+  ids. `harness.py eval export <candidate-id>|--refusals|--allows [--out DIR]` writes reviewable fixtures (input,
+  expected outcome, the reason a refusal must still give, provenance, redaction note) into `.git/harness/eval-drafts/`,
+  never committed, and leaves out any whose input still looks like it holds a secret. Judge-fail and escalation
+  candidates become eval prompts, which aren't replayed. `backbone/evals/` is the user's, like `tools.conf`: the hooks
+  refuse agents' writes there by any path (and in another worktree of the repository), `eval export` itself refuses an
+  `--out` that resolves there, and verify refuses commits that change it. Agents can't write the harness's records in
+  the git folder either. `harness.py eval replay [DIR] [--engine <harness.py>] [--json]` runs the state-free fixtures
+  through `hook pre-tool-use` in a throwaway checkout of the project's rules and settings; for `backbone/evals/` (the
+  default) it reads the fixtures committed at HEAD and names the files the work tree changes there. It reports each one
+  as still as expected, newly allowed (a hole), newly blocked (a false block), blocked for another reason, skipped (with
+  why) or an error, and exits 1 on any but the first and skipped, and on a missing folder or no committed fixture. The
+  refusal reasons in the event log and the command names in the out-of-band snapshot are redacted the same way. CI
+  doesn't run the replay yet.
 - **Outward events say what ran; a Source heading and a budget word say less.** `outward` events are logged by
   post-tool-use, once the call has run, with `result` (`succeeded`, `failed`, or `unknown` where the agent CLI doesn't
   say: Codex, OpenCode's version 1 API; the OpenCode adapter now passes OpenCode's status), and cover spellings the deliverer's
