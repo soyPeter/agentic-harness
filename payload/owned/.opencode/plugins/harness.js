@@ -79,7 +79,7 @@ async function after(event) {
   }
   const [name, input] = translate(event.tool, event.input);
   hook(root, "post-tool-use", { tool_name: name, tool_input: input, session_id: event.sessionID,
-    agent_type: event.agent, cwd: root });
+    agent_type: event.agent, cwd: root, tool_status: event.status ?? null });
 }
 
 // The session-start hook scans the project, so it runs once per session. Context changes don't persist between model
@@ -125,8 +125,9 @@ async function server(ctx) {
     "tool.execute.before": async (input, output) =>
       before({ tool: input.tool, input: output?.args, sessionID: input.sessionID, agent: input.agent }),
     "tool.execute.after": async (input, output) =>
+      // OpenCode 1 says nothing of how the call ended, so the harness records it as unknown.
       after({ tool: input.tool, input: input.args ?? output?.args, sessionID: input.sessionID, agent: input.agent,
-        result: output, status: "completed" }),
+        result: output }),
   };
 }
 
