@@ -521,6 +521,41 @@ class Admission(unittest.TestCase):
                 result = self.project.hook("pre-tool-use", "Bash", {"command": command})
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_a_revocation_rewritten_out_of_local_history_still_holds(self):
+        self.project.admit()
+        before = self.project.commit("feat: admit vendor-sdk")
+        self.project.revoke(self.project.digest())
+        revoking = self.project.commit("fix: revoke vendor-sdk")
+        self.project.write("notes.txt", "x\n")
+        tip = self.project.commit("docs: notes")
+        rewrites = (("git", "rebase", "-q", "--onto", before, revoking),
+                    ("git", "filter-branch", "-f", "--tree-filter", "rm -f backbone/admissions.conf", before + "..HEAD"),
+                    ("git", "reset", "-q", "--hard", before))
+        for rewrite in rewrites:
+            with self.subTest(rewrite=rewrite[1]):
+                self.project.run("git", "reset", "-q", "--hard", tip)
+                self.project.run(*rewrite, env={"FILTER_BRANCH_SQUELCH_WARNING": "1"})
+                self.assertNotIn("[revoke", self.project.run("git", "show", "HEAD:backbone/admissions.conf",
+                                                              check=False).stdout)
+
+                self.assertRefused(self.project.invoke("vendor-sdk"), "revoked")
+                self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": "sh %s" % SCRIPT}), "revoked")
+                self.assertIn("revoked", self.project.harness("doctor").stdout)
+
+    def test_agents_cannot_erase_the_record_of_a_rewritten_history(self):
+        for command in ("git filter-branch --tree-filter 'rm -f backbone/admissions.conf' HEAD",
+                        "git filter-repo --path backbone/admissions.conf --invert-paths",
+                        "git reflog expire --expire=now --all", "git reflog delete HEAD@{1}",
+                        "git -c gc.reflogExpireUnreachable=now gc --prune=now",
+                        "git config gc.reflogExpire now", "git config --global gc.reflogexpireunreachable 0",
+                        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=gc.reflogExpire GIT_CONFIG_VALUE_0=now git gc"):
+            with self.subTest(command=command):
+                self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command}), "reflog")
+        for command in ("git reflog", "git reflog show HEAD", "git gc", "git config --get gc.reflogExpire"):
+            with self.subTest(allowed=command):
+                result = self.project.hook("pre-tool-use", "Bash", {"command": command})
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_agents_cannot_discard_the_users_uncommitted_policy_changes_with_git(self):
         self.project.admit()
         self.project.commit("feat: admit vendor-sdk")

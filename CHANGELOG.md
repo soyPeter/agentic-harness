@@ -17,7 +17,9 @@
   placeholders or pre-approves tools isn't admissible: admission grants no command or permission, and the tool
   contracts, shell checks and role scopes govern every call whichever skills are loaded. `[revoke sha256:...]` blocks
   those bytes in any `.claude/skills/` folder of the repository, even with a matching record; revocations are read
-  from the working copy, the index, HEAD and the default branch together, and a line of the file that is neither an exact
+  from the working copy, the index, HEAD, the default branch and every commit the reflogs record together (so a
+  rebase or reset that drops a local revocation doesn't lift it; agents' `filter-branch`, `filter-repo`, `reflog
+  expire`/`delete` and `gc.reflogExpire*` settings are refused), and a line of the file that is neither an exact
   section header nor `key = value` (a header with a trailing comment, say) blocks every project skill bundle, and
   fails verify, until the user fixes it. Agents' git commands that would rewrite
   `admissions.conf`, `tools.conf`, `harness.conf`, the lock or `escalations.md` (checkout, restore, stash, reset,

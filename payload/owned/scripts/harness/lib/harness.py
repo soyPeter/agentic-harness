@@ -1747,6 +1747,21 @@ def patch_paths(path):
     return found
 
 
+REFLOG_EXPIRY = re.compile(r"(?i)^gc\.(?:[^=]*\.)?reflogexpire")
+REFLOG_REFUSAL = ("%s rewrites history or expires the reflog, where a revocation the user committed stays on record "
+                  "after a rebase or reset (ADR-006); only the user does that, in their own terminal.")
+
+
+def reflog_expiry_settings(assignments):
+    """Why GIT_CONFIG_* assignments set git's reflog expiry for the command, or None."""
+    for assignment in assignments:
+        key, _, value = assignment.partition("=")
+        if (key.startswith("GIT_CONFIG_KEY_") and REFLOG_EXPIRY.match(value)) or (
+                key == "GIT_CONFIG_PARAMETERS" and re.search(r"(?i)gc\.(?:\S*\.)?reflogexpire", value)):
+            return REFLOG_REFUSAL % ("%s=%s" % (key, value))
+    return None
+
+
 def git_policy_writes(words, cwd, depth=0):
     """Why an agent's git command may rewrite a user's policy file, from another revision, the index, a stash or a
     patch: the hooks refuse agents' edits to those files, and git would make the same edit outside them."""
@@ -1760,6 +1775,8 @@ def git_policy_writes(words, cwd, depth=0):
             args = args[1:]
         if name == "-C" or name == "--work-tree":
             cwd = os.path.join(cwd, os.path.expanduser(value))
+        elif name == "-c" and REFLOG_EXPIRY.match(value):
+            return [REFLOG_REFUSAL % ("git -c " + value.partition("=")[0])]
         elif name == "-c" and value.lower().startswith("alias."):
             key, _, command = value.partition("=")
             aliases[key[6:].lower()] = command
@@ -1776,6 +1793,10 @@ def git_policy_writes(words, cwd, depth=0):
             return git_policy_writes(["git"] + shlex.split(alias) + rest, cwd, depth + 1)
         except ValueError:
             return ["git %s is an alias the harness can't read." % sub]
+    if sub in ("filter-branch", "filter-repo") or (sub == "reflog" and rest[:1] in (["expire"], ["delete"])):
+        return [REFLOG_REFUSAL % ("git " + " ".join([sub] + rest[:1] if sub == "reflog" else [sub]))]
+    if sub == "config" and not set(rest) & set(GIT_CONFIG_READS) and any(REFLOG_EXPIRY.match(w) for w in rest):
+        return [REFLOG_REFUSAL % "git config gc.reflogExpire"]
     if sub not in REV_OPTIONS:
         return []
     stdin, kept = None, []
@@ -1921,6 +1942,7 @@ def shell_findings(command, cwd=None, depth=0):
         if prog == "git":
             found.extend(git_findings(words))
             found.extend(git_policy_writes(words, cwd, depth))
+            found.extend(filter(None, [reflog_expiry_settings(assignments)]))
         elif prog == "gh" and profile() in NO_MERGE_PROFILES and (
                 words[1:3] == ["pr", "merge"] or (words[1:2] == ["api"] and any(MERGE_ENDPOINT.search(w) for w in words))):
             found.append("Merging is refused under HARNESS_PROFILE=%s: only a human merges, on GitHub." % profile())
@@ -4231,7 +4253,7 @@ def admissions():
         text = read(ADMISSIONS_FILE)
         records, revocations, errors = admission.parse(text)
         name = ADMISSIONS_FILE.relative_to(ROOT).as_posix()
-        for source, other in git_blobs([source + name for source in REVOCATION_SOURCES]).items():
+        for source, other in git_blobs([source + name for source in REVOCATION_SOURCES] + reflog_copies(name)).items():
             parsed = admission.parse(other or "")
             for digest, fields in parsed[1].items():
                 revocations.setdefault(digest, fields)
@@ -4240,6 +4262,21 @@ def admissions():
                            for e in parsed[2]]
         ADMISSIONS_CACHE["parsed"] = records, revocations, errors
     return ADMISSIONS_CACHE["parsed"]
+
+
+def reflog_copies(name):
+    """The distinct blobs of name in every commit the reflogs record. A rebase, a reset, an amend or filter-branch
+    rewrites a revocation out of the branch, but the commits it left stay in the reflog until it expires."""
+    commits = sorted(set(git("log", "-g", "--all", "--format=%H").split()))
+    if not commits:
+        return []
+    try:
+        out = subprocess.run(["git", "cat-file", "--batch-check=%(objectname) %(objecttype)"], cwd=str(ROOT),
+                             capture_output=True, timeout=GIT_TIMEOUT, text=True,
+                             input="".join("%s:%s\n" % (c, name) for c in commits)).stdout
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    return sorted({line.split()[0] for line in out.splitlines() if line.endswith(" blob")})
 
 
 def git_blobs(specs):

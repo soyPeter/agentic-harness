@@ -198,8 +198,10 @@ table and lists now say what holds, and the fixes are in the same pull request.
   checkout-index and clean when the file would differ from its working, staged or committed copy; cherry-pick,
   revert and stash pop when their commits touch it; apply and am when the patch names it or can't be read. verify
   refuses a commit that changes what the file decides (a pull request needs the `harness-change-approved` label).
-  Revocations are read from the working copy, the index, HEAD and the default branch together, so rolling back the
-  working copy doesn't lift one; a line the working, staged or committed copy has that the harness can't read blocks
+  Revocations are read from the working copy, the index, HEAD, the default branch and every commit the reflogs
+  record together, so rolling back the working copy, or rewriting the revocation out of local history (rebase,
+  reset, amend, filter-branch), doesn't lift one; agents' `filter-branch`, `filter-repo`, `reflog expire`/`delete`
+  and settings of `gc.reflogExpire*` are refused. A line the working, staged or committed copy has that the harness can't read blocks
   every project skill bundle (not the core skills) until the user fixes it.
 - `harness.py admission digest <path>`: sha256 over the sorted lines `<sha256>  <path in the bundle>`, for the files
   git sees (tracked, or untracked and not ignored); a link counts as where it points, and a link out of the bundle
@@ -247,6 +249,10 @@ table and lists now say what holds, and the fixes are in the same pull request.
   project's. Folders of `.claude/skills/` that recent Claude Code versions adopt as plugins were not audited.
 - `git merge`, `pull` and `rebase` may bring a policy file from another branch; they apply committed changes, which
   verify gates, and refusing them would stop agents updating a branch.
+- A revocation committed only locally and rewritten out of the branch holds while a reflog records its commit. Git
+  expires unreachable reflog entries after 30 days by default (`gc.reflogExpireUnreachable`), so a revocation that
+  was never pushed can lapse that long after such a rewrite; push revocations, and CI's verify reads the default
+  branch. Refusing every history rewrite would stop agents rebasing a branch.
 - The adoption criteria's comparison of reference-only and admitted setup on representative approved fixtures needs
   a candidate SDK and approved fixtures, which this ADR leaves to a separately authorized task.
 - Follow-on instructions a bundle points to outside itself stay reference by construction, but the harness can't see
