@@ -10,8 +10,9 @@
   and `harness.py admission` shows each record's state. While the bytes match and no revocation names them, the
   bundle's skills load and satisfy routes as any skill does; otherwise the bundle is reference: the Skill tool is
   refused, reading its SKILL.md doesn't count as loading it, edits routed to it are refused, and the shell checks
-  refuse agents' commands that run its files (by path, as a shell's or interpreter's operand, on its stdin or through
-  a pipe, through runners such as `timeout`, in any letter case), and, while such a bundle is present, commands whose
+  refuse agents' commands that run its files (by path, as a shell's or interpreter's operand with its options read as the
+  shell reads them (`sh -e f`, `bash -o errexit f`), on its stdin or through a pipe, through runners such as `timeout`,
+  `xargs` and `find -exec`, in any letter case of the path or the shell), and, while such a bundle is present, commands whose
   code comes from an expansion or substitution. A bundle whose SKILL.md registers hooks, runs shell
   placeholders or pre-approves tools isn't admissible: admission grants no command or permission, and the tool
   contracts, shell checks and role scopes govern every call whichever skills are loaded. `[revoke sha256:...]` blocks

@@ -1928,9 +1928,10 @@ def shell_findings(command, cwd=None, depth=0):
             start = next((w for w in words[1:] if not w.startswith("-")), ".")
             if start.rstrip("/") in ("", "~", "$HOME", "${HOME}") or (start.startswith("/") and start.count("/") <= 1):
                 found.append("find ... -delete on %s deletes from the filesystem root or home." % start)
-        elif prog in SHELLS and depth < 3:
-            if "-c" in words and words.index("-c") + 1 < len(words):
-                found.extend(shell_findings(words[words.index("-c") + 1], cwd, depth + 1))
+        elif prog.lower() in SHELLS and depth < 3:
+            inline = shell_arguments(words)[0]
+            if inline:
+                found.extend(shell_findings(inline, cwd, depth + 1))
         elif prog == "eval" and depth < 3:
             found.extend(shell_findings(" ".join(words[1:]), cwd, depth + 1))
         elif prog in INTERPRETERS:
@@ -4472,42 +4473,158 @@ UNREADABLE_WORD = re.compile(r"[$`*?\[]|^<\(|^>\(")
 STDIN_SCRIPT = re.compile(r"(?:^|[^<0-9&])0?<(?![<(&])\s*('[^']*'|\"[^\"]*\"|[^\s;|&<>]+)")
 
 
+def shell_arguments(words):
+    """(command string or None, script operand or None, option files, whether it reads its commands from stdin) for
+    a shell's arguments as sh, bash, zsh, dash and ksh read them: options come first and cluster (-eo pipefail), -o
+    and -O take the next word, -c makes the first operand the commands, -s reads them from stdin, and --rcfile and
+    --init-file name a file of commands. -e and -E are errexit and errtrace, not code."""
+    i, inline, stdin, files = 1, False, False, []
+    while i < len(words):
+        word = words[i]
+        if word in ("-", "--"):
+            i += 1
+            break
+        if word.startswith("--"):
+            name, eq, value = word.partition("=")
+            if name in ("--rcfile", "--init-file"):
+                files.append(value if eq else (words[i + 1] if i + 1 < len(words) else ""))
+                i += 0 if eq else 1
+            i += 1
+            continue
+        if len(word) < 2 or word[0] not in "-+":
+            break
+        inline |= word[0] == "-" and "c" in word[1:]
+        stdin |= "s" in word[1:]
+        i += 1 + sum(word[1:].count(c) for c in "oO")
+    operands = words[i:]
+    if inline:
+        return (operands[0] if operands else ""), None, files, False
+    if stdin or not operands:
+        return None, None, files, True
+    return None, operands[0], files, False
+
+
+# The options that give an interpreter its program as text, and those that take the next word as their value.
+INTERPRETER_CODE = {"python": "cm", "perl": "eE", "ruby": "e", "node": "ep"}
+INTERPRETER_VALUES = {"python": ("-W", "-X"), "perl": ("-I", "-M", "-m"), "ruby": ("-I", "-r", "-C", "-E"),
+                      "node": ("-r", "--require", "--import", "--loader", "--experimental-loader", "-C",
+                               "--conditions", "--input-type", "--env-file", "--title")}
+
+
+def interpreter_arguments(prog, words):
+    """(script operand or None, option values, whether it runs inline code, whether it reads its program from stdin).
+    Option values count as files: node -r f and ruby -r f run f."""
+    family = next(f for f in INTERPRETER_CODE if prog.startswith(f))
+    values, i = [], 1
+    while i < len(words):
+        word = words[i]
+        if word in ("-", "--"):
+            i += word == "--"
+            break
+        if not word.startswith("-"):
+            break
+        if word.startswith("--"):
+            name, eq, value = word.partition("=")
+            if name in ("--eval", "--print"):
+                return None, values, True, False
+            if eq:
+                values.append(value)
+            elif name in INTERPRETER_VALUES[family]:
+                values.append(words[i + 1] if i + 1 < len(words) else "")
+                i += 1
+            i += 1
+            continue
+        for k, letter in enumerate(word[1:], 2):
+            if letter in INTERPRETER_CODE[family]:
+                return None, values, True, False
+            if "-" + letter in INTERPRETER_VALUES[family]:
+                values.append(word[k:] or (words[i + 1] if i + 1 < len(words) else ""))
+                i += 0 if word[k:] else 1
+                break
+        i += 1
+    operand = words[i] if i < len(words) else "-"
+    return (None if operand == "-" else operand), values, False, operand == "-"
+
+
+def command_code(words):
+    """(words naming what the command runs as code, whether it reads its program from stdin, its inline code)."""
+    prog = program(words).lower()
+    if prog in SHELLS:
+        inline, script, files, stdin = shell_arguments(words)
+        return files + ([script] if script else []), stdin, inline
+    if prog in INTERPRETERS:
+        script, values, inline, stdin = interpreter_arguments(prog, words)
+        return values + ([script] if script else []), stdin, None
+    if prog in ("source", "."):
+        return words[1:2], len(words) < 2, None
+    return ([words[0]] if "/" in words[0] else []), False, None
+
+
+XARGS_VALUES = ("-I", "-J", "-L", "-n", "-P", "-s", "-E", "-e", "-a", "-d", "-R", "-S", "--arg-file", "--delimiter",
+                "--max-args", "--max-procs", "--max-lines", "--max-chars", "--replace")
+
+
+def runner_words(words):
+    """(the command xargs, parallel or find -exec runs, the token it puts its arguments at, whether xargs reads them
+    from a file) or None for any other command."""
+    prog = program(words)
+    if prog in ("xargs", "parallel"):
+        i, token, from_file = 1, "{}", False
+        while i < len(words) and words[i].startswith("-"):
+            flag = words[i]
+            name = flag[:2] if not flag.startswith("--") else flag.split("=", 1)[0]
+            from_file |= name in ("-a", "--arg-file")
+            if name in ("-I", "-J", "--replace"):
+                token = flag[2:] if name != "--replace" and flag[2:] else (
+                    flag.split("=", 1)[1] if "=" in flag else words[i + 1] if i + 1 < len(words) else "")
+            attached = (name != flag and not flag.startswith("--")) or "=" in flag
+            i += 1 if attached or name not in XARGS_VALUES else 2
+        return words[i:], token, from_file
+    if prog == "find":
+        at = next((i for i, w in enumerate(words) if w in ("-exec", "-execdir", "-ok", "-okdir")), None)
+        if at is not None:
+            end = next((j for j in range(at + 1, len(words)) if words[j] in (";", "+")), len(words))
+            return words[at + 1:end], "{}", True
+    return None
+
+
 def code_files(segment, words, piped):
     """(words that name what the command runs as code, whether some of it can't be read). A shell, an interpreter,
     source or eval runs its script operand, its options' file values (--init-file f), a file on its stdin (sh < f)
-    or what the pipe before it prints (cat f | sh); any other command runs itself when it is a path."""
-    prog = program(words)
+    or what the pipe before it prints (cat f | sh); xargs and find -exec run their command with the names they read
+    or find; any other command runs itself when it is a path."""
     if not words:
         return [], False
     if UNREADABLE_WORD.search(words[0]) and words[0] not in ("[", "[["):
         return [], True
-    if prog not in SHELLS + INTERPRETERS + ("source", ".", "eval"):
-        return ([words[0]] if "/" in words[0] else []), False
-    operands, i, code_string = [], 1, False
-    while i < len(words):
-        word = words[i]
-        if word in ("-c", "-e", "-E") or (prog in SHELLS and re.match(r"^-[a-zA-Z]*c[a-zA-Z]*$", word)):
-            code_string = True
-            i += 2
-            continue
-        if word.startswith("--") and "=" in word:
-            operands.append(word.split("=", 1)[1])
-        elif word.startswith(("-", "+")) and word not in ("-", "--"):
-            pass
-        elif word != "--":
-            operands.append(word)
-        i += 1
+    producers = [shell_words(p)[1] for p in piped]
+    runner = runner_words(words)
+    if runner is not None:
+        run, token, from_file = runner
+        if not run:
+            return [], False
+        names, reads, inline = command_code(run)
+        # The runner's input or search gives the command its words; inline code reads them as $1 or $@.
+        unreadable = any(w and (token in w or "{}" in w) for w in names + [run[0]]) or any(
+            UNREADABLE_WORD.search(w) for w in names) or bool(inline and re.search(r"[$`]", inline))
+        if reads:
+            if program(words) == "find" or from_file or not producers:
+                return names, True
+            names += [w for p in producers for w in p[1:]]
+            unreadable |= any(UNREADABLE_WORD.search(w) for p in producers for w in p)
+        return names, unreadable
+    if program(words).lower() == "eval":
+        return [], any(UNREADABLE_WORD.search(w) for w in words[1:])
+    names, reads, _ = command_code(words)
+    if program(words).lower() not in SHELLS + INTERPRETERS + ("source", "."):
+        return names, False
     stdin = [m.strip("'\"") for m in STDIN_SCRIPT.findall(segment)]
-    names = operands + stdin
-    unreadable = prog == "eval" and any(UNREADABLE_WORD.search(w) for w in words[1:])
-    unreadable |= bool(names[:1] and UNREADABLE_WORD.search(names[0])) or "<(" in segment
-    reads_stdin = not code_string and (not operands or operands[0] in ("-", "/dev/stdin") or
-                                       (prog in SHELLS and any(re.match(r"^-[a-zA-Z]*s", w) for w in words[1:])))
-    if reads_stdin and not stdin and piped:
-        for producer in piped:
-            _, producer_words = shell_words(producer)
-            names += producer_words[1:]
-            unreadable |= any(UNREADABLE_WORD.search(w) for w in producer_words)
+    names += stdin
+    unreadable = any(UNREADABLE_WORD.search(w) for w in names) or "<(" in segment
+    if reads and not stdin and producers:
+        for producer in producers:
+            names += producer[1:]
+            unreadable |= any(UNREADABLE_WORD.search(w) for w in producer)
     return names, unreadable
 
 

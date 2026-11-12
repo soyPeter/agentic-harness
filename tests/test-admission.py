@@ -374,6 +374,28 @@ class Admission(unittest.TestCase):
                 result = self.project.hook("pre-tool-use", "Bash", {"command": command})
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_a_blocked_bundles_script_does_not_run_behind_shell_options_or_runners(self):
+        self.project.admit()
+        self.project.revoke(self.project.digest())
+        self.project.commit("fix: revoke vendor-sdk")
+        for command in ("sh -e %s", "bash -E %s", "bash -o errexit -e %s", "bash -eo pipefail %s", "sh -xv %s",
+                        "bash -O extglob %s", "bash --norc %s", "sh -e - %s", "sh -e < %s", "bash -E<%s",
+                        "cat %s | sh -e", "bash -ec 'sh %s'", "sh -c -e 'sh %s'", "SH %s", "Bash -e %s",
+                        "python3 -E %s", "xargs sh %s < /dev/null", "echo %s | xargs sh", "echo %s | xargs -n 1 bash -e",
+                        "find . -name setup.sh -exec sh %s \\;"):
+            with self.subTest(command=command):
+                self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command % SCRIPT}),
+                                   "revoked")
+        for command in ("find .claude -name '*.sh' -exec sh {} \\;", "find . -exec bash -e {} +",
+                        "ls .claude/skills/*/scripts/*.sh | xargs sh", "xargs -a list.txt sh"):
+            with self.subTest(unreadable=command):
+                self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command}), "can't tell")
+        for command in ("sh -e build.sh", "bash -o errexit -c 'echo hi'", "find . -name '*.md' -exec cat {} \\;",
+                        "sh -c 'echo %s'" % SCRIPT):
+            with self.subTest(allowed=command):
+                result = self.project.hook("pre-tool-use", "Bash", {"command": command})
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_an_admissions_file_the_harness_cannot_read_blocks_every_project_skill_bundle(self):
         self.project.admit()
         self.project.write(".claude/skills/plain/SKILL.md", SKILL_TEXT.replace("vendor-sdk", "plain"))
