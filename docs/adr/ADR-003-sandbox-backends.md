@@ -341,6 +341,18 @@ Still open after v1:
   `runArgs` and the like in `devcontainer.json`; `extends`, `include`, `env_file`, an outside build context,
   `volumes_from`, privileges, host namespaces, extra capabilities, the docker socket and bind-device volumes in the
   Compose file), and explains docker buildx's file entitlement failure when `devcontainer up` hits it.
+  A fifth review showed that refusing unsafe content by name keeps leaking (a key on one line, an escaped key, a socket
+  directory, `container:` namespaces, a seccomp profile, a feature, a port), so the final rule is an allowlist.
+  `container` now means the shipped definition with only these differences: the values of `HARNESS_FIREWALL_ALLOW` and
+  `HARNESS_AGENT_CMD` in the Compose file, the base image line of the Dockerfile and a `workspaceFolder` under
+  `/workspace`, compared, in thin mode, with the release's copy the engine keeps outside the project (a full install has
+  none, so its definitions are always custom). Anything else is a new isolation class, `custom`, ranked between `none`
+  and `container`: run brings it up only once the user approved it, mounts a read-only marker saying so into the agent's
+  container, and its judge passes record `custom`, which the default gate refuses for schema work. Refused even when
+  approved: symlinks, references to files outside the definition (`extends`, `include`, `env_file`, `secrets`,
+  `configs`, an outside build context; JSON Compose files are checked parsed, so escaped keys count),
+  `devcontainer.json` keys that act on the host (`initializeCommand`, `mounts`, `runArgs` and the like), relative
+  binds the private copy can't reproduce and binds of `~/.agentic-harness`.
   Limits: in a full install, `run` on the host executes the workspace's own `scripts/harness/`, which an agent in the
   sandbox can write too, so the approval protects thin installs, whose engine lives outside the project; use thin mode
   with `HARNESS_SANDBOX_START=on`. Other spellings of `harness.py sandbox-approve` in an agent's shell command (a

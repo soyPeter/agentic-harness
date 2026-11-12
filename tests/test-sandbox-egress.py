@@ -646,7 +646,9 @@ class HostRun(Sandbox):
                                        "receipt", "7.1", "--json").stdout)
 
         self.assertIn("run: task 7.1 attempt 1", run.stdout, run.stdout + run.stderr)
-        self.assertEqual(receipt["sandbox"]["isolation_class"], "container", receipt["sandbox"]["isolation_reason"])
+        # A full install has no copy of the shipped definition outside the project, so run can't vouch for it.
+        self.assertEqual(receipt["sandbox"]["isolation_class"], "custom", receipt["sandbox"]["isolation_reason"])
+        self.assertIn("no copy of the shipped definition", receipt["sandbox"]["isolation_reason"])
         self.assertIn("NoNewPrivs:\t1", self.session_log("7.1"))
         self.assertEqual(self.running(), [], "the run stops the sandbox it started")
 
@@ -692,6 +694,78 @@ class HostRun(Sandbox):
             ids = docker("ps", "-q", "--filter", "label=com.docker.compose.project=%s" % project.stdout.strip())
             if ids.stdout.split():
                 docker("stop", *ids.stdout.split())
+
+
+THIN_AGENT = AGENT.replace('["python3", "-B", "scripts/harness/lib/harness.py", "hook", "judge-stop"]',
+                           '["python3", "-B", os.path.expanduser("~/.agentic-harness/plugins/agentic-harness/plugin/'
+                           'launcher.py"), "hook", "judge-stop"]')
+
+
+class ThinHostRun(Sandbox):
+    """HARNESS_SANDBOX_START=on in a thin project, whose engine keeps a copy of the shipped definition outside the
+    project: run vouches for the shipped definition with only the allowed differences (here, the agent command, a
+    stand-in agent) as a container, and records an approved definition with anything else as custom."""
+    UP = False
+
+    @classmethod
+    def install(cls):
+        ThinSandbox.install.__func__(cls)
+        compose = cls.project / ".devcontainer/harness-agent/docker-compose.yml"
+        compose.write_text(compose.read_text().replace(
+            "HARNESS_AGENT_CMD: claude -p --dangerously-skip-permissions --output-format json",
+            "HARNESS_AGENT_CMD: python3 -B /workspace/agent.py"))
+        (cls.project / "agent.py").write_text(THIN_AGENT)
+        (cls.project / "backbone/specs").mkdir(parents=True, exist_ok=True)
+        (cls.project / "backbone/specs/7.1.md").write_text(SPEC)
+        tasks = cls.project / "backbone/3-TASKS.md"
+        tasks.write_text(tasks.read_text() + "- [ ] **Task 7.1: Customer search** (spec: backbone/specs/7.1.md)\n")
+        cls.launcher = ("python3", "-B", str(ROOT / "plugin/launcher.py"))
+        cls.host(*cls.launcher, "hook", "grill-stop", env=cls.on_host,
+                 input=stop_input("griller", {"verdict": "pass", "task": "7.1", "questions": [], "summary": "s"}))
+        spec = cls.project / "backbone/specs/7.1.md"
+        spec.write_text(spec.read_text() + "Approved-by: Ana (2026-11-01)\n")
+        tasks.write_text(tasks.read_text().replace("- [ ] **Task 7.1", "- [WIP] **Task 7.1"))
+        (cls.project / "src").mkdir(exist_ok=True)
+        (cls.project / "src/search.py").write_text(
+            "def search(names, q):  # AC-7.1-1\n    return [n for n in names if q.lower() in n.lower()]\n")
+        (cls.project / "tests").mkdir(exist_ok=True)
+        (cls.project / "tests/test_search.py").write_text("def test_contains():  # AC-7.1-1\n    assert True\n")
+        cls.host("git", "add", "-A")
+        cls.host("git", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "feat: task 7.1 in progress")
+        cls.run_env = dict(cls.on_host, HOME=str(cls.project.parent / "home"),
+                           DOCKER_CONFIG=os.environ.get("DOCKER_CONFIG") or os.path.expanduser("~/.docker"),
+                           HARNESS_ENGINE_SOURCE="/workspace/.harness-release")
+
+    def run_and_receipt(self):
+        tasks = self.project / "backbone/3-TASKS.md"
+        # An earlier run escalated the task (out of [WIP], BLOCKED); the user takes it back.
+        taken_back = re.sub(r"(?m)^(.*\*\*Task 7\.1: .*?)\s+[-\u2014]+\s+BLOCKED:.*$", r"\1", tasks.read_text())
+        tasks.write_text(taken_back.replace("- [ ] **Task 7.1", "- [WIP] **Task 7.1"))
+        env = dict(self.run_env, HARNESS_SANDBOX_START="on", HARNESS_AUTONOMY="autonomous", HARNESS_VERIFY="block",
+                   HARNESS_RUN_ATTEMPTS="1", HARNESS_TEST_CMD="true")
+        run = subprocess.run(list(self.launcher) + ["run", "--only", "7.1"], cwd=self.project, env=env,
+                             capture_output=True, text=True, timeout=2400)
+        self.assertIn("run: task 7.1 attempt 1", run.stdout, run.stdout + run.stderr)
+        return json.loads(self.host(*self.launcher, "receipt", "7.1", "--json", env=self.on_host).stdout)["sandbox"]
+
+    def test_a_the_shipped_definition_with_an_allowed_difference_is_a_container(self):
+        sandbox = self.run_and_receipt()
+
+        self.assertEqual(sandbox["isolation_class"], "container", sandbox["isolation_reason"])
+        self.assertIn("from the shipped definition", sandbox["isolation_reason"])
+
+    def test_b_an_approved_definition_with_anything_else_is_custom(self):
+        dockerfile = self.project / ".devcontainer/harness-agent/Dockerfile"
+        shipped = dockerfile.read_text()
+        self.addCleanup(dockerfile.write_text, shipped)
+        dockerfile.write_text(shipped + "RUN true\n")
+        self.host("git", "-c", "core.hooksPath=/dev/null", "commit", "-qam", "build: a toolchain step in the sandbox")
+        self.host(*self.launcher, "sandbox-approve", env=self.run_env)
+
+        sandbox = self.run_and_receipt()
+
+        self.assertEqual(sandbox["isolation_class"], "custom", sandbox["isolation_reason"])
+        self.assertIn("Dockerfile", sandbox["isolation_reason"])
 
 
 class Tamper(Sandbox):

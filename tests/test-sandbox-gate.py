@@ -31,7 +31,7 @@ except ImportError:
 
 HARNESS = Path(__file__).resolve().parents[1]
 CLASSES = ("docs", "refactor", "feature", "schema")
-ISOLATION = ("none", "container", "userspace-kernel", "microVM", "dedicated-VM")
+ISOLATION = ("none", "custom", "container", "userspace-kernel", "microVM", "dedicated-VM")
 TASKS = {"docs": "1.1", "refactor": "1.2", "feature": "1.3", "schema": "1.4"}
 SPEC = """# Spec {task}: Item
 
@@ -209,6 +209,9 @@ class Finish(unittest.TestCase):
         ("refactor=container schema=microVM", "feature", "none",           False),
         ("docs=userspace-kernel",        "docs",       "container",        False),
         ("Schema=MICROVM",               "schema",     "microVM",          True),
+        ("schema=container",             "schema",     "custom",           False),
+        ("schema=custom",                "schema",     "custom",           True),
+        ("schema=custom",                "schema",     "none",             False),
     )
 
     @classmethod

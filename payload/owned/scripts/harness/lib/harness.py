@@ -6528,7 +6528,11 @@ def sandbox_approve_command(_argv):
         return 1
     digest = sandbox.definition_digest(folder)
     reference = sandbox_reference()
+    custom = sandbox.custom_reason(folder, reference)
     print("sandbox-approve: %s of %s is %s:" % (SANDBOX_DEFINITION, ROOT, digest))
+    print("  definition: %s" % ("custom (%s): its judge passes record isolation_class custom, which a "
+                                "HARNESS_SANDBOX_REQUIRE of container refuses" % custom if custom else
+                                "shipped, with only the allowed differences: its judge passes record container"))
     differs = sandbox.definition_differences(folder, reference) if reference else None
     for name, file_digest in sandbox.definition_files(folder):
         note = ""
@@ -7621,6 +7625,8 @@ def sandbox_evidence_lines(evidence):
     if evidence.get("isolation_class") == "none":
         reason = evidence.get("isolation_reason")
         lines.append("nothing isolated the session from the host" + (": %s" % reason if reason else ""))
+    elif evidence.get("isolation_class") == "custom":
+        lines.append("custom sandbox: %s" % evidence.get("isolation_reason"))
     elif evidence.get("allowlist_hash") == "none":
         lines.append("container without an allowlist: no egress allowlist was published, so its outbound traffic is "
                      "not limited")

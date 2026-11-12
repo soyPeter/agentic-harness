@@ -549,7 +549,7 @@ console.log(JSON.stringify(texts));
         self.assertNotIn(missing, doctor("%s:%s" % (unreadable, pinned)))
         self.assertNotIn("Traceback", doctor("%s:%s" % (unreadable, pinned)))
 
-    def test_run_trusts_the_pinned_releases_own_sandbox_and_only_an_approved_edit_of_it(self):
+    def test_run_trusts_the_pinned_releases_own_sandbox_its_allowed_edits_and_an_approved_one(self):
         self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
         stubs = self.work / "stubs"
         stubs.mkdir()
@@ -564,13 +564,64 @@ console.log(JSON.stringify(texts));
 
         as_released = doctor()
         self.edit_allowlist()
+        allowlisted = doctor()
+        dockerfile = self.project / SANDBOX / "Dockerfile"
+        dockerfile.write_text(dockerfile.read_text() + "RUN true\n")
         edited = doctor()
         self.run_at(self.project, "python3", "-B", str(LAUNCHER), "sandbox-approve", env=env)
         approved = doctor()
 
         self.assertNotIn("sandbox-approve", as_released)
+        self.assertNotIn("sandbox-approve", allowlisted)
         self.assertIn("sandbox-approve", edited)
         self.assertNotIn("sandbox-approve", approved)
+
+    def test_only_the_shipped_definition_with_its_allowed_differences_counts_as_a_container(self):
+        """The release's own definition, with only the allowlist, the agent command, the base image and a workspace
+        subfolder changed, is the sandbox a judge pass may call a container; anything else is custom, which runs
+        once approved but records isolation_class custom."""
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        folder = self.project / SANDBOX
+        compose, config, dockerfile = (folder / "docker-compose.yml", folder / "devcontainer.json",
+                                       folder / "Dockerfile")
+        agent = "  agent:\n    build: .\n"
+        cases = (   # (file, old, new, the class sandbox-approve names)
+            (compose, None, None, "shipped"),
+            (compose, 'HARNESS_FIREWALL_ALLOW: ""', 'HARNESS_FIREWALL_ALLOW: "pypi.org repo.maven.apache.org"', "shipped"),
+            (compose, "HARNESS_AGENT_CMD: claude -p --dangerously-skip-permissions --output-format json",
+             "HARNESS_AGENT_CMD: codex exec --dangerously-bypass-hook-trust", "shipped"),
+            (dockerfile, "node:22-bookworm@sha256:", "node:22-bookworm-slim@sha256:", "shipped"),
+            (config, '"workspaceFolder": "/workspace"', '"workspaceFolder": "/workspace/app"', "shipped"),
+            (compose, agent, agent + "    privileged: true\n", "custom"),
+            (compose, agent, agent + "    env_file: [/etc/hosts]\n", "custom"),
+            (compose, "      - ../..:/workspace:cached\n",
+             "      - ../..:/workspace:cached\n      - /var/run:/host-run\n", "custom"),
+            (compose, "    network_mode: service:egress\n", "    network_mode: container:other\n", "custom"),
+            (compose, '    security_opt: ["no-new-privileges:true"]',
+             '    security_opt: ["no-new-privileges:true", "seccomp=unconfined.json"]', "custom"),
+            (config, '"name"', '"features": {"ghcr.io/devcontainers/features/docker-in-docker:2": {}}, "name"', "custom"),
+            (config, '"name"', '"appPort": [8080], "name"', "custom"),
+            (config, '"workspaceFolder": "/workspace"', '"workspaceFolder": "/elsewhere"', "custom"),
+            (dockerfile, "USER agent\n", "USER agent\nRUN true\n", "custom"),
+            (folder / "egress.py", "LOG = ", "LOG = LOG_PATH = ", "custom"),
+        )
+        for path, old, new, expected in cases:
+            kept = path.read_text()
+            with self.subTest(file=path.name, change=new):
+                if old is not None:
+                    self.assertIn(old, kept)
+                    path.write_text(kept.replace(old, new, 1))
+                approved = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "sandbox-approve",
+                                       env=dict(self.env, HOME=str(self.work / "home")))
+
+                self.assertIn("definition: %s" % expected, approved.stdout)
+            path.write_text(kept)
+        extra = folder / "notes.txt"
+        extra.write_text("an extra file\n")
+        approved = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "sandbox-approve",
+                               env=dict(self.env, HOME=str(self.work / "home")))
+        self.assertIn("definition: custom", approved.stdout)
+        self.assertIn("notes.txt", approved.stdout)
 
 
 if __name__ == "__main__":

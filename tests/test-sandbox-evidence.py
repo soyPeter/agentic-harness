@@ -529,6 +529,8 @@ class Start(Project):
     def test_approving_names_the_definition_it_trusts(self):
         out = self.approve()
 
+        self.assertIn("definition: custom", out)
+        self.assertIn("no copy of the shipped definition outside the project", out)
         self.assertIn(".devcontainer/harness-agent/", out)
         self.assertRegex(out, r"sha256:[0-9a-f]{64}")
         self.assertIn("devcontainer.json", out)
@@ -586,10 +588,11 @@ class Start(Project):
 
     @unittest.skipUnless(REAL_DOCKER, "resolves the Compose files with docker compose config")
     def test_a_mount_run_cannot_reproduce_from_its_private_copy_starts_nothing(self):
-        config = self.project / DEVCONTAINER_REL
-        kept = config.read_text()
-        self.addCleanup(config.write_text, kept)
-        config.write_text(kept.replace('"workspaceFolder": "/workspace"', '"workspaceFolder": "/workspace/app"'))
+        compose = self.project / ".devcontainer/harness-agent/docker-compose.yml"
+        kept = compose.read_text()
+        self.addCleanup(compose.write_text, kept)
+        compose.write_text(kept.replace("      - ../..:/workspace:cached\n",
+                                        "      - ../..:/workspace:cached\n      - ../../..:/projects\n", 1))
         self.approve()
         path = self.tools("devcontainer", "docker", compose=True)
 
@@ -626,7 +629,8 @@ class Start(Project):
         self.assertNotIn("devcontainer up", (Path(path) / "calls").read_text())
 
     @unittest.skipUnless(REAL_DOCKER, "resolves the Compose files with docker compose config")
-    def test_a_definition_that_reaches_past_its_folder_or_the_sandbox_starts_nothing(self):
+    def test_a_definition_that_reads_outside_its_folder_or_acts_on_the_host_starts_nothing(self):
+        """These are refused even approved; anything else an approved definition changes only makes it custom."""
         compose = self.project / ".devcontainer/harness-agent/docker-compose.yml"
         config = self.project / DEVCONTAINER_REL
         outside = self.work / "outside.yml"
@@ -636,17 +640,8 @@ class Start(Project):
             "extends": (compose, agent, agent + "    extends:\n      file: %s\n      service: agent\n" % outside),
             "include": (compose, "services:\n", "include:\n  - %s\nservices:\n" % outside),
             "env_file": (compose, agent, agent + "    env_file: [extra.env]\n"),
+            "env_file, in a flow mapping": (compose, agent, "  agent: {build: ., env_file: [extra.env]}\n  ignored:\n"),
             "build context": (compose, agent, "  agent:\n    build: %s\n" % self.work),
-            "volumes_from": (compose, agent, agent + "    volumes_from: [egress]\n"),
-            "privileged": (compose, agent, agent + "    privileged: true\n"),
-            "cap_add": (compose, agent, agent + "    cap_add: [SYS_ADMIN]\n"),
-            "devices": (compose, agent, agent + "    devices: [/dev/null:/dev/null]\n"),
-            "network_mode": (compose, "    network_mode: service:egress\n", "    network_mode: host\n"),
-            "pid": (compose, agent, agent + "    pid: host\n"),
-            "docker.sock": (compose, "      - ../..:/workspace:cached\n",
-                            "      - ../..:/workspace:cached\n      - /var/run/docker.sock:/var/run/docker.sock\n"),
-            "driver_opts": (compose, "  egress-allowlist:\n",
-                            "  egress-allowlist:\n    driver_opts: {type: none, o: bind, device: /tmp}\n"),
             "initializeCommand": (config, '"name"', '"initializeCommand": "id", "name"'),
             "mounts": (config, '"name"', '"mounts": ["source=/tmp,target=/x,type=bind"], "name"'),
             "runArgs": (config, '"name"', '"runArgs": ["--privileged"], "name"'),
@@ -667,8 +662,22 @@ class Start(Project):
                 path.write_text(kept[path])
 
                 self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
-                self.assertIn(name, run.stdout)
+                self.assertIn(name.split(",")[0], run.stdout)
                 self.assertNotIn("devcontainer up", (Path(tools) / "calls").read_text())
+
+    @unittest.skipUnless(REAL_DOCKER, "resolves the Compose files with docker compose config")
+    def test_an_approved_definition_that_widens_the_sandbox_runs_as_a_custom_one(self):
+        compose = self.project / ".devcontainer/harness-agent/docker-compose.yml"
+        kept = compose.read_text()
+        self.addCleanup(compose.write_text, kept)
+        compose.write_text(kept.replace("  agent:\n    build: .\n", "  agent:\n    build: .\n    privileged: true\n", 1))
+        self.approve()
+        tools = self.tools("devcontainer", "docker", compose=True)
+
+        self.autonomous("run", "--only", "7.1", HARNESS_SANDBOX_START="on", PATH=tools,
+                        CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-test")
+
+        self.assertIn("devcontainer up", (Path(tools) / "calls").read_text())
 
     @unittest.skipUnless(REAL_DOCKER, "resolves the Compose files with docker compose config")
     def test_a_build_that_buildx_refuses_says_what_to_do(self):
