@@ -680,6 +680,19 @@ class Start(Project):
         self.assertIn("devcontainer up", (Path(tools) / "calls").read_text())
 
     @unittest.skipUnless(REAL_DOCKER, "resolves the Compose files with docker compose config")
+    def test_a_session_the_sandbox_kept_from_starting_costs_nothing(self):
+        self.approve()
+        tools = self.tools("devcontainer", "docker", failing=True, compose=True)
+        settings = dict(HARNESS_SANDBOX_START="on", PATH=tools, CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-test",
+                        HARNESS_TASK_BUDGET_USD="1")
+
+        runs = [self.autonomous("run", "--only", "7.1", **settings) for _ in range(2)]
+
+        for run in runs:
+            self.assertIn("the sandbox could not start", run.stdout, run.stdout + run.stderr)
+            self.assertNotIn("budget", run.stdout)
+
+    @unittest.skipUnless(REAL_DOCKER, "resolves the Compose files with docker compose config")
     def test_a_build_that_buildx_refuses_says_what_to_do(self):
         self.approve()
         tools = self.tools("devcontainer", "docker", compose=True)
