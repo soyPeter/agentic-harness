@@ -204,6 +204,39 @@ class WritesToAgentConfiguration(Fixture):
                 self.assertAllowed(self.bash(command), command)
         self.assertAllowed(self.pre_tool_use("Read", {"file_path": str(self.home / ".claude/settings.json")}))
 
+    def disk_ignores_case(self):
+        probe = self.work / "Case-Probe"
+        probe.mkdir(exist_ok=True)
+        return (self.work / "case-probe").exists()
+
+    def test_a_case_variant_names_the_same_file_on_a_case_insensitive_disk(self):
+        for path, text in ((self.home / ".claude/settings.json", "{}"),
+                           (self.home / ".config/opencode/opencode.json", "{}")):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        h = self.home
+        paths = [h / ".CLAUDE/settings.json", h / ".claude/Settings.json", h / ".Claude/SETTINGS.LOCAL.JSON",
+                 h / ".Claude.json", h / ".claude/Agents/judge.md", h / ".claude/HOOKS/pre.sh",
+                 h / ".Codex/config.toml", h / ".codex/Hooks.json", h / ".config/OpenCode/opencode.json",
+                 h / ".Agentic-Harness/machine.json"]
+        commands = ["cp x ~/.Claude/settings.json", "echo x > ~/.Codex/config.toml",
+                    "echo x > ~/.CLAUDE/settings.json", "echo x > ~/.config/OPENCODE/plugins/x.js", "rm -rf ~/.CLAUDE",
+                    "mv ~/.CODEX ~/.codex.off"]
+        if self.disk_ignores_case():
+            for path in paths:
+                with self.subTest(path=str(path)):
+                    self.assertRefused(self.pre_tool_use("Write", {"file_path": str(path), "content": "{}"}))
+                    self.assertRefused(self.pre_tool_use("Edit", {"file_path": str(path), "old_string": "a",
+                                                                  "new_string": "b"}))
+            for command in commands:
+                with self.subTest(command=command):
+                    self.assertRefused(self.bash(command), command)
+        else:
+            # A case-sensitive disk keeps them apart: ~/.CLAUDE is another folder, which Claude Code never reads.
+            for path in paths[:2]:
+                with self.subTest(path=str(path)):
+                    self.assertAllowed(self.pre_tool_use("Write", {"file_path": str(path), "content": "{}"}))
+
     def test_the_rest_of_the_home_folder_is_left_alone(self):
         for path in (self.home / "notes.txt", self.home / ".claude/projects/x/memory/note.md",
                      self.home / ".claude/todos/x.json", self.home / ".config/other/x.json"):

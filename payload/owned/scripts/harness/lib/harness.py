@@ -1820,6 +1820,27 @@ def agent_config_locations():
     return places
 
 
+CASE_PROBES = {}
+
+
+def disk_ignores_case(path):
+    """Whether the disk holding path matches names whatever their case (macOS's and Windows' default), judged on the
+    nearest existing part of path whose name has letters."""
+    probe = path
+    while probe != os.path.dirname(probe):
+        name = os.path.basename(probe)
+        if name.swapcase() != name and os.path.lexists(probe):
+            if probe not in CASE_PROBES:
+                other = os.path.join(os.path.dirname(probe), name.swapcase())
+                try:
+                    CASE_PROBES[probe] = os.path.samefile(probe, other)
+                except OSError:
+                    CASE_PROBES[probe] = False
+            return CASE_PROBES[probe]
+        probe = os.path.dirname(probe)
+    return False
+
+
 def agent_config_path(path_str, cwd, whole=False):
     """Which CLI configuration path_str is in, else None. whole: also a folder that holds some (deleting or moving it
     takes the configuration with it)."""
@@ -1828,14 +1849,17 @@ def agent_config_path(path_str, cwd, whole=False):
     path = os.path.expandvars(os.path.expanduser(path_str))
     if not os.path.isabs(path):
         path = os.path.join(cwd or str(ROOT), path)
-    full, root = os.path.realpath(path), os.path.realpath(str(ROOT))
+    resolved, real_root = os.path.realpath(path), os.path.realpath(str(ROOT))
     for folder, names, label in agent_config_locations():
-        base = os.path.realpath(str(folder))
+        real_base = os.path.realpath(str(folder))
+        # realpath keeps the case it was given, and the CLIs' folders are the same files spelled any way on such a disk.
+        folded = disk_ignores_case(real_base)
+        full, root, base = (p.lower() if folded else p for p in (resolved, real_root, real_base))
         if root == base or root.startswith(base + os.sep):
             continue   # a project kept in one of these folders keeps its own gates
         if full.startswith(base + os.sep):
             first = full[len(base) + 1:].split(os.sep)[0]
-            if names is None or any(fnmatch.fnmatchcase(first, name) for name in names):
+            if names is None or any(fnmatch.fnmatchcase(first, name.lower() if folded else name) for name in names):
                 return label
         if full == base:
             return label
