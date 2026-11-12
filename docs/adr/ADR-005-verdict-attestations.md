@@ -371,16 +371,25 @@ endpoint and a Vault login (a local HTTP server). No cloud KMS, Vault or Sigstor
    the push starts from (`harness.py signing-check <before> <key set>`), so a push can't choose how it is signed.
    - Refusal rules: one signing source at a time (the key secret, a KMS key, or keyless), a KMS key reference and an
      identity of the same cloud, and settings that name another mode are refused.
-   - The job gets `id-token: write`. `Sign in to the KMS` fetches the job's OIDC token for the cloud's audience and
-     leaves it where that cloud's SDK reads it: a GCP external-account credential file, `AWS_ROLE_ARN` with
-     `AWS_WEB_IDENTITY_TOKEN_FILE`, `AZURE_FEDERATED_TOKEN_FILE`, or a Vault token from Vault's JWT login. The key
-     check derives the public key from the KMS and compares it with `harness-attest.pub`, as for the key secret.
-     Signing uses the reference with the services-less signing config, after fetching a fresh token.
+   - Only kms and keyless signing get an OIDC token. A job's permissions are fixed before its steps run, so the
+     signing runs in one of two jobs with the same steps: `attest` without `id-token: write`, for the key, and
+     `attest-oidc` with it. `attest-route`, a job with no secrets outside the environment, reads
+     `HARNESS_ATTEST_SIGNING` at the previous tip as the engine does and starts one of them; the engine's
+     `signing-check` in that job refuses the other job's modes, so a misreading stops the job instead of signing.
+   - Each step that uses the KMS key (the key check and both signing steps) logs in itself: it fetches the job's OIDC
+     token for the cloud's audience and hands it to cosign the way that cloud's SDK reads it (a GCP external-account
+     credential file, `AWS_ROLE_ARN` with `AWS_WEB_IDENTITY_TOKEN_FILE`, `AZURE_FEDERATED_TOKEN_FILE`, or a Vault token
+     from Vault's JWT login), as variables of that step only, and deletes the token and credential files when it ends.
+     The statement, export and upload steps never hold them. The key check derives the public key from the KMS and
+     compares it with `harness-attest.pub`, as for the key secret. Signing uses the reference with the services-less
+     signing config.
    - Bind the cloud's trust to the job's OIDC subject `repo:<owner>/<repo>:environment:harness-attest`, so only the
      protected environment's job can use the key.
-   - Tested: the settings' decision table (property checks), the token request and each cloud's credential file or
-     variables against the stand-ins, and the key check and signing with a key file standing in for the reference
-     (cosign reads both through `--key`). Not tested: any cloud or Vault accepting the token, cosign's KMS clients
+   - Tested: the settings' decision table (property checks), the route agreeing with the engine (property checks)
+     and each job refusing the other's modes, the token request and each cloud's credential file or variables as the
+     signing cosign receives them against the stand-ins, that nothing of the login outlives its step, and the key
+     check and signing with a key file standing in for the reference (cosign reads both through `--key`). Not tested:
+     GitHub running the two jobs and the YAML alias they share, any cloud or Vault accepting the token, cosign's KMS clients
      reading those credentials, and the OIDC subject GitHub issues.
 3. **Implemented, not run end to end: keyless signing.** Only `HARNESS_ATTEST_SIGNING="keyless"` at the commit the
    push starts from turns it on: never by default, never with the key secret or a KMS setting also present, and a

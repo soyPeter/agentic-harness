@@ -16,7 +16,7 @@ import tempfile
 import textwrap
 import unittest
 
-from attest_support import FakeTokenService
+from attest_support import FakeTokenService, left_in
 
 HARNESS = Path(__file__).resolve().parents[1]
 WORKFLOW = HARNESS / "payload/owned/.github/workflows/harness-verify.yml"
@@ -298,20 +298,25 @@ class SignedExport(Steps):
         self.assertEqual(written.returncode, 0, written.stdout + written.stderr)
         return cosign, root, runner
 
-    def test_the_kms_mode_signs_the_export_with_the_reference_and_a_fresh_token(self):
+    def test_the_kms_mode_signs_the_export_with_the_reference_and_a_fresh_token_it_leaves_to_no_later_step(self):
         cosign, root, runner = self.signable_export("signed-kms")
         keys = self.work / "kms-keys"
         keys.mkdir()
         run(keys, cosign, "generate-key-pair", COSIGN_PASSWORD="")
-        service = FakeTokenService(self)
+        service = FakeTokenService(self, vault_token="a-vault-token")
+        address = service.settings["ACTIONS_ID_TOKEN_REQUEST_URL"].split("/token", 1)[0]
+        before = (runner / "github-env").read_text()
 
         signed = self.step(root, SIGN_EXPORT, runner, ATTEST_MODE="kms", ATTEST_KMS_KEY=str(keys / "cosign.key"),
-                           ATTEST_OIDC_AUDIENCE="sts.amazonaws.com",
-                           ATTEST_OIDC_TOKEN=str(runner / "harness-attest-oidc.jwt"), COSIGN_PASSWORD="",
+                           ATTEST_KMS_CLOUD="vault", ATTEST_VAULT_ADDR=address, ATTEST_VAULT_ROLE="harness-attest",
+                           ATTEST_OIDC_AUDIENCE=address, COSIGN_PASSWORD="", GITHUB_ENV=str(runner / "github-env"),
                            **service.settings)
 
         self.assertEqual(signed.returncode, 0, signed.stdout + signed.stderr)
-        self.assertEqual(service.audiences, ["sts.amazonaws.com"])
+        self.assertEqual(service.audiences, [address])
+        self.assertEqual(service.logins, [{"role": "harness-attest", "jwt": "a.github.oidc.token"}])
+        self.assertEqual((runner / "github-env").read_text(), before)
+        self.assertEqual(left_in(runner, "a.github.oidc.token", "a-vault-token"), [])
         check = run(self.work, cosign, "verify-blob", "--key", keys / "cosign.pub", "--bundle", runner / BUNDLE,
                     "--insecure-ignore-tlog", runner / EXPORT, check=False)
         self.assertEqual(check.returncode, 0, check.stdout + check.stderr)

@@ -22,12 +22,17 @@
     `gcpkms://`, `awskms://`, `azurekms://` or `hashivault://` key, used through the job's OIDC token as
     `HARNESS_ATTEST_KMS_IDENTITY`) or `keyless` (Sigstore's public Fulcio and Rekor, an explicit opt-in that publishes
     the workflow's identity for good). One source at a time; a misspelt mode refuses; the key and KMS paths can't fall
-    back to keyless. `harness.py signing-check` decides, and `ci-protect --attest` states the mode. The job gets
-    `id-token: write`.
+    back to keyless. `harness.py signing-check` decides, and `ci-protect --attest` states the mode.
+  - Only kms and keyless signing get GitHub's OIDC token: `attest-route` (no secrets, outside the environment) reads
+    the mode at the previous tip and starts `attest` (key, no `id-token`) or `attest-oidc` (`id-token: write`), which
+    run the same steps; the engine in each refuses the other's modes. The KMS login happens inside each step that uses
+    the KMS key, so the cloud's variables and the Vault token reach no other step, and its token and credential files
+    are deleted when the step ends.
   - Durable storage (release assets, OCI) is deferred.
   **Upgrading:** the `attest` job's first step now decides whether there is anything to sign with, so a project
-  without a key and without signing settings still does nothing. A deploy gate that checks the type by hand
-  (`cosign verify-blob-attestation --type`) moves to `verdicts/v1`.
+  without a key and without signing settings still does nothing. With kms or keyless signing, the run's signing job is
+  `attest-oidc`, not `attest`: a rule or dashboard that looks for the `attest` check by name needs both. A deploy gate
+  that checks the type by hand (`cosign verify-blob-attestation --type`) moves to `verdicts/v1`.
 
 - **The traceability matrix comes with each pull request, and the export can be archived and signed (ADR-004,
   follow-ups).** `harness-verify` writes the HTML matrix of a pull request that verifies with the base branch's

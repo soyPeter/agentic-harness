@@ -14,10 +14,11 @@ import re
 import tempfile
 import unittest
 
-from attest_support import (BUNDLE_FILE, CHECK_KEY, FIND_SETTINGS, READ_APPROVAL, SEARCH, SIGN, SIGN_IN,
-                            STATEMENT_FILE, WRITE, FakeTokenService, Project, cosign_or_skip, fake_github, github_env,
-                            jobs, key_pair, new_project, run, run_step, runner_folder, sha256, step_script, step_text,
-                            take_engine)
+from attest_support import (BUNDLE_FILE, CHECK_KEY, CHECK_SIGNING, CHOOSE_JOB, FIND_SETTINGS, READ_APPROVAL, SEARCH,
+                            SIGN, SIGN_EXPORT, STATEMENT_FILE, WORKFLOW, WRITE, FakeTokenService, Project,
+                            cosign_or_skip, fake_github, github_env, jobs, key_pair, left_in, new_project,
+                            recording_cosign, recording_cosign_calls, run, run_step, runner_folder, sha256, step_script,
+                            step_text, take_engine)
 from hypothesis_profiles import examples
 
 try:
@@ -261,8 +262,7 @@ class ApprovalStep(unittest.TestCase):
         self.assertIn("BRANCH: ${{ github.ref_name }}\n", step)
         self.assertIn('approval-check "$pulls" "$BEFORE..$GITHUB_SHA" "$BRANCH"', step)
         self.assertNotIn("secrets.", step)
-        self.assertIn("    permissions:\n      contents: read\n      pull-requests: read\n      id-token: write\n",
-                      attest)
+        self.assertIn("    permissions:\n      contents: read\n      pull-requests: read\n", attest)
         self.assertNotIn("permissions:", jobs()["verify"])
 
 
@@ -494,36 +494,155 @@ if given is not None:
             self.assertEqual(self.find(before), "no signing is configured" not in engine.stderr, engine.stderr)
 
 
+class OidcJob(FindProject):
+    """Only kms and keyless signing need GitHub's OIDC token, so only their job, attest-oidc, may ask for one. A first
+    job without the environment or its secrets reads the mode at the commit the push starts from, as the engine does,
+    and picks attest or attest-oidc; the engine in the job it picks refuses the other job's modes."""
+
+    def chosen(self, before):
+        runner = runner_folder(self.project)
+        result = run_step(self.project, CHOOSE_JOB, runner, BEFORE=before, GITHUB_OUTPUT=str(runner / "out"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return dict(line.split("=", 1) for line in (runner / "out").read_text().splitlines())["oidc"] == "true"
+
+    def checked(self, before, job, key=False):
+        runner = runner_folder(self.project)
+        result = run_step(self.project, CHECK_SIGNING, runner, BEFORE=before, GITHUB_JOB=job,
+                          ATTEST_KEY_SET="true" if key else "false", ENGINE_SCRIPT=str(self.project.engine))
+        return result, github_env(runner)
+
+    def test_only_kms_or_keyless_at_the_previous_tip_runs_the_job_with_an_oidc_token(self):
+        kms = self.commit_conf(conf_lines(HARNESS_ATTEST_SIGNING="kms", HARNESS_ATTEST_KMS_KEY=AWS_KEY,
+                                          HARNESS_ATTEST_KMS_IDENTITY=AWS_ROLE))
+        keyless = self.commit_conf("\nHARNESS_ATTEST_SIGNING=keyless\n")
+        key = self.commit_conf(conf_lines(HARNESS_ATTEST_SIGNING="key"))
+        commented = self.commit_conf('\n# HARNESS_ATTEST_SIGNING="keyless"\n')
+        overridden = self.commit_conf(conf_lines(HARNESS_ATTEST_SIGNING="keyless") + conf_lines(
+            HARNESS_ATTEST_SIGNING="key"))
+
+        self.assertEqual([self.chosen(c) for c in (kms, keyless)], [True, True])
+        self.assertEqual([self.chosen(c) for c in (self.project.adopted, key, commented, overridden, "0" * 40)],
+                         [False] * 5)
+
+    def test_each_job_refuses_the_modes_of_the_other(self):
+        keyless = self.commit_conf(conf_lines(HARNESS_ATTEST_SIGNING="keyless"))
+        kms = self.commit_conf(conf_lines(HARNESS_ATTEST_SIGNING="kms", HARNESS_ATTEST_KMS_KEY=AWS_KEY,
+                                          HARNESS_ATTEST_KMS_IDENTITY=AWS_ROLE))
+        cases = {"key": (self.project.adopted, True, "attest"), "keyless": (keyless, False, "attest-oidc"),
+                 "kms": (kms, False, "attest-oidc")}
+        for mode, (before, key, job) in cases.items():
+            other = "attest" if job == "attest-oidc" else "attest-oidc"
+            with self.subTest(mode=mode):
+                accepted, variables = self.checked(before, job, key)
+                refused, nothing = self.checked(before, other, key)
+
+                self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+                self.assertEqual(variables["ATTEST_MODE"], mode)
+                self.assertEqual(refused.returncode, 1)
+                self.assertIn("::error::", refused.stdout)
+                self.assertNotIn("ATTEST_MODE", nothing)
+
+    def test_the_key_job_gets_no_oidc_token_and_the_oidc_job_runs_the_same_steps(self):
+        workflow, every = WORKFLOW.read_text(), jobs()
+        key, oidc, choose = every["attest"], every["attest-oidc"], every["attest-route"]
+
+        self.assertEqual(re.findall(r"^ *id-token:.*$", workflow, re.M), ["      id-token: write"])
+        self.assertIn("    permissions:\n      contents: read\n      pull-requests: read\n    env:", key)
+        self.assertIn("    permissions:\n      contents: read\n      pull-requests: read\n      id-token: write\n", oidc)
+        self.assertIn("    needs: attest-route\n"
+                      "    if: github.event_name == 'push' && needs.attest-route.outputs.oidc == 'false'\n", key)
+        self.assertIn("    needs: attest-route\n"
+                      "    if: github.event_name == 'push' && needs.attest-route.outputs.oidc == 'true'\n", oidc)
+        for job in (key, oidc):
+            self.assertIn("    environment: harness-attest\n", job)
+        self.assertIn("    env: &attest-env\n", key)
+        self.assertIn("    steps: &attest-steps\n", key)
+        self.assertTrue(oidc.endswith("    env: *attest-env\n    steps: *attest-steps\n"), oidc)
+        self.assertIn("    if: github.event_name == 'push'\n", choose)
+        for word in ("environment:", "secrets.", "permissions:"):
+            self.assertNotIn(word, choose)
+        self.assertIn("      oidc: ${{ steps.choose.outputs.oidc }}\n", choose)
+        self.assertIn("        id: choose\n", step_text("attest-route", CHOOSE_JOB))
+
+    if given is not None:
+        SIGNING_LINE = st.tuples(st.sampled_from(["", " ", "\t", "#"]),
+                                 st.sampled_from(["HARNESS_ATTEST_SIGNING", "HARNESS_ATTEST_SIGNING_X"]),
+                                 st.sampled_from(["=", " = ", "\t="]),
+                                 st.sampled_from(["keyless", '"keyless"', "'kms'", "kms", '"key"', "key", "", "Kms",
+                                                  '"keyless']))
+
+        @settings(max_examples=examples(30), deadline=None, suppress_health_check=[HealthCheck.too_slow])
+        @given(lines=st.lists(SIGNING_LINE, max_size=3), kms=st.booleans(), key=st.booleans())
+        def test_the_first_job_and_the_engine_agree_on_whether_the_mode_needs_the_token(self, lines, kms, key):
+            text = "\n" + "".join("%s%s%s%s\n" % line for line in lines)
+            if kms:
+                text += conf_lines(HARNESS_ATTEST_KMS_KEY=AWS_KEY, HARNESS_ATTEST_KMS_IDENTITY=AWS_ROLE)
+            before = self.commit_conf(text)
+
+            engine = self.project.harness("signing-check", before, "true" if key else "false")
+
+            if engine.returncode == 0:
+                self.assertEqual(self.chosen(before), "ATTEST_MODE=key\n" not in engine.stdout, engine.stdout)
+
+
 class KmsLogin(unittest.TestCase):
-    """The attest job's KMS login: it asks GitHub for the job's OIDC token with the audience the cloud trusts, and
-    leaves the token where that cloud's SDK (and so cosign's KMS client) reads it. The clouds aren't reached."""
+    """The KMS login, in each step that uses the KMS key: it asks GitHub for the job's OIDC token with the audience the
+    cloud trusts, and hands it to cosign's KMS client the way that cloud's SDK reads it, in that step alone: no later
+    step (the statement, the export, the uploads) inherits a variable, and no token or credential file is left. The
+    clouds aren't reached: a key file stands in for the reference, and the cosign the step runs records what it
+    received before the real cosign signs."""
 
     @classmethod
     def setUpClass(cls):
         temp = tempfile.TemporaryDirectory(prefix="kms ")
         cls.addClassCleanup(temp.cleanup)
-        cls.project = Project(Path(temp.name).resolve() / "project")
+        cls.work = Path(temp.name).resolve()
+        cls.project = Project(cls.work / "project")
+        cls.tip = cls.project.finish("1.1", "Customer search", SEARCH)
 
-    def sign_in(self, service, **login):
+    def setUp(self):
+        self.cosign = cosign_or_skip(self)
+        self.key = self.work / self._testMethodName
+        self.public = key_pair(self, self.key, self.cosign, password="")[1]
+
+    def sign(self, service, **login):
+        """(the signing step's result, its runner, the call that signed, the token's audiences asked for)."""
+        self.project.git("checkout", "-q", "--detach", self.tip)
         runner = runner_folder(self.project)
-        result = run_step(self.project, SIGN_IN, runner, **dict(service.settings, ATTEST_MODE="kms", **login))
+        recorder = recording_cosign(runner, self.cosign)
+        (runner / "harness-attestation").mkdir()
+        (runner / STATEMENT_FILE).write_text(self.project.harness("attest", "--range", self.project.adopted + "..HEAD",
+                                                                  check=True).stdout)
+        result = run_step(self.project, SIGN, runner, ATTEST_MODE="kms", ATTEST_KMS_KEY=str(self.key / "cosign.key"),
+                          COSIGN_PASSWORD="", **dict(service.settings, **dict(recorder, **login)))
+        signing = [c for c in recording_cosign_calls(runner) if c["args"][:1] == ["attest-blob"]]
+        return result, runner, signing[0] if signing else None
+
+    def assert_signed_and_nothing_left(self, result, runner, *secrets):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        return runner, github_env(runner)
+        (runner / "check.pub").write_text(self.public)
+        verified = run(self.work, self.cosign, "verify-blob-attestation", "--key", runner / "check.pub", "--bundle",
+                       runner / BUNDLE_FILE, "--type", json.loads((runner / STATEMENT_FILE).read_text())["predicateType"],
+                       "--digest", self.tip, "--digestAlg", "gitCommit", "--insecure-ignore-tlog", check=False)
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+        self.assertEqual(github_env(runner), {})
+        self.assertEqual(left_in(runner, *secrets), [])
 
     def test_gcp_gets_a_workload_identity_credential_file(self):
         service = FakeTokenService(self)
 
-        runner, variables = self.sign_in(service, ATTEST_KMS_CLOUD="gcp", ATTEST_GCP_PROVIDER=GCP_PROVIDER,
-                                         ATTEST_GCP_SERVICE_ACCOUNT=GCP_ACCOUNT,
-                                         ATTEST_OIDC_AUDIENCE="https://iam.googleapis.com/" + GCP_PROVIDER)
+        result, runner, signing = self.sign(service, ATTEST_KMS_CLOUD="gcp", ATTEST_GCP_PROVIDER=GCP_PROVIDER,
+                                            ATTEST_GCP_SERVICE_ACCOUNT=GCP_ACCOUNT,
+                                            ATTEST_OIDC_AUDIENCE="https://iam.googleapis.com/" + GCP_PROVIDER)
 
+        self.assert_signed_and_nothing_left(result, runner, "a.github.oidc.token", "external_account")
         self.assertEqual(service.audiences, ["https://iam.googleapis.com/" + GCP_PROVIDER])
-        token = variables["ATTEST_OIDC_TOKEN"]
-        self.assertEqual(Path(token).read_text(), "a.github.oidc.token")
-        self.assertEqual(json.loads(Path(variables["GOOGLE_APPLICATION_CREDENTIALS"]).read_text()), {
+        credentials = json.loads(signing["files"]["GOOGLE_APPLICATION_CREDENTIALS"])
+        self.assertEqual(credentials.pop("credential_source")["file"], str(runner / "harness-attest-oidc.jwt"))
+        self.assertEqual(credentials, {
             "type": "external_account", "audience": "//iam.googleapis.com/" + GCP_PROVIDER,
             "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
-            "token_url": "https://sts.googleapis.com/v1/token", "credential_source": {"file": token},
+            "token_url": "https://sts.googleapis.com/v1/token",
             "service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
                                                  "%s:generateAccessToken" % GCP_ACCOUNT})
 
@@ -542,38 +661,51 @@ class KmsLogin(unittest.TestCase):
             with self.subTest(cloud=cloud):
                 service = FakeTokenService(self)
 
-                _, variables = self.sign_in(service, **login)
+                result, runner, signing = self.sign(service, **login)
 
+                self.assert_signed_and_nothing_left(result, runner, "a.github.oidc.token")
                 self.assertEqual(service.audiences, [login["ATTEST_OIDC_AUDIENCE"]])
-                self.assertEqual({k: variables[k] for k in expected}, expected)
-                self.assertEqual(variables[token_variable], variables["ATTEST_OIDC_TOKEN"])
-                self.assertEqual(Path(variables[token_variable]).read_text(), "a.github.oidc.token")
+                self.assertEqual({k: signing["variables"][k] for k in expected}, expected)
+                self.assertEqual(signing["files"][token_variable], "a.github.oidc.token")
 
     def test_vault_trades_the_token_for_a_masked_vault_token(self):
         service = FakeTokenService(self, vault_token="a-vault-token")
         address = service.settings["ACTIONS_ID_TOKEN_REQUEST_URL"].split("/token", 1)[0]
 
-        runner = runner_folder(self.project)
-        result = run_step(self.project, SIGN_IN, runner, **dict(
-            service.settings, ATTEST_MODE="kms", ATTEST_KMS_CLOUD="vault", ATTEST_VAULT_ADDR=address,
-            ATTEST_VAULT_ROLE="harness-attest", ATTEST_OIDC_AUDIENCE=address))
+        result, runner, signing = self.sign(service, ATTEST_KMS_CLOUD="vault", ATTEST_VAULT_ADDR=address,
+                                            ATTEST_VAULT_ROLE="harness-attest", ATTEST_OIDC_AUDIENCE=address)
 
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_signed_and_nothing_left(result, runner, "a.github.oidc.token", "a-vault-token")
         self.assertEqual(service.logins, [{"role": "harness-attest", "jwt": "a.github.oidc.token"}])
         self.assertIn("::add-mask::a-vault-token", result.stdout)
-        variables = github_env(runner)
-        self.assertEqual((variables["VAULT_ADDR"], variables["VAULT_TOKEN"]), (address, "a-vault-token"))
+        self.assertEqual((signing["variables"]["VAULT_ADDR"], signing["variables"]["VAULT_TOKEN"]),
+                         (address, "a-vault-token"))
 
-    def test_no_token_no_login(self):
-        service = FakeTokenService(self, answer='{"message": "no token"}')
-        runner = runner_folder(self.project)
+    def test_no_token_no_login_and_a_failed_login_leaves_no_token(self):
+        cases = {"no token": (FakeTokenService(self, answer='{"message": "no token"}'), {}),
+                 "vault refuses": (FakeTokenService(self), dict(ATTEST_VAULT_ROLE="harness-attest"))}
+        for case, (service, login) in cases.items():
+            with self.subTest(case=case):
+                address = service.settings["ACTIONS_ID_TOKEN_REQUEST_URL"].split("/token", 1)[0]
+                cloud = dict(ATTEST_KMS_CLOUD="vault", ATTEST_VAULT_ADDR=address, ATTEST_OIDC_AUDIENCE=address) \
+                    if login else dict(ATTEST_KMS_CLOUD="aws", ATTEST_AWS_ROLE=AWS_ROLE, ATTEST_AWS_REGION="eu-west-1",
+                                       ATTEST_OIDC_AUDIENCE="sts.amazonaws.com")
 
-        result = run_step(self.project, SIGN_IN, runner, **dict(
-            service.settings, ATTEST_MODE="kms", ATTEST_KMS_CLOUD="aws", ATTEST_AWS_ROLE=AWS_ROLE,
-            ATTEST_AWS_REGION="eu-west-1", ATTEST_OIDC_AUDIENCE="sts.amazonaws.com"))
+                result, runner, signing = self.sign(service, **dict(cloud, **login))
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn("AWS_ROLE_ARN", github_env(runner))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIsNone(signing)
+                self.assertFalse((runner / BUNDLE_FILE).exists())
+                self.assertEqual(github_env(runner), {})
+                self.assertEqual(left_in(runner, "a.github.oidc.token"), [])
+
+    def test_each_step_that_uses_the_kms_key_logs_in_the_same_way(self):
+        logins = [re.search(r"^kms_login\(\) \{\n.*?^\}\n", step_script(name), re.M | re.S)
+                  for name in (CHECK_KEY, SIGN, SIGN_EXPORT)]
+
+        self.assertTrue(all(logins), logins)
+        self.assertEqual(len({login.group(0) for login in logins}), 1)
+        self.assertNotIn("GITHUB_ENV", logins[0].group(0))
 
 
 class SigningSteps(unittest.TestCase):
@@ -612,12 +744,15 @@ class SigningSteps(unittest.TestCase):
 
     def test_the_key_mode_signs_with_the_environments_key(self):
         private, public = key_pair(self, self.work / "key", self.cosign)
+        service = FakeTokenService(self)
         runner = self.runner()
 
-        signed = self.sign(runner, ATTEST_MODE="key", HARNESS_ATTEST_KEY=private, COSIGN_PASSWORD="pw")
+        signed = self.sign(runner, ATTEST_MODE="key", HARNESS_ATTEST_KEY=private, COSIGN_PASSWORD="pw",
+                           **service.settings)
 
         self.assertEqual(signed.returncode, 0, signed.stdout + signed.stderr)
         self.assertEqual(self.verified(runner, public).returncode, 0)
+        self.assertEqual(service.audiences, [])
 
     def test_the_kms_mode_signs_with_the_reference_and_a_fresh_token(self):
         _, public = key_pair(self, self.work / "kms", self.cosign, password="")
@@ -625,9 +760,8 @@ class SigningSteps(unittest.TestCase):
         runner = self.runner()
 
         signed = self.sign(runner, ATTEST_MODE="kms", ATTEST_KMS_KEY=str(self.work / "kms" / "cosign.key"),
-                           ATTEST_OIDC_AUDIENCE="sts.amazonaws.com",
-                           ATTEST_OIDC_TOKEN=str(runner / "harness-attest-oidc.jwt"), COSIGN_PASSWORD="",
-                           **service.settings)
+                           ATTEST_KMS_CLOUD="aws", ATTEST_AWS_ROLE=AWS_ROLE, ATTEST_AWS_REGION="eu-west-1",
+                           ATTEST_OIDC_AUDIENCE="sts.amazonaws.com", COSIGN_PASSWORD="", **service.settings)
 
         self.assertEqual(signed.returncode, 0, signed.stdout + signed.stderr)
         self.assertEqual(service.audiences, ["sts.amazonaws.com"])
@@ -643,18 +777,25 @@ class SigningSteps(unittest.TestCase):
                 self.project.write("harness-attest.pub", published)
                 before = self.project.commit("chore: publish the attest public key")
 
+                service = FakeTokenService(self)
                 checked = run_step(self.project, CHECK_KEY, runner, ATTEST_MODE="kms", BEFORE=before,
-                                   ATTEST_KMS_KEY=str(self.work / "kms-check" / "cosign.key"), COSIGN_PASSWORD="")
+                                   ATTEST_KMS_KEY=str(self.work / "kms-check" / "cosign.key"), COSIGN_PASSWORD="",
+                                   ATTEST_KMS_CLOUD="aws", ATTEST_AWS_ROLE=AWS_ROLE, ATTEST_AWS_REGION="eu-west-1",
+                                   ATTEST_OIDC_AUDIENCE="sts.amazonaws.com", **service.settings)
 
                 self.assertEqual(checked.returncode == 0, accepted, checked.stdout + checked.stderr)
+                self.assertEqual(service.audiences, ["sts.amazonaws.com"])
+                self.assertEqual(left_in(runner, "a.github.oidc.token"), [])
+                self.assertEqual(github_env(runner), {})
         self.project.git("checkout", "-q", "--detach", self.project.adopted)
 
     def test_a_kms_mode_without_a_reference_refuses_before_it_asks_for_a_token(self):
         service = FakeTokenService(self)
         runner = self.runner()
 
-        signed = self.sign(runner, ATTEST_MODE="kms", ATTEST_KMS_KEY="", ATTEST_OIDC_AUDIENCE="sts.amazonaws.com",
-                           ATTEST_OIDC_TOKEN=str(runner / "harness-attest-oidc.jwt"), **service.settings)
+        signed = self.sign(runner, ATTEST_MODE="kms", ATTEST_KMS_KEY="", ATTEST_KMS_CLOUD="aws",
+                           ATTEST_AWS_ROLE=AWS_ROLE, ATTEST_AWS_REGION="eu-west-1",
+                           ATTEST_OIDC_AUDIENCE="sts.amazonaws.com", **service.settings)
 
         self.assertEqual(signed.returncode, 1, signed.stdout + signed.stderr)
         self.assertIn("::error::No KMS key reference", signed.stdout)

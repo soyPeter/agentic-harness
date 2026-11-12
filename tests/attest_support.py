@@ -99,13 +99,13 @@ def sha256(data):
 
 
 TAKE_BASE = "Take the verifier from the base branch"
+CHOOSE_JOB = "Choose the attest job"
 TAKE_PUSHED = "Take the verifier from the commit before the push"
 FIND_SETTINGS = "Find the signing settings"
 CHECK_PUSHED = "Check the pushed range"
 CHECK_SIGNING = "Check the signing settings"
 CHECK_ENVIRONMENT = "Check the harness-attest environment"
 INSTALL_COSIGN = "Install cosign"
-SIGN_IN = "Sign in to the KMS"
 CHECK_KEY = "Check the attestation key"
 READ_APPROVAL = "Read the merged pull request's approval"
 WRITE = "Write the verdict attestation"
@@ -328,6 +328,43 @@ def take_engine(project, ref, step=TAKE_PUSHED, source=None):
     if result.returncode:
         raise AssertionError(result.stdout + result.stderr)
     return runner, (runner / "github-env").read_text().strip().split("=", 1)[1]
+
+
+# Runs the real cosign, after recording what its KMS client would read: the cloud's variables in its environment and the
+# files they name. The clouds themselves can't be reached, so this is how a check sees the login a signing step made.
+RECORDING_COSIGN = """#!%s
+import json, os, sys
+names = ("GOOGLE_APPLICATION_CREDENTIALS", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_REGION",
+         "AWS_ROLE_SESSION_NAME", "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_FEDERATED_TOKEN_FILE", "VAULT_ADDR",
+         "VAULT_TOKEN")
+seen = {name: os.environ[name] for name in names if name in os.environ}
+files = {}
+for name in ("GOOGLE_APPLICATION_CREDENTIALS", "AWS_WEB_IDENTITY_TOKEN_FILE", "AZURE_FEDERATED_TOKEN_FILE"):
+    if os.path.isfile(seen.get(name, "")):
+        files[name] = open(seen[name]).read()
+with open(os.environ["COSIGN_RECORD"], "a") as record:
+    record.write(json.dumps({"args": sys.argv[1:], "variables": seen, "files": files}) + "\\n")
+os.execv(%r, [%r] + sys.argv[1:])
+"""
+
+
+def recording_cosign(runner, cosign):
+    """runner's cosign, recording each call to the list recording_cosign_calls(runner) returns."""
+    (runner / "cosign").write_text(RECORDING_COSIGN % (sys.executable, cosign, cosign))
+    (runner / "cosign").chmod(0o755)
+    return dict(COSIGN_RECORD=str(runner.parent / (runner.name + ".cosign-calls")))
+
+
+def recording_cosign_calls(runner):
+    record = runner.parent / (runner.name + ".cosign-calls")
+    return [json.loads(line) for line in record.read_text().splitlines()] if record.exists() else []
+
+
+def left_in(runner, *secrets):
+    """The files under runner holding any of secrets."""
+    return sorted(str(path.relative_to(runner)) for path in runner.rglob("*")
+                  if path.is_file() and not path.is_symlink() and any(s in path.read_text(errors="replace")
+                                                                          for s in secrets))
 
 
 def github_env(runner):

@@ -16,7 +16,7 @@ import unittest
 
 from attest_support import (APPROVAL, CHECK_ENVIRONMENT, CHECK_KEY, CHECK_PUSHED, CHECK_SIGNING, ENGINE, FIND_SETTINGS,
                             HARNESS, INSTALL_COSIGN, LAUNCHER, LENSES, PREDICATE_TYPE, READ_APPROVAL, SEARCH, SIGN,
-                            SIGN_EXPORT, SIGN_IN, SORT, STATEMENT_FILE, STATEMENT_TYPE, TAKE_BASE, TAKE_PUSHED, UPLOAD,
+                            SIGN_EXPORT, SORT, STATEMENT_FILE, STATEMENT_TYPE, TAKE_BASE, TAKE_PUSHED, UPLOAD,
                             UPLOAD_EXPORT, VERIFIER, VERSION, WORKFLOW, WRITE, WRITE_EXPORT, Project, fake_github,
                             gh_calls, jobs, new_project, run, run_take, sha256, step_script, take_engine)
 from hypothesis_profiles import examples
@@ -621,12 +621,16 @@ class Workflow(unittest.TestCase):
 
         self.assertIn("\non:\n  pull_request:\n", workflow)
         self.assertIn("\n  push:\n    branches: [main]\n", workflow)
-        self.assertIn("if: github.event_name == 'push'\n", attest)
-        self.assertIn("environment: harness-attest\n", attest)
+        for job in ("attest", "attest-oidc"):
+            self.assertIn("    if: github.event_name == 'push' && needs.attest-route.outputs.oidc == '",
+                          jobs()[job])
+            self.assertIn("environment: harness-attest\n", jobs()[job])
         self.assertIn("\npermissions:\n  contents: read\n", workflow)
         self.assertNotIn("pull_request_target", workflow)
         self.assertIn("ATTEST_KEY_SET: ${{ secrets.HARNESS_ATTEST_KEY != '' }}\n", attest)
-        for word in ("continue-on-error", "always()", "failure()", "cancelled()", "needs:"):
+        self.assertIn("if: github.event_name == 'push'\n", jobs()["attest-route"])
+        self.assertEqual(re.findall(r"^ *needs:.*$", workflow, re.M), ["    needs: attest-route"] * 2)
+        for word in ("continue-on-error", "always()", "failure()", "cancelled()"):
             self.assertNotIn(word, workflow)
 
     def test_every_attestation_step_is_opt_in_and_the_statement_is_written_for_the_pushed_range_only(self):
@@ -634,13 +638,12 @@ class Workflow(unittest.TestCase):
         steps = {s.splitlines()[0]: s for s in attest.split("\n      - name: ")[1:]}
 
         self.assertEqual(list(steps), [
-            FIND_SETTINGS, CHECK_PUSHED, TAKE_PUSHED, CHECK_SIGNING, CHECK_ENVIRONMENT, INSTALL_COSIGN, SIGN_IN,
-            CHECK_KEY, READ_APPROVAL, WRITE, SIGN, UPLOAD, WRITE_EXPORT, SIGN_EXPORT, UPLOAD_EXPORT])
+            FIND_SETTINGS, CHECK_PUSHED, TAKE_PUSHED, CHECK_SIGNING, CHECK_ENVIRONMENT, INSTALL_COSIGN, CHECK_KEY,
+            READ_APPROVAL, WRITE, SIGN, UPLOAD, WRITE_EXPORT, SIGN_EXPORT, UPLOAD_EXPORT])
         self.assertNotIn("if:", steps[FIND_SETTINGS])
         for name in (CHECK_PUSHED, TAKE_PUSHED, CHECK_SIGNING, CHECK_ENVIRONMENT, INSTALL_COSIGN, READ_APPROVAL, WRITE,
                      SIGN, UPLOAD, WRITE_EXPORT, SIGN_EXPORT, UPLOAD_EXPORT):
             self.assertIn("if: env.ATTEST == 'true'\n", steps[name])
-        self.assertIn("if: env.ATTEST_MODE == 'kms'\n", steps[SIGN_IN])
         self.assertIn("if: env.ATTEST_MODE == 'key' || env.ATTEST_MODE == 'kms'\n", steps[CHECK_KEY])
         self.assertIn('--range "$BEFORE..HEAD" "${approval[@]}"', steps[WRITE])
         self.assertIn('approval=(--allow-user-changes --pull-request "$ATTEST_PULL_REQUEST")', steps[WRITE])

@@ -22,6 +22,9 @@
 # is attested as approved, as its check was. With nothing configured the job does nothing. Otherwise the job also writes
 # the traceability export as a .reqifz (ADR-004) with the same engine and signs it with the same signer, as the artifact
 # `harness-traceability-signed`.
+# Only kms and keyless signing need GitHub's OIDC token. For them, `attest-route` (no secrets, no environment) reads the
+# mode at the commit the push starts from and starts `attest-oidc` instead of `attest`: the same steps, in the one job
+# with `id-token: write`.
 name: harness-verify
 
 on:
@@ -165,17 +168,55 @@ jobs:
           path: ${{ runner.temp }}/harness-traceability/
           if-no-files-found: ignore
 
-  attest:
+  attest-route:
     if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      oidc: ${{ steps.choose.outputs.oidc }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Choose the attest job
+        id: choose
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # GitHub grants a job's permissions before any step runs, so only the job for kms and keyless signing,
+          # attest-oidc, holds id-token: write. This reads HARNESS_ATTEST_SIGNING at the commit the push starts from as
+          # the engine reads it; the engine in the chosen job then refuses the other job's modes.
+          settings=
+          if [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]]; then
+            settings=$(git show "$BEFORE:backbone/harness.conf" 2>/dev/null || true)
+          fi
+          oidc=$(python3 - "$settings" <<'EOF'
+          import re, sys
+          mode = "key"
+          for line in sys.argv[1].splitlines():
+              m = re.match(r"^\s*HARNESS_ATTEST_SIGNING\s*=\s*(.*?)\s*$", line)
+              if m:
+                  mode = m.group(1)
+                  if len(mode) >= 2 and mode[0] == mode[-1] and mode[0] in "\"'":
+                      mode = mode[1:-1]
+          print("true" if mode in ("kms", "keyless") else "false")
+          EOF
+          )
+          echo "oidc=$oidc" >> "$GITHUB_OUTPUT"
+
+  attest:
+    needs: attest-route
+    if: github.event_name == 'push' && needs.attest-route.outputs.oidc == 'false'
     runs-on: ubuntu-latest
     environment: harness-attest
     permissions:
       contents: read
       pull-requests: read
-      id-token: write
-    env:
+    env: &attest-env
       ATTEST_KEY_SET: ${{ secrets.HARNESS_ATTEST_KEY != '' }}
-    steps:
+    steps: &attest-steps
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
@@ -322,6 +363,15 @@ jobs:
           elif [[ "$status" != 0 ]]; then
             exit 1
           fi
+          mode=$(sed -n 's/^ATTEST_MODE=//p' "$signing")
+          job=attest
+          if [[ "$mode" == kms || "$mode" == keyless ]]; then
+            job=attest-oidc
+          fi
+          if [[ "$GITHUB_JOB" != "$job" ]]; then
+            echo "::error::$mode signing runs in the $job job, not in $GITHUB_JOB: no statement."
+            exit 1
+          fi
           cat "$signing" >> "$GITHUB_ENV"
 
       - name: Check the harness-attest environment
@@ -373,22 +423,28 @@ jobs:
           echo "424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa  $cosign" | sha256sum -c -
           chmod +x "$cosign"
 
-      - name: Sign in to the KMS
-        if: env.ATTEST_MODE == 'kms'
+      - name: Check the attestation key
+        if: env.ATTEST_MODE == 'key' || env.ATTEST_MODE == 'kms'
         shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+          HARNESS_ATTEST_KEY: ${{ secrets.HARNESS_ATTEST_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.HARNESS_ATTEST_PASSWORD }}
         run: |
           # The cloud trusts the job's OIDC token, whose subject names the harness-attest environment. Each cloud's SDK,
-          # and so cosign's KMS client, reads the token from the file or variables set here.
-          token="$RUNNER_TEMP/harness-attest-oidc.jwt"
-          audience=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$ATTEST_OIDC_AUDIENCE")
-          curl -fsS --retry 3 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" \
-            | python3 -c 'import json, sys; sys.stdout.write(json.load(sys.stdin)["value"])' > "$token"
-          echo "ATTEST_OIDC_TOKEN=$token" >> "$GITHUB_ENV"
-          case "$ATTEST_KMS_CLOUD" in
-            gcp)
-              credentials="$RUNNER_TEMP/harness-attest-gcp.json"
-              python3 - "$token" > "$credentials" <<'EOF'
+          # and so cosign's KMS client, reads the token from the file or variables set here: this step's alone, so no
+          # later step or action holds the cloud's credentials, and the files go when the step ends.
+          kms_login() {
+            token="$RUNNER_TEMP/harness-attest-oidc.jwt"
+            credentials="$RUNNER_TEMP/harness-attest-gcp.json"
+            trap 'rm -f "$token" "$credentials"' EXIT
+            audience=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$ATTEST_OIDC_AUDIENCE")
+            curl -fsS --retry 3 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" \
+              | python3 -c 'import json, sys; sys.stdout.write(json.load(sys.stdin)["value"])' > "$token"
+            case "$ATTEST_KMS_CLOUD" in
+              gcp)
+                python3 - "$token" > "$credentials" <<'EOF'
           import json, os, sys
           config = {"type": "external_account", "audience": "//iam.googleapis.com/" + os.environ["ATTEST_GCP_PROVIDER"],
                     "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
@@ -399,38 +455,30 @@ jobs:
                                                              % os.environ["ATTEST_GCP_SERVICE_ACCOUNT"])
           json.dump(config, sys.stdout)
           EOF
-              echo "GOOGLE_APPLICATION_CREDENTIALS=$credentials" >> "$GITHUB_ENV"
-              ;;
-            aws)
-              { echo "AWS_ROLE_ARN=$ATTEST_AWS_ROLE"; echo "AWS_WEB_IDENTITY_TOKEN_FILE=$token"
-                echo "AWS_REGION=$ATTEST_AWS_REGION"; echo "AWS_ROLE_SESSION_NAME=harness-attest"; } >> "$GITHUB_ENV"
-              ;;
-            azure)
-              { echo "AZURE_TENANT_ID=$ATTEST_AZURE_TENANT"; echo "AZURE_CLIENT_ID=$ATTEST_AZURE_CLIENT"
-                echo "AZURE_FEDERATED_TOKEN_FILE=$token"; } >> "$GITHUB_ENV"
-              ;;
-            vault)
-              login=$(python3 -c 'import json, sys; print(json.dumps({"role": sys.argv[1], "jwt": open(sys.argv[2]).read()}))' \
-                "$ATTEST_VAULT_ROLE" "$token")
-              vault_token=$(curl -fsS --retry 3 -X POST --data @- "$ATTEST_VAULT_ADDR/v1/auth/jwt/login" <<< "$login" \
-                | python3 -c 'import json, sys; print(json.load(sys.stdin)["auth"]["client_token"])')
-              echo "::add-mask::$vault_token"
-              { echo "VAULT_ADDR=$ATTEST_VAULT_ADDR"; echo "VAULT_TOKEN=$vault_token"; } >> "$GITHUB_ENV"
-              ;;
-            *)
-              echo "::error::No KMS login for '$ATTEST_KMS_CLOUD': no statement."
-              exit 1
-              ;;
-          esac
-
-      - name: Check the attestation key
-        if: env.ATTEST_MODE == 'key' || env.ATTEST_MODE == 'kms'
-        shell: bash
-        env:
-          BEFORE: ${{ github.event.before }}
-          HARNESS_ATTEST_KEY: ${{ secrets.HARNESS_ATTEST_KEY }}
-          COSIGN_PASSWORD: ${{ secrets.HARNESS_ATTEST_PASSWORD }}
-        run: |
+                export GOOGLE_APPLICATION_CREDENTIALS=$credentials
+                ;;
+              aws)
+                export AWS_ROLE_ARN=$ATTEST_AWS_ROLE AWS_WEB_IDENTITY_TOKEN_FILE=$token AWS_REGION=$ATTEST_AWS_REGION \
+                  AWS_ROLE_SESSION_NAME=harness-attest
+                ;;
+              azure)
+                export AZURE_TENANT_ID=$ATTEST_AZURE_TENANT AZURE_CLIENT_ID=$ATTEST_AZURE_CLIENT \
+                  AZURE_FEDERATED_TOKEN_FILE=$token
+                ;;
+              vault)
+                login=$(python3 -c 'import json, sys; print(json.dumps({"role": sys.argv[1], "jwt": open(sys.argv[2]).read()}))' \
+                  "$ATTEST_VAULT_ROLE" "$token")
+                vault_token=$(curl -fsS --retry 3 -X POST --data @- "$ATTEST_VAULT_ADDR/v1/auth/jwt/login" <<< "$login" \
+                  | python3 -c 'import json, sys; print(json.load(sys.stdin)["auth"]["client_token"])')
+                echo "::add-mask::$vault_token"
+                export VAULT_ADDR=$ATTEST_VAULT_ADDR VAULT_TOKEN=$vault_token
+                ;;
+              *)
+                echo "::error::No KMS login for '$ATTEST_KMS_CLOUD': no statement."
+                exit 1
+                ;;
+            esac
+          }
           published="$RUNNER_TEMP/harness-attest-published.pub"
           if ! git show "$BEFORE:harness-attest.pub" > "$published" 2>/dev/null; then
             echo "::error::$BEFORE has no harness-attest.pub. Commit the public key on the default branch first: no statement."
@@ -439,6 +487,7 @@ jobs:
           key=env://HARNESS_ATTEST_KEY
           if [[ "$ATTEST_MODE" == kms ]]; then
             key=$ATTEST_KMS_KEY
+            kms_login
           fi
           "$RUNNER_TEMP/cosign" public-key --key "$key" > "$RUNNER_TEMP/harness-attest-received.pub"
           if ! cmp -s "$published" "$RUNNER_TEMP/harness-attest-received.pub"; then
@@ -489,6 +538,54 @@ jobs:
           HARNESS_ATTEST_KEY: ${{ secrets.HARNESS_ATTEST_KEY }}
           COSIGN_PASSWORD: ${{ secrets.HARNESS_ATTEST_PASSWORD }}
         run: |
+          # The cloud trusts the job's OIDC token, whose subject names the harness-attest environment. Each cloud's SDK,
+          # and so cosign's KMS client, reads the token from the file or variables set here: this step's alone, so no
+          # later step or action holds the cloud's credentials, and the files go when the step ends.
+          kms_login() {
+            token="$RUNNER_TEMP/harness-attest-oidc.jwt"
+            credentials="$RUNNER_TEMP/harness-attest-gcp.json"
+            trap 'rm -f "$token" "$credentials"' EXIT
+            audience=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$ATTEST_OIDC_AUDIENCE")
+            curl -fsS --retry 3 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" \
+              | python3 -c 'import json, sys; sys.stdout.write(json.load(sys.stdin)["value"])' > "$token"
+            case "$ATTEST_KMS_CLOUD" in
+              gcp)
+                python3 - "$token" > "$credentials" <<'EOF'
+          import json, os, sys
+          config = {"type": "external_account", "audience": "//iam.googleapis.com/" + os.environ["ATTEST_GCP_PROVIDER"],
+                    "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+                    "token_url": "https://sts.googleapis.com/v1/token", "credential_source": {"file": sys.argv[1]}}
+          if os.environ["ATTEST_GCP_SERVICE_ACCOUNT"]:
+              config["service_account_impersonation_url"] = ("https://iamcredentials.googleapis.com/v1/projects/-/"
+                                                             "serviceAccounts/%s:generateAccessToken"
+                                                             % os.environ["ATTEST_GCP_SERVICE_ACCOUNT"])
+          json.dump(config, sys.stdout)
+          EOF
+                export GOOGLE_APPLICATION_CREDENTIALS=$credentials
+                ;;
+              aws)
+                export AWS_ROLE_ARN=$ATTEST_AWS_ROLE AWS_WEB_IDENTITY_TOKEN_FILE=$token AWS_REGION=$ATTEST_AWS_REGION \
+                  AWS_ROLE_SESSION_NAME=harness-attest
+                ;;
+              azure)
+                export AZURE_TENANT_ID=$ATTEST_AZURE_TENANT AZURE_CLIENT_ID=$ATTEST_AZURE_CLIENT \
+                  AZURE_FEDERATED_TOKEN_FILE=$token
+                ;;
+              vault)
+                login=$(python3 -c 'import json, sys; print(json.dumps({"role": sys.argv[1], "jwt": open(sys.argv[2]).read()}))' \
+                  "$ATTEST_VAULT_ROLE" "$token")
+                vault_token=$(curl -fsS --retry 3 -X POST --data @- "$ATTEST_VAULT_ADDR/v1/auth/jwt/login" <<< "$login" \
+                  | python3 -c 'import json, sys; print(json.load(sys.stdin)["auth"]["client_token"])')
+                echo "::add-mask::$vault_token"
+                export VAULT_ADDR=$ATTEST_VAULT_ADDR VAULT_TOKEN=$vault_token
+                ;;
+              *)
+                echo "::error::No KMS login for '$ATTEST_KMS_CLOUD': no statement."
+                exit 1
+                ;;
+            esac
+          }
           cosign="$RUNNER_TEMP/cosign"
           statement="$RUNNER_TEMP/harness-attestation/harness-verdicts.intoto.json"
           bundle="$RUNNER_TEMP/harness-attestation/harness-verdicts.sigstore.json"
@@ -507,11 +604,7 @@ jobs:
                 echo "::error::No KMS key reference: no statement."
                 exit 1
               fi
-              # GitHub's OIDC tokens are short-lived, and the statement step may have outlasted the one the login took.
-              audience=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$ATTEST_OIDC_AUDIENCE")
-              curl -fsS --retry 3 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-                "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" \
-                | python3 -c 'import json, sys; sys.stdout.write(json.load(sys.stdin)["value"])' > "$ATTEST_OIDC_TOKEN"
+              kms_login
               "$cosign" attest-blob --yes --key "$ATTEST_KMS_KEY" --signing-config "$RUNNER_TEMP/signing-config.json" \
                 --statement "$statement" --bundle "$bundle" < /dev/null
               ;;
@@ -555,6 +648,54 @@ jobs:
           HARNESS_ATTEST_KEY: ${{ secrets.HARNESS_ATTEST_KEY }}
           COSIGN_PASSWORD: ${{ secrets.HARNESS_ATTEST_PASSWORD }}
         run: |
+          # The cloud trusts the job's OIDC token, whose subject names the harness-attest environment. Each cloud's SDK,
+          # and so cosign's KMS client, reads the token from the file or variables set here: this step's alone, so no
+          # later step or action holds the cloud's credentials, and the files go when the step ends.
+          kms_login() {
+            token="$RUNNER_TEMP/harness-attest-oidc.jwt"
+            credentials="$RUNNER_TEMP/harness-attest-gcp.json"
+            trap 'rm -f "$token" "$credentials"' EXIT
+            audience=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$ATTEST_OIDC_AUDIENCE")
+            curl -fsS --retry 3 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" \
+              | python3 -c 'import json, sys; sys.stdout.write(json.load(sys.stdin)["value"])' > "$token"
+            case "$ATTEST_KMS_CLOUD" in
+              gcp)
+                python3 - "$token" > "$credentials" <<'EOF'
+          import json, os, sys
+          config = {"type": "external_account", "audience": "//iam.googleapis.com/" + os.environ["ATTEST_GCP_PROVIDER"],
+                    "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+                    "token_url": "https://sts.googleapis.com/v1/token", "credential_source": {"file": sys.argv[1]}}
+          if os.environ["ATTEST_GCP_SERVICE_ACCOUNT"]:
+              config["service_account_impersonation_url"] = ("https://iamcredentials.googleapis.com/v1/projects/-/"
+                                                             "serviceAccounts/%s:generateAccessToken"
+                                                             % os.environ["ATTEST_GCP_SERVICE_ACCOUNT"])
+          json.dump(config, sys.stdout)
+          EOF
+                export GOOGLE_APPLICATION_CREDENTIALS=$credentials
+                ;;
+              aws)
+                export AWS_ROLE_ARN=$ATTEST_AWS_ROLE AWS_WEB_IDENTITY_TOKEN_FILE=$token AWS_REGION=$ATTEST_AWS_REGION \
+                  AWS_ROLE_SESSION_NAME=harness-attest
+                ;;
+              azure)
+                export AZURE_TENANT_ID=$ATTEST_AZURE_TENANT AZURE_CLIENT_ID=$ATTEST_AZURE_CLIENT \
+                  AZURE_FEDERATED_TOKEN_FILE=$token
+                ;;
+              vault)
+                login=$(python3 -c 'import json, sys; print(json.dumps({"role": sys.argv[1], "jwt": open(sys.argv[2]).read()}))' \
+                  "$ATTEST_VAULT_ROLE" "$token")
+                vault_token=$(curl -fsS --retry 3 -X POST --data @- "$ATTEST_VAULT_ADDR/v1/auth/jwt/login" <<< "$login" \
+                  | python3 -c 'import json, sys; print(json.load(sys.stdin)["auth"]["client_token"])')
+                echo "::add-mask::$vault_token"
+                export VAULT_ADDR=$ATTEST_VAULT_ADDR VAULT_TOKEN=$vault_token
+                ;;
+              *)
+                echo "::error::No KMS login for '$ATTEST_KMS_CLOUD': no statement."
+                exit 1
+                ;;
+            esac
+          }
           dir="$RUNNER_TEMP/harness-traceability-signed"
           if [[ ! -f "$dir/traceability.reqifz" ]]; then
             exit 0
@@ -577,10 +718,7 @@ jobs:
                 echo "::error::No KMS key reference: the export is not signed."
                 exit 1
               fi
-              audience=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$ATTEST_OIDC_AUDIENCE")
-              curl -fsS --retry 3 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-                "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" \
-                | python3 -c 'import json, sys; sys.stdout.write(json.load(sys.stdin)["value"])' > "$ATTEST_OIDC_TOKEN"
+              kms_login
               "$cosign" sign-blob --yes --key "$ATTEST_KMS_KEY" --signing-config "$RUNNER_TEMP/signing-config.json" \
                 --bundle "$bundle" "$export" < /dev/null
               ;;
@@ -600,3 +738,15 @@ jobs:
           name: harness-traceability-signed
           path: ${{ runner.temp }}/harness-traceability-signed/
           if-no-files-found: ignore
+
+  attest-oidc:
+    needs: attest-route
+    if: github.event_name == 'push' && needs.attest-route.outputs.oidc == 'true'
+    runs-on: ubuntu-latest
+    environment: harness-attest
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    env: *attest-env
+    steps: *attest-steps
