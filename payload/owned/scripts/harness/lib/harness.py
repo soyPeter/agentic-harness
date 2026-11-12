@@ -1334,7 +1334,44 @@ def describe(hits):
 SQL_CLIENTS = ("psql", "mysql", "mariadb", "sqlite3", "clickhouse-client", "cockroach", "sqlcmd")
 SHELLS = ("sh", "bash", "zsh", "dash", "ksh")
 INTERPRETERS = ("python", "python3", "perl", "ruby", "node")
-WRAPPERS = ("sudo", "env", "time", "nohup", "command", "exec", "nice")
+# Runners: programs that run the command after their own options and operands. {name: (short options that take a
+# value, long options that take a value, operands before the command)}; a long option's value may also follow =.
+RUNNER_OPTIONS = {
+    "timeout": ("sk", ("--signal", "--kill-after"), 1),
+    "gtimeout": ("sk", ("--signal", "--kill-after"), 1),
+    "stdbuf": ("ioe", ("--input", "--output", "--error"), 0),
+    "caffeinate": ("tw", (), 0),
+    "nice": ("n", ("--adjustment",), 0),
+    "ionice": ("cnpPu", ("--class", "--classdata", "--pid", "--pgid", "--uid"), 0),
+    "chrt": ("TPD", ("--sched-runtime", "--sched-period", "--sched-deadline"), 1),
+    "taskset": ("", (), 1),
+    "nohup": ("", (), 0),
+    "setsid": ("", (), 0),
+    "time": ("fo", ("--format", "--output"), 0),
+    "command": ("", (), 0),
+    "builtin": ("", (), 0),
+    "noglob": ("", (), 0),
+    "nocorrect": ("", (), 0),
+    "exec": ("a", (), 0),
+    "env": ("uCPS", ("--unset", "--chdir", "--split-string"), 0),
+    "sudo": ("ugCDhprtTUR", ("--user", "--group", "--close-from", "--chdir", "--host", "--prompt", "--role", "--type",
+                            "--command-timeout", "--other-user", "--chroot"), 0),
+    "doas": ("uC", (), 0),
+    "unbuffer": ("", (), 0),
+    "script": ("tcEoTIOBm", ("--command", "--echo", "--log-out", "--log-in", "--log-io", "--log-timing",
+                            "--logging-format", "--output-limit"), 1),
+    "xvfb-run": ("efnpsw", ("--error-file", "--auth-file", "--server-num", "--xauth-protocol", "--server-args",
+                           "--wait"), 0),
+    "flock": ("Ewc", ("--conflict-exit-code", "--wait", "--timeout", "--command"), 1),
+    "chronic": ("", (), 0),
+    "watch": ("n", ("--interval",), 0),
+    "su": ("csgGw", ("--command", "--session-command", "--shell", "--group", "--supp-group",
+                     "--whitelist-environment"), 1),
+}
+RUNNERS = tuple(RUNNER_OPTIONS)
+# The options whose value is a command line the runner hands to a shell (watch hands it all of its command's words).
+RUNNER_LINES = {"env": ("-S", "--split-string"), "script": ("-c", "--command"), "flock": ("-c", "--command"),
+                "su": ("-c", "--command", "--session-command")}
 MUTATORS = ("rm", "rmdir", "unlink", "mv", "chmod", "chown", "truncate", "tee", "touch")
 # Not <<<, a here-string: the lines after it are commands, not a body.
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
@@ -1405,20 +1442,78 @@ def split_segments(command):
 
 
 def shell_words(segment):
-    """(leading VAR=value assignments, remaining words), with wrappers such as sudo and env dropped."""
-    try:
-        words = shlex.split(segment, comments=True)
-    except ValueError:
-        words = segment.split()
+    """(leading VAR=value assignments, the words of the command the segment runs): keywords, function heads and
+    runners such as sudo -u x, env -i or timeout 60 dropped (unwrapped)."""
+    assignments, words = unwrapped(shell_split(segment))
+    if words[:1] == ["export"] and len(words) > 1:
+        return assignments + [w for w in words[1:] if "=" in w], []
+    return assignments, words
+
+
+def runner_split(words):
+    """(the VAR=value words it sets, the index of the command words, the command line it hands a shell or None) for
+    words that start with a runner named by name or by a system path: past its options and the operands it takes
+    first (timeout's duration, flock's lock file). None for any other command."""
+    name = program(words)
+    if name not in RUNNER_OPTIONS or ("/" in words[0] and
+                                      not os.path.realpath(words[0]).startswith(SYSTEM_PREFIXES)):
+        return None
+    shorts, longs, operands = RUNNER_OPTIONS[name]
+    lines = RUNNER_LINES.get(name, ())
+    assignments, line, i, ended = [], None, 1, False
+    while i < len(words):
+        word = words[i]
+        if not ended and word == "--":
+            ended = True
+        elif not ended and word == "-" and name in ("env", "su"):
+            pass
+        elif not ended and word.startswith("--"):
+            option, eq, value = word.partition("=")
+            if option in longs and not eq:
+                i += 1
+                value = words[i] if i < len(words) else ""
+            line = value if option in lines else line
+        elif not ended and word.startswith("-") and len(word) > 1:
+            for at in range(1, len(word)):
+                if word[at] in shorts:
+                    value = word[at + 1:]
+                    if not value:
+                        i += 1
+                        value = words[i] if i < len(words) else ""
+                    line = value if "-" + word[at] in lines else line
+                    break
+        elif name in ("env", "sudo") and ASSIGNMENT.match(word):
+            assignments.append(word)
+        elif operands:
+            operands -= 1
+        else:
+            break
+        i += 1
+    if name == "watch" and i < len(words):
+        line = " ".join(words[i:])
+    elif name == "env" and line is not None and i < len(words):
+        line = " ".join([line] + [shlex.quote(w) for w in words[i:]])
+    return assignments, i, line
+
+
+def unwrapped(words):
+    """(the VAR=value words before the command, the words of the command): shell keywords, function heads, assignments
+    and runners dropped, nested ones too. A runner that hands a shell a command line (env -S, script -c, flock -c, su
+    -c, watch) runs sh -c '<line>'."""
     assignments = []
-    while words and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]) or words[0] in WRAPPERS
-                     or (words[0] == "export" and len(words) > 1)):
-        if words[0] != "export" and "=" in words[0] and not words[0].startswith("-"):
+    while words:
+        words = command_words(words)
+        if words and ASSIGNMENT.match(words[0]):
             assignments.append(words[0])
-        elif words[0] == "export":
-            assignments.extend(w for w in words[1:] if "=" in w)
-            return assignments, []
-        words = words[1:]
+            words = words[1:]
+            continue
+        split = runner_split(words) if words else None
+        if split is None:
+            break
+        assignments += split[0]
+        if split[2] is not None:
+            return assignments, ["sh", "-c", split[2]]
+        words = words[split[1]:]
     return assignments, words
 
 
@@ -1683,8 +1778,75 @@ def command_words(words):
     return words
 
 
+def literal_program(word):
+    """Whether the program a command word names is literal text after its last expansion: a path such as
+    "$(git rev-parse --show-toplevel)"/tools/x.sh or $VENV/bin/pytest names its program, x.sh or pytest."""
+    end, i = 0, 0
+    while i < len(word):
+        if word.startswith("$(", i):
+            i = closing_paren(word, i + 1)
+            end = i + 1
+        elif word[i] == "`":
+            close = word.find("`", i + 1)
+            i = len(word) if close < 0 else close
+            end = i + 1
+        elif word[i] == "$":
+            match = SHELL_VARIABLE.match(word, i)
+            i = match.end() - 1 if match else i
+            end = i + 1
+        i += 1
+    tail = word[end:]
+    return "/" in tail and bool(tail.rsplit("/", 1)[1])
+
+
+def command_variants(words, env):
+    """The word lists a command can run once the shell expands its command word with the variables the command sets
+    (one per loop item), runners dropped again; None when the command word holds an expansion the hooks can't resolve
+    to text and the program's own name isn't literal (see literal_program)."""
+    done, pending = [], [words]
+    for _ in range(3):
+        later = []
+        for item in pending:
+            if not item or not re.search(r"[$`]", item[0]):
+                done.append(item)
+                continue
+            texts = resolved_texts(item[0], env)
+            if texts is None:
+                if not literal_program(item[0]):
+                    return None
+                done.append(item)
+                continue
+            later += [unwrapped(text.split() + item[1:])[1] for text in texts]
+        pending = later
+    return done + pending
+
+
 HIDDEN_PROGRAM_REFUSAL = ("%s runs a program from a command substitution or a variable the hooks can't resolve to "
                           "text, which they can't read: write the commands out.")
+HIDDEN_COMMAND_REFUSAL = ("It runs %s, a command named by a command substitution or a variable the hooks can't resolve "
+                          "to text, which they can't read: write the command out.")
+# Words that start a command that writes files or runs one: after an unknown program's options, such a word may be the
+# command that program runs (taskset 3 rm ..., a runner the hooks don't know).
+COMMAND_STARTS = MUTATORS + SHELLS + INTERPRETERS + RUNNERS + ("eval", "fish", "git", "gh", "dd", "shred", "find",
+                                                               "xargs", "parallel", "ln", "link", "cp", "install",
+                                                               "rsync", "ditto")
+# Programs whose arguments are text, patterns or files, never a command they run.
+TEXT_PROGRAMS = ("echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "cat", "ls", "head", "tail", "wc",
+                 "less", "more", "jq", "yq", "sort", "uniq", "diff", "cmp", "tr", "cut", "test", "[", "[[",
+                 "basename", "dirname", "realpath", "readlink", "which", "type", "whereis", "man", "file", "stat",
+                 "du", "df", "printenv", "cd", "pushd", "popd", "read", "set", "unset", "shift", "export", "local",
+                 "declare", "typeset", "readonly", "alias", "unalias", "hash", "sleep", "kill", "wait", "true",
+                 "false", ":", "source", ".", "trap")
+
+
+def runs_unknown_runner(words):
+    """The index where the command an unknown program may run starts (taskset 3 rm ..., /tmp/timeout 5 sh -c ...),
+    or None. A runner reaching here is one by a path outside the system's, which may be anything."""
+    prog = program(words)
+    if prog in TEXT_PROGRAMS + CODE_PROGRAMS or is_runtime(prog) or (prog in COMMAND_STARTS and prog not in RUNNERS):
+        return None
+    return next((j for j in range(1, len(words)) if program([words[j]]) in COMMAND_STARTS or is_runtime(words[j])
+                 or engine_script(words[j])), None)
 FUNCTION_REFUSAL = ("It calls %s, a function whose body the hooks can't read, or that calls functions deeper than they "
                     "follow: define it as %s() { ...; }, or write its commands out.")
 
@@ -1910,8 +2072,8 @@ def written_paths(segment, words):
     elif prog in ("sed", "gsed", "perl") and any(w.startswith("-i") or w.startswith("-pi") or w == "--in-place"
                                                 for w in words[1:]):
         paths += args[1:]
-    elif prog == "git" and len(words) > 1 and words[1] in ("rm", "mv"):
-        paths += [w for w in words[2:] if not w.startswith("-")]
+    elif git_subcommand(words) in ("rm", "mv"):
+        paths += [w for w in words[git_options(words)[1] + 1:] if not w.startswith("-")]
     return [p.strip("'\"") for p in paths]
 
 
@@ -1928,13 +2090,14 @@ def git_command_config(words):
     """Why a git call sets a command for git to run, or None: -c, --config-env or git config with an alias that starts
     with ! or a key whose value git runs (core.sshCommand, core.pager, credential helpers, filters...)."""
     pairs = []
-    for i, word in enumerate(words[1:], 1):
-        if word == "-c" and i + 1 < len(words):
-            pairs.append(words[i + 1].partition("=")[::2])
-        elif word.startswith("--config-env"):
-            pairs.append((word.split("=", 1)[-1].partition("=")[0], "!"))
+    options, at = git_options(words)
+    for name, value in options:
+        if name == "-c":
+            pairs.append(value.partition("=")[::2])
+        elif name == "--config-env":
+            pairs.append((value.partition("=")[0], "!"))
     if git_subcommand(words) == "config":
-        rest = [w for w in words[words.index("config") + 1:] if not w.startswith("-")]
+        rest = [w for w in words[at + 1:] if not w.startswith("-")]
         if len(rest) >= 2 and not any(w in GIT_CONFIG_READS for w in words):
             pairs.append((rest[0], rest[1]))
     for key, value in pairs:
@@ -1945,14 +2108,12 @@ def git_command_config(words):
 
 
 def git_findings(words):
-    args = words[1:]
-    while args and args[0].startswith("-"):
-        if args[0] == "-c" and len(args) > 1 and args[1].lower().startswith("core.hookspath"):
-            return ["git -c core.hooksPath=... turns off the harness git hooks."]
-        args = args[2:] if args[0] in ("-c", "-C") else args[1:]
-    if not args:
+    options, at = git_options(words)
+    if any(name in ("-c", "--config-env") and value.lower().startswith("core.hookspath") for name, value in options):
+        return ["git -c core.hooksPath=... turns off the harness git hooks."]
+    if at >= len(words):
         return []
-    sub, rest = args[0], args[1:]
+    sub, rest = words[at], words[at + 1:]
     found = []
     if sub == "commit" and "n" in short_flags(rest):
         found.append("git commit -n is --no-verify: it skips the harness git hooks; fix what the hook reports instead.")
@@ -2138,6 +2299,115 @@ def engine_findings(prog, words, written):
     return []
 
 
+def names_protected(words, cwd, env):
+    """Whether words name a harness-protected path, the git directory, the harness's install or the engine, or a path
+    the hooks can't resolve: what an unknown runner's command is checked for (brew install node names none)."""
+    for word in words:
+        if (PROTECTED_MENTION.search(word) or GIT_DIR_HINT.search(word) or ENGINE_NAME.search(word)
+                or ENGINE_IMPORT.search(word) or engine_script(word) or word in ENGINE_MODULES + ("runpy",)):
+            return True
+        if word.startswith("-"):
+            continue
+        fulls, unresolved = shell_path(word, cwd, env)
+        if unresolved or any(protected_path(full, cwd) or install_path(full, cwd) for full in fulls):
+            return True
+    return False
+
+
+def trap_action(words):
+    """The commands a trap runs (trap 'rm -f "$T"' EXIT), or None when it only lists, resets or names signals."""
+    i = 1
+    while i < len(words) and words[i].startswith("-") and words[i] != "-":
+        i += 1
+        if words[i - 1] == "--":
+            break
+    rest = words[i:]
+    return rest[0] if len(rest) >= 2 and rest[0] != "-" else None
+
+
+def segment_findings(found, segment, op, words, index, segments, cwd, dirs, depth, env, functions):
+    """Adds to found the problems with one command of a segment (words, its command word expanded); returns the
+    directory the commands after it run in."""
+    prog = program(words)
+    if prog in ("cd", "pushd"):
+        target = next((w for w in words[1:] if not w.startswith("-")), os.path.expanduser("~"))
+        fulls, unresolved = shell_path(target, cwd, env)
+        if prog == "pushd":
+            dirs.append(cwd)
+        cwd = UNKNOWN_DIR if unresolved or len(fulls) != 1 else fulls[0]
+        return cwd
+    if prog == "popd":
+        cwd = dirs.pop() if dirs else UNKNOWN_DIR
+        return cwd
+    if prog in functions:
+        if functions[prog] is None or depth >= 3:
+            found.append(FUNCTION_REFUSAL % (prog, prog))
+        else:
+            args = [(resolved_texts(w, env) or [w])[0] if re.search(r"[$`]", w) else w for w in words[1:]]
+            found.extend(shell_findings(functions[prog], cwd, depth + 1, dict(env, **positional_env(args)),
+                                        functions))
+    producer = shell_words(segments[index - 1][0])[1] if index > 0 and segments[index - 1][1] == "|" else None
+    found.extend(engine_findings(prog, words, written_paths(segment, words)))
+    found.extend(program_findings(prog, words, producer, cwd, env))
+    found.extend(git_dir_findings(prog, words, segment, cwd, env))
+    for path in [full for written in written_paths(segment, words) for full in shell_path(written, cwd, env)[0]]:
+        label = install_path(path, cwd)
+        if label:
+            found.append("%s is in %s, which decides this project's gates; agents may not change it."
+                         % (path, label))
+            continue
+        name = protected_path(path, cwd)
+        if name and (name == ".git" or name.startswith(".git/") or in_git_dir(path, cwd)):
+            found.append(GIT_DIR_REFUSAL % name)
+        elif name:
+            found.append("Shell writes to %s skip the harness gates; change it with the Write or Edit tool "
+                         "(or not at all, for verdicts and user-only settings)." % name)
+    if prog == "git":
+        found.extend(git_findings(words))
+        configured = git_command_config(words)
+        if configured:
+            found.append(configured)
+    elif prog in ("awk", "gawk", "mawk", "nawk") and AWK_RUNS.search(segment):
+        found.append("awk runs a command (system(), or a pipe to or from one), which the hooks can't read; run the "
+                     "command itself.")
+    elif prog in ("source", ".") and (len(words) < 2 or script_operand(["sh"] + words[1:]) == ""):
+        found.append("%s runs commands from stdin or a process substitution, which the hooks can't read; source a "
+                     "file." % prog)
+    elif prog == "gh" and profile() in NO_MERGE_PROFILES and (
+            gh_parts(words)[:2] == ("pr", "merge")
+            or (gh_parts(words)[0] == "api" and any(MERGE_ENDPOINT.search(w) for w in words))):
+        found.append("Merging is refused under HARNESS_PROFILE=%s: only a human merges, on GitHub." % profile())
+    elif prog == "find" and ("-delete" in words or ("-exec" in words and "rm" in words)):
+        start = next((w for w in words[1:] if not w.startswith("-")), ".")
+        if start.rstrip("/") in ("", "~", "$HOME", "${HOME}") or (start.startswith("/") and start.count("/") <= 1):
+            found.append("find ... -delete on %s deletes from the filesystem root or home." % start)
+    elif (prog in SHELLS or prog in ("eval", "trap")) and depth < 3:
+        marked = command_words(shell_words(literal_marked(segment))[1])
+        marked = marked if len(marked) == len(words) else words
+        source = (shell_script(marked)[0] if prog in SHELLS else trap_action(marked) if prog == "trap"
+                  else " ".join(marked[1:]) or None)
+        texts = None if source is None else resolved_texts(source, env)
+        if source is not None and texts is None:
+            found.append(HIDDEN_PROGRAM_REFUSAL % prog)
+        # eval and a trap run their commands in this shell, with its variables; sh -c starts another.
+        inner_env = None if prog in SHELLS else env
+        for text in texts or []:
+            found.extend(shell_findings(unmarked(text), cwd, depth + 1, inner_env, functions))
+    elif prog in INTERPRETERS or RUNTIMES.fullmatch(prog):
+        flag = next((f for f in ("-c", "-e", "-pe", "-ne") if f in words), None)
+        if flag and words.index(flag) + 1 < len(words):
+            found.extend(code_findings(words[words.index(flag) + 1], "That %s one-liner" % prog))
+    at = runs_unknown_runner(words)
+    if at is not None and depth < 3 and names_protected(words[at:], cwd, env):
+        found.extend(shell_findings(" ".join(shlex.quote(w) for w in words[at:]), cwd, depth + 1, env, functions))
+    if (prog in SQL_CLIENTS or any(w in SQL_CLIENTS for w in words[:6])) and DELETE_ALL.search(segment):
+        found.append("DELETE without a WHERE clause removes every row.")
+    if prog in ("curl", "wget") and op == "|" and index + 1 < len(segments):
+        if program(shell_words(segments[index + 1][0])[1]) in SHELLS:
+            found.append("Piping a download into a shell runs unreviewed remote code.")
+    return cwd
+
+
 def shell_findings(command, cwd=None, depth=0, env=None, functions=None):
     """Blocking problems with a shell command, beyond the @bash guardrail rules. env and functions are the variables
     and functions the shell running it has (a function's call passes its own)."""
@@ -2151,93 +2421,19 @@ def shell_findings(command, cwd=None, depth=0, env=None, functions=None):
     env, dirs = dict(env or {}), []   # what the command itself assigns, and pushd's stack
     for index, (segment, op) in enumerate(segments):
         assignments, words = shell_words(segment)
-        words = command_words(words)
         for assignment in assignments:
             if SETTING_ASSIGNMENT.match(assignment):
                 found.append("Setting %s from the shell overrides a harness setting or skips a check; only the user "
                              "may do that, in their own terminal." % assignment.split("=", 1)[0])
         if note_shell_state(segment, env) or not words:
             continue
-        if re.search(r"[$`]", words[0]):
-            # A command named by a variable the command set, such as "$@" in a function's body, is that command.
-            texts = resolved_texts(words[0], env)
-            words = (texts[0].split() + words[1:]) if texts and len(texts) == 1 and texts[0].strip() else words
-        if words[0] in ("-S", "--split-string") or words[0].startswith(("-S", "--split-string=")):
-            split = " ".join(([words[0][2:]] if words[0][:2] == "-S" and len(words[0]) > 2 else
-                              [words[0].split("=", 1)[1]] if "=" in words[0] else []) + words[1:])
-            if depth < 3:
-                found.extend(shell_findings(split, cwd, depth + 1))
+        # A command named by a variable the command set, such as "$@" in a function's body, is that command.
+        variants = command_variants(words, env)
+        if variants is None:
+            found.append(HIDDEN_COMMAND_REFUSAL % words[0])
             continue
-        prog = program(words)
-        if prog in ("cd", "pushd"):
-            target = next((w for w in words[1:] if not w.startswith("-")), os.path.expanduser("~"))
-            fulls, unresolved = shell_path(target, cwd, env)
-            if prog == "pushd":
-                dirs.append(cwd)
-            cwd = UNKNOWN_DIR if unresolved or len(fulls) != 1 else fulls[0]
-            continue
-        if prog == "popd":
-            cwd = dirs.pop() if dirs else UNKNOWN_DIR
-            continue
-        if prog in functions:
-            if functions[prog] is None or depth >= 3:
-                found.append(FUNCTION_REFUSAL % (prog, prog))
-            else:
-                args = [(resolved_texts(w, env) or [w])[0] if re.search(r"[$`]", w) else w for w in words[1:]]
-                found.extend(shell_findings(functions[prog], cwd, depth + 1, dict(env, **positional_env(args)),
-                                            functions))
-        producer = shell_words(segments[index - 1][0])[1] if index > 0 and segments[index - 1][1] == "|" else None
-        found.extend(engine_findings(prog, words, written_paths(segment, words)))
-        found.extend(program_findings(prog, words, producer, cwd, env))
-        found.extend(git_dir_findings(prog, words, segment, cwd, env))
-        for path in [full for written in written_paths(segment, words) for full in shell_path(written, cwd, env)[0]]:
-            label = install_path(path, cwd)
-            if label:
-                found.append("%s is in %s, which decides this project's gates; agents may not change it."
-                             % (path, label))
-                continue
-            name = protected_path(path, cwd)
-            if name and (name == ".git" or name.startswith(".git/") or in_git_dir(path, cwd)):
-                found.append(GIT_DIR_REFUSAL % name)
-            elif name:
-                found.append("Shell writes to %s skip the harness gates; change it with the Write or Edit tool "
-                             "(or not at all, for verdicts and user-only settings)." % name)
-        if prog == "git":
-            found.extend(git_findings(words))
-            configured = git_command_config(words)
-            if configured:
-                found.append(configured)
-        elif prog in ("awk", "gawk", "mawk", "nawk") and AWK_RUNS.search(segment):
-            found.append("awk runs a command (system(), or a pipe to or from one), which the hooks can't read; run the "
-                         "command itself.")
-        elif prog in ("source", ".") and (len(words) < 2 or script_operand(["sh"] + words[1:]) == ""):
-            found.append("%s runs commands from stdin or a process substitution, which the hooks can't read; source a "
-                         "file." % prog)
-        elif prog == "gh" and profile() in NO_MERGE_PROFILES and (
-                words[1:3] == ["pr", "merge"] or (words[1:2] == ["api"] and any(MERGE_ENDPOINT.search(w) for w in words))):
-            found.append("Merging is refused under HARNESS_PROFILE=%s: only a human merges, on GitHub." % profile())
-        elif prog == "find" and ("-delete" in words or ("-exec" in words and "rm" in words)):
-            start = next((w for w in words[1:] if not w.startswith("-")), ".")
-            if start.rstrip("/") in ("", "~", "$HOME", "${HOME}") or (start.startswith("/") and start.count("/") <= 1):
-                found.append("find ... -delete on %s deletes from the filesystem root or home." % start)
-        elif (prog in SHELLS or prog == "eval") and depth < 3:
-            marked = command_words(shell_words(literal_marked(segment))[1])
-            marked = marked if len(marked) == len(words) else words
-            source = shell_script(marked)[0] if prog in SHELLS else " ".join(marked[1:]) or None
-            texts = None if source is None else resolved_texts(source, env)
-            if source is not None and texts is None:
-                found.append(HIDDEN_PROGRAM_REFUSAL % prog)
-            for text in texts or []:
-                found.extend(shell_findings(unmarked(text), cwd, depth + 1, functions=functions))
-        elif prog in INTERPRETERS or RUNTIMES.fullmatch(prog):
-            flag = next((f for f in ("-c", "-e", "-pe", "-ne") if f in words), None)
-            if flag and words.index(flag) + 1 < len(words):
-                found.extend(code_findings(words[words.index(flag) + 1], "That %s one-liner" % prog))
-        if (prog in SQL_CLIENTS or any(w in SQL_CLIENTS for w in words[:6])) and DELETE_ALL.search(segment):
-            found.append("DELETE without a WHERE clause removes every row.")
-        if prog in ("curl", "wget") and op == "|" and index + 1 < len(segments):
-            if program(shell_words(segments[index + 1][0])[1]) in SHELLS:
-                found.append("Piping a download into a shell runs unreviewed remote code.")
+        for words in filter(None, variants):
+            cwd = segment_findings(found, segment, op, words, index, segments, cwd, dirs, depth, env, functions)
     for opening, body in bodies:
         _, words = shell_words(split_segments(opening)[0][0] if split_segments(opening) else "")
         prog = program(words)
@@ -2259,7 +2455,7 @@ def rule_text(command):
     parts = []
     for segment, op in split_segments(stripped):
         _, words = shell_words(segment)
-        if program(words) == "git" and any(w in ("commit", "tag") for w in words[1:3]):
+        if git_subcommand(words) in ("commit", "tag"):
             segment = COMMIT_MESSAGE.sub(lambda m: m.group(1) + "''", segment)
         parts.append(segment + op)
     return "".join(parts) + "".join("\n" + body for body in executed)
@@ -5103,11 +5299,7 @@ def default_branch():
 
 
 # The deliverer's gh calls, read as the shell and gh would read them. What the harness can't read is refused.
-RUNNERS = ("timeout", "gtimeout", "nice", "nohup", "stdbuf", "time", "env", "sudo", "doas", "command", "exec",
-           "watch", "ionice", "chronic", "caffeinate", "flock", "setsid", "unbuffer", "script", "su")
 SHELL_KEYWORDS = ("!", "(", ")", "{", "}", "if", "then", "else", "elif", "fi", "do", "done", "while", "until")
-# bash's and zsh's precommand modifiers, which take no options: the command follows them.
-PRECOMMANDS = ("builtin", "noglob", "nocorrect")
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 REDIRECTION = re.compile(r"^[0-9]*(<<<|<<-?|<>|<&|>&|>>|>\||&>>|&>|<|>)")
 EXPANSION = re.compile(r"\$\S|`")
@@ -5352,18 +5544,24 @@ def shell_split_marked(text):
 def run_words(words):
     """(the words of the command a segment runs, why the harness can't read it or ""). Keywords, grouping, leading
     assignments and redirections go; runners such as timeout 60, env -i or nice -n 5 run the command after their own
-    options. xargs, parallel and find -exec add arguments the command line doesn't show, and a command named by an
-    expansion can be any command."""
+    options, and a runner the harness doesn't know runs the gh, git or shell its words name. A runner that hands a
+    shell a command line (env -S, script -c, watch) stays, for segment_calls to read the line. xargs, parallel and
+    find -exec add arguments the command line doesn't show, and a command named by an expansion can be any command."""
     while words:
         first = words[0]
-        if first == "case":
+        split = runner_split(words)
+        if split is not None and split[2] is None:
+            words = words[split[1]:]
+        elif split is not None:
+            break
+        elif first == "case":
             words = words[words.index("in") + 1:] if "in" in words else []
         elif first == "function":
             words = words[2:]
         elif REDIRECTION.match(first):
             words = words[1 + (REDIRECTION.match(first).end() == len(first)):]
-        elif (first in SHELL_KEYWORDS or first in WRAPPERS or first in PRECOMMANDS or ASSIGNMENT.match(first)
-              or first.endswith("()") or (first.endswith(")") and "(" not in first)):
+        elif (first in SHELL_KEYWORDS or ASSIGNMENT.match(first) or first.endswith("()")
+              or (first.endswith(")") and "(" not in first)):
             words = words[1:]
         elif first[:1] in ("(", "{") and first.lstrip("({"):
             words = [first.lstrip("({")] + words[1:]
@@ -5388,6 +5586,10 @@ def run_words(words):
                 return inner, hidden or why
             if EXPANSION.search(words[j]):
                 return words[j:], named
+    elif runs_unknown_runner(words) is not None and not program_refusal(words):
+        at = next((j for j in range(1, len(words)) if program(words[j:]) in runs + ("git",)), None)
+        if at is not None:
+            return run_words(words[at:])
     return words, ""
 
 
@@ -5460,8 +5662,13 @@ def segment_calls(segment, piped, depth):
                 piped or operands or any(re.match(r"^[0-9]*<(?![<&>])", w) for w in words)):
             return [(segment, words, SHELL_INPUT_REFUSAL)]
         return []
+    if prog == "trap" and trap_action(words):
+        return [(segment, words, "")] + gh_calls(trap_action(words), depth + 1)
+    split = runner_split(words) if prog in RUNNERS else None
+    if split and split[2] is not None:
+        return gh_calls(split[2], depth + 1)
     if prog in RUNNERS or prog.startswith("-"):
-        # watch 'gh ...', script -c 'gh ...': the command is one word
+        # a runner by a path the harness doesn't trust: its command may be one word, as in watch 'gh ...'
         return ([call for w in words[1:] if re.search(r"\s", w.strip()) for call in gh_calls(w, depth + 1)]
                 or [(segment, words, problem)])
     return [(segment, words, "")]
@@ -5500,13 +5707,16 @@ def command_problem(marked, words):
 
 
 def program_index(words):
-    """The index of the word a command runs: past the options and times of a runner such as timeout 60 or nice -n 5."""
-    if not words or program(words) not in RUNNERS:
-        return 0
-    for i in range(1, len(words)):
-        if not (words[i].startswith("-") or re.match(r"^\d+[smhd]?$", words[i]) or ASSIGNMENT.match(words[i])):
-            return i
-    return len(words)
+    """The index of the word a command runs: past runners and their options, such as timeout 60 or nice -n 5."""
+    at = 0
+    while at < len(words):
+        split = runner_split(words[at:])
+        if split is None:
+            return at
+        at += split[1]
+        if split[2] is not None:
+            break
+    return at
 
 
 def real_name(prog):
@@ -5920,14 +6130,31 @@ def writes_default(word, targets):
     return dst in targets
 
 
+# git's own options that take a value in the next word, as well as after = (git --git-dir .git, --git-dir=.git).
+GIT_VALUE_OPTIONS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env",
+                     "--attr-source")
+
+
+def git_options(words):
+    """(git's own options in a git call, as (name, value) pairs, the index of its subcommand)."""
+    options, i = [], 1
+    while i < len(words) and words[i].startswith("-"):
+        if words[i] in GIT_VALUE_OPTIONS:
+            options.append((words[i], words[i + 1] if i + 1 < len(words) else ""))
+            i += 2
+            continue
+        name, _, value = words[i].partition("=") if words[i].startswith("--") else (words[i], "", "")
+        options.append((name, value))
+        i += 1
+    return options, i
+
+
 def git_subcommand(words):
     """The subcommand of a git call, past git's own options, or None."""
     if program(words) != "git":
         return None
-    i = 1
-    while i < len(words) and words[i].startswith("-"):
-        i += 2 if words[i] == "-C" else 1
-    return words[i] if i < len(words) else None
+    at = git_options(words)[1]
+    return words[at] if at < len(words) else None
 
 
 def git_refusal(segment, words, targets, on_default):
@@ -5935,15 +6162,12 @@ def git_refusal(segment, words, targets, on_default):
     command may move the default branch, by name or by the branch it's on."""
     if program(words) != "git":
         return None
-    args = words[1:]
-    i = 0
-    while i < len(args) and args[i].startswith("-"):
-        if args[i].split("=", 1)[0] in GIT_OPTIONS_REFUSED:
-            return GIT_OPTION_REFUSAL
-        i += 2 if args[i] == "-C" else 1
-    if i >= len(args):
+    options, at = git_options(words)
+    if any(name in GIT_OPTIONS_REFUSED for name, _ in options):
+        return GIT_OPTION_REFUSAL
+    if at >= len(words):
         return None
-    sub, rest = args[i], args[i + 1:]
+    sub, rest = words[at], words[at + 1:]
     if any(w.split("=", 1)[0] in ("--exec", "--upload-pack", "--receive-pack") for w in rest):
         return GIT_EXEC_REFUSAL
     if sub == "config":
@@ -6542,15 +6766,13 @@ GIT_PUSHES = {"push": None, "send-pack": None, "http-push": None, "subtree": Non
 def git_word_lists(words, env):
     """(the word lists a git call can run once the shell expands its words, whether a word after the subcommand is
     left unexpanded), or (None, True) when git's options or its subcommand hold an expansion the hooks can't resolve
-    to text. The -C folder may be anything."""
-    at = 1
-    while at < len(words) and words[at].startswith("-"):
-        at += 2 if words[at] == "-C" else 1
+    to text. The value of an option such as -C or --git-dir may be anything."""
+    at = git_options(words)[1]
     lists, unresolved = [[]], False
     for i, word in enumerate(words):
         texts = resolved_texts(word, env) if re.search(r"[$`]", word) else [word]
         if texts is None:
-            if i <= at and words[i - 1:i] != ["-C"]:
+            if i <= at and words[i - 1:i] not in [[o] for o in GIT_VALUE_OPTIONS]:
                 return None, True
             unresolved = True
         splits = [[word]] if texts is None or texts == [word] else [text.split() for text in texts]
@@ -6563,9 +6785,9 @@ def git_word_lists(words, env):
 def external_git_refusal(words, unresolved):
     """Whether a git call (its words expanded) may push or change what git runs, under external delivery."""
     sub = git_subcommand(words)
-    options = words[1:words.index(sub)] if sub in words else words[1:]
+    options = git_options(words)[0]
     pushes = sub in GIT_PUSHES and (GIT_PUSHES[sub] is None or unresolved or any(w in GIT_PUSHES[sub] for w in words))
-    if any(o.split("=", 1)[0] in ("-c", "--config-env", "--exec-path") for o in options) or pushes:
+    if any(name in ("-c", "--config-env", "--exec-path") for name, _ in options) or pushes:
         return True
     if sub == "config" and not any(w in GIT_CONFIG_READS for w in words) and \
             len([w for w in words[words.index("config") + 1:] if not w.startswith("-")]) >= 2:
@@ -6591,6 +6813,8 @@ def external_refusal(command):
         if prog == "gh":
             name, sub, args = gh_parts(words)
             reads = EXTERNAL_GH_READS.get(name, ())
+            if name is None:
+                continue
             if (name == "api" and api_write(args)) or (name != "api" and reads is not None and sub not in reads):
                 return EXTERNAL_REFUSAL
         elif prog == "git":

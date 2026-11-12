@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **git's own options, runners and command names the hooks can't read.** Three more spellings got past the shell
+  checks. git's options that take a value (`-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--super-prefix`,
+  `--config-env`, `--attr-source`, as `--git-dir .git` or `--git-dir=.git`) are read before its subcommand, so
+  `git --git-dir .git push` is a push under external delivery and in the deliverer's gate. Runners are looked through
+  with their own options and operands, nested too (`timeout -s KILL 5 rm -rf .git/harness`, `nice -n 5 ...`,
+  `sudo -u x -E bash -c '...'`, `stdbuf`, `caffeinate`, `ionice`, `chrt`, `taskset`, `setsid`, `doas`, `unbuffer`,
+  `script`, `xvfb-run`, `flock`, `chronic`, `watch`, `su`); `env -S`, `script -c`, `flock -c`, `su -c` and `watch` are
+  read as `sh -c` with their command line. A program the hooks don't know is checked from the first word after it that
+  starts a command, and refused only when that command would be. A command whose name comes from a command
+  substitution or a variable the hooks can't resolve is refused (`$(echo ... | base64 -d)`, `X=$(...); $X`), unless
+  the program's own name is written out (`"$(git rev-parse --show-toplevel)"/tools/build.sh`); a trap's commands are
+  checked as commands (`trap 'rm -rf .git/harness' EXIT`). The no-merge profile reads `gh pr merge` behind runners
+  and after `-R`.
+
 - **Shell functions, hidden -c programs and git subcommands from variables.** Three spellings got past the agent shell
   gate. A function body (`f() { rm -rf .git/harness; }; f`, `function f { ...; }`, `f() ( ... )`) is now checked as
   the commands it is, and again at each call with the call's arguments; calling a function whose body the hooks can't

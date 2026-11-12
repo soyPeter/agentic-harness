@@ -404,7 +404,10 @@ DEFAULT_BRANCH_MOVES = ("git checkout main && git merge feat/x && git push origi
                         "git push origin HEAD:`echo main`", 'git push origin "HEAD:main"', "git push origin :main",
                         "git push origin main", "git $(echo push) origin main", "P=push; git $P origin main",
                         'set -- push origin main; git "$@"', 'f() { git "$@"; }; f push origin main',
-                        "git `echo push` origin main", "for s in status push; do git $s origin main; done")
+                        "git `echo push` origin main", "for s in status push; do git $s origin main; done",
+                        "git --namespace x push origin main", "git --namespace=x checkout main",
+                        "timeout -s KILL 5 git push origin main", "sudo -u root git checkout main",
+                        "stdbuf -o L git push origin main", "taskset 3 git push origin main")
 # Globs and braces that the shell expands into words the harness can't read, in gh and git calls and in a command's
 # name; the others are literal text (a glob in ls's argument, a placeholder in a gh api endpoint).
 GLOB_REFUSED = ("gh pr view 7 --json labels *", "git push origin HEAD *", "git fetch origin *", "env ?h pr merge 7",
@@ -427,7 +430,9 @@ DELIVERER_FLOW = ("python3 scripts/harness/lib/harness.py verify --range origin/
                   "gh pr create --base main --title t --body-file - <<'EOF'\nWhat it does.\nEOF",
                   "gh api repos/o/r/pulls/7", "git push -u origin HEAD", "git merge-base origin/main HEAD",
                   "git log origin/main..HEAD --oneline", "git checkout feat/x", "gh pr checks 7 --watch",
-                  "S=status; git $S", "for s in status log; do git $s -1; done")
+                  "S=status; git $S", "for s in status log; do git $s -1; done",
+                  "timeout 60 git push -u origin HEAD", "git --no-pager log origin/main..HEAD --oneline",
+                  "nice -n 5 gh pr checks 7 --watch")
 
 
 class DelivererRound3(GateProject):

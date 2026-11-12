@@ -359,6 +359,18 @@ SPELLINGS = (
     "python3 <(cat scripts/harness/lib/harness.py) {c}",
     "X='python3 scripts/harness/lib/harness.py {c}'; sh -c \"$X\"",
     "bash -lc 'python3 scripts/harness/lib/harness.py {c}'",
+    "timeout 5 bash -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "timeout -s KILL 5 python3 scripts/harness/lib/harness.py {c}",
+    "nice -n 5 sh -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "stdbuf -oL bash -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "caffeinate -i sh -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "sudo -u nobody -E bash -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "env -i PATH=/usr/bin sh -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "script -q /dev/null sh -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "flock /tmp/harness-test.lock -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "watch -n 1 python3 scripts/harness/lib/harness.py {c}",
+    "taskset 3 sh -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "trap 'python3 scripts/harness/lib/harness.py {c}' EXIT",
 )
 # A shell or eval whose program the hooks can't read: a command substitution (here, base64 of the engine command), a
 # read variable, or a variable assigned from a substitution. {b} is the base64 of the engine command.
@@ -371,6 +383,11 @@ HIDDEN_PROGRAMS = (
     "X=$(echo {b} | base64 -d); sh -c \"$X\"",
     "read X < cmd.txt; eval \"$X\"",
     "sh -c \"$UNSET_HARNESS_TEST_VARIABLE\"",
+    "$(echo {b} | base64 -d)",
+    "`echo {b} | base64 -d`",
+    "X=$(echo {b} | base64 -d); $X",
+    "X=$(echo {b} | base64 -d); timeout 5 $X",
+    "trap \"$(echo {b} | base64 -d)\" EXIT",
 )
 # Running the engine through code the hooks don't read, or from a copy, whatever the command.
 CODE_AND_COPIES = (
@@ -418,7 +435,12 @@ EVERYDAY = ("for f in src/*.py; do wc -l \"$f\"; done", "while read -r f; do ech
             "pushd src && make && popd", "sh -c 'echo $1' _ x", "bash -c \"cd $HOME && ls\"",
             "D=src; bash -c \"cd $D && make\"", "bash -lc 'make test'", "eval \"echo hi\"",
             "f() { echo hi; }; f", "build() { make -C src; }; build", "S=status; git $S",
-            "git log -1 --format=%H", "set -euo pipefail; make test")
+            "git log -1 --format=%H", "set -euo pipefail; make test",
+            "timeout 60 pytest", "nice make", "timeout 60 pytest -q tests", "nice -n 10 make test", "time make test",
+            "env -u PYTHONPATH pytest -q", "caffeinate -i make test", "stdbuf -oL make test 2>&1 | tee build.log",
+            "nohup make serve > serve.log 2>&1 &", "\"$(git rev-parse --show-toplevel)\"/tools/build.sh",
+            "$HOME/.local/bin/tool --version", "for t in ruff mypy; do $t src; done", "trap 'echo done' EXIT",
+            "trap - EXIT", "timeout 60 git fetch origin", "brew install node python3")
 
 
 class UserOnlyCommands(unittest.TestCase):
@@ -542,7 +564,17 @@ class GitDirectory(unittest.TestCase):
                 (self.p, "function f() ( rm -rf .git/harness ); f"), (self.p, "f()(rm -rf .git/harness); f"),
                 (self.p, 'f() { rm -rf "$1"; }; f .git/harness'), (self.p, 'f() { rm -rf "$@"; }; f x .git/harness'),
                 (self.p, 'f() { echo "{}" > "$1/harness/events.jsonl"; }; f .git'),
-                (self.p, 'f() { "$@"; }; f rm -rf .git/harness'), (self.p, "f() if true; then :; fi\nf")):
+                (self.p, 'f() { "$@"; }; f rm -rf .git/harness'), (self.p, "f() if true; then :; fi\nf"),
+                (self.p, "timeout 5 rm -rf .git/harness"), (self.p, "nice -n 5 rm -rf .git/harness"),
+                (self.p, "sudo -u nobody rm -rf .git/harness"), (self.p, "caffeinate -i rm -rf .git/harness"),
+                (self.p, "stdbuf -o0 rm -rf .git/harness"), (self.p, "timeout 5 bash -c 'rm -rf .git/harness'"),
+                (self.p, "env -u X timeout 5 rm -rf .git/harness"), (self.p, "command -p rm -rf .git/harness"),
+                (self.p, "xvfb-run -a rm -rf .git/harness"), (self.p, "flock /tmp/l rm -rf .git/harness"),
+                (self.p, "script -q /dev/null rm -rf .git/harness"), (self.p, "watch -n 1 rm -rf .git/harness"),
+                (self.p, "taskset 3 rm -rf .git/harness"), (self.p, "trap 'rm -rf .git/harness' EXIT"),
+                (self.p, "for c in true 'rm -rf .git/harness'; do $c; done"), (self.p, "X=; $X rm -rf .git/harness"),
+                (self.p, "T=timeout; $T 5 rm -rf .git/harness"), (self.p, '$(printf "rm -rf .git/harness")'),
+                (self.p, "/tmp/timeout 5 rm -rf .git/harness")):
             with self.subTest(command=command):
                 self.assertEqual(project.bash(command, "implementer").returncode, 2)
 
@@ -561,6 +593,9 @@ class GitDirectory(unittest.TestCase):
                                  (self.p, 'OUT=build/out.txt; echo x > "$OUT"'),
                                  (self.p, 'f() { make -C "$1"; }; f src'),
                                  (self.p, "clean() { rm -rf build; }; clean"),
+                                 (self.p, "timeout 5 rm -rf build"), (self.p, "nice -n 5 rm -f build/x.o"),
+                                 (self.p, 'T=$(mktemp); trap \'rm -f "$T"\' EXIT; echo x > "$T"'),
+                                 (self.p, 'T=$(mktemp); trap "rm -f $T" EXIT; echo x > "$T"'),
                                  (self.p, "find .git -name '*.lock' -print"),
                                  (self.lane, "tail -3 %s" % shlex.quote(str(self.common / "harness/events.jsonl")))):
             with self.subTest(command=command):

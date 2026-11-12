@@ -310,6 +310,48 @@ class ExternalDelivery(unittest.TestCase):
                     self.assertEqual(answer.returncode, 2, answer.stderr)
         self.assertEqual(self.p.bash("git submodule status", "implementer").returncode, 0)
 
+    def test_git_options_that_take_a_value_hide_no_push(self):
+        refused = ("git --git-dir .git push origin HEAD", "git --git-dir=.git push origin HEAD",
+                   "git --work-tree . push origin HEAD", "P=push; git --work-tree . $P origin HEAD",
+                   "git --namespace x push origin HEAD", "git --namespace=x push origin HEAD",
+                   "git --super-prefix x push origin HEAD", "git --attr-source HEAD push origin HEAD",
+                   "git -C . --git-dir .git --work-tree . push origin HEAD",
+                   "git --config-env user.name=HOME push origin HEAD", "git --git-dir .git -c x.y=z log")
+        for agent in ("implementer", "deliverer", None):
+            for command in refused:
+                with self.subTest(agent=agent, command=command):
+                    answer = self.p.bash(command, agent)
+
+                    self.assertEqual(answer.returncode, 2, answer.stderr)
+        for command in ("git --git-dir .git log -1", "git --work-tree . status", "git --namespace x log -1",
+                        "git -C . --no-pager log -1", "git --git-dir=.git rev-parse HEAD"):
+            with self.subTest(command=command):
+                answer = self.p.bash(command, "implementer")
+
+                self.assertEqual(answer.returncode, 0, answer.stderr)
+
+    def test_a_runner_or_a_trap_hides_no_push(self):
+        refused = ("timeout 5 git push origin HEAD", "timeout -s KILL 5 git push origin HEAD",
+                   "nice -n 5 git push origin HEAD", "stdbuf -o L git push origin HEAD",
+                   "caffeinate -i git push origin HEAD", "sudo -u nobody -E git push origin HEAD",
+                   "env -u X git push origin HEAD", "timeout 5 nice git push origin HEAD",
+                   "script -q /dev/null git push origin HEAD", "flock /tmp/x -c 'git push origin HEAD'",
+                   "watch -n 1 git push origin HEAD", "xvfb-run -a gh pr merge 9", "taskset 3 git push origin HEAD",
+                   "trap 'git push origin HEAD' EXIT", "timeout 5 gh pr merge 9", "ionice -c 3 git push origin HEAD")
+        for agent in ("implementer", "deliverer", None):
+            for command in refused:
+                with self.subTest(agent=agent, command=command):
+                    answer = self.p.bash(command, agent)
+
+                    self.assertEqual(answer.returncode, 2, answer.stderr)
+        for command in ("timeout 60 pytest", "nice make", "timeout 60 git fetch origin", "nice -n 5 git status",
+                        "echo git push origin HEAD", "time make test", "caffeinate -i make test",
+                        "trap 'echo done' EXIT", "command -v gh", "brew install gh"):
+            with self.subTest(command=command):
+                answer = self.p.bash(command, "implementer")
+
+                self.assertEqual(answer.returncode, 0, answer.stderr)
+
     def test_everyday_commands_and_git_subcommands_the_hooks_resolve_are_allowed_in_external_mode(self):
         for command in ("S=status; git $S", "for s in status log; do git $s -1; done", "set -- status; git \"$@\"",
                         "git -C \"$(git rev-parse --show-toplevel)\" status", "for f in src/*.py; do wc -l \"$f\"; done",
