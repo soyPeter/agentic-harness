@@ -84,6 +84,12 @@ only).
   receipt suggests: `risk:low` (`docs`, `refactor`), `risk:elevated` (`feature`, or `docs`/`refactor` with other risks)
   or `risk:high` (`schema`, or `feature` with other risks). Whatever the class, a person approves every spec in
   supervised mode and merges the pull request.
+- **The sandbox each class needs** ([ADR-003](docs/adr/ADR-003-sandbox-backends.md), user-only
+  `HARNESS_SANDBOX_REQUIRE`; the default, `auto`, asks a container for `schema` work in autonomous mode only): such
+  work starts only in a session running in that sandbox,
+  and finishes only with a judge pass recorded in one, which `verify` and CI check from the recorded evidence. A
+  requirement covers the classes above it too, and anything the harness can't read or doesn't know counts as no
+  isolation.
 - **Autonomous mode** (opt-in, user-only): no human in the loop. The harness approves low-risk specs by policy, from
   the spec and later the diff; only a `docs` or `refactor` spec can be low-risk, so `feature` and `schema` work always
   waits for the user's approval. Everything else, including repeated griller or judge failures, is escalated: the task
@@ -103,7 +109,8 @@ pass stale.
   user. It is built from the spec, the verdicts and the diff, and goes into the pull requests the runner and the Orca
   coordinator open. It shows the sandbox the judge pass was recorded in (backend, isolation class, base image digest,
   allowlist hash, region, control plane, credential mode; [ADR-003](docs/adr/ADR-003-sandbox-backends.md), Proposed),
-  so a run that wasn't isolated shows it. It also suggests pull request labels for triage: one `risk:*` label and
+  so a run that wasn't isolated shows it, and whether that met the sandbox the task's Change-Class needs. It also
+  suggests pull request labels for triage: one `risk:*` label and
   `class:<class>`. The deliverer applies them; a label never approves or merges.
 - **Verify**: the pre-commit hook re-checks the gates on the staged state, the pre-push hook (full installs) the
   commits being pushed, and CI the pull request's commits (`harness.py verify --range`) with the **base branch's**
@@ -150,7 +157,9 @@ pass stale.
 - **Runner**: `harness.py run` drives ready tasks unattended (optionally one worktree, branch and PR per task, with a
   cost budget), one fresh agent session per task, with time and attempt budgets, escalating stalls. Sessions start
   through a sandbox backend (`HARNESS_SANDBOX_BACKEND`); the only one, `devcontainer`, runs them where the runner runs,
-  ideally inside `.devcontainer/harness-agent/`, whose outbound allowlist is enforced from a second container.
+  ideally inside `.devcontainer/harness-agent/`, whose outbound allowlist is enforced from a second container. With
+  `HARNESS_SANDBOX_START=on`, `run` on the host brings that sandbox up itself with the devcontainer CLI and runs each
+  session in it.
 - **Observability**: `harness.py report` summarises the event log, and `harness.py trace <id>` shows one task's
   history: the context and skills its agents loaded, the files they edited, what the hooks refused, test runs and
   verdicts.
@@ -269,12 +278,12 @@ python3 /path/to/agentic-harness/plugin/launcher.py init --thin [--version 0.30.
 ```
 
 In Claude Code, `/agentic-harness:init` does the same. It fetches and checks the release, then writes the project seed
-(`backbone/`, `CLAUDE.md`), the pin, `harness-verify.yml`, the shim with `core.hooksPath=.githooks`, and the plugin
-entries. After a fresh clone, each developer runs `git config core.hooksPath .githooks` once.
+(`backbone/`, `CLAUDE.md`), the pin, `harness-verify.yml`, the shim with `core.hooksPath=.githooks`, the sandbox
+(`.devcontainer/harness-agent/`) and the plugin entries. After a fresh clone, each developer runs `git config core.hooksPath .githooks` once.
 
 **Move the pin** to upgrade: `python3 /path/to/agentic-harness/plugin/launcher.py pin <version>` (the user's command;
-agents can't run it). It checks the release, updates the pin and the plugin's marketplace ref, and brings the shim
-and `harness-verify.yml` to that release. The upgrade is then one reviewed change.
+agents can't run it). It checks the release, updates the pin and the plugin's marketplace ref, and brings the shim,
+`harness-verify.yml` and the sandbox files you haven't edited to that release. The upgrade is then one reviewed change.
 
 **Switch an installed project**:
 
@@ -286,7 +295,9 @@ and `harness-verify.yml` to that release. The upgrade is then one reviewed chang
 - Both need a clean working tree and check everything before they write. If a write fails part way (permissions, a
   full disk), they undo their changes. On a project that is already switched, they change nothing.
 - `--to-thin` pins the installed release, or `--version`. It deletes each harness file you haven't edited and keeps
-  an edited one as `<file>.harness-bak`. `backbone/`, `CLAUDE.md` and adopted packs' files stay as they are. The pin
+  an edited one as `<file>.harness-bak`. `backbone/`, `CLAUDE.md` and adopted packs' files stay as they are, and so
+  does the sandbox, brought to the pinned release as `update.sh` would (an edited file whose release copy changed gets
+  a `<file>.harness-new`, and the switch exits 1). The pin
   keeps the hashes the full install recorded for the harness's files among them (`"kept"`) and the install date.
   `harness.py adopt` and `adopt --remove` work from these hashes as they do from a full install's, so a pack can be
   adopted again after the pin moved, and removing one deletes the files you haven't edited. Adopting again never
@@ -330,7 +341,11 @@ and a warning in supervised mode. Install the plugin at the pinned release, or m
   is protected.
 - The pre-commit shim is the only git hook: Conventional Commits (`commit-msg`) and the pre-push check run in full
   installs only, while CI's `verify --range` applies to both.
-- The `.devcontainer/harness-agent/` sandbox for unattended runs comes with the full install only.
+- The `.devcontainer/harness-agent/` sandbox comes with thin mode too (`init --thin`, `pin` and `--to-thin` install
+  it). When the container starts, it fetches the pinned release and Claude Code loads it as the plugin; run the
+  harness there with `python3 ~/.agentic-harness/plugins/agentic-harness/plugin/launcher.py <command>`. `pin` keeps a
+  sandbox file you edited (the allowlist in `docker-compose.yml`, say) and writes the release's copy beside it as
+  `<file>.harness-new`.
 
 ## Enforce it everywhere
 
@@ -421,7 +436,7 @@ A profile is an organisation policy on top of the gates. Set it in `backbone/har
 | `scripts/harness/` | harness | Runtime (`lib/harness.py`), git hooks, core rules and routes, `doctor.sh` |
 | `.github/workflows/harness-verify.yml` | harness | CI: `verify --range` with the base branch's verifier on every pull request; on a push to the default branch, the verdict attestation, signed when `HARNESS_ATTEST_KEY` is set |
 | `.github/workflows/harness-judge.yml` | project | CI: an independent judge session re-judges tasks a pull request finishes (needs `ANTHROPIC_API_KEY`; add your toolchain) |
-| `.devcontainer/harness-agent/` | harness | Sandbox for unattended runs: an outbound allowlist enforced from a second container (the agent's has no NET_ADMIN or NET_RAW), a base image pinned by digest, a trusted workspace, no prompts. Checked in a real container by `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`); the earlier one-container version ran a real task end to end |
+| `.devcontainer/harness-agent/` | harness | Sandbox for unattended runs: an outbound allowlist enforced from a second container (the agent's has no NET_ADMIN or NET_RAW), DNS for allowlisted names only, a log of what it denied, a base image pinned by digest, a trusted workspace, no prompts. Checked in a real container by `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`); the earlier one-container version ran a real task end to end |
 | `.claude/settings.json` | shared | Merged: harness hook entries plus a few read-only permissions |
 
 Check the state of a task's definition with `python3 scripts/harness/lib/harness.py spec-check <id>`, and the harness with `scripts/harness/doctor.sh`.

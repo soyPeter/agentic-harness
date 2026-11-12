@@ -259,3 +259,154 @@ Still open after v1:
   7. A first isolated backend, behind its own ADR, passing the egress parity checks.
   8. Egress denials logged and cited by the receipt.
   9. The sandbox for thin installs.
+
+## Follow-up status
+- **1. DNS: done (2026-11-11).** `egress.py` answers DNS on `127.0.0.1:53` in the shared network namespace and
+  resolves a name, over UDP or TCP, only when it is on the published allowlist (exactly, in any case), through the
+  `egress` container's own resolver; any other name gets NXDOMAIN without leaving and is logged as a denial.
+  `init-firewall.sh` redirects every DNS query from a process other than root to it (a `nat` rule), drops port 53 to
+  anywhere else, and drops traffic to Docker's resolver (`127.0.0.11`, on any port) from anyone but root; the agent's
+  container has no root. After review, a name with a label no host name has (a dot inside it, a space, a control
+  byte) gets FORMERR, and the query for a listed name is rebuilt from the name alone (lower case, a fresh id, no other
+  section), so an EDNS option or the id the agent chose doesn't leave. Still open: names resolve to addresses once, at
+  start; TLS and paths aren't inspected, so DNS over HTTPS to an allowlisted host that offers it, or domain fronting
+  through an allowlisted CDN, would still carry data out.
+- **2. Credentials brokered at egress: deferred (2026-11-11).** Keeping the API credential out of the agent's
+  container needs a broker in the `egress` container that adds it to the agent's requests: either TLS interception
+  with a CA the agent's container trusts, or an Anthropic API relay the agent reaches through `ANTHROPIC_BASE_URL`, and
+  the same for git's GitHub token. Either one changes what the agent's container trusts and what the `egress`
+  container can read, and whether a subscription token may be relayed that way is unverified. That is a decision of
+  its own, to take with its threat model before any code; `credential_mode: brokered` stays reserved for it.
+- **3. Pin the whole built image: deferred (2026-11-11).** Pinning the built image, not just its base, means
+  publishing it to a registry the harness controls, from a reviewed workflow that signs it, and having
+  `docker-compose.yml` name it by digest; a project that adds its toolchain then needs an image of its own published
+  the same way. There is no registry for this yet, and none of it can be built or checked locally, so it waits for that
+  registry and its own change. Until then `base_image_digest` covers the base only, as the evidence says.
+- **4. Gate on the evidence: done (2026-11-11).** `HARNESS_SANDBOX_REQUIRE` (user-only) names the isolation class
+  each Change-Class needs, as `<class>=<isolation class>` pairs. Its default, `auto`, is `schema=container` in
+  autonomous mode and nothing in supervised mode: a review found that requiring it everywhere refused schema work in
+  ordinary supervised use on the host, judged passes already recorded there and Orca's workers. A pair holds for its class
+  and every class above it on ADR-002's ladder. A task of such a class starts only in a session whose own sandbox has
+  that class (`start`, an edit of `3-TASKS.md`), and finishes only when its latest judge pass recorded one (`finish`, an
+  edit, and `verify`, so the pre-commit hook and CI check the recorded evidence, never their own sandbox). It fails
+  closed: a judge pass recorded before the evidence, an unknown isolation class or backend, and a setting that can't be
+  read all refuse, and the last is a doctor error. While such a task is `[WIP]`, a session without the sandbox it
+  needs may read but not write or run anything (write and exec tool calls, and tools without a contract, are
+  refused), so its code isn't written outside the sandbox and then judged inside it. `run` skips such a task before
+  starting a session for it, and the receipt says what the class requires and whether the judge pass met it. The evidence stays a record of the sandbox;
+  the gate is what refuses.
+- **5. `run` on the host starting the sandbox: done (2026-11-11).** With `HARNESS_SANDBOX_START=on` (user-only,
+  default `off`), the `devcontainer` backend's `create` brings `.devcontainer/harness-agent/` up with the devcontainer
+  CLI when the runner isn't already in it, has the harness inside run `doctor` and refuses every session when either
+  fails. `exec` runs each session in the agent's container with the agent command the sandbox defines and the harness
+  settings the user's environment sets, and enforces the session's timeout inside the container. `teardown` removes the
+  containers the backend started after every session. `doctor` errors without
+  the devcontainer CLI, `docker` or the sandbox files, so `run` refuses; `run --worktree` is refused in this mode,
+  because a worktree's git metadata lies outside what the sandbox mounts. The default stays `off`: turning it on needs
+  Docker and the devcontainer CLI on every machine that runs `run`. The Compose project is named after the sandbox's
+  folder, so one project's sandbox runs per machine at a time.
+  A review found that an agent in the sandbox could edit the definition `devcontainer up` reads on the host (an
+  `initializeCommand` runs there) and have the next session's `up` run it. So before every `up` the backend checks
+  the definition's folder against a digest this machine trusts: the running engine's own copy when the engine lives
+  outside the project (thin mode), or one the user approved with `harness.py sandbox-approve`, kept in
+  `~/.agentic-harness/sandbox-approvals.json`, which no sandbox mounts. The lock isn't the anchor, because it lives in
+  the workspace the agent can write. After `up`, the host's own code checks that a process in the agent's container is
+  isolated. Agents can't write the definition or the approvals, or run `sandbox-approve`.
+  A second review found a window between the check and `devcontainer up` reading the files, which an agent's process
+  left in a sandbox that was already up could use to swap them. So `run` refuses to start while the project's sandbox
+  is up, stops (later: removes) it after every session, and brings up a private copy of the definition, checked after it was copied,
+  from `~/.agentic-harness/sandbox-runs/` (a generated Compose file mounts the workspace by its absolute path). The
+  isolation check runs in Python's isolated mode, so no module in the workspace stands in for the standard library,
+  and a definition file that can't be read counts as a changed one.
+  A third review found that moving the Compose file into the private copy made its relative mounts resolve from there:
+  an approved definition whose `workspaceFolder` isn't the template's mounted `~/.agentic-harness/sandbox-runs` into
+  the agent's container, so one project's agent could rewrite another's copy between its check and its `up`. Each run
+  now has a private folder of its own (`mkdtemp`, removed after the session), and `docker compose config` resolves the
+  Compose files from the workspace and from the copy before `up`: a bind whose source differs between the two is
+  relative, and only the workspace mount the generated file replaces may be one; no bind may hold or lie in
+  `~/.agentic-harness`. Symlinks in the definition are refused, the Compose project is named by the harness (a `.env`
+  in the workspace can't choose it), and the containers are removed after every session and recreated by the next
+  `up`, so nothing an agent changes inside them persists; the isolation probe runs with `/usr/bin/python3` under
+  `env -i`.
+  A fourth review found that the shared Claude Code login volume let an agent leave a `~/.claude/settings.json`
+  (`disableAllHooks`, an `env` with `PYTHONPATH`) that later sessions, in every project, would read. In the sandbox the
+  image now ships root-owned managed settings (`/etc/claude-code/managed-settings.json`, `disableAllHooks: false`),
+  which outrank user and project settings, and `run` replaces every named volume the agent's container writes to with
+  a tmpfs for the session, so nothing written under `~/.claude` outlives it; Claude Code's credentials then come from
+  the environment (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`), and `run` refuses without one. The engine side
+  (refusing agent writes to user-level agent configuration, doctor and session-start errors for `disableAllHooks`,
+  user hooks and `env`, and hooks run with `python3 -I`) is another change, made on main; until it lands, an agent can
+  still change `~/.claude` during its own session, and a sandbox opened in an editor still uses the shared login
+  volume. `run` also refuses a definition that reaches past its folder or the sandbox (`initializeCommand`, `mounts`,
+  `runArgs` and the like in `devcontainer.json`; `extends`, `include`, `env_file`, an outside build context,
+  `volumes_from`, privileges, host namespaces, extra capabilities, the docker socket and bind-device volumes in the
+  Compose file), and explains docker buildx's file entitlement failure when `devcontainer up` hits it.
+  A fifth review showed that refusing unsafe content by name keeps leaking (a key on one line, an escaped key, a socket
+  directory, `container:` namespaces, a seccomp profile, a feature, a port), so the final rule is an allowlist.
+  `container` now means the shipped definition with only these differences: the values of `HARNESS_FIREWALL_ALLOW` and
+  `HARNESS_AGENT_CMD` in the Compose file, the base image line of the Dockerfile and a `workspaceFolder` under
+  `/workspace`, compared, in thin mode, with the release's copy the engine keeps outside the project (a full install has
+  none, so its definitions are always custom). Anything else is a new isolation class, `custom`, ranked between `none`
+  and `container`: run brings it up only once the user approved it, mounts a read-only marker saying so into the agent's
+  container, and its judge passes record `custom`, which the default gate refuses for schema work. Refused even when
+  approved: symlinks, references to files outside the definition (`extends`, `include`, `env_file`, `secrets`,
+  `configs`, an outside build context; JSON Compose files are checked parsed, so escaped keys count),
+  `devcontainer.json` keys that act on the host (`initializeCommand`, `mounts`, `runArgs` and the like), relative
+  binds the private copy can't reproduce and binds of `~/.agentic-harness`.
+  A sixth review found that the comparison split lines with Python's `splitlines()`, which also breaks at `\f`, `\r`,
+  `\x1c` and the like, while Docker breaks a Dockerfile only at `\n`: a form feed in place of the newline before
+  `COPY managed-settings.json` folded that instruction into the comment above it, and the definition still counted as
+  shipped while its image had no managed settings. The comparison is now of bytes, split on `\n` only, with every byte
+  of every other line compared; it is still a text comparison, not one of the resolved configuration (`docker compose
+  config` needs Docker, and `sandbox-approve` and `doctor` classify the definition without it), so anything Docker,
+  Compose or the devcontainer CLI would read differently from the shipped bytes is `custom`. The allowed values are now
+  patterns of printable ASCII: a double-quoted host list for `HARNESS_FIREWALL_ALLOW`, another tag or digest of the
+  shipped image's repository (not another registry or name), and a `workspaceFolder` under `/workspace` with no `.`
+  or `..` segment; resource limits (`cpus`, `mem_limit`, `memswap_limit`, `pids_limit`), which only lower what a
+  container may use, may be added on the lines right after a service's `build: .`. `HARNESS_AGENT_CMD` is no longer
+  allowed: it decides what runs in the container, the harness's hooks included. A property check changes one byte of
+  a shipped file anywhere outside the allowed values and expects `custom`. A container with the agent's restrictions
+  but no marker from `run` (an editor's, say) used to record `container`; it now records `custom`, since nothing says
+  which definition it came from, and `run` and `doctor` inside any container no longer try to start a sandbox.
+  Limits: in a full install, `run` on the host executes the workspace's own `scripts/harness/`, which an agent in the
+  sandbox can write too, so the approval protects thin installs, whose engine lives outside the project; use thin mode
+  with `HARNESS_SANDBOX_START=on`. Other spellings of `harness.py sandbox-approve` in an agent's shell command (a
+  split path, `xargs`, `runpy`) are the class PR #90 refuses for every user-only command through its `USER_COMMANDS`
+  list. PR #90 merged first, and the merge of main into this branch added `sandbox-approve` to `USER_COMMANDS`, so
+  every spelling it refuses is refused for `sandbox-approve` too. One spelling it doesn't refuse yet, for any
+  user-only command: `timeout`, `stdbuf` or `caffeinate` before an interpreter given the engine's path in a variable
+  (`timeout 5 python3 $H sandbox-approve`). PR #96 adds generic wrapper unwrapping to the shell checks on main; this
+  change depends on it rather than adding a second unwrapping, and its test of those spellings is skipped until #96
+  lands.
+- **6. Orca's workers inside a backend's sandbox: deferred (2026-11-11).** Orca starts each worker itself, on the host,
+  in the task's worktree. Running workers in the sandbox needs Orca to launch them through the sandbox (a launch command
+  per agent that goes through `devcontainer exec`) and worktrees whose git metadata the sandbox can see: a worktree's
+  `.git` points into the main checkout, outside the folder the sandbox mounts, which is also why `run --worktree` is
+  refused with `HARNESS_SANDBOX_START=on`. That needs a design for mounting the repository's git metadata, and checking
+  it needs a live Orca run, which this change doesn't start. Until then a worker can't start work whose class needs a
+  container (follow-up 4): the start gate refuses it on the host and says why.
+- **7. A first isolated backend: deferred (2026-11-11).** As decided above, each vendor backend gets its own ADR and must
+  pass the egress parity checks before it can be selected. That needs a choice among the candidates, an account, and
+  the vendor's sandbox to run the parity checks against, none of which a local change has. The interface it plugs into
+  is in place: `create` may now raise `SandboxError`, and `exec` passes the harness settings in, as the host-started
+  devcontainer does.
+- **8. Egress denials logged and cited by the receipt: done (2026-11-11).** `init-firewall.sh` sends every packet
+  its rules drop to NFLOG group 7 first (rate-limited to 50 a second; the rest are still dropped). `egress.py`, the
+  `egress` container's main process, reads the group over netlink (standard library only) and appends one JSON line per
+  packet to `/run/harness-egress/denials.jsonl` (target address, port and protocol, and the sending uid), on the volume
+  the agent mounts read-only; its health check waits for the log, and if it stops the agent loses its network. Each
+  judge pass in a container records `egress_denials`: since when the log runs, how many packets were denied, the ten
+  targets denied most and the log's sha256. The receipt cites them, or says "not logged" for an `egress` container
+  from before the log. The log restarts with the `egress` container, so it covers the container's lifetime, not one
+  task. A review found that a name the agent asked for could carry line breaks into the receipt, and so into a pull
+  request; a target now shows only the characters of a host name, address and port (`?` for any other, at most 255),
+  both in the recorded summary and in the receipt.
+- **9. The sandbox for thin installs: done (2026-11-11).** `init --thin`, `pin` and `update.sh --to-thin` install
+  `.devcontainer/harness-agent/` from the pinned release; `pin` and `--to-thin` update the files nobody edited and keep
+  an edited one with the release's copy beside it (`<file>.harness-new`), by the hashes the lock records under `kept`,
+  as `update.sh` does. When the container starts, `thin-engine.py` fetches the pinned release into the launcher's engine
+  cache, refuses it unless it is the pinned commit with no local changes, and links it into the folder
+  `CLAUDE_CODE_PLUGIN_DIRS` names, so every Claude Code session in the sandbox loads the pinned plugin and its hooks,
+  and judge passes record the same evidence as a full install's. Inside the image, `doctor` reports an error, so `run`
+  and `orca` refuse to start, unless the sessions would load exactly the pinned plugin. Codex and OpenCode sessions in
+  a thin project's sandbox get no plugin from this; the image runs Claude Code.

@@ -2,6 +2,107 @@
 
 ## Unreleased
 
+- **ADR-003's follow-ups have a dated status.** Follow-ups 1 (DNS), 4 (the gate), 5 (`run` starting the sandbox),
+  8 (denial log) and 9 (thin installs) are done, each in its own entry below. Deferred, with the reason in the ADR:
+  2 (brokered credentials: a broker means TLS interception or an API relay, a trust decision of its own), 3 (pinning
+  the whole image: needs a registry and a signed publishing workflow), 6 (Orca's workers in the sandbox: Orca launches
+  them on the host, and worktrees' git metadata lies outside what the sandbox mounts) and 7 (a first isolated backend:
+  needs its own ADR, a vendor account and the egress parity checks).
+
+- **`run` on the host can bring the sandbox up itself (ADR-003 follow-up 5).** With the new user-only
+  `HARNESS_SANDBOX_START=on` (default `off`), `run` brings `.devcontainer/harness-agent/` up with the devcontainer CLI
+  before each session, has the harness inside run `doctor`, and refuses every session when either fails. Each session
+  runs in the agent's container with the agent command the sandbox defines and the harness settings your environment
+  sets; its timeout is enforced inside the container, and the runner removes the sandbox's containers after each
+  session; it refuses to start while the project's sandbox is already up. `doctor` reports an error without the
+  devcontainer CLI, `docker`
+  or the sandbox files, and `run --worktree` is refused in this mode. A dry run says it would bring the sandbox up.
+  `tests/test-sandbox-evidence.py` covers when `run` may start; `HostRun` in `tests/test-sandbox-egress.py`
+  (`HARNESS_E2E=1`) runs sessions in the real sandbox from the host, a timed-out one included.
+  - `devcontainer up` runs parts of the sandbox's definition on the host, and an agent in the sandbox can write the
+    workspace, so `run` brings up only a definition this machine trusts: the engine's own copy in thin mode, or one
+    you approved with the new `harness.py sandbox-approve` (recorded in `~/.agentic-harness/sandbox-approvals.json`).
+    A changed, added or removed file in `.devcontainer/harness-agent/` stops the run before `up`, and `doctor` says
+    so. `run` brings up a private copy of the definition (in `~/.agentic-harness/sandbox-runs/`), checked after it was
+    copied, so a change made after the check never reaches `devcontainer up`; each run's copy is its own and removed
+    afterwards, and a bind mount the copy would resolve differently, one into `~/.agentic-harness`, or a symlink in the
+    definition stops the run. The Compose project is named by the harness, and the containers are removed after every
+    session, so nothing an agent changes inside them reaches the next. After `up`, the host's own code checks, with an
+    absolute interpreter and no environment, that the agent's container isolates its sessions. Each session gets a
+    fresh `~/.claude` (a tmpfs over every named volume the agent writes to), so Claude Code's credentials must come
+    from the environment (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`); the image's root-owned managed settings
+    keep the harness's hooks on whatever a user settings file says. Only the shipped definition counts as a
+    `container`: in thin mode `run` compares its files byte for byte with the release's copy (as bytes split on `\n`,
+    not as Docker, Compose or the devcontainer CLI would read them) and allows only a `HARNESS_FIREWALL_ALLOW` host
+    list in double quotes, resource limits (`cpus`, `mem_limit`, `memswap_limit`, `pids_limit`) right after a
+    service's `build: .` line, another tag or digest of the base image's repository in the Dockerfile's
+    `ARG HARNESS_SANDBOX_IMAGE=` line, and a `workspaceFolder` under `/workspace`. Anything else, the agent command
+    `HARNESS_AGENT_CMD` included, makes it `custom`, a new isolation class below `container`: `run` brings it up once
+    you approved it, and its judge passes record `custom`, so the default gate refuses schema work there; a full
+    install's definitions are always `custom`, and so is a container no `run` marked as brought up from the shipped
+    definition (one an editor opened, say). `run` prints the class the host found in each session's sandbox. Even
+    approved, a definition that reads files outside its folder (`extends`, `include`, `env_file`, `secrets`,
+    `configs`, an outside build context) or acts on the host (`initializeCommand`, `mounts`, `runArgs` and the like in
+    `devcontainer.json`) stops the run, and a docker buildx file entitlement failure says what to do. In a full install `run` executes the
+    workspace's own `scripts/harness/`, which the sandbox can write too: use thin mode with `HARNESS_SANDBOX_START=on`. Agents can't change
+    the definition, write the approvals or run `sandbox-approve`. **Upgrading:** approve a full install's sandbox once
+    before turning `HARNESS_SANDBOX_START` on, and again after you or an update change it; in a thin project, a
+    sandbox whose agent command you changed in `docker-compose.yml` now needs your approval too, and records `custom`.
+
+- **No data leaves the sandbox in DNS queries (ADR-003 follow-up 1).** `egress.py` now also answers DNS in the
+  `egress` container: it resolves a name, over UDP or TCP, only when it is on the published allowlist (exactly, in any
+  case), and answers NXDOMAIN otherwise, logging the name in the denial log. `init-firewall.sh` redirects every DNS
+  query a process other than root makes, to any resolver, to it, drops port 53 to anywhere else, and keeps everyone but
+  root away from Docker's resolver on `127.0.0.11`. The query sent upstream for a listed name is rebuilt from the name
+  alone (lower case, a fresh id, no EDNS or other section), and a name with a label no host name has (a dot inside it,
+  a space, a control byte) gets FORMERR. DNS over HTTPS to an allowlisted host, and domain fronting through an
+  allowlisted CDN, remain possible: TLS isn't inspected. `tests/test-egress-dns.py` checks the resolver's rule through its
+  command line, with a property check; `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`) checks it in the real sandbox,
+  against other resolvers and Docker's own. **Upgrading:** rebuild the sandbox; a tool that needs a host off the
+  allowlist now fails to resolve it instead of failing to connect, so add the host to `HARNESS_FIREWALL_ALLOW`.
+
+- **The sandbox logs what it denies, and the receipt cites it (ADR-003 follow-up 8).** Every outbound packet the
+  `egress` container's rules drop is logged first (NFLOG, up to 50 a second), and the new `egress.py`, now the
+  `egress` container's main process, appends one line per packet to `/run/harness-egress/denials.jsonl` (target
+  address, port, protocol and the sending uid), which the agent mounts read-only. Each judge pass in a container records
+  `egress_denials` in its sandbox evidence (since when, how many, the ten targets denied most, the log's sha256), and
+  the receipt cites them; an `egress` container from before the log shows "not logged". A target shows only the
+  characters of a host name, address and port (`?` for any other, at most 255), so a name the agent asked for can't
+  add lines to a receipt or a pull request. Covered by
+  `tests/test-sandbox-evidence.py` and, in real containers, `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`).
+  **Upgrading:** rebuild the sandbox.
+
+- **Thin projects get the sandbox (ADR-003 follow-up 9).** `init --thin`, `pin` and `update.sh --to-thin` install
+  `.devcontainer/harness-agent/` from the pinned release. `pin` and `--to-thin` update the sandbox files nobody edited
+  and keep an edited one, writing the release's copy to `<file>.harness-new` and exiting 1, as `update.sh` does; the
+  lock records their hashes under `kept`. When the container starts, the new `thin-engine.py` fetches the release the
+  project pins (from `HARNESS_ENGINE_SOURCE`, passed in from the host, or GitHub), checks it is the pinned commit, and
+  links it into `~/.agentic-harness/plugins/`, which the agent's container names in `CLAUDE_CODE_PLUGIN_DIRS`: every
+  Claude Code session in there loads the pinned plugin, and its judge passes record the container like a full
+  install's. Run the harness there with `python3 ~/.agentic-harness/plugins/agentic-harness/plugin/launcher.py`.
+  Inside the image, `doctor` reports an error (so `run` and `orca` refuse) when a thin project's sessions wouldn't load
+  exactly the pinned plugin. `tests/test-thin-install.py` and `tests/test-thin-convert.py` cover the files and the
+  check; `ThinSandbox` in `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`) brings a thin project's sandbox up for real.
+  **Upgrading:** a thin project gets the sandbox with its next `pin`; rebuild the container after it.
+
+- **Unattended schema work needs the sandbox (ADR-003 follow-up 4).** A new user-only setting,
+  `HARNESS_SANDBOX_REQUIRE`, names the isolation class each Change-Class needs, as space-separated
+  `<class>=<isolation class>` pairs; a pair also covers the classes above it on the ladder. The default, `auto`, is
+  `schema=container` in autonomous mode and nothing in supervised mode; pairs you set apply in both. A task of such a class
+  starts only in a session whose own sandbox has that class, and finishes only when its latest judge pass recorded one:
+  `start`, `finish`, an agent's edit of `3-TASKS.md` and `verify` (pre-commit and CI, from the recorded evidence) all
+  refuse otherwise. While it is `[WIP]`, a session without that sandbox may only read: its write and exec tool calls,
+  and tools without a contract, are refused. A judge pass recorded before the evidence, an unknown isolation class or backend, and a value that
+  can't be read refuse too; the last is a doctor error. `run` skips such a task before starting a session for it
+  (exit 1), and `receipt` says what the class requires and whether the judge pass met it (`sandbox_required` in
+  `--json`). **Upgrading:** supervised projects see no change. In autonomous mode, schema work now has to start in,
+  and be judged in, `.devcontainer/harness-agent/`; a schema task judged on the host before the upgrade needs a judge
+  pass in the sandbox to finish, and the Orca coordinator's workers, which run on the host, can't do schema work. Set
+  `HARNESS_SANDBOX_REQUIRE=""` in `backbone/harness.conf` to keep the earlier behaviour, or `schema=container` to ask
+  for the sandbox in supervised mode too. `tests/test-sandbox-gate.py` drives the gate through every entry point, with a property check of
+  the ladder; `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`) starts and judges schema work in the real image and
+  finishes it on the host.
+
 - **Outward events say what ran; a Source heading and a budget word say less.** `outward` events are logged by
   post-tool-use, once the call has run, with `result` (`succeeded`, `failed`, or `unknown` where the agent CLI doesn't
   say: Codex, OpenCode's version 1 API; the OpenCode adapter now passes OpenCode's status), and cover spellings the deliverer's
