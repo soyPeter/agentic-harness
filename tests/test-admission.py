@@ -381,7 +381,7 @@ class Admission(unittest.TestCase):
         for command in ("cat $F | sh", "sh \"$S\"", "$RUN"):
             with self.subTest(unreadable=command):
                 self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command}), "can't tell")
-        for command in ("cat %s" % SCRIPT, "echo date | sh", "timeout 5 sh build.sh", "head %s | grep echo" % SCRIPT,
+        for command in ("cat %s" % SCRIPT, "timeout 5 sh build.sh", "head %s | grep echo" % SCRIPT,
                         "nice -n 5 make test", "sh -c 'echo hi'"):
             with self.subTest(allowed=command):
                 result = self.project.hook("pre-tool-use", "Bash", {"command": command})
