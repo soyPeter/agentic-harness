@@ -151,6 +151,8 @@ class WritesToAgentConfiguration(Fixture):
             """jq '.disableAllHooks = true' ~/.claude/settings.json | sponge ~/.claude/settings.json""",
             """python3 edit.py ~/.claude/settings.json""",
             """echo x > $UNSET_PREFIX/.claude/settings.json""",
+            'D=~/.claude; echo x > "$D/settings.json"',
+            """for f in ~/.codex/config.toml; do echo x > "$f"; done""",
             """claude config set -g disableAllHooks true""",
             """claude plugin disable agentic-harness@agentic-harness""",
             """claude plugin uninstall agentic-harness""",
