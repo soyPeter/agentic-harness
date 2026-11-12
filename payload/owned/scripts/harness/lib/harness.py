@@ -1957,6 +1957,96 @@ def config_findings(segment, words, cwd, env=None):
     return found
 
 
+CLI_PACKAGES = {"@anthropic-ai/claude-code": "claude", "@openai/codex": "codex", "opencode-ai": "opencode"}
+# Variables that start a nested session in bare or safe mode, or with OpenCode configuration from elsewhere; with
+# HOOK_ENV_HIJACK (a moved home or config folder, PATH, PYTHON*), what a nested session's environment may not set.
+NESTED_SESSION_ENV = re.compile(r"^(?:CLAUDE_CODE_(?:SIMPLE|SAFE_MODE)|OPENCODE_\w+)$")
+CODEX_HOOK_FEATURES = ("hooks", "codex_hooks", "plugins")
+
+
+def started_agent_cli(words):
+    """(the agent CLI words start, directly or through a package runner such as npx, its arguments), or (None, [])."""
+    prog, rest = program(words), words[1:]
+    if prog in ("claude", "codex", "opencode"):
+        return prog, rest
+    if prog in ("pnpm", "yarn") and rest[:1] == ["dlx"]:
+        rest = rest[1:]
+    elif prog not in ("npx", "bunx", "pnpx"):
+        return None, []
+    for i, word in enumerate(rest):
+        if not word.startswith("-"):
+            return CLI_PACKAGES.get(re.sub(r"(?<=.)@[^/]*$", "", word)), rest[i + 1:]
+    return None, []
+
+
+def settings_override_problems(value, what):
+    """Why a --settings or --agents value (inline JSON, or a file) may leave the harness's hooks out."""
+    if not value.lstrip().startswith("{"):
+        return ["%s %s: a file can change between this check and the session reading it; pass the JSON inline"
+                % (what, value or "''")]
+    try:
+        data = json.loads(value)
+    except ValueError:
+        return ["%s with JSON the hooks can't read" % what]
+    if not isinstance(data, dict):
+        return []
+    if what == "--agents":
+        roles = sorted(set(data) & set(PIPELINE_AGENTS))
+        return ["--agents redefining %s, which replaces the harness's agent of that name and the hooks it carries"
+                % ", ".join(roles)] if roles else []
+    found = ["--settings %s" % key for key in ("disableAllHooks", "allowManagedHooksOnly") if data.get(key) is True]
+    env = data.get("env") if isinstance(data.get("env"), dict) else {}
+    found += ["--settings setting %s in its env" % name for name in sorted(env) if HOOK_ENV_HIJACK.match(str(name))]
+    plugins = data.get("enabledPlugins") if isinstance(data.get("enabledPlugins"), dict) else {}
+    if plugins.get(PLUGIN_ID) is False:
+        found.append("--settings turning the agentic-harness plugin off")
+    return found
+
+
+def codex_override_problems(args):
+    found = []
+    for value in flag_values(args, "-c", "--config"):
+        key, _, raw = (part.strip() for part in value.partition("="))
+        key = re.sub(r"[\"'\s]", "", key)
+        names = re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*=", raw) + [key.rsplit(".", 1)[-1]]
+        if (key in ["features.%s" % f for f in CODEX_HOOK_FEATURES] and raw != "true") or (
+                key == "features" and re.search(r"\b(?:%s)\s*=\s*(?!true\b)" % "|".join(CODEX_HOOK_FEATURES), raw)) \
+                or (key == "allow_managed_hooks_only" and raw != "false") or re.match(r"^projects(?:\.|$)", key) \
+                or (key.startswith("shell_environment_policy") and any(HOOK_ENV_HIJACK.match(n) for n in names)):
+            found.append("-c %s" % value)
+    found += ["--disable %s" % v for v in flag_values(args, "--disable") if v in CODEX_HOOK_FEATURES]
+    found += ["--ignore-user-config, which drops the project's trust and the plugins"] \
+        if "--ignore-user-config" in args else []
+    return found
+
+
+def nested_session_findings(words, assignments, env):
+    """Why a command starts an agent CLI without the harness's hooks: flags that skip or turn them off, settings or
+    configuration from elsewhere, or an environment that moves the CLI's configuration."""
+    cli, args = started_agent_cli(words)
+    if not cli:
+        return []
+    names = {a.split("=", 1)[0] for a in assignments} | set(env)
+    found = ["%s set for it" % name for name in sorted(names)
+             if HOOK_ENV_HIJACK.match(name) or NESTED_SESSION_ENV.match(name)]
+    if cli == "claude":
+        found += [flag for flag in ("--bare", "--safe-mode", "--restricted") if flag in args]
+        found += ["--setting-sources %s, which leaves out the project's settings" % (value or "''")
+                  for value in flag_values(args, "--setting-sources")
+                  if "project" not in [s.strip() for s in value.split(",")]]
+        for flag in ("--settings", "--agents"):
+            for value in flag_values(args, flag):
+                found += settings_override_problems(value, flag)
+    elif cli == "codex":
+        found += codex_override_problems(args)
+    elif "--pure" in args:
+        found.append("--pure, which skips plugins")
+    if not found:
+        return []
+    return ["That starts %s without the harness's hooks (%s), and they are what stop that session's agent too. "
+            "Start it without that; only the user changes how the hooks run." % (cli, "; ".join(found))]
+
+
 def written_paths(segment, words):
     """Paths a segment writes, moves or deletes: redirection targets and mutating programs' operands."""
     paths = re.findall(r"(?:^|[^<>&0-9])(?:[0-9]?>>?|&>>?)\s*('[^']*'|\"[^\"]*\"|[^\s;|&<>]+)", segment)
@@ -2249,6 +2339,7 @@ def shell_findings(command, cwd=None, depth=0):
             cwd = dirs.pop() if dirs else UNKNOWN_DIR
             continue
         found.extend(config_findings(segment, words, cwd, env))
+        found.extend(nested_session_findings(words, assignments, env))
         producer = shell_words(segments[index - 1][0])[1] if index > 0 and segments[index - 1][1] == "|" else None
         found.extend(engine_findings(prog, words, written_paths(segment, words)))
         found.extend(program_findings(prog, words, producer, cwd, env))

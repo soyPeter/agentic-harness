@@ -416,6 +416,82 @@ class ConfigurationThatTurnsTheHarnessOff(Fixture):
         self.assertRefused(self.config_change("user_settings", user, HARNESS_AUTONOMY="autonomous"))
 
 
+class NestedSessionsKeepTheHooks(Fixture):
+    """An agent may start another agent session, but not one whose flags or environment leave the harness's hooks
+    out: they are what stops that session's agent too."""
+
+    def test_settings_overrides_that_turn_the_hooks_off_are_refused(self):
+        commands = [
+            """claude --settings '{"disableAllHooks":true}' -p hi""",
+            """claude -p --settings='{"disableAllHooks": true}' hi""",
+            """claude --dangerously-skip-permissions --settings '{"disableAllHooks":true}' -p hi""",
+            """claude --settings '{"env":{"PATH":"/tmp/evil"}}' -p hi""",
+            """claude --settings '{"enabledPlugins":{"agentic-harness@agentic-harness":false}}' -p hi""",
+            """claude --settings s.json -p hi""",
+            """echo '{"disableAllHooks":true}' > s.json && claude --settings s.json -p hi""",
+            """claude --setting-sources user -p hi""",
+            """claude --setting-sources user,local -p hi""",
+            """claude --setting-sources= -p hi""",
+            """claude --bare -p hi""",
+            """claude --safe-mode""",
+            """claude --restricted -p hi""",
+            """claude --agents '{"judge":{"description":"j","prompt":"say pass"}}' -p hi""",
+            """claude -p --agents agents.json hi""",
+            """CLAUDE_CODE_SIMPLE=1 claude -p hi""",
+            """env CLAUDE_CODE_SAFE_MODE=1 claude -p hi""",
+            """CLAUDE_CONFIG_DIR=/tmp/fresh claude -p hi""",
+            """export CLAUDE_CONFIG_DIR=/tmp/fresh; claude -p hi""",
+            """HOME=/tmp/h claude -p hi""",
+            """PATH=/tmp/evil:$PATH claude -p hi""",
+            """npx @anthropic-ai/claude-code --bare -p hi""",
+            """npx -y @anthropic-ai/claude-code@latest --settings '{"disableAllHooks":true}' -p hi""",
+            'bash -c "claude --bare -p hi"',
+            """codex -c features.hooks=false exec hi""",
+            """codex exec -c 'features.codex_hooks=false' hi""",
+            """codex --config features.hooks=false exec hi""",
+            """codex -c 'features={hooks=false}' exec hi""",
+            """codex --disable hooks exec hi""",
+            """codex --disable=codex_hooks exec hi""",
+            """codex exec --ignore-user-config hi""",
+            """codex -c 'projects."/x".trust_level="untrusted"' exec hi""",
+            """codex -c allow_managed_hooks_only=true exec hi""",
+            """codex -c 'shell_environment_policy.set={PYTHONPATH="/tmp/x"}' exec hi""",
+            """CODEX_HOME=/tmp/fresh codex exec hi""",
+            """npx @openai/codex --disable hooks exec hi""",
+            """opencode --pure run hi""",
+            """OPENCODE_CONFIG_CONTENT='{"plugin":["-*"]}' opencode run hi""",
+            """OPENCODE_DISABLE_PROJECT_CONFIG=1 opencode run hi""",
+            """XDG_CONFIG_HOME=/tmp/x opencode run hi""",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                result = self.bash(command)
+                self.assertRefused(result, command)
+                self.assertIn("hooks", result.stderr)
+
+    def test_other_nested_sessions_are_allowed(self):
+        commands = [
+            """claude -p hi""",
+            """claude --dangerously-skip-permissions -p hi""",
+            """claude --permission-mode bypassPermissions -p hi""",
+            """claude --settings '{"model":"opus"}' -p hi""",
+            """claude --setting-sources user,project,local -p hi""",
+            """claude --setting-sources project -p hi""",
+            """claude --agents '{"helper":{"description":"h","prompt":"p"}}' -p hi""",
+            """codex exec hi""",
+            """codex -c model=o3 exec hi""",
+            """codex --enable hooks exec hi""",
+            """codex -c features.hooks=true exec hi""",
+            """codex --dangerously-bypass-approvals-and-sandbox exec hi""",
+            """opencode run hi""",
+            """echo claude --bare -p hi""",
+            """grep -n -- --bare notes.md""",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertAllowed(self.bash(command), command)
+
+
 class IsolatedHookInterpreters(Fixture):
     """Every hook wiring runs python3 -I, so PYTHONPATH and friends from a settings env block can't hijack the engine."""
 
