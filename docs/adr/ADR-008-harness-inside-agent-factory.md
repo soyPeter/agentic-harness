@@ -1,43 +1,59 @@
 # ADR-008: The harness as the gate inside the agent software factory
 
 ## Status
-Proposed
+Accepted
 
 ## Date
-2026-11-11
+2026-11-11, revised 2026-11-13
 
 ## Context
-The maintainer has designed an **agent software factory**: an always-on service on a Hetzner box (`claude-box`)
-where agents pull work, open pull requests and report, and a person reviews. It was built on 2026-11-11 and installed
-switched off. It has never run with a real model or with real Slack, Linear or GitHub. Its code is not in this
-repository. This ADR does not describe its internals; where a decision depends on them, it says "assumed".
+The maintainer's **agent software factory** runs on the Hetzner `claude-box`: agents take delegated work,
+open pull requests and report, and a person reviews. The supplied
+[factory diagram, captured 13 November 2026](../sdlc/sources/agent-software-factory-2026-11-13.png)
+reports it live since 2026-11-11 as `sixseven` (also `67`), using the subscription. This supersedes the earlier
+snapshot that described it as installed but switched off. The factory's code is outside this repository;
+this update reads the image, not its implementation, deployed settings or a completed build run.
+The image still names the first build task as a next action. “Live” does not establish end-to-end qualification.
 
-The design, from its diagram:
+Source SHA-256: `25d2b177c64f146c967b39b9229d335ec7cad61528491be123f2e8750078a0a3`.
+The factory state below is **reported by that snapshot**. The Decision section specifies the harness integration
+contract. Follow-ups 1, 2, 3, 4 and 10 have since landed in main through PR #90; the implementation notes below
+record their actual semantics and limits. Factory-side integration remains unverified.
 
-- **Doors**: a Slack mention (reports land in the channel), GitHub (a review of the factory's PR, or a comment naming
-  it) and Linear (an issue delegated to it, or labelled eligible).
-- **Inbox**: every event is sender-checked, de-duplicated and queued. A **clock** adds an hourly janitor and scheduled
-  QA (the QA sweep is not built: it needs a preview stack).
-- **The loop a worker runs**: 1 Pick (takes an issue as its delegate), 2 Build (a fix in a sandbox; a daemon
-  re-checks), 3 Challenge (Fable always, Mythos on risky diffs), 4 Open PR (evidence in, the user as reviewer),
-  5 You review (tag the agent for changes, back to Build), 6 Close out (keep lessons, queue a KB note, report).
-- **Crew**, one shared identity, one session per task: Worker (Opus, one per project, from pick to PR), QA (not
-  built), Challenger (Fable, attacks every diff before the PR), Security (Mythos, risky diffs: public surfaces,
-  external calls, databases, new systems).
-- **Memory**: a task ledger, a project KB (Markdown in git, per project, changed by reviewed PR) and project notes
-  (lessons shown to the next worker).
-- **Foundations**: its own identity and tokens (none set yet); trusted senders (only named people give orders, other
-  text is data); spend caps ($25 a task, $100 a day, booked before each call); a sandbox (agent code runs without
-  secrets or open ports); log and stop (every outward action audited, one stop switch); a risk flag (rules flag a diff,
-  Fable can escalate, only the user downgrades); the user keeps merge, deploy, spend and infrastructure.
-- **Runtime**: a listener (no open ports; polls Slack, Linear and GitHub every 30 s), a dispatcher (plain code: checks
-  the sender, drops repeats, routes), a runner (one session per task, resumed on review; a fixed number of lanes), a
-  lane (the whole session boxed from outside; pushes only from a trusted clone), a key proxy (holds the real keys,
-  enforces the caps; lanes get stand-ins), a watchdog (heartbeat to systemd; disk and memory alerts to Slack), a
-  janitor (frees lanes and branches a week after a task settles) and a preview stack (not built).
-- **When an agent stops and asks**: it needs a ruling (behaviour nobody has decided), it is blocked (missing access,
-  repeated failed attempts), a cap is hit, or the work is off limits (production, infrastructure, secrets,
-  security-labelled issues).
+### Factory snapshot (13 November 2026)
+
+- **Doors and inbox:** Slack mentions, `sixseven`/`67` or thread replies; GitHub PR reviews or comments naming it;
+  Linear delegated issues or comments naming it. The inbox sender-checks and deduplicates. Code decides orders
+  and `go` authorization. GitHub comments by Andrei himself go unheard under the current shared identity.
+- **Worker loop:** 1 Pick an issue as delegate, 2 Build in a sandbox, 3 Open PR with evidence and reviewers,
+  4 You review and tag the agent to revise in the same session, 5 Close out with lessons and a report.
+  There is no separate universal Challenge stage in this version of the image.
+- **Crew:** Front (Opus, with Haiku sorting what to answer) talks, proposes, reads code and diffs, and can comment,
+  file, review, label and merge in the external factory. Worker (Opus) handles one task per project from pick to PR.
+  Advisor (Fable) is consulted on features and wide changes; it is not an independent judge of every diff.
+  Security (Mythos) is triggered by risky paths (public surfaces, outside calls, databases), but its key is missing:
+  a flagged change stops there. QA and the preview stack are not built, and parallel workers per project are not built.
+- **Memory:** facts record what Front heard and from whom/where, but remain hearsay until proposed as an entry.
+  Entries (rulings, findings, learning or pages) require `go` from the authorized person. The factory drafts a KB PR
+  that a person merges. Roles read local pages first, then `triple-kb`. The task ledger includes conversations and
+  next actions. The image says KB push is off pending branch protection; automatic promotion is not implied.
+- **Identity and authority:** Slack uses the bot; git/GitHub and Linear currently use Andrei's login/key and act as
+  him. Dedicated GitHub/Linear identities remain a next action. The roster controls who gives orders and approves;
+  a ruling needs its ruler's `go`. Merge is described as requiring a roster ask and GitHub approval, while Front
+  can perform it. That is a difference from the harness's human-only merge rule, not proof that rule is enforced.
+- **Foundations:** the image states no secrets or open ports in agent code, audited outward actions, one stop switch,
+  path-based risk that only a person may downgrade, and human control of deploy, spend and infrastructure.
+  It lists caps of $25/task, $100/day and $5/conversation, with a separate Front budget of $25/day across chat.
+  Only advisor calls pass through the key proxy. Its cap enforcement therefore does not establish metering or
+  pre-call limits over subscription worker/Front activity; that boundary requires qualification.
+- **Runtime:** listener (live Slack plus polling all doors every 30 s), code dispatcher, task/chat lanes, one KB writer,
+  whole-session boxing and trusted-clone pushes, watchdog, and an hourly janitor that frees settled lanes/branches
+  and refreshes the KB copy. A preview stack with an isolated DB and scrubbed connectors is not built.
+- **Stops:** undecided behavior, missing access/repeated failures, a cap hit, or off-limits work (production,
+  infrastructure, secrets, security-labelled issues). A missing security key is a stop, not a waived check.
+- **PR and autonomy:** PRs carry issue/branch/changelog conventions, worker tests and factory reruns, gate evidence,
+  rulings, risk, security outcome, advisor use and cost. The project ladder is triage/QA, delegated fixes, then
+  self-assignment of `agent-ok` issues; Disputes is on delegated fixes. The ladder controls intake, not spec approval.
 
 Most of the worker loop exists in the harness today. Paths below are in this repository; `harness.py` is
 `payload/owned/scripts/harness/lib/harness.py`.
@@ -64,19 +80,15 @@ Most of the worker loop exists in the harness today. Paths below are in this rep
 | Scheduling | `orca-nightly`, an Orca automation precheck (defaults to `orca --merge --trust`); `.github/workflows/nightly.yml` is this repository's own self-test, not a project scheduler | `harness.py` (`orca_nightly_command`); `.github/workflows/nightly.yml` |
 | Engine version | thin mode: the project pins a release in `backbone/.harness-lock.json`; the launcher runs it and refuses everything but reads when it can't | [ADR-001](ADR-001-thin-mode-plugin.md); `plugin/launcher.py` |
 
-What the factory needs and the harness lacks:
+Integration coverage after PR #90 (factory runtime not qualified here):
 
-- No provenance on a task: nothing records who asked, through which door, or whether the sender is trusted.
-- Spend is limited per `run` and only between tasks, after the cost is known. There is no per-task cap that survives
-  resumes, no per-day cap, and nothing booked before a call.
-- No security reviewer that risk switches on.
-- Review comments on a pull request don't come back into the task. Red CI does (`delivery-failed`, HOOKS.md
-  "Deliverer").
-- No place for a KB note distinct from `6-MEMORY.md`.
-- Nothing tells a janitor when a worktree or branch is safe to delete.
-- Model routing per role exists in `orca` only, and no verdict says which model produced it.
-- The deliverer pushes from inside the agent's session, so it needs a GitHub credential there. The factory keeps
-  credentials out of lanes and pushes from a trusted clone.
+- Intake with source provenance, contract version 1, per-task locks and a generic no-merge profile are implemented.
+- Per-task budget accounting survives resumes, but is defence in depth, not enforcement against an agent with a
+  shell. Factory-owned pre-call/day limits and subscription usage coverage still require qualification.
+- External delivery planning and signed recording are implemented; the factory must supply its trusted-clone adapter
+  and protect its credentials and delivery key outside the lane.
+- Risk-triggered security review, model routing in `run` with model evidence, PR review feedback, KB drafts and safe
+  janitor lifecycle signals remain follow-ups. Red CI already returns as `delivery-failed`.
 
 ## Decision
 The harness is the gate inside each lane of the factory. The factory brings work in, runs lanes and talks to the
@@ -84,6 +96,12 @@ outside world; the harness decides whether the work in a lane is good enough and
 versioned contract of harness commands.
 
 ### 1. Who owns what
+
+These are requirements for the combined factory/harness path, not assertions about the running external service.
+The design overview below is read with the implementation notes, which specify the implemented command semantics.
+The factory's conditional advisor remains useful, but every task must still pass the configured independent judge
+and review lenses. Intake authorization (`go`, delegation or `agent-ok`) does not replace a required `Approved-by`
+line. The shared human credentials and Front's merge capability must not carry into the integrated path.
 
 | Concern | Owner |
 |---|---|
@@ -108,29 +126,26 @@ versioned contract of harness commands.
   and so inherits its attempts, timeouts, kill-switch checks and escalations; the factory doesn't re-implement the
   workflow. One `run` invocation is the factory's "session".
 - **A project joins the factory by the user's own settings**, all user-only: thin pin; `HARNESS_AUTONOMY="autonomous"`;
-  `HARNESS_AGENT_CMD` set to the lane's agent command; `HARNESS_REVIEW` on; `HARNESS_DELIVER` on (`external` once
-  follow-up 4 ships); a no-merge profile
-  (follow-up 10); `harness-verify` required on the default branch (`harness.py ci-protect`). `run` already refuses to
+  `HARNESS_AGENT_CMD` set to the lane's agent command; `HARNESS_REVIEW` on; `HARNESS_DELIVER="external"`; `HARNESS_PROFILE="no-merge"`; `harness-verify` required on the default branch (`harness.py ci-protect`). `run` already refuses to
   start while `doctor` reports an error.
 
 ### 2. The contract
 
 The contract is the commands, flags, JSON fields and event kinds named below. It is **version 1**. Within a version,
-fields are only added; removing a field or changing its meaning is a new version. The harness will state the
-versions it serves (`harness.py contract --json`, proposed, follow-up 1), and the factory refuses a lane whose pinned
-engine doesn't serve its version. Until that command exists, the factory's adapter lists the engine releases it was
-tested with (assumed).
+fields are only added; removing a field or changing its meaning is a new version. `harness.py contract --json` declares served versions and answer/event fields (follow-up 1, implemented in PR #90).
+The factory must refuse a lane whose pinned engine does not serve its version; deployed adapter behavior is not
+verified here. Main's implementation does not automatically upgrade a project's pinned release.
 
 **Hand a task in.** In the lane's worktree, before `run`:
 
 - Linear, today: the factory fetches the issue with its own token and runs `harness.py linear import <ISSUE> --task
   <id> --from <issue.json>`, so no Linear token enters the lane.
-- Every door, proposed (follow-up 2): `harness.py intake <request.json> [--json]`, with `contract`, `source`
+- Every door (follow-up 2, implemented): `harness.py intake <request.json> [--json]`, with `contract`, `source`
   (`slack`, `github`, `linear`, `clock`), `channel`, `message_id` and `url`, `sender`, `sender_verdict` (`trusted` or
   `untrusted`, from the factory's check), `received_at`, `dedupe_key` and `text`. It writes the draft spec with a
   frozen `## Source` section holding the provenance, quotes `text` as source material (as `linear import` does),
-  adds the task line and logs an `intake` event. It allocates the task id under a lock in the shared git directory,
-  as `adr_next` does for ADR numbers, and returns it. The same `dedupe_key` returns the existing task and writes
+  adds the task line and logs an `intake` event. It returns a task id in the form `intake.<n>`;
+  the dedupe index lives in the shared git directory, with checkout Source sections as fallback. The same `dedupe_key` returns the existing task and writes
   nothing. An `untrusted` request is recorded and escalated (kind `intake`); nothing builds until a person approves
   the spec. `linear import` gains the same provenance.
 
@@ -144,7 +159,7 @@ outcome from `next`.
 | `harness.py next <id> --json` | `step` (`define`, `grill`, `answer`, `approve`, `start`, `test`, `implement`, `judge`, `diagnose`, `fix`, `review`, `finish`, `deliver`, `delivery-failed`, `blocked`, `done`), `role`, `progress` (unchanged means the last session did nothing), `change_class`, `escalations`, `pr`, `findings` |
 | `harness.py state --json` | every task's state and verdicts, `autonomous`, `halted` |
 | `harness.py receipt <id> --json` | the PR body's evidence: `changed`, `verified`, `not_verified`, `change_class`, `risks`, `sandbox`, `approval_needed`, `suggested_labels` |
-| `harness.py escalations` | open escalations, by class. Text today; `--json` with `kind`, `class`, `reason`, `needed` is proposed (follow-up 1) |
+| `harness.py escalations` | open escalations, by class. `--json` is implemented in follow-up 1; `contract --json` declares its fields |
 | `harness.py trace <id> --json`, `report --json` | the task's history and cost, for the report and the audit log |
 
 The four ways an agent "stops and asks" map onto escalations:
@@ -153,14 +168,15 @@ The four ways an agent "stops and asks" map onto escalations:
 |---|---|
 | Needs a ruling | kinds `approval` (a `feature` or `schema` spec, or risk found), `decision`, griller failures; classes `contradictory_req`, `missing_context` |
 | Blocked | kinds `runner`, `coordinator`, `integration`, judge failures; classes `tool_timeout`, `unchanged_repeat`, `permission_denied`, `failed_test`. An agent that can't start (`run-agent-failed`) is a lane problem, not the task's |
-| Cap hit | `run-budget` event per run today; kind `budget` proposed (follow-up 3) |
+| Cap hit | `run-budget` per run; kind `budget` for the implemented task ledger/proxy-refusal handling (follow-up 3) |
 | Off limits | `approval` with risk reasons for `schema` work and risk paths; `out-of-band change`. Security-labelled issues and production or infrastructure requests are refused by the dispatcher before intake |
 
 A spec that needs a person's approval is approved by that person writing their `Approved-by:` line on the task
 branch. A reply in Slack is not an approval, and the factory never writes the line.
 
 **Deliver across the boundary.** The lane holds no GitHub credential, so the deliverer's push and gh calls move to the
-factory's trusted clone. The harness still decides what is delivered. Proposed (follow-up 4):
+factory's trusted clone. The harness still decides what is delivered. Follow-up 4 is implemented in PR #90;
+its signing, verification and label inputs are detailed in the implementation notes:
 
 - `HARNESS_DELIVER="external"` (user-only): `run` ends a finished, committed task at `deliver` with outcome
   `ready-to-deliver` instead of starting the deliverer or retrying.
@@ -173,53 +189,58 @@ factory's trusted clone. The harness still decides what is delivered. Proposed (
   the checks `record_delivery` applies today (the pushed head equals the task's `HEAD`; `delivered` needs checks
   `passed` or `none`; `hold` and `ci-failed` need findings with owners).
 
-Until follow-up 4 ships, a lane that must push holds a GitHub stand-in that the proxy forwards only to the endpoints
-the deliverer's allowlist permits (assumed), and the deliverer runs in the lane as today.
+For a project pinned to an older engine without external delivery, keep integrated delivery disabled until the
+user upgrades it. A restricted stand-in remains an unverified interim design: the image says only advisor calls
+use the key proxy. The shared human login cannot establish credential isolation. Lost replies to external writes
+still need the durable-attempt and operation-specific reconciliation rules proposed in
+[ADR-011](ADR-011-indeterminate-side-effect-outcomes.md); an existing PR alone does not prove an edit succeeded.
 
 **Stop a lane.** The factory's stop switch creates `.git/harness/STOP` in each project clone: every agent tool call is
 refused and `run` stops between sessions. The factory then ends its sessions. A killed session leaves the task `[WIP]`,
 and the next `run` resumes it. Removing `STOP` is the user's act; the factory never removes it.
 
-**Cost.** The key proxy is the enforcement point: it books each call's estimated cost against the task's cap ($25)
-and the day's ($100) before forwarding it, and refuses past either (assumed). Each lane gets one stand-in key per task,
-so the proxy can attribute spend (assumed). The harness, proposed (follow-up 3):
+**Cost.** The factory owns pre-call budget enforcement and attribution across resumes. The image's key proxy
+covers advisor calls only; subscription worker/Front calls need a separately qualified limit or usage-control
+mechanism. The stated caps are not evidence of complete enforcement. For metered calls, book the estimate against
+the applicable task/day/conversation budgets before forwarding and reconcile actual usage. Do not report unknown
+subscription usage as zero cost or claim it is covered by the advisor proxy. The harness side of follow-up 3 is implemented in PR #90:
 
-- reads the task's remaining budget from the runner's environment (`HARNESS_TASK_BUDGET_USD`, set by the factory for
-  the `run` process, which agents can't change);
+- reads the task's whole cap from `HARNESS_TASK_BUDGET_USD`, with the same value on each resume; the ledger tracks
+  prior usage, reserves the remaining amount before a session and settles reported usage afterward;
 - adds each session's cost to a per-task ledger in `.git/harness/` that survives resumes, and puts the total on the
   receipt;
 - refuses to start another session once the ledger reaches the budget, and treats the proxy's refusal as a cap hit
   rather than a retryable failure: it escalates with kind `budget` and stops.
 
 The ledger is accounting and defence in depth, not the enforcement: an agent with a shell in the lane can write any
-file its user can, the ledger included. The enforcing per-task cap, like the per-day cap, is the key proxy's; the
-harness reports each session's cost to the factory and stops when the proxy refuses.
+file its user can, the ledger included. The factory must enforce the task/day limits outside the lane: the proxy can cover advisor calls, but does not
+establish coverage of subscription sessions. The harness reports known usage and recognizes proxy refusal as
+described in the implementation notes; unreported prices make its ledger a floor, not full cost evidence.
 
 `HARNESS_RUN_MAX_COST` stays as the per-run limit for runs outside the factory.
 
 **Events for the factory's audit log.** The factory tails `.git/harness/events.jsonl` read-only and forwards each
 event with its lane, project and intake id. Each line is a JSON object with `at`, `kind`, and where known `task`,
-`session` and `agent`. Version 1 covers `intake` (proposed), `task-start`, `task-finish`, `verdict`, `review`,
+`session` and `agent`. Version 1 covers `intake`, `task-start`, `task-finish`, `verdict`, `review`,
 `approval`, `escalation`, `proposal`, `deliver`, `run-start`, `run-attempt` (with `cost_usd`), `run-budget`,
-`run-halt`, `run-agent-failed`, `run-end`, `tamper`, `block`, `gate` and `linear-import`. Proposed (follow-up 1): a
-`v` field on every event, and an `outward` event for each outward write the harness itself allows (a push, PR create
-or edit, label, Linear comment). The factory audits the outward actions it performs itself. `log_event` never fails
+`run-halt`, `run-agent-failed`, `run-end`, `tamper`, `block`, `gate` and `linear-import`. Follow-up 1 adds a `v`
+field on every event and `outward` events; the implementation notes list their coverage and omissions. The factory audits the outward actions it performs itself. `log_event` never fails
 its caller, so a missing event is a gap in the audit log, not evidence that nothing happened.
 
 ### 3. Roles and steps
 
 | Factory | Harness | Status |
 |---|---|---|
-| 1 Pick | dispatcher routes to a project; intake in the lane; then DEFINE: analyst spec, architect, griller, approval (policy only for low-risk `docs` and `refactor`; a person for `feature` and `schema`) | intake with provenance proposed |
-| 2 Build | implementer (and tester); hooks, skill gate, write scopes; the judge recorder re-runs the tests; `verify` at commit | exists |
-| 3 Challenge | judge and the three reviewer lenses on the Challenger's model, debugger on a judge fail; the security lens when risk triggers it | security lens and routing in `run` proposed |
-| 4 Open PR | delivery plan from the harness, push and PR by the factory; receipt and labels in the PR; `harness-verify` in CI | split delivery proposed |
-| 5 You review | review comments from trusted reviewers become a `fix` step; the next delivery updates the same PR | proposed |
-| 6 Close out | the scribe at `finish` (`6-MEMORY.md`, Proposed ADRs, proposals); a KB note draft; the receipt, and `linear receipt` run by the factory with its token | KB note drafts proposed |
-| Worker (Opus) | the `run` session (`HARNESS_AGENT_CMD` on Opus) and the analyst, architect, tester, implementer and scribe it delegates to | exists |
-| Challenger (Fable) | judge and reviewer lenses; the griller too if the user routes it there | routing in `run` proposed |
-| Security (Mythos) | a `security` reviewer lens, added when risk triggers it | proposed |
-| QA (not built) | none: the tester's acceptance tests are the closest; browser QA waits for preview stacks | out of scope |
+| 1 Pick | intake, then analyst/architect, griller and approval; policy only for low-risk docs/refactor, human for feature/schema | intake provenance and DEFINE implemented |
+| 2 Build | implementer and optional tester, hooks and skill scopes; then independent judge and three reviewer lenses before delivery | mandatory review exists; conditional advisor does not replace it |
+| 3 Open PR | harness delivery plan and receipt, trusted-clone verification/push/PR, base-verifier CI | harness external delivery implemented; factory adapter unverified |
+| 4 You review | trusted review comments become findings and a fix step, with fresh affected evidence before updating the same PR | feedback adapter proposed |
+| 5 Close out | scribe memory, Proposed ADRs and KB drafts; the factory submits the reviewed KB PR and reports | KB drafts proposed; scribe runs before task finish |
+| Front (Opus; Haiku routing) | external conversation and dispatch; cannot approve specs or merge through the integrated identity | factory-owned; current merge capability must be excluded |
+| Worker (Opus) | runner session and its delegated analyst, architect, tester, implementer and scribe roles | exists; factory adapter not qualified here |
+| Advisor (Fable) | optional feature/wide-change advice, separate from independent acceptance judgment | factory-owned; not a universal Challenger |
+| Security (Mythos) | extra security lens when risk triggers it; missing key blocks delivery | lens/routing proposed; image reports missing key |
+| QA and preview stack | future ongoing/browser QA; acceptance tests do not establish that a deployed environment works | external and not built in the image |
 
 The Pick step gains DEFINE: the factory's loop goes from issue to fix, the harness's from issue to approved spec to
 fix. For `feature` and `schema` work that means a person approves the spec before Build, as ADR-002 requires. The
@@ -236,7 +257,7 @@ light lane (`HARNESS_LIGHT_LANE`, the user's switch) keeps small fixes short.
   lowers it. Lowering stays with the user: the class is in the approved, frozen spec and the risk settings are
   user-only, as today.
 - **Evidence**: every grill, judge and review verdict records the agent and model that produced it, and the receipt
-  shows them, so "Fable challenged this diff" is a fact on the PR, not a setting.
+  shows them, so the PR distinguishes advisor consultation from the models that actually judged and reviewed this revision.
 
 ### 4. What stays out of the harness
 - **Listeners for Slack, GitHub and Linear, the inbox and the dispatcher.** They are long-running, network-facing and
@@ -256,7 +277,8 @@ Every case fails closed: no work starts, and nothing is pushed or merged that th
 | Harness refuses (a gate, `doctor` error, `verify`, plugin mismatch) | The refusal is the outcome. The factory reports the `next` step or the escalation and does not retry in a loop. It never sets `HARNESS_VERIFY=off`, edits `harness.conf` or runs `pin`, `ci-protect` or `orca --merge` |
 | Stale pin, or the pinned engine can't be fetched | The launcher refuses everything but reads; in autonomous mode a plugin mismatch stops `run` (ADR-001). The factory reports it; the user moves the pin in a reviewed PR |
 | Contract version not served | The factory doesn't route tasks to that project |
-| Cap hit mid-task | The proxy refuses the call; the session ends; the harness records the cost and escalates (`budget`); the task stays `BLOCKED` with its work committed or left in the worktree, never delivered half-judged. A day cap holds new sessions until the next day |
+| Cap hit mid-task | The factory's enforcement point refuses further activity (the proxy for advisor calls; a separately qualified control for subscription sessions); the harness records known usage and escalates (`budget`). The task stays `BLOCKED`, never delivered half-judged. A day cap holds new sessions until the next day |
+| Required security review has no key or produces no verdict | Keep the flagged change blocked. Advisor advice, worker tests and human intake authorization do not replace the required security pass |
 | Duplicate events | The inbox drops repeats by source and message id. `intake` is idempotent on `dedupe_key`; `run` on a done task does nothing; a delivery updates the same PR; a review comment id is processed once (follow-up 7) |
 | Two lanes on one task | The runner assigns one lane per (project, task) (assumed); `run --only` takes a per-task lock in the shared git directory, as `orca` takes one per repository (follow-up 1) |
 | Lane dies after the commit, before the PR | `next` still says `deliver`; the next delivery opens or updates the PR |
@@ -271,7 +293,7 @@ Every case fails closed: no work starts, and nothing is pushed or merged that th
   a session reads (PR text, CI logs, vault notes), its tools stay held by the hooks: write scopes, guardrails, the
   deliverer's allowlist, protected paths, user-only settings and the read-only knowledge tools. An injected
   instruction can still steer the model within those tools; the judge, the lenses, the security lens, the CI floor
-  and the human review are the defence. Proposed [ADR-006](ADR-006-external-agent-resource-admission.md) applies the
+  and the human review are the defence. Accepted [ADR-006](ADR-006-external-agent-resource-admission.md) applies the
   same rule to third-party setup resources: reference data, not authority.
 - **Cross-project leakage between lanes.** One lane holds one project's clone and nothing of another's (assumed).
   Harness state is per repository (`backbone/`, `.git/harness/`), and the knowledge source is configured per project
@@ -279,12 +301,15 @@ Every case fails closed: no work starts, and nothing is pushed or merged that th
   mounted read-only. Codex and OpenCode role agents are installed per user (ADR-001), so each lane runs with its own
   home folder (assumed). Stand-in keys are per lane and task, so one project can't spend another's budget (assumed).
   Lessons stay per project: the factory doesn't copy `6-MEMORY.md` or KB notes between projects.
-- **The factory identity's permissions.** GitHub: write to branches other than the default branch and to pull
+- **The required factory identity's permissions.** The image's shared Andrei credentials do not establish this
+  boundary. Provision a dedicated identity before integrated delivery. GitHub: write to branches other than the default branch and to pull
   requests, read checks; no admin role (admins can bypass branch protection), not on the default branch's push
   restriction or a ruleset's bypass list, no `workflows` permission, no access to secrets, variables or environments.
   Linear: read issues and comment; `linear receipt` already refuses states that complete or cancel a ticket. Slack:
-  read mentions and post in the factory's channels. Model keys: held by the proxy only.
-- **How ADR-002's "only a human merges" holds.** Three layers, the second being the boundary:
+  read mentions and post in the factory's channels. Model API keys: held by the proxy only. Subscription
+  authentication and its usage limits require their own qualified boundary; an advisor stand-in does not cover them.
+- **Required enforcement of ADR-002's "only a human merges".** These layers require deployment checks; the image's
+  Front merge capability and roster request are not substitutes. Three layers, the second being the boundary:
   1. In the lane, the deliverer never merges and its gh allowlist refuses merge, review, close and auto-merge; a
      no-merge profile extends the refusal of `gh pr merge`, merge APIs and merge tools to every agent (follow-up 10).
   2. GitHub: the default branch restricts who may push, which includes merging a pull request, to named people; it
@@ -324,7 +349,11 @@ Every case fails closed: no work starts, and nothing is pushed or merged that th
   - Supervised use, `run` and `orca` outside the factory.
   - The CI floor, the receipt and ADR-002's ladder.
   - Merging stays with a person.
-- **Before the factory takes real work**: follow-ups 1, 2, 3, 4 and 10, and the GitHub settings in section 6.
+- **Before qualifying the factory/harness path for real work**: follow-ups 1, 2, 3, 4 and 10, the GitHub
+  settings in section 6, and evidence that DEFINE, independent judgment and the three review lenses cannot be
+  skipped. This is an integration gate; the image already reports an independently running factory. Qualify
+  subscription-worker budgets separately from the advisor proxy and keep flagged work stopped until security
+  review is available.
 - **Follow-up work**, each its own change with tests in `tests/run-tests.sh`. Size: S is one small PR, M one PR across
   several hooks or commands, L more than one PR.
   1. **Contract surface** (S): `contract --json`; `escalations --json`; a `v` field and `outward` events; a per-task
@@ -332,9 +361,9 @@ Every case fails closed: no work starts, and nothing is pushed or merged that th
   2. **Intake with provenance and the trusted-sender verdict** (M): `intake`, the frozen `## Source` section,
      idempotence on `dedupe_key`, escalation for untrusted senders; the same provenance on `linear import`.
   3. **Spend caps per task and per day** (S to M): `HARNESS_TASK_BUDGET_USD`, the per-task ledger, refusing a new
-     session over budget, the `budget` escalation kind and cost on the receipt. The enforcing caps, per task and per
-     day, and booking before each call are the proxy's: the ledger is accounting and defence in depth, since an agent
-     with a shell can write any file its user can.
+     session over budget, the `budget` escalation kind and cost on the receipt. The ledger is accounting and defence
+     in depth, since an agent with a shell can write any file its user can. Enforcing pre-call and per-day limits
+     remain factory-owned; qualify advisor-proxy coverage and subscription worker/Front limits separately.
   4. **Delivery from a trusted clone** (M): `HARNESS_DELIVER="external"`, `delivery-plan`, `delivery-record`.
   5. **Model routing per role in `run`, and the model in every verdict** (M).
   6. **A security lens that risk switches on** (M): the `security` lens, `HARNESS_SECURITY_PATHS`, the trigger in
@@ -354,13 +383,13 @@ Every case fails closed: no work starts, and nothing is pushed or merged that th
       NET_ADMIN or NET_RAW, `no-new-privileges`, the egress allowlist published), and `credential_mode: brokered`
       describes stand-in keys (ADR-003 follow-ups 2 and 9). Until then, thin-mode receipts from lanes say
       `isolation_class: none`.
-- Proposed [ADR-007](ADR-007-evidence-closed-loop.md) describes signal intake with a source reference and a
+- Accepted [ADR-007](ADR-007-evidence-closed-loop.md) describes signal intake with a source reference and a
   deduplication key; follow-up 2 is the harness side of that for the factory's doors.
 
 ## Implementation notes (2026-11-11)
-Follow-ups 1, 2, 3, 4 and 10, the ones Consequences requires before the factory takes real work, are built in the
-harness on branch `soyPeter/adr008-prereqs` (pull request #90), with the fixes an independent review of that pull
-request asked for. The Status stays Proposed: accepting the decision is the maintainer's call. The factory's runtime
+Follow-ups 1, 2, 3, 4 and 10 are implemented and merged into main through
+[PR #90](https://github.com/soyPeter/agentic-harness/pull/90), including its independent-review fixes.
+The ADR is Accepted; implementation in main does not imply a released/pinned engine or a qualified factory adapter. The factory's runtime
 isn't in this repository, so each follow-up is tested from the harness's side only, through its commands, hooks and
 event log: `tests/test-factory-contract.py`, `test-no-merge-profile.py`, `test-task-budget.py`, `test-intake.py` and
 `test-external-delivery.py`.
@@ -390,7 +419,8 @@ What was built, and where it reads this ADR one way among several:
   refuse that way (assumed). It escalates `budget` and stops the run, since the day's cap may refuse the next task too.
   The escalation's class is `permission_denied`. The ledger is accounting and defence in depth: an agent with a shell
   can write any file its user can, the ledger included, so the enforcing per-task cap, like the per-day one, is the
-  proxy's. A session whose agent reports no price (Codex) adds nothing, so the ledger is a floor.
+  factory's, outside the lane. The image's advisor-only proxy does not establish subscription-worker coverage.
+  A session whose agent reports no price (Codex) adds nothing, so the ledger is a floor.
 - **2, intake.** Task ids are `intake.<n>`. The dedupe index is in the shared git directory, with the Source sections of
   the checkout's specs as a fallback. An untrusted request is escalated (`intake`) at once and, once a person resolves
   that, its Source is a risk reason, so `approve` escalates it again and only a person's `Approved-by:` line lets it
@@ -431,8 +461,8 @@ What remains open, plainly: the shell checks read command text, and a text check
 agents can also run code the hooks don't read (a test or a script they write and run). Such code can still append to the
 event log, change or delete the cost ledger, delete a run lock, or rewrite the out-of-band snapshot, all in the git
 directory, and so hide a change to `backbone/` from the tamper check too. The boundaries that hold are the credentials a
-lane doesn't have (the key proxy enforces spend whatever the ledger says, and with external delivery only the trusted
-clone can push), `harness-verify` in CI with the base branch's engine, and the human review; signed delivery records
+lane doesn't have (an external budget control must enforce limits regardless of the ledger, and with external
+ delivery only the trusted clone can push), `harness-verify` in CI with the base branch's engine, and the human review; signed delivery records
 (`HARNESS_DELIVERY_KEY`) keep a forged delivery from counting, and a missing ledger stops a task that ran before. The
 shell checks and the out-of-band snapshot are defence in depth. Without the key, `next` trusts every delivery record, as
 it trusts the deliverer's own report today.
@@ -440,7 +470,7 @@ it trusts the deliverer's own report today.
 Not built, and why:
 
 - Follow-ups 5 to 9 and 11: not among the prerequisites above, so left for their own changes.
-- The per-day cap and booking each call before it goes out: the key proxy's (section 2).
+- Per-day/pre-call enforcement: factory-owned (section 2); advisor-proxy coverage does not qualify subscription usage.
 - The factory's side of each step (the adapter that checks `contract`, the sender check, the proxy, the trusted clone's
   fetch, verify, push and pull request calls, keeping `HARNESS_DELIVERY_KEY`) and the GitHub settings of section 6: they
   are not in this repository.

@@ -3,7 +3,7 @@
 - **Status:** Proposed. Not accepted, not implemented, and not permission to edit any agent, skill, hook or rule.
 - **Date:** 2026-11-10 (Europe/Madrid).
 - **Target repository:** https://github.com/soyPeter/agentic-harness
-- **Location:** `docs/research/2026-11-model-change-instruction-review-plan.md`. This is an implementation plan, not an ADR. It adds a review step and a lint report. It does not change an architectural boundary.
+- **Location:** `docs/research/2026-11-model-change-instruction-review-plan.md`. Work packages and evidence remain here; the decision is recorded in [ADR-012](../adr/ADR-012-model-change-instruction-review.md).
 - **Decision authority (proposed role, unassigned):** repository maintainer. Merge stays with the user as today.
 - **Related:** `payload/owned/AGENTS.md`; `payload/owned/.claude/agents/*.md` and `.opencode/agents/*.md`; `payload/owned/.claude/skills/*`; `payload/owned/backbone/HOOKS.md`; [ADR-002](../adr/ADR-002-change-class-ladder.md); KB note `60-AI/Research/ai-Instruction-Carryover-Fable-5-2-Prompting-2026-11.md`.
 

@@ -4,7 +4,7 @@
 - **Human decisions recorded (10 Nov 2026, Pedro):** run WP0 as read-only analysis; first level is stubs only (signatures and types, no contracts); a signature mismatch against the frozen skeleton is a judge **blocker**.
 - **Date:** 2026-11-10 (Europe/Madrid).
 - **Target repository:** https://github.com/soyPeter/agentic-harness
-- **Location:** `docs/research/2026-11-structural-skeleton-spec-plan.md`. It is a plan, not an ADR. It adds an opt-in format for content the architect already writes, with no new authority boundary. If WP2 ends up making skeletons a gate input, that change gets its own ADR.
+- **Location:** `docs/research/2026-11-structural-skeleton-spec-plan.md`. Work packages and evidence remain here; the decision is recorded in [ADR-016](../adr/ADR-016-structural-skeleton-spec.md).
 - **Decision authority (proposed role, unassigned):** repository maintainer. PR merge stays with the user.
 - **Related:** `payload/owned/backbone/templates/spec.md` (Architecture, Tech requirements); `payload/owned/.claude/agents/architect.md`; `payload/owned/.claude/agents/judge.md`; `HARNESS_REQ_STYLE=ears` as the precedent for an opt-in spec style; [ADR-002](../adr/ADR-002-change-class-ladder.md); [ADR-004](../adr/ADR-004-traceability-export.md). Does not depend on [ADR-007](../adr/ADR-007-evidence-closed-loop.md), [ADR-006](../adr/ADR-006-external-agent-resource-admission.md) or the [delegation-contracts plan](2026-11-delegation-contracts-qualification-plan.md). Distinct from the dependency-gate plan (task order) and the PR-body opener plan (review summary).
 

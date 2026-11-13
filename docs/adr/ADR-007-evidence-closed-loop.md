@@ -1,7 +1,7 @@
 # ADR-007: Evidence-driven closed loop
 
 ## Status
-Proposed
+Accepted
 
 ## Date
 2026-11-07, revised 2026-11-10 (renumbered from a draft that clashed with [ADR-003](ADR-003-sandbox-backends.md))

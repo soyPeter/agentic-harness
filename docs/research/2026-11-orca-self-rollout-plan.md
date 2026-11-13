@@ -1,5 +1,7 @@
 # Plan: run the open harness plans and ADR follow-ups through Orca
 
+Decision record: [ADR-013](../adr/ADR-013-orca-self-rollout.md). The plan retains its recorded decisions, work packages and evidence.
+
 - Status: Accepted (2026-11-10). Pedro accepted the 16 defaults in [Decisions (2026-11-10)](#6-decisions-2026-11-10). Nothing has started in the repository and no code has changed.
 - Date: 10 Nov 2026 (Europe/Madrid). Accepted the same day.
 - Repository: soyPeter/agentic-harness. The inventory below was taken against origin/main at `6e2f8ac` (v0.30.0). By the afternoon of 10 Nov 2026, origin/main had moved to `8d31682` and already included the merges of PR 78 and PR 80.

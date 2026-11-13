@@ -160,7 +160,7 @@
 <line x1="1700" y1="622" x2="1700" y2="680" stroke="#8C8880" stroke-width="1.6" stroke-dasharray="5 5" marker-end="url(#arrow-g)"/>
 <rect x="1540" y="684" width="320" height="236" rx="3" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5" stroke-dasharray="7 6"/>
 <text x="1564" y="724" class="title-s"><tspan x="1564" dy="0">Incidents trace back</tspan></text>
-<text x="1564" y="752" class="tiny" fill="#E2602A">ADR-007 · PROPOSED · NOT BUILT</text>
+<text x="1564" y="752" class="tiny" fill="#E2602A">ADR-007 · UNBUILT</text>
 <text x="1564" y="788" class="body"><tspan x="1564" dy="0">A regression links to its PR</tspan><tspan x="1564" dy="25">and spec, as confirmed,</tspan><tspan x="1564" dy="25">suspected or unknown, and</tspan><tspan x="1564" dy="25">becomes one owned task.</tspan></text>
 <!-- Feedback: what fails becomes the next task -->
 <line x1="1700" y1="920" x2="1700" y2="1112" stroke="#8C8880" stroke-width="1.6" stroke-dasharray="5 5"/>
@@ -185,5 +185,5 @@
 <circle cx="850" cy="1171" r="6" fill="#E2602A"/>
 <text x="868" y="1176" class="tiny">WORK RUNS START</text>
 <rect x="1090" y="1156" width="40" height="26" rx="3" fill="#FAF9F6" stroke="#8C8880" stroke-width="1.5" stroke-dasharray="6 5"/>
-<text x="1144" y="1176" class="tiny">PROPOSED, OR OUTSIDE THE HARNESS</text>
+<text x="1144" y="1176" class="tiny">UNBUILT, OR OUTSIDE THE HARNESS</text>
 </svg>

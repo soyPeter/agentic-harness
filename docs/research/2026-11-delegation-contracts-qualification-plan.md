@@ -4,7 +4,7 @@
 - **Date:** 2026-11-08 (Europe/Madrid).
 - **Target repository:** https://github.com/soyPeter/agentic-harness
 - **Suggested destination:** `docs/research/2026-11-delegation-contracts-qualification-plan.md`.
-- **Why this location:** narrow local directory read found `docs/research/2026-11-agent-sdlc-landscape.md` and `docs/adr/ADR-001..003`. This is a qualification/PR plan under the existing architecture, not another architectural decision competing with [ADR-007](../adr/ADR-007-evidence-closed-loop.md). It creates no ADR number.
+- **Why this location:** qualification work packages remain in research; [ADR-009](../adr/ADR-009-delegation-contracts-qualification.md) records the bounded decision under [ADR-007](../adr/ADR-007-evidence-closed-loop.md).
 - **Related decisions:** [ADR-002](../adr/ADR-002-change-class-ladder.md), [ADR-007 evidence-driven closed loop](../adr/ADR-007-evidence-closed-loop.md).
 
 
