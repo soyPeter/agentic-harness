@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.31.0 (2026-11-15)
+
+This release includes the harness-side prerequisites for factory integration: contract v1, provenance intake,
+per-task budget accounting, external delivery with signed records, and the generic no-merge profile. It also includes
+the unreleased verification, traceability and hook changes detailed below. Factory deployment remains separate:
+use a reviewed project pin and aligned plugins, qualify the trusted adapter, and keep delivery credentials and the
+signing key outside agent environments. Existing projects upgrade through their reviewed pin changes.
+
+- **Thin-install checks survive a release bump.** Fixed-version upgrade fixtures now use their own matching plugin
+  checkout. Separate checks cover the current release's default version, both when its tag exists and when it is
+  unavailable; changing `VERSION` no longer breaks unrelated thin-install tests.
 
 - **Outward events say what ran; a Source heading and a budget word say less.** `outward` events are logged by
   post-tool-use, once the call has run, with `result` (`succeeded`, `failed`, or `unknown` where the agent CLI doesn't
@@ -137,7 +147,7 @@
   **Upgrading:** a ReqIF import mapping that read `Harness.Result` or `Harness.Verdict` as text now gets enumerations
   with the same names and values.
 
-- **The harness as the gate inside the agent software factory (ADR-008, Proposed; docs only).**
+- **The harness as the gate inside the agent software factory (ADR-008, Accepted; docs only).**
   `docs/adr/ADR-008-harness-inside-agent-factory.md` decides how the harness sits inside an always-on factory that
   takes work from Slack, GitHub and Linear. The factory owns the doors, the sender check, identity and keys, lanes,
   the watchdog, the janitor and the clock. The harness owns everything inside a lane (spec, gates, verdicts, receipts,
@@ -283,7 +293,7 @@
 - **`state` and `next` hash the working tree once per command.** Each judged task used to hash the whole working
   tree again, about 0.6 s per hash on 5,000 files; now one command shares one hash across its tasks.
 
-- **Signed verdict attestations (ADR-005, Proposed).** `docs/adr/ADR-005-verdict-attestations.md` decides how
+- **Signed verdict attestations (ADR-005, Accepted).** `docs/adr/ADR-005-verdict-attestations.md` decides how
   `harness-verify` turns its verdict into evidence others can check: an in-toto Statement, a custom predicate type
   (`https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1`, no SLSA level claimed), cosign with a
   self-managed key first, a KMS next and keyless only as an explicit opt-in. This release ships its first slice:
@@ -316,7 +326,7 @@
   commit kept the `backbone/` files that differ from both HEAD and the checkout, so a task marked done in one commit
   looked changed once a later commit in the range touched `backbone/` (another task's spec, a memory note), and CI
   failed the pull request.
-- **Sandbox backends and sandbox evidence (ADR-003, Proposed).** `docs/adr/ADR-003-sandbox-backends.md` decides a
+- **Sandbox backends and sandbox evidence (ADR-003, Accepted).** `docs/adr/ADR-003-sandbox-backends.md` decides a
   sandbox backend interface for unattended runs (create, exec, copy in and out, egress policy, teardown, identity),
   with the local devcontainer as the default and the only backend the CI floor may use, and lists E2B, Freestyle and
   Coder as later candidates with the research's risks. This release ships its v1:
