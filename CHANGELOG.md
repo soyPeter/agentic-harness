@@ -25,6 +25,65 @@
   the command sets it (`P=push; git $P`, `set -- push; git "$@"`, a loop's list) and refused when it can't be
   resolved (`git $(echo push)`). These checks stay defence in depth: credentials, CI's verify and human review are
   the boundaries.
+- **A spec change makes the evidence and approval given on the earlier text stale (ADR-007, Proposed; first slice).**
+  Judge, review and tester records now carry the spec fingerprint (the grill's: the spec except its `Approved-by:` lines,
+  and every ADR it references) next to the code fingerprint. A pass counts only on the code and the spec it judged, so
+  any change to the spec but its `Approved-by:` lines (a criterion, a constraint, an assumption, the Change-Class, or
+  only a reworded sentence) or to a referenced ADR sends the task back to the griller, the judge, the tester and every
+  review lens even when the code is the same. Finishing a task (the hook, `finish`,
+  pre-commit and CI `verify`) now passes the start gate again, as HOOKS.md already said verify did: a spec whose
+  approval the user removed to change it needs a current grill pass and their approval again. Verify also refuses a
+  commit that changes an approved spec while its `Approved-by:` lines stay as they were, since that approval was given
+  on the earlier text (the user approves the new text with a new line; in CI the `harness-change-approved` label lets
+  it through). A range is checked commit by commit, so an approval removed with the change and given again later with
+  the same line is a renewal, and a change committed under the old approval passes once a later commit changes the
+  `Approved-by:` lines. Verify can't tell who wrote an `Approved-by:` line: a commit that changes an approved spec
+  and the date on its approval line together passes it, as before; the snapshot of protected files is the check on
+  that. `next` routes a changed `[WIP]` task to `grill`, `approve`, `test` and `judge` with a `reason`; `state
+  --json` gives the judge verdict's `stale` (`code`, `spec` or `unrecorded`); the receipt refuses a pass on an
+  earlier spec and names the spec and code it was judged on (`judged_on`). Stale passes stay in the append-only
+  history. Upgrade note: a judge, review or tester record from an earlier release has no spec fingerprint, so it
+  counts as stale: run them again for tasks in progress. ADR-007's implementation notes hold the audit (P0) this
+  slice came from, and what it leaves out.
+- **Text under a spec's `## Approval` heading is part of the spec (ADR-007).** The grill fingerprint, the freeze on an
+  approved spec, verify and the risk assessment left out the whole Approval section, but the gates read acceptance
+  criteria from anywhere in the spec, and the template puts Approval last, so a criterion appended to a spec landed
+  there: rewording it left the grill and judge passes current, an agent could change it after approval, and policy
+  approval didn't see a risk term in it. Only the `Approved-by:` lines (and comments and blank lines in that section)
+  are left out now. Upgrade note: a spec with other text under `## Approval` gets a new fingerprint, so its grill and
+  judge passes go stale: grill and judge it again (its approval stays). A note that goes with an approval belongs in
+  the `Approved-by:` line or in a comment.
+- **Attestations: approved harness changes, a verify helper, predicate v1, KMS and keyless signing (ADR-005,
+  follow-ups).** Built and tested locally; the cloud and Sigstore paths are not run end to end yet (the ADR's
+  "Follow-up status" says what was and wasn't tested).
+  - A push merged from a pull request labelled `harness-change-approved` now gets a statement, as the pull request's
+    check passed with the label. The `attest` job reads the pull requests of the pushed commit, and the engine the push
+    starts from (`harness.py approval-check`) approves only the one merged as that commit, carrying the label, whose
+    merge is the whole push (a squash, the rebase of one commit, or a merge commit of the previous tip and its head).
+    The statement says `allowUserChanges: true` and names the pull request. The job needs `pull-requests: read`.
+  - `harness.py attest verify <statement> <bundle> --key <key> --commit <id>` has cosign check the signature, then
+    checks a policy on the statement the bundle signs: the predicate type, the commit (or `--tree`, the code) subject,
+    `result: "PASSED"`, the spec, judge and review gates on (`--require NAME=VALUE` for more), and no
+    `--allow-user-changes` unless `--accept-user-changes`. `harness.py attest policy` applies the policy alone.
+  - The predicate type is now `https://github.com/soyPeter/agentic-harness/attestation/verdicts/v1`: v0.1 (never
+    released) plus `verification.approval`. `attest` writes v1; `attest verify` and `attest policy` read both. A
+    breaking change to v1 gets a new type.
+  - Signing modes in `backbone/harness.conf`, user-only and read at the commit the push starts from:
+    `HARNESS_ATTEST_SIGNING` is `key` (the default, the secret as before), `kms` (`HARNESS_ATTEST_KMS_KEY`, a
+    `gcpkms://`, `awskms://`, `azurekms://` or `hashivault://` key, used through the job's OIDC token as
+    `HARNESS_ATTEST_KMS_IDENTITY`) or `keyless` (Sigstore's public Fulcio and Rekor, an explicit opt-in that publishes
+    the workflow's identity for good). One source at a time; a misspelt mode refuses; the key and KMS paths can't fall
+    back to keyless. `harness.py signing-check` decides, and `ci-protect --attest` states the mode.
+  - Only kms and keyless signing get GitHub's OIDC token: `attest-route` (no secrets, outside the environment) reads
+    the mode at the previous tip and starts `attest` (key, no `id-token`) or `attest-oidc` (`id-token: write`), which
+    run the same steps; the engine in each refuses the other's modes. The KMS login happens inside each step that uses
+    the KMS key, so the cloud's variables and the Vault token reach no other step, and its token and credential files
+    are deleted when the step ends.
+  - Durable storage (release assets, OCI) is deferred.
+  **Upgrading:** the `attest` job's first step now decides whether there is anything to sign with, so a project
+  without a key and without signing settings still does nothing. With kms or keyless signing, the run's signing job is
+  `attest-oidc`, not `attest`: a rule or dashboard that looks for the `attest` check by name needs both. A deploy gate
+  that checks the type by hand (`cosign verify-blob-attestation --type`) moves to `verdicts/v1`.
 
 - **Outward events say what ran; a Source heading and a budget word say less.** `outward` events are logged by
   post-tool-use, once the call has run, with `result` (`succeeded`, `failed`, or `unknown` where the agent CLI doesn't
@@ -155,9 +214,9 @@
   criterion's result and the judge's verdict are now enumerations (`Harness.Result`, `Harness.Verdict`) instead of
   strings, so ALM tools can filter on them. `harness.py trace link <matrix-url> [--task ID]` prints the comment that
   links a matrix and names its commit; the deliverer adds it to the pull request's body once CI passes, and
-  `linear receipt <task> --matrix <url>` adds it to the ticket's receipt comment. With the ADR-005 attest key, the push
-  job also writes the `.reqifz` with the engine the push starts from, signs it with the same key (`cosign sign-blob`)
-  and uploads it as `harness-traceability-signed`.
+  `linear receipt <task> --matrix <url>` adds it to the ticket's receipt comment. When ADR-005 signing is set up, the
+  push job also writes the `.reqifz` with the engine the push starts from, signs it with the attestation's signer (the
+  key, the KMS key or keyless; `cosign sign-blob`) and uploads it as `harness-traceability-signed`.
   **Upgrading:** a ReqIF import mapping that read `Harness.Result` or `Harness.Verdict` as text now gets enumerations
   with the same names and values.
 

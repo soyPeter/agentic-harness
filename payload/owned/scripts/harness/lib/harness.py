@@ -17,9 +17,16 @@ Usage:
   harness.py adopt <pack>[,<pack>] --adr ADR-NNN --with <opts> --without <opts> [--dry-run]
   harness.py adopt --remove <pack>[,<pack>] [--dry-run]
   harness.py verify [--range <base>..<tip>] [--allow-user-changes]   (gates on the staged change, or a CI range)
-  harness.py attest --range <base>..<tip> [--allow-user-changes]     (in-toto statement of a verified range, ADR-005)
+  harness.py attest --range <base>..<tip> [--allow-user-changes [--pull-request <n>]]
+                                                                  (in-toto statement of a verified range, ADR-005)
+  harness.py attest verify <statement> <bundle> (--key <key> | --certificate-identity <id> --certificate-oidc-issuer
+             <url>) (--commit <id> | --tree <id>)... [--type <uri>]... [--require NAME=VALUE]... [--accept-user-changes]
+                                                                  (a signed statement: cosign, then a policy)
+  harness.py attest policy <statement> (--commit <id> | --tree <id>)... [...]   (the policy alone, no signature)
   harness.py environment-check <environment.json> <policies.json> <branch>   (CI: the attest environment's rule, ADR-005)
   harness.py repository-check <secrets.json> <variables.json>    (CI: no repository-level attest secrets, ADR-005)
+  harness.py approval-check <pulls.json> <base>..<tip> <branch>   (CI: the merged pull request's approval, ADR-005)
+  harness.py signing-check <commit> <true|false>                  (CI: the attest job's signing mode, ADR-005)
   harness.py approve <task-id>                                    (autonomous mode: policy approval of a low-risk spec)
   harness.py escalate <task-id> --reason <text> [--kind <k>] [--class <failure class>] [--needed <text>]
   harness.py escalations [--json]                                 (open escalations for the user)
@@ -44,6 +51,7 @@ Usage:
                                                                   (the harness-attest environment: default branch only)
   harness.py doctor
 """
+import base64
 import fnmatch
 import glob
 import hashlib
@@ -143,7 +151,8 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
                   "HARNESS_TESTER", "HARNESS_ACCEPTANCE_PATHS", "HARNESS_ORCA_AGENTS", "HARNESS_ORCA_LAUNCH",
                   "HARNESS_SPEC_MAX_ITEMS", "HARNESS_LIGHT_LANE", "HARNESS_LIGHT_MAX_ITEMS", "HARNESS_LIGHT_MAX_FILES",
                   "HARNESS_REVIEW", "HARNESS_DELIVER", "HARNESS_PROFILE", "HARNESS_REQ_STYLE",
-                  "HARNESS_SANDBOX_BACKEND")
+                  "HARNESS_SANDBOX_BACKEND", "HARNESS_ATTEST_SIGNING", "HARNESS_ATTEST_KMS_KEY",
+                  "HARNESS_ATTEST_KMS_IDENTITY")
 # Organisation profiles (HARNESS_PROFILE, user-only). "triple": a supervised pilot where only a human merges, so the
 # coordinator's --merge and --trust and the scheduled backlog run are refused. "no-merge": the same refusals for any
 # organisation, such as an agent factory's lanes (ADR-008), without Triple's catalog pack.
@@ -710,15 +719,22 @@ def approval_start(text):
     return m.start() if m else len(text)
 
 
-def without_approval(text):
-    """text outside its Approval section: what the grill fingerprint covers and approval freezes."""
-    return without_section(text, "Approval")
-
-
 def frozen_text(text):
-    """What the grill fingerprint covers and the freeze keeps: the spec outside its Approval section, or all of it when a
-    reader could read its sections differently, since then no section can be trusted."""
-    return text if spec_reading_problem(text) else without_approval(text)
+    """What the grill fingerprint covers and the freeze keeps: the spec without its Approved-by lines, or all of it when
+    a reader could read its sections differently, since then no section can be trusted. The rest of the Approval
+    section counts: the template puts it last, so a criterion appended to a spec lands there."""
+    if spec_reading_problem(text):
+        return text
+    view = outline(text)
+    bounds = section_bounds(view, "Approval")
+    if bounds is None:
+        return text
+    words = comment_free(text)
+    # Comments and blank lines are left out with the Approved-by lines, so a spec whose Approval section holds nothing
+    # else keeps the fingerprint it had when the whole section was left out: an upgrade doesn't stale its grill pass.
+    kept = [line for line, shown, said in zip(*(t[bounds[1]:bounds[2]].splitlines(True) for t in (text, view, words)))
+            if not APPROVAL_LINE.match(shown) and not blank_line(said)]
+    return text[:bounds[0]] + (text[bounds[0]:bounds[1]] + "".join(kept) if kept else "") + text[bounds[2]:]
 
 
 def approval_section(text):
@@ -1014,8 +1030,8 @@ def ears_problems(req, text):
 def change_class(text):
     """(class, declared, problem) from the spec's Change-Class: line. Without one the spec counts as feature;
     a value that isn't exactly one class, or two different values, is a problem and counts as feature too."""
-    # Not from the Approval section, where agents may still write once the spec is approved, nor from a code block or
-    # comment, where the line is an example.
+    # Not from the Approval section, which holds the user's approval, nor from a code block or comment, where the line
+    # is an example.
     values = [v.strip() for v in CHANGE_CLASS_LINE.findall(without_section(text, "Approval", view=outline(text)))]
     distinct = sorted({v.lower() for v in values})
     if reading_problem(text):   # a reader may take a line for code or a heading, so no class in it can be trusted
@@ -1099,7 +1115,7 @@ def validate_spec(task, text=None):
 
 
 def spec_fingerprint(task, text=None):
-    """Hash of the spec (without its Approval section) and of every ADR it references."""
+    """Hash of the spec (frozen_text: without its Approved-by lines) and of every ADR it references."""
     text = read(spec_path(task)) if text is None else text
     digest = hashlib.sha256(frozen_text(text).encode("utf-8"))
     for adr in spec_adrs(text):
@@ -2492,6 +2508,15 @@ def consecutive_fails(history):
     return fails
 
 
+def spec_stale(task, entry, current=None):
+    """Why a judge, review or tester record doesn't cover task's current spec (and its ADRs): "spec" when it was
+    recorded on another revision, "unrecorded" when it carries none, or None when it covers it. A record from before
+    verdicts carried the spec revision can't show what it judged, so it never counts as current (ADR-007)."""
+    if not entry.get("spec"):
+        return "unrecorded"
+    return None if entry["spec"] == (current or spec_fingerprint(task)) else "spec"
+
+
 def code_fingerprint(include_backbone=False):
     """Git tree hash of the working tree, hashed from the files' content (tracked and untracked, ignores respected),
     excluding backbone/ unless include_backbone. Identical code gives an identical hash, committed or not."""
@@ -2722,7 +2747,8 @@ def record_verdict(data, kind):
             if report["test_run"] is not None:
                 verdict, reasons = effective_judge(task, report)
         details = {"criteria": report.get("criteria"), "findings": report.get("findings"), "tests": report.get("tests"),
-                   "test_run": report.get("test_run"), "sandbox": sandbox.evidence(conf()["HARNESS_SANDBOX_BACKEND"])}
+                   "test_run": report.get("test_run"), "sandbox": sandbox.evidence(conf()["HARNESS_SANDBOX_BACKEND"]),
+                   "spec": spec_fingerprint(task)}
     history = verdict_history(task, kind)
     entry = {"verdict": verdict, "claimed": report.get("verdict"), "reasons": reasons, "fingerprint": fingerprint,
              "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "summary": report.get("summary")}
@@ -2874,7 +2900,7 @@ def content_risks(text, changed=None):
     values = conf()
     # Skills only says which skills the agents load, and explaining why `security` isn't needed ("no auth or
     # personal data") would read as risk. What the work does is in the other sections and in the diff.
-    outside = without_approval(text)
+    outside = frozen_text(text)
     body = without_section(outside, "Skills", view=comment_free(outside))
     reasons = []
     unread = spec_reading_problem(text)
@@ -3426,8 +3452,9 @@ def light_drift(task):
             "line, then have the architect and the griller review the spec." % (task, "; ".join(why)))
 
 
-def start_problems(task):
-    """Why task cannot be [WIP] (or done): spec, grill and approval. None when it may start."""
+def start_problems(task, action="start"):
+    """Why task cannot start (become [WIP]) or, with action "finish", leave [WIP]: spec, grill and approval. None when
+    it may."""
     spec = spec_rel(task)
     if task in blocked_tasks(read(TASKS)):
         return ("Task %s is BLOCKED by an escalation; the user resolves it in backbone/escalations.md and "
@@ -3436,41 +3463,49 @@ def start_problems(task):
     history = verdict_history(task, "grill")
     last = history[-1] if history else None
     if invalid:
-        return ("Task %s cannot start: %s is not ready:\n      - %s\n    The analyst writes requirements "
+        return ("Task %s cannot %s: %s is not ready:\n      - %s\n    The analyst writes requirements "
                 "and acceptance criteria, the architect the ADRs and Architecture section."
-                % (task, spec, "\n      - ".join(invalid)))
+                % (task, action, spec, "\n      - ".join(invalid)))
+    approval = approved(read(spec_path(task)))
+    renew = ("Task %s cannot finish: its spec is no longer approved. The approval was removed, so the spec may have "
+             "changed since the task started: ask the user to review %s and approve it again ('Approved-by: <name> "
+             "(<date>)' under '## Approval'); agents cannot." % (task, spec)) if action == "finish" else None
     note = ""
     if light_marked(task):
         reasons = light_reasons(task)
         if not reasons:
-            return None if approved(read(spec_path(task))) else (
+            return None if approval else renew or (
                 "Task %s cannot start: the user has not approved the spec (light lane: no grilling needed). Ask them "
                 "to review %s and add 'Approved-by: <name> (<date>)' under '## Approval' themselves." % (task, spec))
         note = " It is marked (light), but %s, so it goes through the griller." % "; ".join(reasons)
     if last is None:
-        return ("Task %s cannot start: the spec has not been grilled. Ask the griller agent to review %s.%s"
-                % (task, spec, note))
+        return ("Task %s cannot %s: the spec has not been grilled. Ask the griller agent to review %s.%s"
+                % (task, action, spec, note))
     if last.get("verdict") != "pass":
-        return ("Task %s cannot start: the griller failed the spec (%s). Take its open questions to the user (have "
+        return ("Task %s cannot %s: the griller failed the spec (%s). Take its open questions to the user (have "
                 "the analyst or architect apply the recommendations marked apply without asking), update the spec "
-                "and grill again." % (task, "; ".join(last.get("reasons") or [])[:400]))
+                "and grill again." % (task, action, "; ".join(last.get("reasons") or [])[:400]))
     if last.get("fingerprint") != spec_fingerprint(task):
-        return "Task %s cannot start: the spec or its ADRs changed after the griller passed it. Grill again." % task
+        return ("Task %s cannot %s: the spec or its ADRs changed after the griller passed it. Grill again."
+                % (task, action))
     report = dict(last, verdict=last.get("claimed"))
     rederived, reasons = effective_grill(task, report)
     if rederived != "pass":
-        return "Task %s cannot start: the recorded grill pass does not hold up (%s)." % (task, "; ".join(reasons)[:400])
-    if not approved(read(spec_path(task))):
-        return ("Task %s cannot start: the user has not approved the spec. Ask them to review %s and add "
-                "'Approved-by: <name> (<date>)' under '## Approval' themselves; agents cannot." % (task, spec))
+        return ("Task %s cannot %s: the recorded grill pass does not hold up (%s)."
+                % (task, action, "; ".join(reasons)[:400]))
+    if not approval:
+        return renew or ("Task %s cannot start: the user has not approved the spec. Ask them to review %s and add "
+                         "'Approved-by: <name> (<date>)' under '## Approval' themselves; agents cannot." % (task, spec))
     return None
 
 
 def start_gate(before, after):
-    """Starting a task requires a valid spec, a current griller pass and the user's approval."""
+    """Starting a task, and finishing one, requires a valid spec, a current griller pass and the user's approval: a
+    spec that changed during the build needs both again (ADR-007)."""
     if not gate_on("HARNESS_SPEC_GATE"):
         return None
     problems = [p for p in (start_problems(task) for task in started_tasks(before, after)) if p]
+    problems += [p for p in (start_problems(task, "finish") for task in finished_tasks(before, after)) if p]
     return "\n".join("  - " + p for p in problems) if problems else None
 
 
@@ -3497,6 +3532,13 @@ def judge_problems(task, current, max_rounds):
     rederived, why = effective_judge(task, report)
     if rederived != "pass":
         return "The recorded judge pass for task %s does not hold up: %s." % (task, "; ".join(why)[:400])
+    stale = spec_stale(task, last)
+    if stale == "spec":
+        return ("The spec of task %s changed after the judge passed it (an acceptance criterion, constraint, "
+                "assumption or ADR may differ from what was judged). Run the judge again on the current spec." % task)
+    if stale:
+        return ("The judge pass for task %s records no spec revision (it predates spec-bound verdicts), so it can't "
+                "show which spec it judged. Run the judge again." % task)
     review = review_problems(task, current, max_rounds)
     if review:
         return review
@@ -3545,6 +3587,9 @@ def review_problems(task, current, max_rounds):
                                 "then judge and review again." % (lens, task, issues))
         elif current and last.get("fingerprint") != current:
             problems.append("The code changed after the %s review of task %s passed. Review it again." % (lens, task))
+        elif spec_stale(task, last):
+            problems.append("The spec changed after the %s review of task %s passed (or the review records no spec "
+                            "revision). Review it again." % (lens, task))
     return " ".join(problems) or None
 
 
@@ -3563,6 +3608,10 @@ def acceptance_problem(task):
     if acceptance_fingerprint(task) != history[-1].get("fingerprint"):
         return ("The acceptance tests of task %s changed after the tester recorded them. Only the tester may change "
                 "them: restore them (git checkout -- <file>), or ask the tester to revise and re-record them."
+                % task)
+    if spec_stale(task, history[-1]):
+        return ("The spec of task %s changed after the tester recorded its acceptance tests (or the record has no "
+                "spec revision). Ask the tester to check them against the current criteria and record them again."
                 % task)
     return None
 
@@ -3598,6 +3647,50 @@ def spec_guard(before, after):
         return ("  - This spec is approved and therefore frozen. If it must change, ask the user to remove their "
                 "approval first; it will need grilling and approval again.")
     return None
+
+
+def approval_reused(name, before, after):
+    """The freeze as verify sees it, for changes made outside the hooks: a spec whose text changes while its Approved-by
+    lines stay as they were keeps an approval given on the earlier text (ADR-007)."""
+    if before is None or after is None:
+        return None
+    before, after = line_endings(before), line_endings(after)
+    if not approved(before) or approved(after) != approved(before) or \
+            approval_lines(outline(before)) != approval_lines(outline(after)) or \
+            frozen_text(before) == frozen_text(after):
+        return None
+    return ("%s changed while its Approved-by lines stayed the same, so the approval was "
+            "given on the earlier text. The user removes the approval before the spec changes and, once the griller "
+            "has passed the new text, approves it with a new Approved-by line. A deliberate exception is committed "
+            "with HARNESS_VERIFY=off (in CI, the harness-change-approved label)." % name)
+
+
+def approval_state(text):
+    if text is None:
+        return None
+    text = line_endings(text)
+    return approved(text), approval_lines(outline(text))
+
+
+def reused_approvals(steps):
+    """approval_reused over steps ((revision, its parents, the paths it changes), oldest first): a step that changes an
+    approved spec's text but keeps its Approved-by lines is refused unless a later step changes those lines. A range is
+    checked step by step, since its two ends can show the same line although the user removed the approval with the
+    change and gave it again later. A merge is refused only when it reuses the approval of every parent."""
+    pending = {}
+    for rev, parents, names in steps:
+        for name in names:
+            if not re.match(r"^backbone/specs/[^/]+\.md$", name):
+                continue
+            after = show(rev, name)
+            befores = [show(parent, name) for parent in parents]
+            if all(approval_state(before) != approval_state(after) for before in befores):
+                pending.pop(name, None)
+            label = "%s (commit %s)" % (name, rev[:12]) if rev else name
+            reused = [approval_reused(label, before, after) for before in befores]
+            if reused and all(reused):
+                pending[name] = reused[0]
+    return [pending[name] for name in sorted(pending)]
 
 
 def user_only_change(before, after):
@@ -3701,6 +3794,12 @@ def verify_changes(before, after, changed, done_fingerprint, allow_user_changes=
             problem = start_problems(task)
             if problem:
                 problems.append(problem)
+        for task in sorted((new_done - old_done) & old_wip):
+            problem = start_problems(task, "finish")
+            if problem:
+                problems.append(problem)
+    if before and not allow_user_changes:
+        problems.extend(reused_approvals(range_steps(before, after) if after else [(after, [before], changed)]))
     if values["HARNESS_JUDGE_GATE"] != "off":
         max_rounds = int(values["HARNESS_JUDGE_MAX_ROUNDS"] or 2)
         for task in sorted(new_done - old_done):
@@ -3789,6 +3888,14 @@ def verify_range(spec, allow_user_changes=False):
                           allow_user_changes)
 
 
+def range_steps(base, tip):
+    """The commits of base..tip, oldest first, each with its parents and the specs it changes (reused_approvals)."""
+    lines = [line.split() for line in git("rev-list", "--reverse", "--parents", "%s..%s" % (base, tip)).splitlines()]
+    return [(line[0], line[1:], sorted({name for parent in line[1:]
+                                        for name in diff_names(parent, line[0], "--", "backbone/specs")}))
+            for line in lines if line]
+
+
 def done_commit(task, commits, tip):
     """The first of commits (oldest first) whose task list marks task done, else tip."""
     tasks_rel = TASKS.relative_to(ROOT).as_posix()
@@ -3815,9 +3922,19 @@ def verify_command(argv):
 # --------------------------------------------------------------------------- attestation (ADR-005)
 
 STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
-VERDICTS_PREDICATE = "https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1"
+# v1 is v0.1 plus verification.approval, and the first type a release carries: from v1 on, a breaking change gets a new
+# type, and the readers (attest verify, attest policy) keep reading every type the engine ever wrote.
+VERDICTS_PREDICATE = "https://github.com/soyPeter/agentic-harness/attestation/verdicts/v1"
+VERDICTS_PREDICATES = ("https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1", VERDICTS_PREDICATE)
 VERIFIER_ID = "https://github.com/soyPeter/agentic-harness"
-ATTEST_USAGE = "usage: harness.py attest --range <base>..<tip> [--allow-user-changes]\n"
+APPROVAL_LABEL = "harness-change-approved"
+ATTEST_USAGE = (
+    "usage: harness.py attest --range <base>..<tip> [--allow-user-changes [--pull-request <number>]]\n"
+    "usage: harness.py attest verify <statement> <bundle> (--key <public key or KMS reference> | "
+    "--certificate-identity <identity> --certificate-oidc-issuer <issuer>) <policy>\n"
+    "usage: harness.py attest policy <statement> <policy>\n"
+    "  <policy>: (--commit <full commit id> | --tree <full tree id>)... [--type <predicate type>]... "
+    "[--require NAME=VALUE]... [--accept-user-changes]\n")
 
 
 def verdict_brief(history):
@@ -3882,8 +3999,9 @@ def verification_settings():
     return {key: {"value": values[key], "environment": key in os.environ} for key in sorted(values)}
 
 
-def attest_statement(base_ref, tip_ref, allow_user_changes=False):
-    """(in-toto Statement, []) for a range that passes verify, checked out at its tip; else (None, problems)."""
+def attest_statement(base_ref, tip_ref, allow_user_changes=False, pull_request=None):
+    """(in-toto Statement, []) for a range that passes verify, checked out at its tip; else (None, problems).
+    pull_request is the merged pull request whose approval label allowed the user changes."""
     commits_of = {}
     for ref in (base_ref, tip_ref):
         commits_of[ref] = git("rev-parse", "-q", "--verify", ref + "^{commit}").strip()
@@ -3913,27 +4031,228 @@ def attest_statement(base_ref, tip_ref, allow_user_changes=False):
         "predicate": {
             "verifier": {"id": VERIFIER_ID, "engineSha256": sha256(__file__), "baseLock": base_lock(base)},
             "verification": {"base": base, "tip": tip, "result": "PASSED", "allowUserChanges": allow_user_changes,
+                             "approval": {"label": APPROVAL_LABEL, "pullRequest": pull_request} if pull_request
+                             else None,
                              "settings": verification_settings()},
             "tasks": [attested_task(task, commits, tip) for task in finished],
         },
     }, []
 
 
+def command_options(argv, valued, flags=()):
+    """(positional words, {option: [values]}, {flags}) of argv; None when an option is unknown or lacks its value."""
+    positional, values, seen = [], {}, set()
+    words = iter(argv)
+    for word in words:
+        if word in flags:
+            seen.add(word)
+        elif word in valued:
+            value = next(words, None)
+            if value is None:
+                return None
+            values.setdefault(word, []).append(value)
+        elif word.startswith("--"):
+            return None
+        else:
+            positional.append(word)
+    return positional, values, seen
+
+
 def attest_command(argv):
-    """Print the in-toto Statement of a verified range; nothing on stdout when the range doesn't verify."""
-    allow = "--allow-user-changes" in argv
-    args = [a for a in argv if a != "--allow-user-changes"]
-    if args[:1] != ["--range"] or len(args) != 2 or ".." not in args[1] or args[1].startswith(".."):
+    """Print the in-toto Statement of a verified range; nothing on stdout when the range doesn't verify. attest verify
+    and attest policy check one instead."""
+    if argv[:1] == ["verify"]:
+        return attest_verify_command(argv[1:])
+    if argv[:1] == ["policy"]:
+        return attest_policy_command(argv[1:])
+    parsed = command_options(argv, ("--range", "--pull-request"), ("--allow-user-changes",))
+    positional, values, flags = parsed or ([], {}, set())
+    ranges, pulls = values.get("--range", []), values.get("--pull-request", [])
+    allow = "--allow-user-changes" in flags
+    if parsed is None or positional or len(ranges) != 1 or ".." not in ranges[0] or ranges[0].startswith("..") \
+            or len(pulls) > 1 or (pulls and not (allow and re.fullmatch(r"[1-9][0-9]{0,9}", pulls[0]))):
         sys.stderr.write(ATTEST_USAGE)
         return 64
-    base, _, tip = args[1].partition("..")
-    statement, problems = attest_statement(base, tip or "HEAD", allow)
+    base, _, tip = ranges[0].partition("..")
+    statement, problems = attest_statement(base, tip or "HEAD", allow, int(pulls[0]) if pulls else None)
     for problem in problems:
         sys.stderr.write("attest: %s\n" % problem)
     if problems:
         return 1
     sys.stdout.write(json.dumps(statement, indent=2, sort_keys=True) + "\n")
     return 0
+
+
+POLICY_GATES = {"HARNESS_SPEC_GATE": "on", "HARNESS_JUDGE_GATE": "on", "HARNESS_REVIEW": "on"}
+POLICY_OPTIONS = ("--commit", "--tree", "--type", "--require")
+OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def attest_policy(values, flags):
+    """A consumer's policy from the options of attest verify or attest policy; None when it names no commit or code
+    to check, or an option is malformed."""
+    commits, trees = values.get("--commit", []), values.get("--tree", [])
+    if not commits + trees or not all(OBJECT_ID.fullmatch(name) for name in commits + trees):
+        return None
+    required = dict(POLICY_GATES)
+    for item in values.get("--require", []):
+        name, equals, value = item.partition("=")
+        if not equals or not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+            return None
+        required[name] = value
+    return {"commits": commits, "trees": trees, "types": values.get("--type") or list(VERDICTS_PREDICATES),
+            "required": required, "accept_user_changes": "--accept-user-changes" in flags}
+
+
+def shown(value):
+    return "'%s'" % value if isinstance(value, str) else "missing" if value is None else json.dumps(value)
+
+
+def member(value, key):
+    """value[key] when value is an object and holds one, else None: statements are read as untrusted JSON."""
+    return value.get(key) if isinstance(value, dict) else None
+
+
+def policy_problems(statement, policy):
+    """(problems, a summary of what was checked) of a verdict statement, v0.1 or v1, against a consumer's policy."""
+    if member(statement, "_type") != STATEMENT_TYPE:
+        return ["not an in-toto Statement v1 (_type is %s)" % shown(member(statement, "_type"))], None
+    problems = []
+    kind = statement.get("predicateType")
+    if not isinstance(kind, str) or kind not in policy["types"]:
+        problems.append("the predicate type %s is not one the policy accepts (%s)" % (kind, ", ".join(policy["types"])))
+    subjects = statement.get("subject") if isinstance(statement.get("subject"), list) else []
+    for wanted, name, algorithm in [(c, "commit", "gitCommit") for c in policy["commits"]] + \
+            [(t, "code", "gitTree") for t in policy["trees"]]:
+        if wanted not in [member(member(s, "digest"), algorithm) for s in subjects if member(s, "name") == name]:
+            problems.append("no %s subject is %s" % (name, wanted))
+    verification = member(member(statement, "predicate"), "verification")
+    if member(verification, "result") != "PASSED":
+        problems.append("verify's result is %s, not PASSED" % (
+            member(verification, "result") if isinstance(member(verification, "result"), str)
+            else shown(member(verification, "result"))))
+    settings = member(verification, "settings")
+    for name, value in sorted(policy["required"].items()):
+        found = member(member(settings, name), "value")
+        if found != value:
+            problems.append("%s is %s; the policy requires '%s'" % (name, shown(found), value))
+    allowed, approval = member(verification, "allowUserChanges"), member(verification, "approval")
+    by = "approved by pull request #%s" % member(approval, "pullRequest") if member(approval, "pullRequest") \
+        else "no approval recorded"
+    if allowed is True and not policy["accept_user_changes"]:
+        problems.append("the range was verified with --allow-user-changes (%s): it may change the harness or its "
+                        "user-only settings. Pass --accept-user-changes to accept such a change" % by)
+    elif allowed is not True and allowed is not False:
+        problems.append("allowUserChanges is %s, not true or false" % shown(allowed))
+    if problems:
+        return problems, None
+    return [], "ok: " + ", ".join(
+        [kind] + ["commit %s" % c for c in policy["commits"]] + ["code %s" % t for t in policy["trees"]]
+        + ["verify PASSED", " ".join("%s=%s" % item for item in sorted(policy["required"].items()))]
+        + (["user changes accepted (%s)" % by] if allowed is True else []))
+
+
+def report_policy(label, statement, policy):
+    problems, summary = policy_problems(statement, policy)
+    for problem in problems:
+        print("%s: %s" % (label, problem))
+    if not problems:
+        print("%s: %s" % (label, summary))
+    return 1 if problems else 0
+
+
+def attest_policy_command(argv):
+    """attest policy: a consumer's policy on a statement, without its signature (attest verify checks that)."""
+    parsed = command_options(argv, POLICY_OPTIONS, ("--accept-user-changes",))
+    policy = attest_policy(parsed[1], parsed[2]) if parsed and len(parsed[0]) == 1 else None
+    if policy is None:
+        sys.stderr.write(ATTEST_USAGE)
+        return 64
+    try:
+        statement = json.loads(Path(parsed[0][0]).read_text(encoding="utf-8"))
+    except OSError:
+        print("attest policy: can't read %s" % parsed[0][0])
+        return 1
+    except ValueError as exc:
+        print("attest policy: the statement doesn't parse: %s" % exc)
+        return 1
+    print("attest policy: no signature checked (attest verify checks it)")
+    return report_policy("attest policy", statement, policy)
+
+
+def bundle_statement(data):
+    """(the in-toto statement a Sigstore bundle's DSSE envelope carries, None), or (None, why not)."""
+    try:
+        envelope = member(json.loads(data.decode("utf-8")), "dsseEnvelope")
+        if member(envelope, "payloadType") != "application/vnd.in-toto+json":
+            return None, "no DSSE envelope of an in-toto payload"
+        return json.loads(base64.b64decode(envelope.get("payload") or "", validate=True).decode("utf-8")), None
+    except ValueError as exc:
+        return None, "it doesn't decode: %s" % exc
+
+
+def cosign_check(cosign, bundle, statement, policy, signer):
+    """(ok, cosign's last words) of cosign verify-blob-attestation on bundle (its bytes): the signature, the predicate
+    type and the first commit (or code) the policy names. cosign reads a copy, so it checks the bytes read here."""
+    digest = (policy["commits"][0], "gitCommit") if policy["commits"] else (policy["trees"][0], "gitTree")
+    with tempfile.TemporaryDirectory(prefix="harness-attest-") as folder:
+        copy = Path(folder) / "bundle.sigstore.json"
+        copy.write_bytes(bundle)
+        words = [cosign, "verify-blob-attestation", "--bundle", str(copy), "--type",
+                 str(member(statement, "predicateType")), "--digest", digest[0], "--digestAlg", digest[1]] + signer
+        try:
+            result = subprocess.run(words, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return False, "cosign took longer than 120 s"
+    said = [line for line in (result.stderr + result.stdout).splitlines() if line.strip()
+            and not line.startswith(("WARNING", "Verified OK"))]
+    return result.returncode == 0, said[-1] if said else "cosign exited with %d" % result.returncode
+
+
+def attest_verify_command(argv):
+    """attest verify: cosign checks the bundle's signature, then the consumer's policy is applied to the statement the
+    bundle signs, which must be the statement file's."""
+    parsed = command_options(argv, POLICY_OPTIONS + ("--key", "--certificate-identity", "--certificate-oidc-issuer"),
+                             ("--accept-user-changes",))
+    positional, values, flags = parsed or ([], {}, set())
+    keys, identities = values.get("--key", []), values.get("--certificate-identity", [])
+    issuers = values.get("--certificate-oidc-issuer", [])
+    policy = attest_policy(values, flags) if parsed else None
+    if policy is None or len(positional) != 2 or max(len(keys), len(identities), len(issuers)) > 1 \
+            or bool(keys) == bool(identities or issuers) or bool(identities) != bool(issuers):
+        sys.stderr.write(ATTEST_USAGE)
+        return 64
+    try:
+        text, bundle = Path(positional[0]).read_text(encoding="utf-8"), Path(positional[1]).read_bytes()
+    except OSError as exc:
+        print("attest verify: can't read %s" % exc.filename)
+        return 1
+    signed, problem = bundle_statement(bundle)
+    if problem:
+        print("attest verify: %s is not a Sigstore bundle of an in-toto statement (%s)" % (positional[1], problem))
+        return 1
+    try:
+        same = json.loads(text) == signed
+    except ValueError:
+        same = False
+    if not same:
+        print("attest verify: the statement is not the one the bundle signs (the bundle carries its own)")
+        return 1
+    cosign = shutil.which("cosign")
+    if not cosign:
+        print("attest verify: cosign is not installed (https://docs.sigstore.dev/cosign/system_config/installation/); "
+              "attest policy checks the statement without its signature")
+        return 1
+    # A key-signed bundle from the attest job has no transparency log entry, by design (ADR-005); a keyless one has.
+    signer = ["--key", keys[0], "--insecure-ignore-tlog"] if keys else \
+        ["--certificate-identity", identities[0], "--certificate-oidc-issuer", issuers[0]]
+    ok, said = cosign_check(cosign, bundle, signed, policy, signer)
+    if not ok:
+        print("attest verify: the signature doesn't verify: %s" % said)
+        return 1
+    print("attest verify: signature: ok (cosign, %s)" % (
+        "key %s" % keys[0] if keys else "certificate of %s from %s" % (identities[0], issuers[0])))
+    return report_policy("attest verify", signed, policy)
 
 
 ATTEST_ENVIRONMENT = "harness-attest"
@@ -4013,6 +4332,181 @@ def repository_check_command(argv):
     if not copies:
         print("repository-check: no repository-level %s" % " or ".join(ATTEST_SECRETS))
     return 1 if copies else 0
+
+
+def merged_approval(pulls, base, tip, branch):
+    """(the number of the pull request that approved the push base..tip, None), or (None, why not), from GitHub's
+    list of tip's pull requests (GET repos/<r>/commits/<tip>/pulls). Exactly one is merged into branch with tip as its
+    merge commit, it carries the approval label, and the push is that merge alone: one commit on base (a squash, or the
+    rebase of one commit) or a merge commit of base and the pull request's head. More in the push would pass under a
+    label that never saw it."""
+    if not isinstance(pulls, list):
+        return None, "GitHub's answer is not a list of pull requests"
+    merged = [p for p in pulls if isinstance(p, dict) and p.get("merged_at") and p.get("merge_commit_sha") == tip
+              and member(p.get("base"), "ref") == branch and type(p.get("number")) is int and p["number"] > 0]
+    if not merged:
+        return None, "no pull request merged into %s has %s as its merge commit" % (branch, tip[:12])
+    if len(merged) > 1:
+        return None, "pull requests %s and #%d %s name %s as their merge commit" % (
+            ", ".join("#%d" % p["number"] for p in merged[:-1]), merged[-1]["number"],
+            "both" if len(merged) == 2 else "all", tip[:12])
+    number = merged[0]["number"]
+    parents = git("rev-list", "--parents", "-n", "1", tip).split()[1:]
+    if parents != [base] and not (len(parents) == 2 and parents[0] == base
+                                  and parents[1] == member(merged[0].get("head"), "sha")):
+        return None, ("the push is more than pull request #%d's merge: %s is neither one commit on %s nor a merge of "
+                      "%s and the pull request's head" % (number, tip[:12], base[:12], base[:12]))
+    if APPROVAL_LABEL not in [member(label, "name") for label in merged[0].get("labels") or []]:
+        return None, "pull request #%d doesn't carry %s" % (number, APPROVAL_LABEL)
+    return number, None
+
+
+def approval_check_command(argv):
+    """harness-verify's attest job: the pull request that approved the pushed range, from GitHub's JSON (ADR-005).
+    Prints its number; exit 1 and nothing on stdout when no pull request approved the whole push."""
+    if len(argv) != 3 or argv[1].count("..") != 1 or argv[1].startswith("..") or argv[1].endswith(".."):
+        sys.stderr.write("usage: harness.py approval-check <pulls.json> <base>..<tip> <branch>\n")
+        return 64
+    commits = []
+    for ref in argv[1].split(".."):
+        commits.append(git("rev-parse", "-q", "--verify", ref + "^{commit}").strip())
+        if not commits[-1]:
+            sys.stderr.write("approval-check: %s is not a commit\n" % ref)
+            return 1
+    try:
+        pulls = json.loads(read(argv[0]) or "null")
+    except ValueError as exc:
+        sys.stderr.write("approval-check: GitHub's answer doesn't parse: %s\n" % exc)
+        return 1
+    number, problem = merged_approval(pulls, commits[0], commits[1], argv[2])
+    if problem:
+        sys.stderr.write("approval-check: %s\n" % problem)
+        return 1
+    sys.stderr.write("approval-check: pull request #%d, merged into %s as %s, carries %s\n" % (
+        number, argv[2], commits[1][:12], APPROVAL_LABEL))
+    print(number)
+    return 0
+
+
+SIGNING_MODES = ("key", "kms", "keyless")
+KMS_SETTINGS = ("HARNESS_ATTEST_KMS_KEY", "HARNESS_ATTEST_KMS_IDENTITY")
+# (cloud, key reference, identity the job's OIDC token logs in as, what that identity is). An AWS key is named by its
+# ARN because the ARN names the region the SDK must call.
+KMS_CLOUDS = (
+    ("gcp", r"gcpkms://projects/[^/\s]+/locations/[^/\s]+/keyRings/[^/\s]+/cryptoKeys/[^/\s]+"
+            r"(?:/(?:cryptoKeyVersions|versions)/[^/\s]+)?",
+     r"(projects/[0-9]+/locations/global/workloadIdentityPools/[^/\s]+/providers/[^/\s]+)"
+     r"(?: ([^\s@]+@[^\s@]+\.iam\.gserviceaccount\.com))?",
+     "a workload identity provider (projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/"
+     "<provider>), optionally followed by the email of the service account to act as"),
+    ("aws", r"awskms://[^/\s]*/arn:aws[a-z-]*:kms:([a-z0-9-]+):[0-9]{12}:(?:key|alias)/\S+",
+     r"(arn:aws[a-z-]*:iam::[0-9]{12}:role/\S+)", "the ARN of the IAM role to assume"),
+    ("azure", r"azurekms://[^/\s]+/[^/\s]+(?:/[^/\s]+)?", r"([0-9a-f-]{36}) ([0-9a-f-]{36})",
+     "the tenant ID and the client ID of the app registration, separated by a space"),
+    ("vault", r"hashivault://[^/\s]+", r"(https://[^/\s]+) (\S+)",
+     "the Vault address (https://<host>[:<port>]) and the role of its JWT login, separated by a space"),
+)
+
+
+def kms_login(key, identity):
+    """({the attest job's variables}, None) for signing with the KMS key reference key, logged in through the job's
+    OIDC token as identity; or (None, why not)."""
+    for cloud, key_pattern, identity_pattern, wanted in KMS_CLOUDS:
+        named = re.fullmatch(key_pattern, key)
+        if not named:
+            continue
+        login = re.fullmatch(identity_pattern, identity)
+        if not login:
+            return None, "HARNESS_ATTEST_KMS_IDENTITY for %s %s key is %s" % (
+                "an" if cloud[0] in "aeiou" else "a", cloud, wanted)
+        found = {"ATTEST_KMS_KEY": key, "ATTEST_KMS_CLOUD": cloud}
+        if cloud == "gcp":
+            found.update(ATTEST_OIDC_AUDIENCE="https://iam.googleapis.com/" + login.group(1),
+                         ATTEST_GCP_PROVIDER=login.group(1), ATTEST_GCP_SERVICE_ACCOUNT=login.group(2) or "")
+        elif cloud == "aws":
+            found.update(ATTEST_OIDC_AUDIENCE="sts.amazonaws.com", ATTEST_AWS_ROLE=login.group(1),
+                         ATTEST_AWS_REGION=named.group(1))
+        elif cloud == "azure":
+            found.update(ATTEST_OIDC_AUDIENCE="api://AzureADTokenExchange", ATTEST_AZURE_TENANT=login.group(1),
+                         ATTEST_AZURE_CLIENT=login.group(2))
+        else:
+            found.update(ATTEST_OIDC_AUDIENCE=login.group(1), ATTEST_VAULT_ADDR=login.group(1),
+                         ATTEST_VAULT_ROLE=login.group(2))
+        return found, None
+    return None, ("HARNESS_ATTEST_KMS_KEY %s a gcpkms://, awskms:// (with the key's ARN), azurekms:// or hashivault:// "
+                  "key reference, which kms signing needs" % ("%s is not" % shown(key) if key else "is not set: it is"))
+
+
+def signing_settings(values, key_configured):
+    """({the attest job's signing variables}, []) from the signing settings in values (harness.conf at the commit the
+    push starts from) and whether the HARNESS_ATTEST_KEY secret is set; or (None, problems). One signing source at a
+    time, and keyless only when HARNESS_ATTEST_SIGNING says keyless: it publishes the workflow's identity for good."""
+    mode = values.get("HARNESS_ATTEST_SIGNING")
+    kms = sorted(name for name in KMS_SETTINGS if name in values)
+    if mode is None and not kms and not key_configured:
+        return None, ["no signing is configured: no HARNESS_ATTEST_KEY in %s, and no HARNESS_ATTEST_SIGNING in "
+                      "harness.conf" % ATTEST_ENVIRONMENT]
+    mode = "key" if mode is None else mode
+    if mode not in SIGNING_MODES:
+        return None, ["HARNESS_ATTEST_SIGNING is %s: it is key (the default), kms or keyless" % shown(mode)]
+    problems = []
+    if mode != "kms" and kms:
+        problems.append("harness.conf sets %s, but HARNESS_ATTEST_SIGNING is %s: set it to kms, or remove them"
+                        % (" and ".join(kms), mode))
+    if mode == "key" and not key_configured:
+        problems.append("HARNESS_ATTEST_SIGNING is key, but there is no HARNESS_ATTEST_KEY in %s" % ATTEST_ENVIRONMENT)
+    if mode != "key" and key_configured:
+        problems.append("HARNESS_ATTEST_KEY is set, but HARNESS_ATTEST_SIGNING is %s: delete the secret, so that one "
+                        "key signs" % mode)
+    found = {"ATTEST_MODE": mode}
+    if mode == "kms":
+        login, problem = kms_login(values.get("HARNESS_ATTEST_KMS_KEY", ""),
+                                   values.get("HARNESS_ATTEST_KMS_IDENTITY", ""))
+        problems += [problem] if problem else []
+        found.update(login or {})
+    return (None, problems) if problems else (found, [])
+
+
+def signing_check_command(argv):
+    """harness-verify's attest job: its signing mode, from harness.conf at the commit the push starts from (a push
+    can't choose how it is signed) and whether the key secret is set, as lines for $GITHUB_ENV (ADR-005)."""
+    if len(argv) != 2 or argv[1] not in ("true", "false"):
+        sys.stderr.write("usage: harness.py signing-check <commit> <true|false>   (true: HARNESS_ATTEST_KEY is set)\n")
+        return 64
+    commit = git("rev-parse", "-q", "--verify", argv[0] + "^{commit}").strip()
+    if not commit:
+        sys.stderr.write("signing-check: %s is not a commit\n" % argv[0])
+        return 1
+    found, problems = signing_settings(parse_conf(show(commit, CONF_FILE.relative_to(ROOT).as_posix()) or ""),
+                                       argv[1] == "true")
+    for problem in problems:
+        sys.stderr.write("signing-check: %s\n" % problem)
+    if problems:
+        return 1
+    sys.stderr.write("signing-check: %s\n" % signing_description(found, commit[:12]))
+    sys.stdout.write("".join("%s=%s\n" % item for item in found.items()))
+    return 0
+
+
+def signing_description(found, where):
+    if found["ATTEST_MODE"] == "kms":
+        return "kms: %s, logged in through the job's OIDC token (%s)" % (found["ATTEST_KMS_KEY"],
+                                                                         found["ATTEST_KMS_CLOUD"])
+    if found["ATTEST_MODE"] == "keyless":
+        return ("keyless (HARNESS_ATTEST_SIGNING at %s): a Fulcio certificate for the workflow's identity, written to "
+                "the public Rekor log for good" % where)
+    return "key: HARNESS_ATTEST_KEY in %s" % ATTEST_ENVIRONMENT
+
+
+def signing_line(default):
+    """(the signing the attest job takes from the default branch's harness.conf, as ci-protect states it, whether it
+    needs harness-attest.pub)."""
+    values = parse_conf(show(default, CONF_FILE.relative_to(ROOT).as_posix()) or "")
+    mode = values.get("HARNESS_ATTEST_SIGNING", "key")
+    found, problems = signing_settings(values, mode == "key")
+    if problems:
+        return "signing on %s: the job refuses to sign (%s)" % (default, "; ".join(problems)), True
+    return "signing on %s: %s" % (default, signing_description(found, default)), mode != "keyless"
 
 
 def attest_repository(name):
@@ -4100,7 +4594,10 @@ def ci_protect_attest(name, default, dry_run, recorded=False, delete_copies=Fals
         print("ci-protect --attest: attest mode with %s in %s: %s" % (
             ATTEST_POLICY_SECRET, ATTEST_ENVIRONMENT, attest_mode(True, recorded)))
         print("ci-protect --attest: attest mode without it: %s" % attest_mode(False, recorded))
-        print("ci-protect --attest: %s" % public_key_line(default))
+        signing, needs_key = signing_line(default)
+        print("ci-protect --attest: %s" % signing)
+        if needs_key:
+            print("ci-protect --attest: %s" % public_key_line(default))
         return 0 if dry_run else 1
     _, _, copies = attest_repository(name)
     if copies is None:
@@ -4154,7 +4651,10 @@ def ci_protect_attest(name, default, dry_run, recorded=False, delete_copies=Fals
               ATTEST_POLICY_SECRET))
     print("ci-protect --attest: attest mode: %s" % attest_mode(
         None if names is None else ATTEST_POLICY_SECRET in names, recorded))
-    print("ci-protect --attest: %s" % public_key_line(default))
+    signing, needs_key = signing_line(default)
+    print("ci-protect --attest: %s" % signing)
+    if needs_key:
+        print("ci-protect --attest: %s" % public_key_line(default))
     return 0
 
 
@@ -6384,18 +6884,20 @@ def task_status(task, fingerprint=code_fingerprint):
     state = task_state(task)
     exists = spec_path(task).is_file()
     text = read(spec_path(task)) if exists else ""
+    spec = spec_fingerprint(task, text)
     grill = verdict_history(task, "grill")
     judge = verdict_history(task, "judge")
     last_grill, last_judge = (grill[-1] if grill else None), (judge[-1] if judge else None)
+    stale = last_judge and ("code" if last_judge.get("fingerprint") != fingerprint()
+                            else spec_stale(task, last_judge, spec))
     return {
         "task": task, "title": task_title(task), "state": state, "spec": spec_rel(task) if exists else None,
         "change_class": change_class(text)[0] if exists else None,
         "spec_problems": validate_spec(task) if exists else ["no spec yet"],
         "grill": last_grill and {"verdict": last_grill.get("verdict"),
-                                 "current": last_grill.get("fingerprint") == spec_fingerprint(task)},
+                                 "current": last_grill.get("fingerprint") == spec},
         "approved": bool(exists and approved(text)),
-        "judge": last_judge and {"verdict": last_judge.get("verdict"),
-                                 "current": last_judge.get("fingerprint") == fingerprint()},
+        "judge": last_judge and {"verdict": last_judge.get("verdict"), "current": not stale, "stale": stale or None},
         "escalations": [e for e in open_escalations() if re.search(r"\bTask %s:" % re.escape(task), e)],
     }
 
@@ -6474,17 +6976,30 @@ def next_step(task, fingerprint=code_fingerprint):
                                                    and s["grill"]["verdict"] == "pass"):
         return dict(step, step="grill", role="griller", reason="the spec changed during the build (an answered "
                                                                  "question); grill it again before going on")
+    if s["spec"] and not s["approved"] and gate_on("HARNESS_SPEC_GATE"):
+        reason = ("the spec is no longer approved: its approval was removed, so the spec may have changed since the "
+                  "task started")
+        if autonomous():
+            return dict(step, step="approve", role=None, reason=reason,
+                        command="python3 scripts/harness/lib/harness.py approve %s" % task)
+        return dict(step, step="approve", role=None, reason=reason,
+                    needed="the user's Approved-by: line in %s again" % s["spec"])
+    spec = spec_fingerprint(task)
     if tester_on():
         tests = verdict_history(task, "tests")
-        if not tests or acceptance_fingerprint(task) != tests[-1].get("fingerprint"):
-            return dict(step, step="test", role="tester",
-                        reason="no acceptance tests yet" if not tests else "the acceptance tests changed since the "
-                                                                          "tester recorded them")
+        reason = ("no acceptance tests yet" if not tests else
+                  "the acceptance tests changed since the tester recorded them"
+                  if acceptance_fingerprint(task) != tests[-1].get("fingerprint") else
+                  "the spec changed since the tester recorded the acceptance tests (or the record has no spec "
+                  "revision)" if spec_stale(task, tests[-1], spec) else None)
+        if reason:
+            return dict(step, step="test", role="tester", reason=reason)
     judge = s["judge"]
     if judge and judge["current"] and judge["verdict"] == "pass" and review_on():
         current = fingerprint()
         reviews = lens_reviews(task)
-        on_current = {lens: e for lens, e in reviews.items() if e and e.get("fingerprint") == current}
+        on_current = {lens: e for lens, e in reviews.items()
+                      if e and e.get("fingerprint") == current and not spec_stale(task, e, spec)}
         failed = [lens for lens, e in on_current.items() if e.get("verdict") != "pass"]
         if failed:
             return dict(step, step="fix", role="implementer", reason="must-fix findings from the %s review"
@@ -6510,7 +7025,10 @@ def next_step(task, fingerprint=code_fingerprint):
                     **({"needs": owners} if owners else {}))
     if not judge and not code_changed():
         return dict(step, step="implement", role="implementer")
-    return dict(step, step="judge", role="judge", reason="no judge verdict on the current code")
+    reason = {"spec": "the spec changed after the judge's last verdict: judge the task against the current spec",
+              "unrecorded": "the judge's last verdict records no spec revision (it predates spec-bound verdicts): "
+                            "judge it again"}.get((judge or {}).get("stale"), "no judge verdict on the current code")
+    return dict(step, step="judge", role="judge", reason=reason)
 
 
 def latest_delivery(head, signed=False, task=None):
@@ -6607,7 +7125,7 @@ def start_command(task):
 
 
 def finish_command(task):
-    problems = set_task_marker(task, "x", (blocked_guard, judge_gate))
+    problems = set_task_marker(task, "x", (blocked_guard, start_gate, judge_gate))
     print("finish: task %s is [x]; commit it with its code, tests, spec and verdicts" % task if not problems
           else "finish: task %s can't finish:\n%s" % (task, "\n".join(problems)))
     return 1 if problems else 0
@@ -6620,7 +7138,14 @@ def state_command(argv):
         print(json.dumps({"autonomous": autonomous(), "tasks": states, "halted": halt_file().exists()}, indent=2))
         return 0
     for s in states:
-        print("%-8s %-8s %s" % (s["task"], s["state"], s["title"]))
+        notes = []
+        if s["state"] == "wip" and s["judge"] and s["judge"]["stale"]:
+            notes.append("judge %s on %s" % (s["judge"]["verdict"], {
+                "code": "earlier code", "spec": "an earlier spec", "unrecorded": "an unrecorded spec revision"}[
+                s["judge"]["stale"]]))
+        if s["state"] == "wip" and s["spec"] and not s["approved"]:
+            notes.append("not approved")
+        print("%-8s %-8s %s%s" % (s["task"], s["state"], s["title"], "  (%s)" % "; ".join(notes) if notes else ""))
     return 0
 
 
@@ -8633,6 +9158,12 @@ def receipt_data(task, base=None, code=None):
         return None, "no spec at %s" % spec_rel(task)
     if passed.get("fingerprint") != (code or code_fingerprint()):
         return None, "the code changed after the judge passed task %s; judge it again first" % task
+    stale = spec_stale(task, passed)
+    if stale == "spec":
+        return None, "the spec changed after the judge passed task %s; judge it again first" % task
+    if stale:
+        return None, ("the judge pass of task %s records no spec revision (it predates spec-bound verdicts); judge it "
+                      "again first" % task)
     body = comment_free(spec_text)
     title = re.match(r"^#\s+Spec\s+\S+:\s*(.+)$", body.strip().splitlines()[0]) if body.strip() else None
     base = receipt_base(task, spec_text, base)
@@ -8697,6 +9228,7 @@ def receipt_data(task, base=None, code=None):
         "risks": risk_reasons(task, base),
         "rounds": {"grill": len(grills), "judge": len(judge), "debug": len(verdict_history(task, "debug"))},
         "judged_at": passed.get("at"),
+        "judged_on": {"spec": passed.get("spec"), "code": passed.get("fingerprint")},
         "sandbox": sandbox.normalized(passed.get("sandbox")),
         "approval": approval_lines(approval_section(spec_text) or ""),
         "approval_needed": approval_needed,
@@ -8752,7 +9284,8 @@ def receipt_text(d):
     lines += ["  %-8s %s" % (c["status"], c["path"]) for c in d["changed"]] or ["  (no code changes)"]
     if d["backbone_changed"]:
         lines.append("  backbone: %s" % ", ".join(c["path"] for c in d["backbone_changed"]))
-    sections = (("VERIFIED (judge pass %s, re-checked by the harness)" % d["judged_at"], d["verified"]),
+    sections = (("VERIFIED (judge pass %s on spec %s and code %s, re-checked by the harness)"
+                 % (d["judged_at"], d["judged_on"]["spec"][:12], (d["judged_on"]["code"] or "?")[:12]), d["verified"]),
                 ("NOT VERIFIED", d["not_verified"] or ["nothing outside the acceptance criteria"]),
                 ("SANDBOX (where the judge pass was recorded)", sandbox_lines(d["sandbox"])),
                 ("COST (the runner's agent sessions for this task)", cost_lines(d.get("cost"))),
@@ -9605,8 +10138,8 @@ def record_tests(data):
         deny("No acceptance test file (HARNESS_ACCEPTANCE_PATHS) mentions %s yet. Write a test for each, naming its "
              "AC id, then stop again." % ", ".join(missing))
     history = verdict_history(task, "tests")
-    entry = {"fingerprint": acceptance_fingerprint(task), "files": covered, "missing": missing,
-             "red": report.get("red"), "problems": report.get("problems") or [],
+    entry = {"fingerprint": acceptance_fingerprint(task), "spec": spec_fingerprint(task), "files": covered,
+             "missing": missing, "red": report.get("red"), "problems": report.get("problems") or [],
              "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "summary": report.get("summary")}
     history.append(entry)
     VERDICTS.mkdir(parents=True, exist_ok=True)
@@ -9668,7 +10201,7 @@ def record_review(data):
     verdict = "fail" if any(f.get("severity") == "must-fix" for f in findings) else "pass"
     history = verdict_history(task, "review")
     history.append({"lens": lens, "verdict": verdict, "claimed": report.get("verdict"),
-                    "fingerprint": code_fingerprint(), "findings": findings,
+                    "fingerprint": code_fingerprint(), "spec": spec_fingerprint(task), "findings": findings,
                     "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "summary": report.get("summary")})
     VERDICTS.mkdir(parents=True, exist_ok=True)
     verdict_path(task, "review").write_text(json.dumps({"task": task, "kind": "review", "history": history}, indent=2)
@@ -9842,6 +10375,10 @@ def main(argv):
         return environment_check_command(argv[2:])
     if argv[1:2] == ["repository-check"]:
         return repository_check_command(argv[2:])
+    if argv[1:2] == ["approval-check"]:
+        return approval_check_command(argv[2:])
+    if argv[1:2] == ["signing-check"]:
+        return signing_check_command(argv[2:])
     if len(argv) == 3 and argv[1] == "approve":
         return approve_command(argv[2])
     if argv[1:2] == ["escalate"]:
