@@ -1,7 +1,7 @@
 # ADR-006: Admit third-party agent setup resources explicitly
 
 ## Status
-Proposed
+Accepted
 
 ## Date
 2026-11-08
