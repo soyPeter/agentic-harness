@@ -644,8 +644,10 @@ FENCE_INDENT = "a code fence indented 4 or more columns"
 class FenceRules(unittest.TestCase):
     """Where a fenced code block ends, as Markdown decides it, for every gate that reads a spec. The example's '## Approval'
     heading is a heading only when the line after it closes the block: a run of the same character at least as long as
-    the opener, at 0-3 spaces, with nothing after it. Then the passwords below it are in the Approval section and aren't
-    screened. A deeper marker is refused as misplaced, since a list item would read it as closing the block."""
+    the opener, at 0-3 spaces, with nothing after it. Then the Approved-by line below it is in the Approval section and
+    approves the spec. The password beside it is screened either way, since only Approved-by lines are left out of
+    what the spec says. A deeper marker is refused as misplaced, since a list item would read it as closing the
+    block."""
     # opener   candidate closer   closes  misplaced
     TABLE = (
         ("```",   "```",           True,   False),
@@ -661,7 +663,8 @@ class FenceRules(unittest.TestCase):
         ("~~~",   "```",           False,  False),
         ("~~~",   "~~~",           True,   False),
     )
-    CONTEXT = "Example:\n\n%s\nexample = 1\n%s\n## Approval\nPasswords are stored in plain text.\n"
+    CONTEXT = ("Example:\n\n%s\nexample = 1\n%s\n## Approval\nApproved-by: Ana (2026-11-01)\n"
+               "Passwords are stored in plain text.\n")
     ids = itertools.count(1)
 
     def setUp(self):
@@ -670,6 +673,10 @@ class FenceRules(unittest.TestCase):
     def add(self, task, opener, candidate):
         self.project.add_task(task, declared("docs"), self.CONTEXT % (opener, candidate))
 
+    def approved(self, task):
+        return next(t for t in json.loads(self.project.harness("state", "--json")[1])["tasks"]
+                    if t["task"] == task)["approved"]
+
     def test_a_fence_closes_only_where_markdown_closes_it(self):
         for n, (opener, candidate, closes, misplaced) in enumerate(self.TABLE, 1):
             with self.subTest(opener=opener, candidate=candidate):
@@ -677,7 +684,8 @@ class FenceRules(unittest.TestCase):
                 self.add(task, opener, candidate)
 
                 code, out = self.project.harness("risk", task)
-                self.assertEqual("password" in out, not closes, out)
+                self.assertIn("password", out)
+                self.assertEqual(self.approved(task), closes)
                 code, out = self.project.harness("spec-check", task)
                 self.assertEqual(FENCE_INDENT in out, misplaced, out)
 
@@ -693,7 +701,8 @@ class FenceRules(unittest.TestCase):
             self.add(task, opener, candidate)
 
             code, out = self.project.harness("risk", task)
-            self.assertEqual("password" in out, not (indent <= 3 and same), out)
+            self.assertIn("password", out)
+            self.assertEqual(self.approved(task), indent <= 3 and same)
             code, out = self.project.harness("spec-check", task)
             self.assertEqual(FENCE_INDENT in out, same and indent >= 4, out)
 

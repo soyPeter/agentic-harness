@@ -95,8 +95,10 @@ only).
 ![The evidence chain from spec to receipt, where it is checked again, and the proposed ADRs that extend it](docs/sdlc/4-evidence.svg)
 
 The receipt is built from evidence, not from what the agents said. Two fingerprints tie each verdict to what it judged
-(the spec and its ADRs for the grill pass, the code tree for the judge and review passes), so a later edit makes the
-pass stale.
+(the spec and its ADRs for the grill pass; the code tree and that same spec fingerprint for the judge, review and tester
+records), so a later edit makes the pass stale. Any change to the spec other than its `Approved-by:` lines, or to an
+ADR it references, sends the task back to the griller and the judge even when the code is the same, and finishing needs
+the user's approval of the changed spec ([ADR-007](docs/adr/ADR-007-evidence-closed-loop.md), Proposed).
 
 - **Change receipt**: `harness.py receipt <id>` states what the harness can prove about a judged task: what changed,
   each acceptance criterion with its tests, what is *not* verified, the decisions and risks, and what still needs the
