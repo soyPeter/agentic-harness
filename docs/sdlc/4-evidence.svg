@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1760 1268" width="1760" height="1268" role="img" aria-labelledby="t d">
 <title id="t">What the harness can prove about a change</title>
-<desc id="d">One task's evidence chain from spec to receipt, tied together by a spec fingerprint and a code fingerprint; the places it is checked again outside the agent's session; and the proposed exports that carry it out of the repository.</desc>
+<desc id="d">One task's evidence chain from spec to receipt, tied together by a spec fingerprint and a code fingerprint; the places it is checked again outside the agent's session; and shipped evidence extensions under accepted ADRs, with further work pending.</desc>
 <style>
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; letter-spacing: 0.12em; fill: #262523; }
   .sans { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #262523; }
@@ -97,16 +97,16 @@
 <text x="1460" y="848.0" class="tiny">HARNESS EDITS NEED THE</text>
 <text x="1460" y="868.0" class="tiny">HARNESS-CHANGE-APPROVED</text>
 <text x="1460" y="888.0" class="tiny">LABEL</text>
-<text x="48" y="980" class="label">PROPOSED ADRS · THEIR V1 IS ON MAIN; NONE IS ACCEPTED YET</text>
-<rect x="48" y="1004" width="540" height="178" rx="3" fill="#FAF9F6" stroke="#E2602A" stroke-width="1.5" stroke-dasharray="7 6"/>
+<text x="48" y="980" class="label">ACCEPTED ADRS · FIRST SLICES SHIPPED; FOLLOW-UPS PENDING</text>
+<rect x="48" y="1004" width="540" height="178" rx="3" fill="#FAF9F6" stroke="#A9A49B" stroke-width="1.5"/>
 <text x="68" y="1034" class="tiny" fill="#E2602A">ADR-003 · IN THE JUDGE PASS AND RECEIPT</text>
 <text x="68" y="1066" class="title-s">Sandbox evidence</text>
 <text x="68" y="1096" class="body"><tspan x="68" dy="0">Each judge pass records where it ran: backend, isolation</tspan><tspan x="68" dy="23">class, base image digest, egress allowlist hash, region,</tspan><tspan x="68" dy="23">control plane, credential mode.</tspan></text>
-<rect x="612" y="1004" width="540" height="178" rx="3" fill="#FAF9F6" stroke="#E2602A" stroke-width="1.5" stroke-dasharray="7 6"/>
+<rect x="612" y="1004" width="540" height="178" rx="3" fill="#FAF9F6" stroke="#A9A49B" stroke-width="1.5"/>
 <text x="632" y="1034" class="tiny" fill="#E2602A">ADR-004 · READ FROM BACKBONE/ AND GIT</text>
 <text x="632" y="1066" class="title-s">Traceability export</text>
 <text x="632" y="1096" class="body"><tspan x="632" dy="0">trace export --format reqif | needs | html: requirement →</tspan><tspan x="632" dy="23">AC → test → verdict → commit. Derived and one-way; no gate</tspan><tspan x="632" dy="23">reads it back.</tspan></text>
-<rect x="1176" y="1004" width="540" height="178" rx="3" fill="#FAF9F6" stroke="#E2602A" stroke-width="1.5" stroke-dasharray="7 6"/>
+<rect x="1176" y="1004" width="540" height="178" rx="3" fill="#FAF9F6" stroke="#A9A49B" stroke-width="1.5"/>
 <text x="1196" y="1034" class="tiny" fill="#E2602A">ADR-005 · HARNESS-VERIFY, AFTER THE MERGE</text>
 <text x="1196" y="1066" class="title-s">Signed verdict attestation</text>
 <text x="1196" y="1096" class="body"><tspan x="1196" dy="0">attest --range: an in-toto statement about a commit and</tspan><tspan x="1196" dy="23">its code tree, only for a range that verifies. On a push</tspan><tspan x="1196" dy="23">to main, CI writes it with the previous tip's engine and</tspan><tspan x="1196" dy="23">signs it if the key matches harness-attest.pub.</tspan></text>
@@ -114,6 +114,6 @@
 <text x="78" y="1238" class="tiny">CHECKED BY THE HARNESS</text>
 <g><path d="M372,1219 L385,1232 L372,1245 L359,1232 z" fill="#FAF9F6" stroke="#262523" stroke-width="1.8"/><path d="M372,1226 L378,1232 L372,1238 L366,1232 z" fill="#E2602A"/></g>
 <text x="394" y="1238" class="tiny">A PERSON DECIDES</text>
-<rect x="640" y="1218" width="40" height="26" rx="3" fill="#FAF9F6" stroke="#E2602A" stroke-width="1.5" stroke-dasharray="6 5"/>
-<text x="694" y="1238" class="tiny">PROPOSED: AN ADR WITH ITS V1 SHIPPED, NOT YET ACCEPTED</text>
+<rect x="640" y="1218" width="40" height="26" rx="3" fill="#FAF9F6" stroke="#A9A49B" stroke-width="1.5"/>
+<text x="694" y="1238" class="tiny">SHIPPED SLICE; ACCEPTED ADR DOES NOT MEAN EVERY FOLLOW-UP IS BUILT</text>
 </svg>
