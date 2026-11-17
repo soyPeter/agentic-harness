@@ -2071,7 +2071,8 @@ INTO = "into"   # a destination that receives content whose names the hooks can'
 
 def copy_targets(prog, args):
     """[(path, whole)] a copy, move or link writes: its target, what lands in it, the sources a move or link takes
-    away, and the target as a whole when a folder's contents land in it (cp -T, rsync src/, ditto). The target is the
+    away, the target as a whole when a folder's contents land in it (cp -T, rsync src/, ditto), and every folder
+    install -d makes. The target is the
     -t folder, or the last operand, or one before it that only options this table doesn't know follow."""
     found = []
     for table in COPIERS[prog]:
@@ -2087,11 +2088,13 @@ def copy_targets(prog, args):
             found += [(target, False)] + [(os.path.join(target, os.path.basename(s.rstrip("/"))), False)
                                           for s in sources]
             contents = any(s.endswith("/") or os.path.basename(s.rstrip("/")) in ("", ".", "..") for s in sources)
-            if prog == "ditto" or (prog in ("cp", "rsync", "scp") and (
-                    contents or given & {"-T", "--no-target-directory"})):
+            if prog == "ditto" or (prog in ("cp", "rsync", "scp") and contents) or (
+                    prog == "cp" and given & {"-T", "--no-target-directory"}):
                 found.append((target, INTO))
             if prog in ("ln", "mv"):
                 found += [(s, True) for s in sources]
+        if prog == "install" and "-d" in given:
+            found += [(o, False) for o in operands]
     return found
 
 

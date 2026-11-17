@@ -264,7 +264,7 @@ class WritesToAgentConfiguration(Fixture):
                         "cpio -idD ~ < e.cpio", "cpio -i -D ~ < e.cpio", "cpio -i --directory=~ < e.cpio",
                         "cpio -pd ~ < list.txt", "cpio -i --insecure < e.cpio",
                         "rsync -a e/ ~ --exclude x", "rsync -av --exclude .git e/ ~", "rsync -a . ~",
-                        "cp -R . ~", "cp -rT evil ~", "cp -t ~/.claude settings.json", "ditto evil ~ --arch arm64",
+                        "cp -R . ~", "cp -rT evil ~", "install -d ~/.claude/hooks build", "cp -t ~/.claude settings.json", "ditto evil ~ --arch arm64",
                         "7z x -o~ e.7z", "7z X e.7z -O%s" % home, "7z x -spf e.7z", "unar -o ~ e.zip",
                         "cd ~ && jar xf e.jar", "python3 -m zipfile -e e.zip ~", "python3 -m tarfile -e e.tar ~",
                         'tar -xf e.tar -C "$(cat dir.txt)"', 'cd "$(cat dir.txt)" && unzip e.zip'):
@@ -273,7 +273,7 @@ class WritesToAgentConfiguration(Fixture):
         for command in ("tar -xC ~/notes -f e.tar", "tar xCf %s e.tar" % notes, "unzip -qod ~/notes e.zip",
                         "tar -xfC e.tar ~", "unzip -qql e.zip", "cpio -it < e.cpio", "cpio -idD ~/notes < e.cpio",
                         "rsync -a e/ ~/notes --exclude x", "7z l e.7z", "7z x e.7z -o%s" % notes,
-                        "python3 -m zipfile -l e.zip", "UNZIP=-q unzip e.zip -d ~/notes"):
+                        "python3 -m zipfile -l e.zip", "UNZIP=-q unzip e.zip -d ~/notes", "rsync -T /tmp/t src ~"):
             with self.subTest(command=command):
                 self.assertAllowed(self.bash(command), command)
 
