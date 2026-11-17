@@ -54,3 +54,49 @@ Unset the base URL and placeholder, pass the real variable again as today. `cred
 1. WP0 may start. Option B is still Proposed. WP1 onward needs a separate yes.
 2. First version is API-key only. OAuth-token users are out of scope for now. WP0 still notes what happens with an OAuth token, for the record.
 3. A budget or rate limit at the proxy becomes its own follow-up, outside this plan.
+
+## WP0 results
+
+Checked on 17 Nov 2026. This answers the unverified base-URL item in Evidence and baseline. The plan status stays Proposed. Option B stays Proposed. WP1 still needs a separate yes.
+
+- **CLI:** `@anthropic-ai/claude-code` 2.1.326. `claude --version` printed `2.1.326 (Claude Code)`.
+- **OS:** Ubuntu 24.04.5 LTS, Linux 6.12.113+, x86_64.
+- **Isolation:** the CLI and the stub ran in a network namespace with only the loopback interface up. Any other host would fail inside that namespace.
+- **Stub:** stdlib `http.server` on `127.0.0.1:8765`. It logged method, path, and header names. For `x-api-key` and `Authorization` it logged only whether the value equalled the placeholder `sk-ant-placeholder-wp0` (Bearer scheme for `Authorization`). Header values stayed out of the log. `POST /v1/messages` with `stream` true got a short server-sent events reply: text `ok`, stop reason `end_turn`.
+
+Official override and gateway notes, read on the same day:
+
+- `ANTHROPIC_BASE_URL` overrides the API endpoint for a proxy or gateway. https://code.claude.com/docs/en/env-vars
+- `ANTHROPIC_API_KEY` is sent as `X-Api-Key`. `ANTHROPIC_AUTH_TOKEN` is a gateway bearer value, sent as `Authorization: Bearer`. Same page.
+- `CLAUDE_CODE_OAUTH_TOKEN` is a claude.ai token from `claude setup-token`, for scripts and CI. https://code.claude.com/docs/en/authentication
+- How to point Claude Code at a gateway: https://code.claude.com/docs/en/llm-gateway-connect
+- Gateway shape: inference posts to `/v1/messages?beta=true`. Forward `anthropic-version` and `anthropic-beta`. With a claude.ai login and no gateway credential, `Authorization` carries that login. https://code.claude.com/docs/en/llm-gateway-protocol
+
+Commands, placeholder only. Install: `npm install @anthropic-ai/claude-code@2.1.326`. Binary: `node_modules/@anthropic-ai/claude-code/bin/claude.exe`. Each run was `env -i` with `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, `TMPDIR=/tmp`, `TERM=dumb`, plus:
+
+```
+ANTHROPIC_BASE_URL=http://127.0.0.1:8765
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1
+DISABLE_TELEMETRY=1
+DISABLE_AUTOUPDATER=1
+DISABLE_UPDATES=1
+```
+
+Those variables suppress telemetry, updates, and the official marketplace install. The prompt was:
+
+```
+claude -p --output-format text --permission-mode dontAsk --no-session-persistence "Reply with the single word ok."
+```
+
+API-key run added `ANTHROPIC_API_KEY=sk-ant-placeholder-wp0`. OAuth run added `CLAUDE_CODE_OAUTH_TOKEN=sk-ant-placeholder-wp0` and left `ANTHROPIC_API_KEY` unset. Separate empty `HOME` directories. Working directory was an empty temp dir.
+
+**API key.** The override was honoured. The stub saw one request: `POST /v1/messages?beta=true`. Body `stream` was true. Model was `claude-opus-5-5`. The placeholder was in `x-api-key` and matched. `Authorization` was absent. The CLI printed `ok` and exited 0.
+
+Header names, in observed order: `Accept`, `Content-Type`, `User-Agent`, `X-Claude-Code-Session-Id`, `X-Stainless-Arch`, `X-Stainless-Lang`, `X-Stainless-OS`, `X-Stainless-Package-Version`, `X-Stainless-Retry-Count`, `X-Stainless-Runtime`, `X-Stainless-Runtime-Version`, `X-Stainless-Timeout`, `anthropic-beta`, `anthropic-dangerous-direct-browser-access`, `anthropic-version`, `x-api-key`, `x-app`, `Connection`, `Host`, `Accept-Encoding`, `Content-Length`.
+
+**OAuth token, for the record.** The override was honoured for this placeholder. The stub saw one request, same path, `stream` true. Model was `claude-sonnet-5-5`. Header names matched the API-key request, with `Authorization` in place of `x-api-key`. The scheme was Bearer and the token matched the placeholder. `x-api-key` was absent. The CLI printed `ok` and exited 0. The value was the placeholder above. A token from `claude setup-token` was not available. The first version stays API-key only.
+
+Neither run called `/v1/models` or `/v1/messages/count_tokens`. The temp homes did not store the placeholder.
+
+**Verdict: pass.** API-key mode sends the model request through `ANTHROPIC_BASE_URL`, and the credential is in `x-api-key`. WP1 can be proposed.
