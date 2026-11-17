@@ -34,14 +34,16 @@ SAME_AS_DIRECT = ("{c}", "x=$({c})", 'echo "$({c})"', 'echo "$(echo "$({c})")"',
                   "watch -n 5 {q}", "env -S {q}", "bash <<'EOF'\n{c}\nEOF", "bash <<< {q}",
                   "cat <<EOF\nit's $({c})\nEOF", "true && {c}", "{c} | cat", "( {c} )", "({c} )", "{{ {c}; }}",
                   "if FOO=1 {c}; then :; fi", "while false; do {c}; done", "case x in x) {c};; esac",
-                  "f() {{ {c}; }}", "function f {{ {c}; }}", "2>/dev/null {c}", "> /dev/null {c}",
-                  "builtin eval {q}", "noglob {c}", "nocorrect {c}",
+                  "f() {{ {c}; }}", "f () {{ {c}; }}", "function f {{ {c}; }}", "2>/dev/null {c}", "> /dev/null {c}",
+                  "builtin eval {q}", "noglob {c}", "nocorrect {c}", "({c})", "{c}>/dev/null", "({c})2>&1",
+                  "bash<<<{q}",
                   # A quote inside "$(...)" belongs to the substitution, not to the string around it.
                   'echo "$(printf \'"\')"; {c}; echo "$(printf \'"\')"', 'x="$(echo "$(printf \'"\')"; {c})"')
 # Ways of running it that add arguments or commands the harness can't read.
 UNREADABLE = ("echo 7 | xargs {c}", "echo 7 | timeout 60 xargs {c}", "parallel {c} ::: 1",
               "find . -name x -exec {c} ';'", "echo {q} | bash", "echo {q} | env bash", "source <(echo {q})",
-              ". /dev/stdin <<< {q}", "source ./deliver.sh")
+              ". /dev/stdin <<< {q}", "source ./deliver.sh", "sh<deliver.sh", "bash -e<deliver.sh",
+              "(sh)<deliver.sh", "sh <>deliver.sh", "busybox sh<deliver.sh")
 # The gh commands delivery needs, as the deliverer's instructions use them, and gh's own aliases for them.
 DELIVERY_GH = ("gh pr create --base main --title t --body b", "gh pr new --title t --body b", "gh pr edit 7 --body b",
                "gh pr view --json labels", "gh pr checks --watch --fail-fast", "gh pr list --head feat/x", "gh pr ls",

@@ -356,6 +356,9 @@ SPELLINGS = (
     "git -c alias.x='!python3 scripts/harness/lib/harness.py {c}' x",
     "awk 'BEGIN{{system(\"python3 scripts/harness/lib/harness.py {c}\")}}'",
     "python3 <(cat scripts/harness/lib/harness.py) {c}",
+    "python3 scripts/harness/lib/harness.py {c}>/dev/null",
+    "cd scripts/harness/lib && python3<harness.py - {c}",
+    "busybox env python3 scripts/harness/lib/harness.py {c}",
 )
 # Running the engine through code the hooks don't read, or from a copy, whatever the command.
 CODE_AND_COPIES = (
@@ -377,8 +380,10 @@ STDIN_PROGRAMS = ("echo 'print(1)' | python3", "echo 'print(1)' | python3 -", "p
                   "ls *.sh | xargs -n1 bash", "git ls-files | xargs sh -c 'echo $0'", "timeout 9 python3 - < tool.py",
                   "echo ls | sh", "bash -s < cmds.txt", "awk '{system($0)}' cmds.txt", "git config alias.x '!ls'",
                   "git -c core.sshCommand=x fetch origin", "python3 <(cat tool.py)", "source <(cat tool.sh)",
-                  "env -S 'python3 - < tool.py'")
+                  "env -S 'python3 - < tool.py'", "sh<cmds.txt", "sh< cmds.txt", "bash<cmds.txt",
+                  "python3<tool.py", "env sh<cmds.txt", "(sh)<cmds.txt", "busybox sh<cmds.txt", "node<tool.js")
 LITERAL_PROGRAMS = ("python3 - <<'EOF'\nprint(1)\nEOF", "python3 - <<< 'print(1)'", "python3 tools/x.py < input.txt",
+                    "python3 tools/x.py<input.txt", "python3 tools/x.py>log", "sort<input.txt",
                     "cat data.csv | python3 tools/x.py", "python3 --version", "node --version",
                     "git ls-files '*.py' | xargs python3 -m pyflakes", "bash <<'EOF'\necho hi\nEOF",
                     "awk '{print $1}' data.txt", "git -c user.name=x log -1", "git config user.name x",

@@ -1353,9 +1353,10 @@ def describe(hits):
 # and its arguments rather than any text that happens to appear (commit messages, data heredocs).
 
 SQL_CLIENTS = ("psql", "mysql", "mariadb", "sqlite3", "clickhouse-client", "cockroach", "sqlcmd")
-SHELLS = ("sh", "bash", "zsh", "dash", "ksh")
+SHELLS = ("sh", "bash", "zsh", "dash", "ksh", "ash", "hush")
 INTERPRETERS = ("python", "python3", "perl", "ruby", "node")
-WRAPPERS = ("sudo", "env", "time", "nohup", "command", "exec", "nice")
+# busybox runs the applet its first word names: busybox sh f is sh f.
+WRAPPERS = ("sudo", "env", "time", "nohup", "command", "exec", "nice", "busybox")
 MUTATORS = ("rm", "rmdir", "unlink", "mv", "chmod", "chown", "truncate", "tee", "touch")
 # Not <<<, a here-string: the lines after it are commands, not a body.
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
@@ -1413,8 +1414,9 @@ def split_segments(command):
             segments.append(("".join(current), command[i:i + 2]))
             current = []
             i += 1
-        elif ch == "&" and (command[i - 1:i] in (">", "<") or command[i + 1:i + 2] == ">"):
-            current.append(ch)  # a redirection such as 2>&1 or &>file
+        elif (ch == "&" and (command[i - 1:i] in (">", "<") or command[i + 1:i + 2] == ">")) or (
+                ch == "|" and command[i - 1:i] == ">"):
+            current.append(ch)  # a redirection such as 2>&1, &>file or >|file
         elif ch in ";\n|&":
             segments.append(("".join(current), ch))
             current = []
@@ -1425,8 +1427,75 @@ def split_segments(command):
     return [(s, op) for s, op in segments if s.strip()]
 
 
+# What may follow a subshell's ): its redirections, another ), or the end of the segment.
+SUBSHELL_END = re.compile(r"\s*(?:$|[0-9]*[<>]|&>|\))")
+# Longest first. & starts one only before >: anywhere else it ends the command.
+REDIRECT_OPERATORS = ("&>>", "<<<", "<<-", "<<", "<>", "<&", ">&", ">>", ">|", "&>", "<", ">")
+
+
+def operators_apart(segment):
+    """segment with its redirection operators and subshell parentheses set apart from the words around them, as the
+    shell reads them: sh<f is sh, < and f, and echo hi>out is echo, hi, > and out. Digits written against an
+    operator are its file descriptor when they are the whole word (2>f), and part of the word otherwise (a2>f).
+    A subshell's ( goes apart and its ) goes: the redirections after it give the subshell's commands their input,
+    so (sh)<f is sh < f. A case pattern stays one word, ending in ) ((x) cmd is x) cmd), and a function's () is a
+    word of its own. Quotes, backslashes and expansions ($(...), `...`, ${...}, <(...)) stay as they are."""
+    parts, word, quote, closes, i = [], "", None, set(), 0
+    while i < len(segment):
+        ch, end = segment[i], i + 1
+        if quote == "'":
+            quote = None if ch == "'" else quote
+        elif ch == "\\":
+            end = i + 2
+        elif quote == '"' and ch == '"':
+            quote = None
+        elif ch == "`":
+            close = segment.find("`", i + 1)
+            end = len(segment) if close < 0 else close + 1
+        elif segment.startswith("$(", i) or (quote is None and segment.startswith(("<(", ">("), i)):
+            end = closing_paren(segment, i + 1) + 1
+        elif segment.startswith("${", i):
+            close = segment.find("}", i + 2)
+            end = len(segment) if close < 0 else close + 1
+        elif quote:
+            pass
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(" and not word:
+            close = closing_paren(segment, i)
+            if close < len(segment) and not segment[i + 1:close].strip():
+                parts.append(" () ")
+                i = close + 1
+                continue
+            if close == len(segment) or SUBSHELL_END.match(segment, close + 1):
+                closes.add(close)
+                parts.append(" ( ")
+            i = end
+            continue
+        elif ch == ")" and (i in closes or SUBSHELL_END.match(segment, end)):
+            # A ) whose ( is in an earlier segment ((cd x; sh f)) is known by what follows it.
+            parts.append(" ")
+            word, i = "", end
+            continue
+        elif ch.isspace():
+            parts.append(ch)
+            word, i = "", end
+            continue
+        else:
+            op = next((o for o in REDIRECT_OPERATORS if segment.startswith(o, i)), None)
+            if op:
+                descriptor = op[0] in "<>" and re.fullmatch(r"[0-9]+", word)
+                parts.append(("" if not word or descriptor else " ") + op + " ")
+                word, i = "", i + len(op)
+                continue
+        parts.append(segment[i:end])
+        word, i = word + segment[i:end], end
+    return "".join(parts)
+
+
 def shell_words(segment):
     """(leading VAR=value assignments, remaining words), with wrappers such as sudo and env dropped."""
+    segment = operators_apart(segment)
     try:
         words = shlex.split(segment, comments=True)
     except ValueError:
@@ -1441,6 +1510,24 @@ def shell_words(segment):
             return assignments, []
         words = words[1:]
     return assignments, words
+
+
+def past_keywords(words):
+    """words past the shell's keywords and the head of a case item (case x in x)) or a function (f() {, f () {,
+    function f {): the command they run."""
+    while words:
+        if words[0] == "case":
+            words = words[words.index("in") + 1:] if "in" in words else []
+        elif words[0] == "function":
+            words = words[2:]
+        elif words[1:2] == ["()"]:
+            words = words[2:]
+        elif words[0] in SHELL_KEYWORDS or words[0].endswith("()") or (
+                words[0].endswith(")") and "(" not in words[0]):
+            words = words[1:]
+        else:
+            break
+    return words
 
 
 def program(words):
@@ -1787,9 +1874,14 @@ def install_path(path_str, cwd):
     return None
 
 
+# A file a redirection opens for writing, in operators_apart's text. >&1 and >&- duplicate or close a descriptor.
+WRITE_TARGET = re.compile(r"(?:^|\s)([0-9]*(?:>>|>\||>&|<>|>)|&>>?)\s*('[^']*'|\"[^\"]*\"|[^\s;|&<>]+)")
+
+
 def written_paths(segment, words):
     """Paths a segment writes, moves or deletes: redirection targets and mutating programs' operands."""
-    paths = re.findall(r"(?:^|[^<>&0-9])(?:[0-9]?>>?|&>>?)\s*('[^']*'|\"[^\"]*\"|[^\s;|&<>]+)", segment)
+    paths = [target for op, target in WRITE_TARGET.findall(operators_apart(segment))
+             if not (op.endswith(">&") and re.fullmatch(r"[0-9]*-?", target))]
     prog, args = program(words), [w for w in words[1:] if not w.startswith("-")]
     if prog in MUTATORS:
         paths += args
@@ -2314,8 +2406,7 @@ def shell_findings(command, cwd=None, depth=0):
     env, dirs = {}, []   # what the command itself assigns, and pushd's stack
     for index, (segment, op) in enumerate(segments):
         assignments, words = shell_words(segment)
-        while words and words[0] in SHELL_KEYWORDS:
-            words = words[1:]
+        words = past_keywords(words)
         more, run_words = unwrap_runners(words)
         assignments += more
         for assignment in assignments:
@@ -4984,7 +5075,8 @@ def skill_tool_gate(tool_input):
 
 
 UNREADABLE_WORD = re.compile(r"[$`*?\[]|^<\(|^>\(")
-STDIN_SCRIPT = re.compile(r"(?:^|[^<0-9&])0?<(?![<(&])\s*('[^']*'|\"[^\"]*\"|[^\s;|&<>]+)")
+# A file on a command's stdin (< f, 0<f, <>f), in operators_apart's text.
+STDIN_SCRIPT = re.compile(r"(?:^|\s)0?<>?\s+('[^']*'|\"[^\"]*\"|[^\s;|&<>]+)")
 
 
 def shell_arguments(words):
@@ -5115,7 +5207,7 @@ def code_files(segment, words, piped):
     names, reads, _ = command_code(words)
     if program(words).lower() not in SHELLS + INTERPRETERS + ("source", "."):
         return names, False
-    stdin = [m.strip("'\"") for m in STDIN_SCRIPT.findall(segment)]
+    stdin = [m.strip("'\"") for m in STDIN_SCRIPT.findall(operators_apart(segment))]
     names += stdin
     unreadable = any(UNREADABLE_WORD.search(w) for w in names) or "<(" in segment
     if reads and not stdin and producers:
@@ -5897,7 +5989,7 @@ def default_branch():
 
 # The deliverer's gh calls, read as the shell and gh would read them. What the harness can't read is refused.
 RUNNERS = ("timeout", "gtimeout", "nice", "nohup", "stdbuf", "time", "env", "sudo", "doas", "command", "exec",
-           "watch", "ionice", "chronic", "caffeinate", "flock", "setsid", "unbuffer", "script", "su")
+           "watch", "ionice", "chronic", "caffeinate", "flock", "setsid", "unbuffer", "script", "su", "busybox")
 SHELL_KEYWORDS = ("!", "(", ")", "{", "}", "if", "then", "else", "elif", "fi", "do", "done", "while", "until")
 # bash's and zsh's precommand modifiers, which take no options: the command follows them.
 PRECOMMANDS = ("builtin", "noglob", "nocorrect")
@@ -6111,6 +6203,7 @@ def shell_split(text):
 
 def shell_split_marked(text):
     """shell_split's words, each with the unquoted brace and glob characters (GLOB_CHARS) it holds."""
+    text = operators_apart(text)
     words, word, marks, quote, i = [], None, "", None, 0
     while i < len(text):
         ch = text[i]
@@ -6150,7 +6243,7 @@ def run_words(words):
         first = words[0]
         if first == "case":
             words = words[words.index("in") + 1:] if "in" in words else []
-        elif first == "function":
+        elif first == "function" or words[1:2] == ["()"]:
             words = words[2:]
         elif REDIRECTION.match(first):
             words = words[1 + (REDIRECTION.match(first).end() == len(first)):]

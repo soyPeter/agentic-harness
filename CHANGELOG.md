@@ -35,6 +35,19 @@
   destinations are recorded, not checked, and other plugins' bundles, outside the repository, can't be admitted; the
   ADR's implementation notes list what is deferred and why.
 
+- **The shell checks read a redirection written against a word as the shell does.** `sh<f`, `bash<f`,
+  `python3<f`, `env sh<f` and `(sh)<f` ran `f` as a program from stdin, and a revoked bundle's script with it,
+  past the stdin-program rule and the bundle check, because the redirection stayed part of the command's word; so did
+  `harness.py snapshot>/dev/null` past the user-only command check, and `rm AGENTS.md>/dev/null`, `echo x 12>f`,
+  `echo x>|f` and `echo x>&f` past the protected-path check. Commands are now split into words with each redirection
+  operator (`<`, `<<`, `<<<`, `<&`, `<>`, `>`, `>>`, `>|`, `>&`, `&>`, `&>>`, and the descriptor digits written
+  against it) apart from the words around it, in every check that reads command words, the deliverer's gate
+  included; a subshell's redirection gives its commands their input (`(sh)<f`, `(cd d; sh f)`), and `<>f` counts as
+  stdin. `busybox` runs the applet it names (`busybox sh f` is `sh f`; `ash` and `hush` are shells), and a case
+  item's or a function's command (`case x in x) sh f;; esac`, `f () { sh f; }`) is read as the command it is.
+  Everyday commands with attached redirections (`echo hi>out.txt`, `sort<in.txt`, `python3 script.py>log`) stay
+  allowed, and a quoted `>` (`echo 'x>AGENTS.md'`) is no longer taken for a write.
+
 - **Outward events say what ran; a Source heading and a budget word say less.** `outward` events are logged by
   post-tool-use, once the call has run, with `result` (`succeeded`, `failed`, or `unknown` where the agent CLI doesn't
   say: Codex, OpenCode's version 1 API; the OpenCode adapter now passes OpenCode's status), and cover spellings the deliverer's

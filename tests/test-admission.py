@@ -410,6 +410,42 @@ class Admission(unittest.TestCase):
                 result = self.project.hook("pre-tool-use", "Bash", {"command": command})
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_a_redirection_written_against_a_word_is_read_apart_from_it(self):
+        self.project.admit()
+        self.project.revoke(self.project.digest())
+        self.project.commit("fix: revoke vendor-sdk")
+        for command in ("sh<%s", "sh< %s", "bash<%s", "python3<%s", "env sh<%s", "(sh)<%s", "(sh %s)",
+                        "( sh )<%s", "sh 2>/dev/null<%s", "busybox sh %s", "busybox bash %s", "busybox sh<%s",
+                        "/bin/busybox ash %s", "timeout 5 busybox sh %s", "sh <>%s", "python3 0<%s"):
+            with self.subTest(command=command):
+                self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command % SCRIPT}),
+                                   "revoked")
+        for command in ("rm AGENTS.md>/dev/null", "touch CLAUDE.md>/dev/null", "echo x 12>AGENTS.md",
+                        "echo x>|AGENTS.md", "echo x>&AGENTS.md", "echo x &>>AGENTS.md"):
+            with self.subTest(protected=command):
+                self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command}), "Shell writes")
+        for command in ("echo hi>out.txt", "sort<in.txt", "python3 script.py>log", "cat a.txt>>b.txt",
+                        "sh build.sh 2>&1|tee log", "sh build.sh>log 2>&1", "echo 'sh<%s'" % SCRIPT,
+                        "grep -c x<%s" % SCRIPT, "busybox ls", "(cd build && make)>log", "grep '>' AGENTS.md",
+                        "echo 'x>AGENTS.md'", "sh build.sh 2>&-"):
+            with self.subTest(allowed=command):
+                result = self.project.hook("pre-tool-use", "Bash", {"command": command})
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_blocked_bundles_script_does_not_run_from_a_case_item_or_a_function(self):
+        self.project.admit()
+        self.project.revoke(self.project.digest())
+        self.project.commit("fix: revoke vendor-sdk")
+        for command in ("case x in x) sh %s;; esac", "f() { sh %s; }; f", "f () { sh %s; }; f",
+                        "function f { sh %s; }; f", "case x in (x) bash %s;; esac"):
+            with self.subTest(command=command):
+                self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command % SCRIPT}),
+                                   "revoked")
+        for command in ("case x in x) sh build.sh;; esac", "f() { make test; }; f"):
+            with self.subTest(allowed=command):
+                result = self.project.hook("pre-tool-use", "Bash", {"command": command})
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_an_admissions_file_the_harness_cannot_read_blocks_every_project_skill_bundle(self):
         self.project.admit()
         self.project.write(".claude/skills/plain/SKILL.md", SKILL_TEXT.replace("vendor-sdk", "plain"))
