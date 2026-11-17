@@ -1431,6 +1431,62 @@ def short_flags(words):
     return {c for w in words if w.startswith("-") and not w.startswith("--") for c in w[1:]}
 
 
+def parse_options(args, valued="", flags=None, long_valued=(), long_flags=(), old_style=False, clap=False,
+                  abbreviations=False):
+    """(options [(name, value or None)], operands, the indexes of operands that may be an option's value), as
+    getopt_long or clap reads args: bundled short options (-xvf), a short option's value attached (-Cdir; clap also
+    takes -C=dir) or in the next word, --name=value or --name value, options after operands, and -- ending them.
+    old_style: a first word without a dash is bundled options whose values are the next words in order (tar xCf dir
+    file). abbreviations: getopt_long takes a prefix of a long option (--dir for --directory). An operand that follows
+    an option this table doesn't know (not in flags or long_flags; flags None knows no short one) may be its value."""
+    known = tuple(long_valued) + tuple(long_flags)
+    options, operands, maybe, i, open_option = [], [], set(), 0, False
+    if old_style and args and not args[0].startswith("-"):
+        i = 1
+        for letter in args[0]:
+            options.append(("-" + letter, args[i] if letter in valued and i < len(args) else None))
+            i += letter in valued
+    while i < len(args):
+        word, i = args[i], i + 1
+        if word == "--":
+            operands += args[i:]
+            break
+        if word.startswith("--"):
+            name, eq, value = word.partition("=")
+            if abbreviations and name not in known and len(name) > 3:
+                name = next((n for n in known if n.startswith(name)), name)
+            if name in long_valued and not eq:
+                value, i = (args[i] if i < len(args) else ""), i + 1
+            options.append((name, value if eq or name in long_valued else None))
+            open_option = not eq and name not in known
+            continue
+        if word.startswith("-") and word != "-":
+            open_option = True
+            for at, letter in enumerate(word[1:], 2):
+                if letter not in valued:
+                    options.append(("-" + letter, None))
+                    open_option = flags is None or letter not in flags
+                    continue
+                value = word[at:]
+                if clap and value.startswith("="):
+                    value = value[1:]
+                elif not value:
+                    value, i = (args[i] if i < len(args) else ""), i + 1
+                options.append(("-" + letter, value))
+                open_option = False
+                break
+            continue
+        if open_option:
+            maybe.add(len(operands))
+        operands.append(word)
+        open_option = False
+    return options, operands, maybe
+
+
+def option_values(options, *names):
+    return [value for name, value in options if name in names and value is not None]
+
+
 GIT_DIRS = []   # resolved once per process
 
 
@@ -2004,8 +2060,9 @@ def settings_override_problems(value, what):
 
 
 def codex_override_problems(args):
+    options = parse_options(args, valued="c", long_valued=("--config", "--disable", "--enable"), clap=True)[0]
     found = []
-    for value in flag_values(args, "-c", "--config"):
+    for value in option_values(options, "-c", "--config"):
         key, _, raw = (part.strip() for part in value.partition("="))
         key = re.sub(r"[\"'\s]", "", key)
         names = re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*=", raw) + [key.rsplit(".", 1)[-1]]
@@ -2014,9 +2071,9 @@ def codex_override_problems(args):
                 or (key == "allow_managed_hooks_only" and raw != "false") or re.match(r"^projects(?:\.|$)", key) \
                 or (key.startswith("shell_environment_policy") and any(HOOK_ENV_HIJACK.match(n) for n in names)):
             found.append("-c %s" % value)
-    found += ["--disable %s" % v for v in flag_values(args, "--disable") if v in CODEX_HOOK_FEATURES]
+    found += ["--disable %s" % v for v in option_values(options, "--disable") if v in CODEX_HOOK_FEATURES]
     found += ["--ignore-user-config, which drops the project's trust and the plugins"] \
-        if "--ignore-user-config" in args else []
+        if "--ignore-user-config" in [name for name, _ in options] else []
     return found
 
 
@@ -2029,17 +2086,19 @@ def nested_session_findings(words, assignments, env):
     names = {a.split("=", 1)[0] for a in assignments} | set(env)
     found = ["%s set for it" % name for name in sorted(names)
              if HOOK_ENV_HIJACK.match(name) or NESTED_SESSION_ENV.match(name)]
+    options = parse_options(args, long_valued=("--settings", "--setting-sources", "--agents"))[0]
+    given = [name for name, _ in options]
     if cli == "claude":
-        found += [flag for flag in ("--bare", "--safe-mode", "--restricted") if flag in args]
+        found += [flag for flag in ("--bare", "--safe-mode", "--restricted") if flag in given]
         found += ["--setting-sources %s, which leaves out the project's settings" % (value or "''")
-                  for value in flag_values(args, "--setting-sources")
+                  for value in option_values(options, "--setting-sources")
                   if "project" not in [s.strip() for s in value.split(",")]]
         for flag in ("--settings", "--agents"):
-            for value in flag_values(args, flag):
+            for value in option_values(options, flag):
                 found += settings_override_problems(value, flag)
     elif cli == "codex":
         found += codex_override_problems(args)
-    elif "--pure" in args:
+    elif "--pure" in given:
         found.append("--pure, which skips plugins")
     if not found:
         return []
