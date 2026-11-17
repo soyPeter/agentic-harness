@@ -15,7 +15,9 @@ import sys
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(SOURCE_ROOT / "plugin"))
+sys.path.insert(0, str(SOURCE_ROOT / "tools"))
 from launcher import EngineUnavailable, checked, engines_dir, fetch
+import installer
 
 DEFAULT_SOURCE = "https://github.com/soyPeter/agentic-harness.git"
 MARKETPLACE = "agentic-harness"
@@ -27,6 +29,9 @@ SHIM = ".githooks/pre-commit"
 # Project files copied from the pinned release; pin brings them to the new one.
 RELEASE_FILES = ((SHIM, "plugin/pre-commit"),
                  (".github/workflows/harness-verify.yml", "payload/owned/.github/workflows/harness-verify.yml"))
+# The sandbox for unattended runs (ADR-003). Unlike the files above, the user edits it (the allowlist, the toolchain),
+# so pin updates it as update.sh does, by the hashes recorded under "kept".
+SANDBOX = ".devcontainer/harness-agent"
 VERSION = (SOURCE_ROOT / "VERSION").read_text().strip()
 
 
@@ -89,6 +94,35 @@ def release_checkout(version):
         if not isinstance(metadata, dict) or metadata.get("version") != version:
             raise ThinError("release v%s has a mismatched %s version" % (version, name))
     return commit, engine
+
+
+def sandbox_sources(release):
+    """{project path: release file} for the sandbox release ships; none from a release before thin mode had it."""
+    owned = release / "payload/owned"
+    folder = owned / SANDBOX
+    if not folder.is_dir():
+        return {}
+    return {path.relative_to(owned).as_posix(): path for path in sorted(folder.rglob("*"))
+            if path.is_file() and path.name not in installer.IGNORED}
+
+
+def recorded_sandbox(lock):
+    return {rel: digest for rel, digest in (lock.get("kept") or {}).items() if rel.startswith(SANDBOX + "/")}
+
+
+def update_sandbox(root, lock, release):
+    """Brings the sandbox to release, keeping files the user edited; returns the files whose release copy went to
+    <file>.harness-new."""
+    plan = installer.Plan(root, dry_run=False)
+    recorded = recorded_sandbox(lock)
+    digests = installer.sync_owned(plan, sandbox_sources(release), recorded, force=False)
+    kept = lock.setdefault("kept", {})
+    for rel in recorded:
+        kept.pop(rel)
+    kept.update(digests)
+    for action, path, detail in plan.report:
+        print("  %-9s %s%s" % (action, path, "  (%s)" % detail if detail else ""))
+    return [path for action, path, _ in plan.report if action == "CONFLICT"]
 
 
 def root_dir():
@@ -170,8 +204,9 @@ def init(version, name):
     backbone = release / "payload/owned/backbone"
     files = {}
     project_files = set()
-    # What a later update.sh --to-full compares the harness documents with, to tell edited ones apart.
-    harness_docs = {}
+    # What a later update.sh --to-full or pin compares the harness documents and the sandbox with, to tell edited ones
+    # apart.
+    recorded = {}
     for base in (seeds, backbone):
         for path in sorted(base.rglob("*")):
             if not path.is_file():
@@ -193,11 +228,17 @@ def init(version, name):
                 content = text.encode("utf-8")
             files[rel] = content
             if base == backbone:
-                harness_docs[rel.as_posix()] = hashlib.sha256(content).hexdigest()
+                recorded[rel.as_posix()] = hashlib.sha256(content).hexdigest()
     workflow = Path(".github/workflows/harness-verify.yml")
     files[workflow] = (release / "payload/owned" / workflow).read_bytes()
     shim = release / "plugin/pre-commit"
     files[Path(".githooks/pre-commit")] = shim.read_bytes()
+    executable = {Path(SHIM)}
+    for rel, source in sandbox_sources(release).items():
+        files[Path(rel)] = source.read_bytes()
+        recorded[rel] = hashlib.sha256(files[Path(rel)]).hexdigest()
+        if os.access(str(source), os.X_OK):
+            executable.add(Path(rel))
     kept = sorted(str(rel) for rel in project_files if (root / rel).exists())
     for rel, content in files.items():
         path = root / rel
@@ -205,10 +246,10 @@ def init(version, name):
             raise ThinError("%s already exists with different content" % rel)
     for rel, content in files.items():
         if rel not in project_files or not (root / rel).exists():
-            write_new(root, rel, content, executable=rel == Path(".githooks/pre-commit"))
+            write_new(root, rel, content, executable=rel in executable)
     (root / ".claude").mkdir(exist_ok=True)
     (root / ".claude/settings.json").write_text(settings)
-    (root / LOCK).write_text(json.dumps({"mode": "thin", "version": version, "commit": commit, "kept": harness_docs},
+    (root / LOCK).write_text(json.dumps({"mode": "thin", "version": version, "commit": commit, "kept": recorded},
                                         indent=2) + "\n")
     git("config", "core.hooksPath", ".githooks", cwd=root)
     print("Installed thin agentic harness v%s (%s) in %s" % (version, commit, root))
@@ -242,11 +283,14 @@ def pin(version):
         if rel == SHIM:
             path.chmod(0o755)
     (root / ".claude/settings.json").write_text(settings)
-    (root / LOCK).write_text(json.dumps(lock, indent=2) + "\n")
     print("Pinned thin agentic harness to v%s (%s)" % (version, commit))
     if updated:
         print("Updated from the release: %s" % ", ".join(updated))
-    return 0
+    conflicts = update_sandbox(root, lock, release)
+    (root / LOCK).write_text(json.dumps(lock, indent=2) + "\n")
+    if conflicts:
+        print("Merge each <file>.harness-new into the file you edited, then delete it.")
+    return 1 if conflicts else 0
 
 
 def main(argv):

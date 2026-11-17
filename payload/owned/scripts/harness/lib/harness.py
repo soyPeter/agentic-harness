@@ -26,6 +26,7 @@ Usage:
   harness.py contract [--json]                                    (the factory contract versions served, ADR-008)
   harness.py risk <task-id>
   harness.py run [--max-tasks N] [--only <task>] [--worktree [--pr]] [--dry-run]   (autonomous, unattended)
+  harness.py sandbox-approve                                      (trust the sandbox's definition on this machine)
   harness.py report [--days N] [--json | --rules]                 (events: verdicts, gates, rules, lift, candidates)
   harness.py receipt <task-id> [--base <rev>] [--json]            (what the harness can prove about a judged task)
   harness.py delivery-plan <task-id> [--base <branch>] [--pr-labels a,b] [--json]
@@ -143,7 +144,7 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
                   "HARNESS_TESTER", "HARNESS_ACCEPTANCE_PATHS", "HARNESS_ORCA_AGENTS", "HARNESS_ORCA_LAUNCH",
                   "HARNESS_SPEC_MAX_ITEMS", "HARNESS_LIGHT_LANE", "HARNESS_LIGHT_MAX_ITEMS", "HARNESS_LIGHT_MAX_FILES",
                   "HARNESS_REVIEW", "HARNESS_DELIVER", "HARNESS_PROFILE", "HARNESS_REQ_STYLE",
-                  "HARNESS_SANDBOX_BACKEND")
+                  "HARNESS_SANDBOX_BACKEND", "HARNESS_SANDBOX_REQUIRE", "HARNESS_SANDBOX_START")
 # Organisation profiles (HARNESS_PROFILE, user-only). "triple": a supervised pilot where only a human merges, so the
 # coordinator's --merge and --trust and the scheduled backlog run are refused. "no-merge": the same refusals for any
 # organisation, such as an agent factory's lanes (ADR-008), without Triple's catalog pack.
@@ -158,12 +159,16 @@ KNOWLEDGE_PATH_KEYS = ("path", "paths", "note", "notes", "hub", "name", "file", 
 # Paths an agent may change only through the file tools, where the hooks see the change. Shell writes to
 # them are refused: they would skip the gates (task states, approvals, verdicts, settings, skill state).
 SHELL_PROTECTED = (r"^backbone(/|$)", r"^scripts/harness(/|$)", r"^\.claude(/|$)", r"^\.codex(/|$)", r"^\.opencode(/|$)",
-                   r"^(AGENTS|CLAUDE)\.md$", r"^\.githooks(/|$)",
+                   r"^(AGENTS|CLAUDE)\.md$", r"^\.githooks(/|$)", r"^\.devcontainer/harness-agent(/|$)",
                    r"^\.git(/|$)", r"^harness-attest\.pub$")
 # Thin mode (ADR-001): the launcher names the engine cache and the plugin it runs from. They decide the project's gates
 # but lie outside it, beyond the reach of the repository-relative protections.
 INSTALL_DIRS = (("HARNESS_ENGINES", "the harness engine cache"), ("HARNESS_PLUGIN_ROOT", "the harness plugin"))
 INSTALL_SCRIPTS = ("harness.py", "launcher.py", "thin.py")
+# In the sandbox, where thin-engine.py links a thin project's pinned engine as the Claude Code plugin.
+SANDBOX_PLUGIN = "~/.agentic-harness/plugins/agentic-harness"
+# devcontainer up runs parts of the sandbox's definition on the host, so only the user changes or approves it.
+SANDBOX_DEFINITION = ".devcontainer/harness-agent/"
 # Codex and OpenCode plugins can't ship agents, so a thin session start installs the pinned engine's role agents where
 # each CLI loads user-level agents (ADR-001). A file there without this mark is the user's own and is left alone.
 USER_AGENTS = {"codex": (".codex/agents", ".toml", "Codex"), "opencode": (".opencode/agents", ".md", "OpenCode")}
@@ -356,6 +361,8 @@ DEFAULTS = {
     "HARNESS_RUN_MAX_COST": "",
     "HARNESS_TASK_BUDGET_USD": "",
     "HARNESS_SANDBOX_BACKEND": "devcontainer",
+    "HARNESS_SANDBOX_REQUIRE": "auto",
+    "HARNESS_SANDBOX_START": "off",
     "HARNESS_CI_JUDGE_CMD": "claude -p --agent judge --dangerously-skip-permissions --output-format json",
     "HARNESS_SKILL_MAX_AGE": "180",
     "HARNESS_HOOK_SLOW": "5",
@@ -1340,7 +1347,7 @@ MUTATORS = ("rm", "rmdir", "unlink", "mv", "chmod", "chown", "truncate", "tee", 
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 SETTING_ASSIGNMENT = re.compile(r"^(HARNESS_[A-Z0-9_]+|SKIP_BUILD)=")
 PROTECTED_MENTION = re.compile(r"(?:^|[\s'\"/=(:])(backbone/|scripts/harness/|\.claude/|AGENTS\.md|CLAUDE\.md"
-                               r"|\.git/|harness-attest\.pub)")
+                               r"|\.git/|harness-attest\.pub|\.devcontainer/harness-agent)")
 CODE_WRITES = re.compile(r"open\([^)]*,\s*['\"][wax+]|\.write_(text|bytes)\(|\bos\.(remove|unlink|rename|replace|"
                          r"chmod|truncate)\(|\bshutil\.(copy|move|rmtree)|\.(unlink|rename|touch|rmdir)\(|"
                          r"\bfs\.(writeFile|appendFile|unlink|rename|rm|copyFile)|\bFile\.(write|delete|rename)|"
@@ -1740,6 +1747,10 @@ def install_path(path_str, cwd):
         agent = os.path.realpath(str(agent))
         if full == agent or agent.startswith(full.rstrip(os.sep) + os.sep):
             return "the harness's role agents"
+    for private in (sandbox.approvals_file(), sandbox.private_runs()):
+        private = os.path.realpath(str(private))
+        if full == private or full.startswith(private + os.sep) or private.startswith(full.rstrip(os.sep) + os.sep):
+            return "the sandbox definitions approved and brought up on this machine"
     return None
 
 
@@ -1822,7 +1833,7 @@ def code_findings(code, label):
     found = []
     if PROTECTED_MENTION.search(code) and CODE_WRITES.search(code):
         found.append("%s writes to harness-protected paths (backbone/, scripts/harness/, .claude/, git hooks, "
-                     "harness-attest.pub); use the Write/Edit tools so the gates see the change." % label)
+                     "harness-attest.pub, the sandbox's definition); use the Write/Edit tools so the gates see the change." % label)
     if ENGINE_IMPORT.search(code) or (ENGINE_NAME.search(code) and CODE_RUNS.search(code)):
         found.append("%s runs the harness engine from code the hooks don't read; run harness.py itself, with the "
                      "commands agents may run." % label)
@@ -1832,7 +1843,7 @@ def code_findings(code, label):
 # The commands only the user, CI, an agent factory or an Orca automation's precheck runs. Their dry runs (where they
 # have one) change nothing.
 USER_COMMANDS = ("run", "orca", "orca-nightly", "snapshot", "linear", "intake", "delivery-record", "ci-judge",
-                 "ci-protect")
+                 "ci-protect", "sandbox-approve")
 FIND_EXEC = ("-exec", "-execdir", "-ok", "-okdir")
 PLANNING_COMMANDS = ("orca", "orca-nightly", "linear")
 ENGINE_MODULES = ("harness", "launcher", "thin")
@@ -1843,7 +1854,7 @@ CODE_RUNS = re.compile(r"\bexec(?:file)?\s*\(|\bcompile\s*\(|\bimportlib\b|\bsub
                        r"\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\b(?:spawn|exec)Sync\b")
 USER_COMMAND_REFUSAL = ("harness.py %s is for the user, CI, an agent factory or an Orca automation's precheck, not "
                         "agents, however the engine is started: run, orca, orca-nightly, snapshot, linear, intake, "
-                        "delivery-record, ci-judge, ci-protect and pin are theirs.")
+                        "delivery-record, ci-judge, ci-protect, sandbox-approve and pin are theirs.")
 
 
 def engine_script(word):
@@ -2041,7 +2052,10 @@ def shell_findings(command, cwd=None, depth=0):
                              % (path, label))
                 continue
             name = protected_path(path, cwd)
-            if name and (name == ".git" or name.startswith(".git/") or in_git_dir(path, cwd)):
+            if name and name.startswith(SANDBOX_DEFINITION.rstrip("/")):
+                found.append("%s is the sandbox's definition, which runs partly on the host: only the user changes "
+                             "it." % name)
+            elif name and (name == ".git" or name.startswith(".git/") or in_git_dir(path, cwd)):
                 found.append(GIT_DIR_REFUSAL % name)
             elif name:
                 found.append("Shell writes to %s skip the harness gates; change it with the Write or Edit tool "
@@ -3110,11 +3124,78 @@ def start_problems(task):
     return None
 
 
+def sandbox_requirement():
+    """HARNESS_SANDBOX_REQUIRE as it applies here. auto, the default, holds unattended work to the sandbox: schema work
+    needs a container in autonomous mode, and nothing does in supervised mode, where a person approves each step."""
+    value = conf()["HARNESS_SANDBOX_REQUIRE"]
+    if value.strip().lower() == "auto":
+        return "schema=container" if autonomous() else ""
+    return value
+
+
+def sandbox_required(task):
+    """(the isolation class task's Change-Class needs under HARNESS_SANDBOX_REQUIRE, None), or (None, why the setting
+    can't be read)."""
+    return sandbox.required_isolation(sandbox_requirement(), change_class(read(spec_path(task)))[0], CHANGE_CLASSES)
+
+
+def sandbox_refusal(task, evidence, doing, whose, remedy):
+    """Why the sandbox evidence (whose: the sandbox it describes) doesn't allow task's work, or None."""
+    required, invalid = sandbox_required(task)
+    if invalid:
+        return ("Task %s %s: HARNESS_SANDBOX_REQUIRE can't be read (%s); until the user fixes it in "
+                "backbone/harness.conf, no task may start or finish." % (task, doing, invalid))
+    why = sandbox.shortfall(evidence, required)
+    if why is None:
+        return None
+    return ("Task %s %s: Change-Class %s work needs a sandbox of at least %s isolation (HARNESS_SANDBOX_REQUIRE), and "
+            "%s %s. %s, or ask the user to lower HARNESS_SANDBOX_REQUIRE in backbone/harness.conf."
+            % (task, doing, change_class(read(spec_path(task)))[0], required, whose, why, remedy))
+
+
+def sandbox_start_problem(task):
+    """Why task can't start in the sandbox this process runs in, or None. A start is checked where it happens, so CI's
+    verify, which runs elsewhere, never checks it."""
+    return sandbox_refusal(task, sandbox.session_isolation(conf()["HARNESS_SANDBOX_BACKEND"]), "cannot start here",
+                           "this session's sandbox", "Start it inside the .devcontainer/harness-agent/ sandbox "
+                           "(harness.py run brings it up with HARNESS_SANDBOX_START=on)")
+
+
+def sandbox_work_problem(tool, tool_input):
+    """Why this session may not run tool while a [WIP] task needs a sandbox the session lacks, or None. Reads go on;
+    anything that may write or run, a tool without a contract included, waits for that sandbox. A task's own line in
+    3-TASKS.md is the start and finish gates' to judge."""
+    contract = tool_contract(tool)
+    if contract is not None and contract["class"] not in ("write", "exec"):
+        return None
+    if tool in FILE_TOOLS and canonical(rel(tool_input.get("file_path") or "")) == "backbone/3-TASKS.md":
+        return None
+    tasks = wip_task_ids()
+    if not tasks:
+        return None
+    here = sandbox.session_isolation(conf()["HARNESS_SANDBOX_BACKEND"])
+    for task in tasks:
+        refusal = sandbox_refusal(task, here, "is [WIP], so no work on it happens here", "this session's sandbox",
+                                  "Work on it only inside the .devcontainer/harness-agent/ sandbox: stop here and "
+                                  "report it")
+        if refusal:
+            return refusal
+    return None
+
+
+def sandbox_finish_problem(task, judged):
+    """Why the sandbox recorded with the judge pass judged doesn't allow finishing task, or None."""
+    return sandbox_refusal(task, sandbox.normalized(judged.get("sandbox")), "cannot finish", "its judge pass",
+                           "Run the judge again inside the .devcontainer/harness-agent/ sandbox")
+
+
 def start_gate(before, after):
-    """Starting a task requires a valid spec, a current griller pass and the user's approval."""
+    """Starting a task requires a valid spec, a current griller pass and the user's approval, in a sandbox its
+    Change-Class allows."""
     if not gate_on("HARNESS_SPEC_GATE"):
         return None
-    problems = [p for p in (start_problems(task) for task in started_tasks(before, after)) if p]
+    started = started_tasks(before, after)
+    problems = [p for task in started for p in (start_problems(task), sandbox_start_problem(task)) if p]
     return "\n".join("  - " + p for p in problems) if problems else None
 
 
@@ -3141,6 +3222,9 @@ def judge_problems(task, current, max_rounds):
     rederived, why = effective_judge(task, report)
     if rederived != "pass":
         return "The recorded judge pass for task %s does not hold up: %s." % (task, "; ".join(why)[:400])
+    isolated = sandbox_finish_problem(task, last)
+    if isolated:
+        return isolated
     review = review_problems(task, current, max_rounds)
     if review:
         return review
@@ -3835,6 +3919,39 @@ def plugin_mismatch():
             % (plugin, pinned, pinned, plugin))
 
 
+def offered_plugins():
+    """The versions of the agentic-harness plugins CLAUDE_CODE_PLUGIN_DIRS gives Claude Code sessions: each path is a
+    plugin, or a folder whose children are."""
+    found = []
+    for entry in filter(None, os.environ.get("CLAUDE_CODE_PLUGIN_DIRS", "").split(os.pathsep)):
+        path = Path(os.path.expanduser(entry))
+        try:
+            candidates = [path] if (path / ".claude-plugin/plugin.json").is_file() else sorted(path.iterdir())
+        except OSError:
+            continue
+        for plugin in candidates:
+            data = json_file(plugin / ".claude-plugin/plugin.json") or {}
+            if data.get("name") == "agentic-harness":
+                found.append(str(data.get("version") or "unknown"))
+    return found
+
+
+def sandbox_plugin_problem():
+    """Inside the harness-agent image, why a thin project's Claude Code sessions would run without the plugin of the
+    release it pins, or None. There the plugin comes from CLAUDE_CODE_PLUGIN_DIRS (thin-engine.py), not an install;
+    without it a session that skips its permission prompts would run with no harness hooks at all."""
+    info = lock()
+    if not os.environ.get("HARNESS_SANDBOX_IMAGE") or info.get("mode") != "thin":
+        return None
+    pinned, offered = str(info.get("version") or ""), offered_plugins()
+    if offered and set(offered) == {pinned}:
+        return None
+    return ("Claude Code sessions in this sandbox would not load the agentic-harness plugin v%s this project pins "
+            "(CLAUDE_CODE_PLUGIN_DIRS offers %s), so they would run without the harness hooks. Restart the container, "
+            "whose start runs .devcontainer/harness-agent/thin-engine.py to fetch the pinned engine, or run that "
+            "script and read why it failed" % (pinned, ", ".join("v" + v for v in offered) or "none"))
+
+
 def health():
     """List of (level, message) for misconfigurations; level is 'error' or 'warn'."""
     issues = []
@@ -3905,9 +4022,22 @@ def health():
     unusable = sandbox.problem(values["HARNESS_SANDBOX_BACKEND"])
     if unusable:
         issues.append(("error", unusable))
+    _, unreadable = sandbox.required_isolation(sandbox_requirement(), CHANGE_CLASSES[0], CHANGE_CLASSES)
+    if unreadable:
+        issues.append(("error", "HARNESS_SANDBOX_REQUIRE can't be read: %s; no task may start or finish until it is "
+                                "fixed" % unreadable))
     unpublished = sandbox.unpublished_allowlist()
     if unpublished:
         issues.append(("error", unpublished))
+    unplugged = sandbox_plugin_problem()
+    if unplugged:
+        issues.append(("error", unplugged))
+    if values["HARNESS_SANDBOX_START"] not in ("on", "off"):
+        issues.append(("error", "HARNESS_SANDBOX_START must be on or off"))
+    elif values["HARNESS_SANDBOX_START"] == "on":
+        unstartable = sandbox.start_problem(ROOT, sandbox_reference())
+        if unstartable:
+            issues.append(("error", unstartable))
     stale = stale_sandbox_config()
     if stale:
         issues.append(("warn", stale))
@@ -4559,6 +4689,9 @@ def hook_pre_tool_use(data):
         if mismatch:
             deny("Harness blocked this call: %s. In autonomous mode no work runs until they match; stop and report "
                  "it." % mismatch)
+    unsandboxed = sandbox_work_problem(tool, tool_input) if tool != "apply_patch" else None
+    if unsandboxed:
+        deny("Harness blocked this call: %s" % unsandboxed)
     if tool.startswith(KNOWLEDGE_TOOL_PREFIX):
         knowledge_guard(tool, tool_input)
         return
@@ -4613,6 +4746,10 @@ def hook_pre_tool_use(data):
     if path == LOCK_FILE.relative_to(ROOT).as_posix():
         deny("Harness blocked this change to %s: the lock is written by the installer and harness.py adopt only."
              % path)
+    if path.startswith(SANDBOX_DEFINITION):
+        deny("Harness blocked this change to %s: it is the sandbox's definition, and devcontainer up runs parts of it "
+             "on the host (harness.py run, with HARNESS_SANDBOX_START=on). Only the user changes it, and approves the "
+             "change with harness.py sandbox-approve." % path)
     if path == ".githooks/pre-commit" and lock().get("mode") == "thin":
         deny("Harness blocked this change to %s: in thin mode it is the shim that runs the pinned engine's checks, "
              "written by init --thin only." % path)
@@ -7069,6 +7206,72 @@ def trust_problem(command=None):
             "agent commands other than Claude Code." % (ROOT, ROOT))
 
 
+def sandbox_harness_cli(launcher=False):
+    """The harness command inside the project's sandbox: a thin project's engine is the plugin thin-engine.py links
+    there, and its launcher checks the engine is the pinned one."""
+    if not thin_mode():
+        return "python3 scripts/harness/lib/harness.py"
+    return "python3 %s/%s" % (SANDBOX_PLUGIN, "plugin/launcher.py" if launcher else
+                              "payload/owned/scripts/harness/lib/harness.py")
+
+
+def sandbox_reference():
+    """The engine's own copy of the sandbox's definition, when the engine lives outside the project (thin mode): an
+    agent in the sandbox can't write it, so a definition equal to it needs no approval."""
+    folder = ENGINE / SANDBOX_DEFINITION
+    root = os.path.realpath(str(ROOT))
+    engine = os.path.realpath(str(ENGINE))
+    if engine == root or engine.startswith(root + os.sep) or not folder.is_dir():
+        return None
+    return folder
+
+
+def run_backend(values):
+    return sandbox.backend(values["HARNESS_SANDBOX_BACKEND"], start=values["HARNESS_SANDBOX_START"] == "on",
+                           harness=sandbox_harness_cli(launcher=True), reference=sandbox_reference())
+
+
+def sandbox_approve_command(_argv):
+    """The user's command: trust the sandbox's definition, as it is now, for this project on this machine."""
+    folder = ROOT / SANDBOX_DEFINITION
+    if not folder.is_dir():
+        print("sandbox-approve: %s is missing; nothing to approve" % SANDBOX_DEFINITION)
+        return 1
+    unreadable = [name for name, digest in sandbox.definition_files(folder) if digest == sandbox.UNREADABLE]
+    if unreadable:
+        print("sandbox-approve: %s can't be read, so %s can't be approved" % (", ".join(unreadable), SANDBOX_DEFINITION))
+        return 1
+    links = [name for name, digest in sandbox.definition_files(folder) if digest.startswith("symlink:")]
+    if links:
+        print("sandbox-approve: %s is a symlink, and run never trusts one: replace it with the file it points to"
+              % ", ".join(links))
+        return 1
+    digest = sandbox.definition_digest(folder)
+    reference = sandbox_reference()
+    custom = sandbox.custom_reason(folder, reference)
+    print("sandbox-approve: %s of %s is %s:" % (SANDBOX_DEFINITION, ROOT, digest))
+    print("  definition: %s" % ("custom (%s): its judge passes record isolation_class custom, which a "
+                                "HARNESS_SANDBOX_REQUIRE of container refuses" % custom if custom else
+                                "shipped, with only the allowed differences: its judge passes record container"))
+    differs = sandbox.definition_differences(folder, reference) if reference else None
+    for name, file_digest in sandbox.definition_files(folder):
+        note = ""
+        if differs is not None:
+            note = "  (differs from the harness's copy)" if name in differs else "  (as the harness ships it)"
+        print("  %s %s%s" % (file_digest[:19], name, note))
+    sandbox.approve_definition(ROOT, digest)
+    print("Approved on this machine: harness.py run brings up only this definition (HARNESS_SANDBOX_START=on). "
+          "Approve again after you change it, or after an update or pin changes it.")
+    return 0
+
+
+def session_settings():
+    """The harness settings this process's environment sets. Sessions in a sandbox the runner brought up get them too,
+    apart from the agent command, which the sandbox defines."""
+    return {key: os.environ[key] for key in DEFAULTS
+            if key in os.environ and key not in ("HARNESS_AGENT_CMD", "HARNESS_SANDBOX_START")}
+
+
 def dollars(value):
     value = (value or "").strip()
     return float(value) if re.match(r"^\d+(\.\d+)?$", value) else None
@@ -7171,15 +7374,22 @@ def budget_refusal(log_path, code):
     return re.sub(r"\s+", " ", text).strip()[:300] if BUDGET_REFUSAL.search(text) else None
 
 
-def run_agent(prompt, log_path, timeout):
+def run_agent(backend, prompt, log_path, timeout):
+    """(exit code or None, seconds) of one agent session through the backend. Raises sandbox.SandboxError before the
+    session when its sandbox can't be used."""
     values = conf()
-    backend = sandbox.backend(values["HARNESS_SANDBOX_BACKEND"])
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.time()
-    box = backend.create(ROOT)
+    settings = session_settings() if backend.starts_sandbox() else None
+    box = backend.create(ROOT, env=settings)
     try:
+        if box.container:
+            prompt = prompt.replace(harness_cli(), sandbox_harness_cli())
+        if box.isolation:
+            print("run: the session's sandbox is up: isolation_class %s (%s)" % box.isolation)
         with log_path.open("w", encoding="utf-8") as log:
-            code = backend.exec(box, values["HARNESS_AGENT_CMD"], stdin=prompt, log=log, timeout=timeout)
+            code = backend.exec(box, box.agent_command or values["HARNESS_AGENT_CMD"], stdin=prompt, log=log,
+                                timeout=timeout, env=settings)
     finally:
         backend.teardown(box)
     return code, round(time.time() - started, 1)
@@ -7212,7 +7422,15 @@ def run_command(argv):
     if errors:
         print("run: fix the harness first:\n  " + "\n  ".join(errors))
         return 1
-    problem = trust_problem() if not dry_run else None
+    backend = run_backend(values)
+    starting = backend.starts_sandbox()
+    if starting and "--worktree" in argv:
+        print("run: --worktree can't run in the sandbox run brings up (HARNESS_SANDBOX_START=on): a worktree's git "
+              "metadata lives in the main checkout, outside the folder the sandbox mounts. Run without --worktree, or "
+              "start run inside the sandbox")
+        return 1
+    # The sandbox trusts its own workspace (trust-workspace.py).
+    problem = trust_problem() if not dry_run and not starting else None
     if problem:
         print("run: " + problem)
         return 1
@@ -7221,9 +7439,24 @@ def run_command(argv):
         queue = [t for t in queue if t[0] == only]
     if max_tasks:
         queue = queue[:max_tasks]
+    # A session could neither start nor finish such a task: skip it before paying for one. Sessions in a sandbox run
+    # brings up are checked by the gates inside it.
+    unsandboxed = {} if starting else {
+        task: sandbox_refusal(task, sandbox.session_isolation(values["HARNESS_SANDBOX_BACKEND"]), "can't run here",
+                              "the sandbox its sessions would run in",
+                              "Run harness.py run inside the .devcontainer/harness-agent/ sandbox, or set "
+                              "HARNESS_SANDBOX_START=on")
+        for task, _, _ in queue}
+    unsandboxed = {task: why for task, why in unsandboxed.items() if why}
+    queue = [t for t in queue if t[0] not in unsandboxed]
+    for task, why in unsandboxed.items():
+        print("run: %s task %s: %s" % ("would skip" if dry_run else "skipped", task, why))
     if "--worktree" in argv and not dry_run:
-        return run_worktrees(queue, "--pr" in argv)
+        return run_worktrees(queue, "--pr" in argv) or (1 if unsandboxed else 0)
     if dry_run:
+        if starting:
+            print("run: would bring up .devcontainer/harness-agent/ with the devcontainer CLI and run each session in "
+                  "it")
         for task, title, state in queue:
             print("run: would %s task %s: %s" % ("resume" if state == "wip" else "start", task, title))
         return 0
@@ -7238,7 +7471,7 @@ def run_command(argv):
     attempts = int(values["HARNESS_RUN_ATTEMPTS"]) if values["HARNESS_RUN_ATTEMPTS"].isdigit() else 2
     run_dir = events_file().parent / "runs" / time.strftime("%Y%m%d-%H%M%S")
     log_event("run-start", tasks=[t for t, _, _ in queue])
-    summary = []
+    summary = [(task, "sandbox") for task in unsandboxed]
     max_cost = float(values["HARNESS_RUN_MAX_COST"]) if re.match(r"^\d+(\.\d+)?$", values["HARNESS_RUN_MAX_COST"]) else None
     task_budget = dollars(values["HARNESS_TASK_BUDGET_USD"])
     spent = 0.0
@@ -7311,7 +7544,18 @@ def run_command(argv):
                              "permission_denied")
                     outcome = "escalated"
                     break
-            code, seconds = run_agent(prompt, log_path, timeout)
+            try:
+                code, seconds = run_agent(backend, prompt, log_path, timeout)
+            except sandbox.SandboxError as exc:
+                print("run: the sandbox could not start, so no session ran; stopping the run: %s" % exc)
+                log_event("run-sandbox-failed", task=task, error=str(exc)[:800])
+                try:   # no session ran, so the reservation is settled at nothing
+                    write_ledger(task, {"session": session, "attempt": attempt, "cost_usd": 0.0, "turns": 0,
+                                        "log": None})
+                except OSError as ledger_error:
+                    log_event("run-ledger", task=task, error=str(ledger_error))
+                outcome = "sandbox-failed"
+                break
             cost, turns = session_usage(log_path)
             try:
                 write_ledger(task, {"session": session, "attempt": attempt, "cost_usd": cost, "turns": turns,
@@ -7400,7 +7644,7 @@ def run_command(argv):
                 outcome = "escalated"
         summary.append((task, outcome))
         task_lock_release(task)
-        if outcome in ("halted", "agent-failed", "cap-hit"):
+        if outcome in ("halted", "agent-failed", "cap-hit", "sandbox-failed"):
             break
     log_event("run-end", summary=summary)
     for task, outcome in summary:
@@ -8276,6 +8520,7 @@ def receipt_data(task, base=None, code=None):
         "rounds": {"grill": len(grills), "judge": len(judge), "debug": len(verdict_history(task, "debug"))},
         "judged_at": passed.get("at"),
         "sandbox": sandbox.normalized(passed.get("sandbox")),
+        "sandbox_required": receipt_sandbox_required(task, passed),
         "approval": approval_lines(approval_section(spec_text) or ""),
         "approval_needed": approval_needed,
         "cost": receipt_cost(task),
@@ -8284,7 +8529,20 @@ def receipt_data(task, base=None, code=None):
     return data, None
 
 
-def sandbox_lines(evidence):
+def receipt_sandbox_required(task, passed):
+    """The isolation class task's Change-Class needs, and whether the sandbox recorded with its judge pass has it."""
+    return {"isolation_class": sandbox_required(task)[0], "met": sandbox_finish_problem(task, passed) is None}
+
+
+def sandbox_lines(evidence, change_class_name, required):
+    lines = sandbox_evidence_lines(evidence)
+    lines.append("required for Change-Class %s (HARNESS_SANDBOX_REQUIRE): %s; %s" % (
+        change_class_name, required["isolation_class"] or "the setting can't be read", "met" if required["met"]
+        else "NOT met"))
+    return lines
+
+
+def sandbox_evidence_lines(evidence):
     if not evidence:
         return ["not recorded: the judge pass predates sandbox evidence (ADR-003); judge the task again to record it"]
     evidence = sandbox.normalized(evidence)
@@ -8292,12 +8550,32 @@ def sandbox_lines(evidence):
     if evidence.get("isolation_class") == "none":
         reason = evidence.get("isolation_reason")
         lines.append("nothing isolated the session from the host" + (": %s" % reason if reason else ""))
+    elif evidence.get("isolation_class") == "custom":
+        lines.append("custom sandbox: %s" % evidence.get("isolation_reason"))
     elif evidence.get("allowlist_hash") == "none":
         lines.append("container without an allowlist: no egress allowlist was published, so its outbound traffic is "
                      "not limited")
     if str(evidence.get("allowlist_hash", "")).startswith("sha256:"):
         lines.append("allowlist_hash covers host names only, not the addresses they resolve to or the GitHub ranges "
                      "init-firewall.sh adds")
+    if evidence.get("isolation_class") != "none":
+        lines.extend(egress_denial_lines(evidence.get("egress_denials")))
+    return lines
+
+
+def egress_denial_lines(denials):
+    if not isinstance(denials, dict):
+        return ["egress denials: not logged (the egress container predates its denial log)"]
+    count = denials.get("count")
+    lines = ["egress denials since the egress container started (%s): %s%s, logged in %s (%s)" % (
+        sandbox.printable(denials.get("since") or "unknown"), count if isinstance(count, int) and count else "none",
+        " or more (the log stopped at its limit)" if denials.get("truncated") else "",
+        sandbox.printable(denials.get("log")), sandbox.printable(denials.get("log_sha256")))]
+    top = [entry for entry in denials.get("top") or [] if isinstance(entry, dict)]
+    if top:
+        lines.append("denied: " + "; ".join("%s (%s) x%s" % (
+            sandbox.printable(entry.get("target")), sandbox.printable(entry.get("kind"), 20),
+            entry.get("count") if isinstance(entry.get("count"), int) else "?") for entry in top))
     return lines
 
 
@@ -8332,7 +8610,8 @@ def receipt_text(d):
         lines.append("  backbone: %s" % ", ".join(c["path"] for c in d["backbone_changed"]))
     sections = (("VERIFIED (judge pass %s, re-checked by the harness)" % d["judged_at"], d["verified"]),
                 ("NOT VERIFIED", d["not_verified"] or ["nothing outside the acceptance criteria"]),
-                ("SANDBOX (where the judge pass was recorded)", sandbox_lines(d["sandbox"])),
+                ("SANDBOX (where the judge pass was recorded)", sandbox_lines(d["sandbox"], d["change_class"],
+                                                                              d["sandbox_required"])),
                 ("COST (the runner's agent sessions for this task)", cost_lines(d.get("cost"))),
                 ("DECISIONS", ["follows %s" % a for a in d["decisions"]["governing_adrs"]] +
                  ["ADR changed: %s" % a for a in d["decisions"]["adrs_changed"]] +
@@ -9430,6 +9709,8 @@ def main(argv):
         return contract_command(argv[2:])
     if argv[1:2] == ["run"]:
         return run_command(argv[2:])
+    if argv[1:2] == ["sandbox-approve"]:
+        return sandbox_approve_command(argv[2:])
     if argv[1:2] == ["state"]:
         return state_command(argv[2:])
     if argv[1:2] == ["orca"]:

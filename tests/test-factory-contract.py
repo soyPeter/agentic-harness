@@ -317,7 +317,7 @@ if (api === 'v1') {
 # The commands only the user, CI, the factory or an Orca precheck runs, with the arguments they need.
 USER_ONLY = ("run --only 1.1", "linear import DIS-1 --task 9.1", "linear receipt 7.1", "intake request.json",
              "delivery-record 7.1 report.json", "snapshot", "orca --pr", "orca-nightly", "ci-judge --range a..b",
-             "ci-protect", "pin 0.31.0")
+             "ci-protect", "pin 0.31.0", "sandbox-approve")
 # Every way an agent could start the engine with one of them: {c} is the command.
 SPELLINGS = (
     "python3 scripts/harness/lib/harness.py {c}",

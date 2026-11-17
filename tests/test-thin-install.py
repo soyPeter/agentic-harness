@@ -8,10 +8,25 @@ import subprocess
 import tempfile
 import unittest
 
+from hypothesis_profiles import examples
+
+try:
+    from hypothesis import given, settings, strategies as st
+except ImportError:
+    given = None
+
 
 ROOT = Path(__file__).resolve().parents[1]
 ENGINE = ROOT / "payload/owned/scripts/harness/lib/harness.py"
 LAUNCHER = ROOT / "plugin/launcher.py"
+SANDBOX = ".devcontainer/harness-agent"
+# Where a value the shipped definition lets the user change starts; it runs to the end of that line.
+ALLOWED_VALUE_AFTER = {"docker-compose.yml": b"HARNESS_FIREWALL_ALLOW: ", "Dockerfile": b"ARG HARNESS_SANDBOX_IMAGE=",
+                       "devcontainer.json": b'"workspaceFolder": '}
+
+
+def sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 class ThinInstall(unittest.TestCase):
@@ -59,8 +74,9 @@ class ThinInstall(unittest.TestCase):
             data["version"] = version
             path.write_text(json.dumps(data, indent=2) + "\n")
 
-    def run_at(self, cwd, *args, check=True):
-        result = subprocess.run(args, cwd=cwd, env=self.env, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    def run_at(self, cwd, *args, check=True, env=None):
+        result = subprocess.run(args, cwd=cwd, env=env or self.env, stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True)
         if check:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
@@ -73,11 +89,13 @@ class ThinInstall(unittest.TestCase):
         lock_path = self.project / "backbone/.harness-lock.json"
         lock = json.loads(lock_path.read_text())
         harness_docs = ROOT / "payload/owned/backbone"
+        sandbox = ROOT / "payload/owned" / SANDBOX
+        kept = {"backbone/" + path.relative_to(harness_docs).as_posix(): sha256(path)
+                for path in sorted(harness_docs.rglob("*")) if path.is_file()}
+        kept.update({"%s/%s" % (SANDBOX, path.name): sha256(path) for path in sandbox.iterdir()})
         self.assertEqual(lock, {"mode": "thin", "version": "0.30.0",
                                 "commit": self.run_at(self.source, "git", "rev-parse", "v0.30.0").stdout.strip(),
-                                "kept": {"backbone/" + path.relative_to(harness_docs).as_posix():
-                                         hashlib.sha256(path.read_bytes()).hexdigest()
-                                         for path in sorted(harness_docs.rglob("*")) if path.is_file()}})
+                                "kept": kept})
         self.assertFalse((self.project / "scripts/harness").exists())
         self.assertFalse((self.project / "AGENTS.md").exists())
         self.assertNotIn("@AGENTS.md", (self.project / "CLAUDE.md").read_text())
@@ -438,6 +456,229 @@ console.log(JSON.stringify(texts));
         self.assertTrue((self.project / ".githooks/pre-commit").stat().st_mode & 0o111)
         self.assertEqual((self.project / ".github/workflows/harness-verify.yml").read_text(), workflow.read_text())
         self.assertIn(".githooks/pre-commit", result.stdout)
+
+
+    def release_sandbox(self, version, changed=()):
+        """Release v<version> with each named sandbox file changed; returns the release's sandbox folder."""
+        folder = self.source / "payload/owned" / SANDBOX
+        for name in changed:
+            path = folder / name
+            path.write_text(path.read_text() + "# %s\n" % version)
+        self.set_release_version(version)
+        self.run_at(self.source, "git", "add", "-A")
+        self.run_at(self.source, "git", "commit", "-qm", "release " + version)
+        self.run_at(self.source, "git", "tag", "v" + version)
+        return folder
+
+    def edit_allowlist(self):
+        """The project's docker-compose.yml with an extra allowlisted host, as a user sets it."""
+        compose = self.project / SANDBOX / "docker-compose.yml"
+        compose.write_text(compose.read_text().replace('HARNESS_FIREWALL_ALLOW: ""', 'HARNESS_FIREWALL_ALLOW: "pypi.org"'))
+        return compose
+
+    def test_init_installs_the_sandbox_of_the_pinned_release(self):
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+
+        release = self.work / "cache/0.30.0/payload/owned" / SANDBOX
+        kept = json.loads((self.project / "backbone/.harness-lock.json").read_text())["kept"]
+        for source in sorted(release.iterdir()):
+            installed = self.project / SANDBOX / source.name
+            with self.subTest(name=source.name):
+                self.assertEqual(installed.read_bytes(), source.read_bytes())
+                self.assertEqual(os.access(str(installed), os.X_OK), os.access(str(source), os.X_OK))
+                self.assertEqual(kept["%s/%s" % (SANDBOX, source.name)], sha256(source))
+        self.assertTrue((self.project / SANDBOX / "thin-engine.py").is_file())
+
+    def test_pin_updates_the_sandbox_files_nobody_edited_and_keeps_an_edited_one(self):
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        compose = self.edit_allowlist()
+        release = self.release_sandbox("0.30.2", changed=("Dockerfile", "docker-compose.yml"))
+
+        result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "pin", "0.30.2", check=False)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual((self.project / SANDBOX / "Dockerfile").read_bytes(), (release / "Dockerfile").read_bytes())
+        self.assertIn('HARNESS_FIREWALL_ALLOW: "pypi.org"', compose.read_text())
+        self.assertEqual((self.project / SANDBOX / "docker-compose.yml.harness-new").read_bytes(),
+                         (release / "docker-compose.yml").read_bytes())
+        self.assertIn("CONFLICT", result.stdout)
+        self.assertIn("docker-compose.yml.harness-new", result.stdout)
+        self.assertEqual(json.loads((self.project / "backbone/.harness-lock.json").read_text())["version"], "0.30.2")
+
+    def test_pin_keeps_an_edited_sandbox_file_the_release_did_not_change(self):
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        compose = self.edit_allowlist()
+
+        result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "pin", "0.30.1")
+
+        self.assertIn('HARNESS_FIREWALL_ALLOW: "pypi.org"', compose.read_text())
+        self.assertFalse((self.project / SANDBOX / "docker-compose.yml.harness-new").exists())
+        self.assertNotIn("CONFLICT", result.stdout)
+
+    def test_pin_adds_the_sandbox_to_a_project_pinned_before_thin_mode_had_it(self):
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        shutil.rmtree(str(self.project / ".devcontainer"))
+        lock_path = self.project / "backbone/.harness-lock.json"
+        lock = json.loads(lock_path.read_text())
+        lock["kept"] = {name: digest for name, digest in lock["kept"].items() if not name.startswith(SANDBOX)}
+        lock_path.write_text(json.dumps(lock, indent=2) + "\n")
+
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "pin", "0.30.1")
+
+        self.assertTrue((self.project / SANDBOX / "docker-compose.yml").is_file())
+        self.assertIn(SANDBOX + "/docker-compose.yml", json.loads(lock_path.read_text())["kept"])
+
+    def test_doctor_in_the_sandbox_needs_claude_code_to_load_the_pinned_plugin(self):
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        image = dict(self.env, HARNESS_SANDBOX_IMAGE="node@sha256:" + "a" * 64)
+        image.pop("CLAUDE_CODE_PLUGIN_DIRS", None)
+        pinned, other, empty = self.work / "plugins", self.work / "other-plugins", self.work / "no-plugins"
+        for folder in (pinned, other, empty):
+            folder.mkdir()
+        (pinned / "agentic-harness").symlink_to(self.work / "cache/0.30.0")
+        (other / "agentic-harness").symlink_to(self.source)
+
+        def doctor(plugin_dirs=None, inside=True):
+            env = dict(image if inside else self.env)
+            if plugin_dirs is not None:
+                env["CLAUDE_CODE_PLUGIN_DIRS"] = plugin_dirs
+            result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "doctor", env=env, check=False)
+            return result.stdout + result.stderr
+
+        missing = "Claude Code sessions in this sandbox would not load the agentic-harness plugin v0.30.0"
+        self.assertIn(missing, doctor())
+        self.assertIn("thin-engine.py", doctor())
+        self.assertNotIn(missing, doctor(str(pinned)))
+        self.assertNotIn(missing, doctor("%s:%s" % (empty, self.work / "cache/0.30.0")))
+        self.assertIn("v0.30.1", doctor(str(other)))
+        self.assertIn(missing, doctor("%s:%s" % (other, pinned)))
+        self.assertNotIn(missing, doctor(inside=False))
+        unreadable = self.work / "unreadable-plugins"
+        unreadable.mkdir(mode=0)
+        self.addCleanup(unreadable.chmod, 0o755)
+        self.assertNotIn(missing, doctor("%s:%s" % (unreadable, pinned)))
+        self.assertNotIn("Traceback", doctor("%s:%s" % (unreadable, pinned)))
+
+    def test_run_trusts_the_pinned_releases_own_sandbox_its_allowed_edits_and_an_approved_one(self):
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        stubs = self.work / "stubs"
+        stubs.mkdir()
+        for name in ("devcontainer", "docker"):
+            (stubs / name).write_text("#!/bin/sh\nexit 0\n")
+            (stubs / name).chmod(0o755)
+        env = dict(self.env, HARNESS_SANDBOX_START="on", PATH="%s:%s" % (stubs, self.env["PATH"]),
+                   HOME=str(self.work / "home"))
+
+        def doctor():
+            return self.run_at(self.project, "python3", "-B", str(LAUNCHER), "doctor", env=env, check=False).stdout
+
+        as_released = doctor()
+        self.edit_allowlist()
+        allowlisted = doctor()
+        dockerfile = self.project / SANDBOX / "Dockerfile"
+        dockerfile.write_text(dockerfile.read_text() + "RUN true\n")
+        edited = doctor()
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "sandbox-approve", env=env)
+        approved = doctor()
+
+        self.assertNotIn("sandbox-approve", as_released)
+        self.assertNotIn("sandbox-approve", allowlisted)
+        self.assertIn("sandbox-approve", edited)
+        self.assertNotIn("sandbox-approve", approved)
+
+    def test_only_the_shipped_definition_with_its_allowed_differences_counts_as_a_container(self):
+        """The release's own definition, byte for byte, with only the allowlist, resource limits, the base image's tag
+        or digest and a workspace subfolder changed, is the sandbox a judge pass may call a container; anything else
+        is custom, which runs once approved but records isolation_class custom."""
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        folder = self.project / SANDBOX
+        compose, config, dockerfile = (folder / "docker-compose.yml", folder / "devcontainer.json",
+                                       folder / "Dockerfile")
+        agent, egress = "  agent:\n    build: .\n", "  egress:\n    build: .\n"
+        image = "ARG HARNESS_SANDBOX_IMAGE=node:22-bookworm@sha256:"
+        cases = (   # (file, old, new, the class sandbox-approve names)
+            (compose, None, None, "shipped"),
+            (compose, 'HARNESS_FIREWALL_ALLOW: ""', 'HARNESS_FIREWALL_ALLOW: "pypi.org repo.maven.apache.org"', "shipped"),
+            (dockerfile, image, "ARG HARNESS_SANDBOX_IMAGE=node:22-bookworm-slim@sha256:", "shipped"),
+            (dockerfile, "\nFROM", " \nFROM", "custom"),
+            (dockerfile, image, "ARG HARNESS_SANDBOX_IMAGE=docker.io/library/node:22-bookworm@sha256:", "custom"),
+            (dockerfile, image, "ARG HARNESS_SANDBOX_IMAGE=ghcr.io/someone/node:22-bookworm@sha256:", "custom"),
+            (dockerfile, image, "ARG HARNESS_SANDBOX_IMAGE=node-evil:22-bookworm@sha256:", "custom"),
+            (config, '"workspaceFolder": "/workspace"', '"workspaceFolder": "/workspace/app"', "shipped"),
+            (config, '"workspaceFolder": "/workspace"', '"workspaceFolder": "/workspace/../etc"', "custom"),
+            (compose, agent, agent + "    mem_limit: 4g\n    cpus: 2\n    pids_limit: 512\n", "shipped"),
+            (compose, egress, egress + '    mem_limit: "512m"\n', "shipped"),
+            (compose, agent, agent + "    mem_limit: 4g # and more\n", "custom"),
+            (compose, agent, agent + "    cpus: 2\n    cpus: 2\n", "custom"),
+            (compose, "    cap_drop: [NET_ADMIN, NET_RAW]\n", "    cap_drop: [NET_ADMIN, NET_RAW]\n    cpus: 2\n",
+             "custom"),
+            # The agent command decides what runs in the container, the harness's hooks included.
+            (compose, "HARNESS_AGENT_CMD: claude -p --dangerously-skip-permissions --output-format json",
+             "HARNESS_AGENT_CMD: codex exec --dangerously-bypass-hook-trust", "custom"),
+            # Docker splits a Dockerfile only on \n: with a form feed, the COPY is part of the comment above it.
+            (dockerfile, "\nCOPY managed-settings.json", "\fCOPY managed-settings.json", "custom"),
+            (dockerfile, "USER agent\n", "USER agent\r\n", "custom"),
+            (compose, 'HARNESS_FIREWALL_ALLOW: ""', 'HARNESS_FIREWALL_ALLOW: ""\r    privileged: true', "custom"),
+            (compose, 'HARNESS_FIREWALL_ALLOW: ""', "HARNESS_FIREWALL_ALLOW: ~", "custom"),
+            (config, '"name": "harness-agent"', '"name":  "harness-agent"', "custom"),
+            (compose, agent, agent + "    privileged: true\n", "custom"),
+            (compose, agent, agent + "    env_file: [/etc/hosts]\n", "custom"),
+            (compose, "      - ../..:/workspace:cached\n",
+             "      - ../..:/workspace:cached\n      - /var/run:/host-run\n", "custom"),
+            (compose, "    network_mode: service:egress\n", "    network_mode: container:other\n", "custom"),
+            (compose, '    security_opt: ["no-new-privileges:true"]',
+             '    security_opt: ["no-new-privileges:true", "seccomp=unconfined.json"]', "custom"),
+            (config, '"name"', '"features": {"ghcr.io/devcontainers/features/docker-in-docker:2": {}}, "name"', "custom"),
+            (config, '"name"', '"appPort": [8080], "name"', "custom"),
+            (config, '"workspaceFolder": "/workspace"', '"workspaceFolder": "/elsewhere"', "custom"),
+            (dockerfile, "USER agent\n", "USER agent\nRUN true\n", "custom"),
+            (folder / "egress.py", "LOG = ", "LOG = LOG_PATH = ", "custom"),
+        )
+        for path, old, new, expected in cases:
+            kept = path.read_bytes()
+            with self.subTest(file=path.name, change=new):
+                if old is not None:
+                    self.assertIn(old.encode(), kept)
+                    path.write_bytes(kept.replace(old.encode(), new.encode(), 1))
+                approved = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "sandbox-approve",
+                                       env=dict(self.env, HOME=str(self.work / "home")))
+
+                self.assertIn("definition: %s" % expected, approved.stdout)
+            path.write_bytes(kept)
+        extra = folder / "notes.txt"
+        extra.write_text("an extra file\n")
+        approved = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "sandbox-approve",
+                               env=dict(self.env, HOME=str(self.work / "home")))
+        self.assertIn("definition: custom", approved.stdout)
+        self.assertIn("notes.txt", approved.stdout)
+
+    if given is not None:
+        @settings(max_examples=examples(80), deadline=None)
+        @given(data=st.data(), name=st.sampled_from(sorted(p.name for p in (ROOT / "payload/owned" / SANDBOX).iterdir())),
+               change=st.sampled_from(("replace", "insert", "delete")))
+        def test_any_byte_changed_outside_the_allowed_values_makes_the_definition_custom(self, data, name, change):
+            if not (self.project / SANDBOX).is_dir():
+                self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+            path = self.project / SANDBOX / name
+            shipped = path.read_bytes()
+            prefix = ALLOWED_VALUE_AFTER.get(name)
+            start = shipped.index(prefix) + len(prefix) if prefix else len(shipped) + 1
+            end = shipped.index(b"\n", start) if prefix else start
+            last = len(shipped) if change == "insert" else len(shipped) - 1
+            at = data.draw(st.integers(0, last).filter(lambda i: not start <= i <= end if change == "insert"
+                                                       else not start <= i < end), label="at")
+            byte = bytes([data.draw(st.integers(0, 255).filter(lambda b: change != "replace" or b != shipped[at]),
+                                    label="byte")])
+            changed = {"replace": shipped[:at] + byte + shipped[at + 1:], "insert": shipped[:at] + byte + shipped[at:],
+                       "delete": shipped[:at] + shipped[at + 1:]}[change]
+            path.write_bytes(changed)
+            try:
+                approved = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "sandbox-approve",
+                                       env=dict(self.env, HOME=str(self.work / "home")), check=False)
+            finally:
+                path.write_bytes(shipped)
+
+            self.assertIn("definition: custom", approved.stdout, approved.stdout + approved.stderr)
 
 
 if __name__ == "__main__":
