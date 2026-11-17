@@ -44,6 +44,9 @@ class Profiles(unittest.TestCase):
                "tool_name": "mcp__github__merge_pull_request", "tool_input": {"pullNumber": 7}}
         return {
             "gh pr merge": self.p.bash("gh pr merge 7 --squash", "implementer", env=env).returncode == 2,
+            "gh pr merge behind runners": self.p.bash("timeout -s KILL 60 nice -n 5 gh pr merge 7", "implementer",
+                                                      env=env).returncode == 2,
+            "gh pr merge after -R": self.p.bash("gh pr -R o/r merge 7", "implementer", env=env).returncode == 2,
             "merge API": self.p.bash("gh api -X PUT repos/o/r/pulls/7/merge", "implementer", env=env).returncode == 2,
             "merge tool": self.p.hook("pre-tool-use", mcp, env=env).returncode == 2,
             "orca --merge": REFUSAL in self.p.harness("orca", "--merge", check=False, env=env).stdout,

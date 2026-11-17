@@ -1,5 +1,7 @@
 # Proposed plan: qualify design challenge and agent-readable onboarding
 
+Decision record: [ADR-010](../adr/ADR-010-design-challenge-agent-onboarding.md). The plan retains its recorded decisions, work packages and evidence.
+
 - **Status:** Proposed; no implementation or agent launch authorized.
 - **Date:** 2026-11-08 (Europe/Madrid).
 - **Repository:** `soyPeter/agentic-harness`.

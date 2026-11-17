@@ -3,7 +3,7 @@
 - **Status:** Proposed — not accepted, not implemented, and not permission to change any gate, hook, runner or test.
 - **Date:** 2026-11-09 (Europe/Madrid).
 - **Target repository:** https://github.com/soyPeter/agentic-harness
-- **Location:** `docs/research/2026-11-task-dependency-gate-plan.md` (implementation plan under existing decisions; not an ADR, because it extends an existing gate to a rule the coordinator already applies, without a new architectural boundary).
+- **Location:** `docs/research/2026-11-task-dependency-gate-plan.md`. Work packages and evidence remain here; the decision is recorded in [ADR-017](../adr/ADR-017-task-dependency-gate.md).
 - **Decision authority (proposed role, unassigned):** repository maintainer; PR merge stays with the user as today.
 - **Related:** `payload/owned/backbone/HOOKS.md` (Orca queue, start gate); `payload/owned/backbone/8-WORKFLOW.md` step 7; `payload/owned/AGENTS.md` sections 4 and 7; [ADR-002](../adr/ADR-002-change-class-ladder.md). Does not depend on [ADR-007](../adr/ADR-007-evidence-closed-loop.md) or [ADR-006](../adr/ADR-006-external-agent-resource-admission.md).
 

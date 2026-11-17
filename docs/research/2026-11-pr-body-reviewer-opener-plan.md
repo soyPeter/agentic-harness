@@ -3,7 +3,7 @@
 - **Status:** Proposed — not accepted, not implemented, and not permission to change the deliverer or any hook.
 - **Date:** 2026-11-09 (Europe/Madrid).
 - **Target repository:** https://github.com/soyPeter/agentic-harness
-- **Location:** `docs/research/2026-11-pr-body-reviewer-opener-plan.md` (implementation plan under existing decisions; not an ADR, because it changes PR presentation, not an architectural boundary).
+- **Location:** `docs/research/2026-11-pr-body-reviewer-opener-plan.md`. Work packages and evidence remain here; the decision is recorded in [ADR-014](../adr/ADR-014-pr-body-reviewer-opener.md).
 - **Decision authority (proposed role, unassigned):** repository maintainer; merge stays with the user as today.
 - **Related:** README "Change receipt"; `payload/owned/backbone/HOOKS.md` sections "Deliverer" and "Change receipt"; `payload/owned/backbone/8-WORKFLOW.md` step 15; [ADR-002](../adr/ADR-002-change-class-ladder.md) (risk labels); [ADR-005](../adr/ADR-005-verdict-attestations.md) (Proposed).
 

@@ -39,7 +39,7 @@ Check the state at any time with `python3 scripts/harness/lib/harness.py spec-ch
 ### Phase 4: Record and finish
 
 12. **Scribe:** "Record task `<id>`." It adds memory entries and ADRs for emergent decisions.
-13. **Finish:** change the task line to `[x]`. The judge gate requires a judge pass and a pass from every review lens on the current code. Then commit the code, tests, spec, ADRs, verdicts and backbone updates together.
+13. **Finish:** change the task line to `[x]`. The judge gate requires a judge pass and a pass from every review lens on the current code and spec, and the start gate's checks hold again: a spec that changed during the build was grilled and approved again. Then commit the code, tests, spec, ADRs, verdicts and backbone updates together.
 14. **Report** to the user with the task's change receipt: `python3 scripts/harness/lib/harness.py receipt <id>`. The harness builds it from the spec, the verdicts and the diff, not from what the agents said: what changed, each AC with the tests that prove it, what is **not** verified (NFRs no AC covers, findings left open), the ADRs and assumptions, the risks, and what still needs the user's decision. Add anything skipped that it can't know.
 
 ### Phase 5: Deliver

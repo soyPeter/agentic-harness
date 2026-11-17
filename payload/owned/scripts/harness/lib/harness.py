@@ -17,9 +17,16 @@ Usage:
   harness.py adopt <pack>[,<pack>] --adr ADR-NNN --with <opts> --without <opts> [--dry-run]
   harness.py adopt --remove <pack>[,<pack>] [--dry-run]
   harness.py verify [--range <base>..<tip>] [--allow-user-changes]   (gates on the staged change, or a CI range)
-  harness.py attest --range <base>..<tip> [--allow-user-changes]     (in-toto statement of a verified range, ADR-005)
+  harness.py attest --range <base>..<tip> [--allow-user-changes [--pull-request <n>]]
+                                                                  (in-toto statement of a verified range, ADR-005)
+  harness.py attest verify <statement> <bundle> (--key <key> | --certificate-identity <id> --certificate-oidc-issuer
+             <url>) (--commit <id> | --tree <id>)... [--type <uri>]... [--require NAME=VALUE]... [--accept-user-changes]
+                                                                  (a signed statement: cosign, then a policy)
+  harness.py attest policy <statement> (--commit <id> | --tree <id>)... [...]   (the policy alone, no signature)
   harness.py environment-check <environment.json> <policies.json> <branch>   (CI: the attest environment's rule, ADR-005)
   harness.py repository-check <secrets.json> <variables.json>    (CI: no repository-level attest secrets, ADR-005)
+  harness.py approval-check <pulls.json> <base>..<tip> <branch>   (CI: the merged pull request's approval, ADR-005)
+  harness.py signing-check <commit> <true|false>                  (CI: the attest job's signing mode, ADR-005)
   harness.py approve <task-id>                                    (autonomous mode: policy approval of a low-risk spec)
   harness.py escalate <task-id> --reason <text> [--kind <k>] [--class <failure class>] [--needed <text>]
   harness.py escalations [--json]                                 (open escalations for the user)
@@ -48,6 +55,7 @@ Usage:
                                                                   (the harness-attest environment: default branch only)
   harness.py doctor
 """
+import base64
 import fnmatch
 import glob
 import hashlib
@@ -148,7 +156,8 @@ USER_ONLY_KEYS = ("HARNESS_SPEC_GATE", "HARNESS_SKILL_GATE", "HARNESS_JUDGE_GATE
                   "HARNESS_TESTER", "HARNESS_ACCEPTANCE_PATHS", "HARNESS_ORCA_AGENTS", "HARNESS_ORCA_LAUNCH",
                   "HARNESS_SPEC_MAX_ITEMS", "HARNESS_LIGHT_LANE", "HARNESS_LIGHT_MAX_ITEMS", "HARNESS_LIGHT_MAX_FILES",
                   "HARNESS_REVIEW", "HARNESS_DELIVER", "HARNESS_PROFILE", "HARNESS_REQ_STYLE",
-                  "HARNESS_SANDBOX_BACKEND")
+                  "HARNESS_SANDBOX_BACKEND", "HARNESS_ATTEST_SIGNING", "HARNESS_ATTEST_KMS_KEY",
+                  "HARNESS_ATTEST_KMS_IDENTITY")
 # Organisation profiles (HARNESS_PROFILE, user-only). "triple": a supervised pilot where only a human merges, so the
 # coordinator's --merge and --trust and the scheduled backlog run are refused. "no-merge": the same refusals for any
 # organisation, such as an agent factory's lanes (ADR-008), without Triple's catalog pack.
@@ -717,15 +726,22 @@ def approval_start(text):
     return m.start() if m else len(text)
 
 
-def without_approval(text):
-    """text outside its Approval section: what the grill fingerprint covers and approval freezes."""
-    return without_section(text, "Approval")
-
-
 def frozen_text(text):
-    """What the grill fingerprint covers and the freeze keeps: the spec outside its Approval section, or all of it when a
-    reader could read its sections differently, since then no section can be trusted."""
-    return text if spec_reading_problem(text) else without_approval(text)
+    """What the grill fingerprint covers and the freeze keeps: the spec without its Approved-by lines, or all of it when
+    a reader could read its sections differently, since then no section can be trusted. The rest of the Approval
+    section counts: the template puts it last, so a criterion appended to a spec lands there."""
+    if spec_reading_problem(text):
+        return text
+    view = outline(text)
+    bounds = section_bounds(view, "Approval")
+    if bounds is None:
+        return text
+    words = comment_free(text)
+    # Comments and blank lines are left out with the Approved-by lines, so a spec whose Approval section holds nothing
+    # else keeps the fingerprint it had when the whole section was left out: an upgrade doesn't stale its grill pass.
+    kept = [line for line, shown, said in zip(*(t[bounds[1]:bounds[2]].splitlines(True) for t in (text, view, words)))
+            if not APPROVAL_LINE.match(shown) and not blank_line(said)]
+    return text[:bounds[0]] + (text[bounds[0]:bounds[1]] + "".join(kept) if kept else "") + text[bounds[2]:]
 
 
 def approval_section(text):
@@ -1021,8 +1037,8 @@ def ears_problems(req, text):
 def change_class(text):
     """(class, declared, problem) from the spec's Change-Class: line. Without one the spec counts as feature;
     a value that isn't exactly one class, or two different values, is a problem and counts as feature too."""
-    # Not from the Approval section, where agents may still write once the spec is approved, nor from a code block or
-    # comment, where the line is an example.
+    # Not from the Approval section, which holds the user's approval, nor from a code block or comment, where the line
+    # is an example.
     values = [v.strip() for v in CHANGE_CLASS_LINE.findall(without_section(text, "Approval", view=outline(text)))]
     distinct = sorted({v.lower() for v in values})
     if reading_problem(text):   # a reader may take a line for code or a heading, so no class in it can be trusted
@@ -1106,7 +1122,7 @@ def validate_spec(task, text=None):
 
 
 def spec_fingerprint(task, text=None):
-    """Hash of the spec (without its Approval section) and of every ADR it references."""
+    """Hash of the spec (frozen_text: without its Approved-by lines) and of every ADR it references."""
     text = read(spec_path(task)) if text is None else text
     digest = hashlib.sha256(frozen_text(text).encode("utf-8"))
     for adr in spec_adrs(text):
@@ -1347,7 +1363,44 @@ def describe(hits):
 SQL_CLIENTS = ("psql", "mysql", "mariadb", "sqlite3", "clickhouse-client", "cockroach", "sqlcmd")
 SHELLS = ("sh", "bash", "zsh", "dash", "ksh")
 INTERPRETERS = ("python", "python3", "perl", "ruby", "node")
-WRAPPERS = ("sudo", "env", "time", "nohup", "command", "exec", "nice")
+# Runners: programs that run the command after their own options and operands. {name: (short options that take a
+# value, long options that take a value, operands before the command)}; a long option's value may also follow =.
+RUNNER_OPTIONS = {
+    "timeout": ("sk", ("--signal", "--kill-after"), 1),
+    "gtimeout": ("sk", ("--signal", "--kill-after"), 1),
+    "stdbuf": ("ioe", ("--input", "--output", "--error"), 0),
+    "caffeinate": ("tw", (), 0),
+    "nice": ("n", ("--adjustment",), 0),
+    "ionice": ("cnpPu", ("--class", "--classdata", "--pid", "--pgid", "--uid"), 0),
+    "chrt": ("TPD", ("--sched-runtime", "--sched-period", "--sched-deadline"), 1),
+    "taskset": ("", (), 1),
+    "nohup": ("", (), 0),
+    "setsid": ("", (), 0),
+    "time": ("fo", ("--format", "--output"), 0),
+    "command": ("", (), 0),
+    "builtin": ("", (), 0),
+    "noglob": ("", (), 0),
+    "nocorrect": ("", (), 0),
+    "exec": ("a", (), 0),
+    "env": ("uCPS", ("--unset", "--chdir", "--split-string"), 0),
+    "sudo": ("ugCDhprtTUR", ("--user", "--group", "--close-from", "--chdir", "--host", "--prompt", "--role", "--type",
+                            "--command-timeout", "--other-user", "--chroot"), 0),
+    "doas": ("uC", (), 0),
+    "unbuffer": ("", (), 0),
+    "script": ("tcEoTIOBm", ("--command", "--echo", "--log-out", "--log-in", "--log-io", "--log-timing",
+                            "--logging-format", "--output-limit"), 1),
+    "xvfb-run": ("efnpsw", ("--error-file", "--auth-file", "--server-num", "--xauth-protocol", "--server-args",
+                           "--wait"), 0),
+    "flock": ("Ewc", ("--conflict-exit-code", "--wait", "--timeout", "--command"), 1),
+    "chronic": ("", (), 0),
+    "watch": ("n", ("--interval",), 0),
+    "su": ("csgGw", ("--command", "--session-command", "--shell", "--group", "--supp-group",
+                     "--whitelist-environment"), 1),
+}
+RUNNERS = tuple(RUNNER_OPTIONS)
+# The options whose value is a command line the runner hands to a shell (watch hands it all of its command's words).
+RUNNER_LINES = {"env": ("-S", "--split-string"), "script": ("-c", "--command"), "flock": ("-c", "--command"),
+                "su": ("-c", "--command", "--session-command")}
 MUTATORS = ("rm", "rmdir", "unlink", "mv", "chmod", "chown", "truncate", "tee", "touch")
 # Not <<<, a here-string: the lines after it are commands, not a body.
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
@@ -1437,20 +1490,78 @@ def lexed(segment, punctuation=False, comments=False):
 
 
 def shell_words(segment):
-    """(leading VAR=value assignments, remaining words), with wrappers such as sudo and env dropped."""
-    try:
-        words = lexed(segment, comments=True)
-    except ValueError:
-        words = segment.split()
+    """(leading VAR=value assignments, the words of the command the segment runs): keywords, function heads and
+    runners such as sudo -u x, env -i or timeout 60 dropped (unwrapped)."""
+    assignments, words = unwrapped(shell_split(segment))
+    if words[:1] == ["export"] and len(words) > 1:
+        return assignments + [w for w in words[1:] if "=" in w], []
+    return assignments, words
+
+
+def runner_split(words):
+    """(the VAR=value words it sets, the index of the command words, the command line it hands a shell or None) for
+    words that start with a runner named by name or by a system path: past its options and the operands it takes
+    first (timeout's duration, flock's lock file). None for any other command."""
+    name = program(words)
+    if name not in RUNNER_OPTIONS or ("/" in words[0] and
+                                      not os.path.realpath(words[0]).startswith(SYSTEM_PREFIXES)):
+        return None
+    shorts, longs, operands = RUNNER_OPTIONS[name]
+    lines = RUNNER_LINES.get(name, ())
+    assignments, line, i, ended = [], None, 1, False
+    while i < len(words):
+        word = words[i]
+        if not ended and word == "--":
+            ended = True
+        elif not ended and word == "-" and name in ("env", "su"):
+            pass
+        elif not ended and word.startswith("--"):
+            option, eq, value = word.partition("=")
+            if option in longs and not eq:
+                i += 1
+                value = words[i] if i < len(words) else ""
+            line = value if option in lines else line
+        elif not ended and word.startswith("-") and len(word) > 1:
+            for at in range(1, len(word)):
+                if word[at] in shorts:
+                    value = word[at + 1:]
+                    if not value:
+                        i += 1
+                        value = words[i] if i < len(words) else ""
+                    line = value if "-" + word[at] in lines else line
+                    break
+        elif name in ("env", "sudo") and ASSIGNMENT.match(word):
+            assignments.append(word)
+        elif operands:
+            operands -= 1
+        else:
+            break
+        i += 1
+    if name == "watch" and i < len(words):
+        line = " ".join(words[i:])
+    elif name == "env" and line is not None and i < len(words):
+        line = " ".join([line] + [shlex.quote(w) for w in words[i:]])
+    return assignments, i, line
+
+
+def unwrapped(words):
+    """(the VAR=value words before the command, the words of the command): shell keywords, function heads, assignments
+    and runners dropped, nested ones too. A runner that hands a shell a command line (env -S, script -c, flock -c, su
+    -c, watch) runs sh -c '<line>'."""
     assignments = []
-    while words and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]) or words[0] in WRAPPERS
-                     or (words[0] == "export" and len(words) > 1)):
-        if words[0] != "export" and "=" in words[0] and not words[0].startswith("-"):
+    while words:
+        words = command_words(words)
+        if words and ASSIGNMENT.match(words[0]):
             assignments.append(words[0])
-        elif words[0] == "export":
-            assignments.extend(w for w in words[1:] if "=" in w)
-            return assignments, []
-        words = words[1:]
+            words = words[1:]
+            continue
+        split = runner_split(words) if words else None
+        if split is None:
+            break
+        assignments += split[0]
+        if split[2] is not None:
+            return assignments, ["sh", "-c", split[2]]
+        words = words[split[1]:]
     return assignments, words
 
 
@@ -1594,6 +1705,227 @@ def assigned_value(value, env):
             value = re.sub(r"\$(?:\{%s\}|%s(?![A-Za-z0-9_]))" % (re.escape(name), re.escape(name)),
                            lambda _: known, value)
     return value
+
+
+ASSIGNED = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\+?)=(.*)$", re.S)
+SHELL_VARIABLE = re.compile(r"\$(?:\{([^}]*)\}|([A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-]))")
+DECLARATIONS = ("export", "local", "declare", "typeset", "readonly")
+
+
+def positional_env(args):
+    """The variables set -- args, or a function called with args, gives its commands: $@ and $* (a list, one path per
+    argument), $# and $1 to $9; an argument the hooks can't know stays as written, so a path from it is unresolved."""
+    env = {"@": list(args), "*": list(args), "#": str(len(args))}
+    env.update((str(n), args[n - 1] if n <= len(args) else "") for n in range(1, 10))
+    return env
+
+
+def note_shell_state(segment, env):
+    """Records in env what a segment sets for the commands after it: assignments (export, local and declare too), a
+    loop's list, read's variables (unknown) and set's positional parameters. Returns whether that is all it does."""
+    words = command_words(shell_split(segment))
+    if not words:
+        return True
+    declared = words[1:] if words[0] in DECLARATIONS else words
+    if all(ASSIGNED.match(w) for w in declared):
+        for word in declared:
+            name, append, value = ASSIGNED.match(word).groups()
+            env[name] = None if append else assigned_value(value, env)
+        return True
+    if words[0] in DECLARATIONS:
+        for word in words[1:]:
+            match = ASSIGNED.match(word)
+            if match:
+                env[match.group(1)] = None
+        return True
+    if words[0] in ("for", "select") and words[2:3] == ["in"]:
+        items = words[3:]
+        env[words[1]] = None if any(re.search(r"\$\(|`", w) for w in items) else items
+        return True
+    if words[0] == "read":
+        env.update((name, None) for name in words[1:] if not name.startswith("-"))
+        return False
+    if words[0] == "set":
+        args, i = words[1:], 0
+        while i < len(args) and args[i][:1] in "-+" and args[i] != "--":
+            i += 2 if args[i][1:] and args[i].endswith("o") else 1
+        if i < len(args):
+            args = args[i + (args[i] == "--"):]
+            env.update(positional_env([w if re.search(r"[$`]", w) is None else "$(unknown)" for w in args]))
+        return True
+    return False
+
+
+def resolved_texts(text, env):
+    """The texts a word can be once the shell expands its variables (its quotes already removed), or None when it holds
+    an expansion the hooks can't resolve to text: a command substitution, $'...', or a variable the command doesn't
+    set to text. A loop variable gives one text per item; a name the command doesn't set is read from the
+    environment."""
+    if re.search(r"\$[('\"]|`", text):
+        return None
+    texts = [text]
+    for m in reversed(list(SHELL_VARIABLE.finditer(text))):
+        name = m.group(1) if m.group(1) is not None else m.group(2)
+        if name in env:
+            value = env[name]
+        else:
+            value = os.environ.get(name) if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) else None
+        if isinstance(value, list):
+            items = [" ".join(value)] if name in ("@", "*") else value
+        else:
+            items = [value]
+        if any(item is None or re.search(r"[$`]", item) for item in items) or len(texts) * len(items) > 64:
+            return None
+        texts = [t[:m.start()] + item + t[m.end():] for t in texts for item in items]
+    return texts
+
+
+LITERAL_MARKS = {"$": "\x00", "`": "\x01"}
+
+
+def literal_marked(text):
+    """text with each $ and ` the shell leaves as written (in single quotes, or escaped) replaced by a mark, so that
+    after quote removal the $ and ` left are the ones the shell expands. unmarked() puts them back."""
+    out, quote, i = [], None, 0
+    while i < len(text):
+        ch = text[i]
+        if quote == "'":
+            out.append(LITERAL_MARKS.get(ch, ch))
+            quote = None if ch == "'" else quote
+        elif ch == "\\" and text[i + 1:i + 2] in LITERAL_MARKS:
+            out.append(LITERAL_MARKS[text[i + 1]])
+            i += 1
+        elif ch == "\\":
+            out.append(text[i:i + 2])
+            i += 1
+        else:
+            out.append(ch)
+            if ch == '"':
+                quote = None if quote else '"'
+            elif ch == "'" and quote is None:
+                quote = "'"
+        i += 1
+    return "".join(out)
+
+
+def unmarked(text):
+    for ch, mark in LITERAL_MARKS.items():
+        text = text.replace(mark, ch)
+    return text
+
+
+FUNCTION_HEAD = re.compile(r"\s*(?:(?:then|do|else|!)\s+|[{(]\s*)*(?:function\s+([^\s(){}<>;&|]+)(?:\s*\(\s*\))?"
+                           r"|([^\s(){}<>;&|=$`'\"]+)\s*\(\s*\))\s*")
+FUNCTION_WORD = re.compile(r"^[^\s(){}<>;&|=$`'\"]+\(\)[({]?(.*)$", re.S)
+
+
+def function_bodies(command):
+    """{name: body} for each function command defines: name() { ...; }, name() ( ... ), function name { ...; }. The
+    body is None when it is another compound command (if, while...) or isn't closed: the hooks don't read it."""
+    found, pos = {}, 0
+    for segment, _ in split_segments(command):
+        start = command.find(segment, pos)
+        pos = start + len(segment)
+        m = FUNCTION_HEAD.match(segment)
+        if not m:
+            continue
+        at = start + m.end()
+        opening = command[at:at + 1]
+        end = closing_paren(command, at, "{}" if opening == "{" else "()") if opening and opening in "{(" else None
+        found[m.group(1) or m.group(2)] = command[at + 1:end] if end is not None and end < len(command) else None
+    return found
+
+
+def command_words(words):
+    """The words of the command a segment runs: shell keywords and a function definition's head (f() {, function f
+    {) dropped, so a function's body is checked as the commands it is."""
+    while words:
+        head = FUNCTION_WORD.match(words[0])
+        if words[0] in SHELL_KEYWORDS:
+            words = words[1:]
+        elif words[0] == "function" and len(words) > 1:
+            words = words[2:]
+            words = words[1:] if words[:1] == ["()"] else words[2:] if words[:2] == ["(", ")"] else words
+        elif head:
+            words = ([head.group(1)] if head.group(1) else []) + words[1:]
+        elif words[1:2] == ["()"] or words[1:3] == ["(", ")"]:
+            words = words[2 if words[1] == "()" else 3:]
+        else:
+            break
+    return words
+
+
+def literal_program(word):
+    """Whether the program a command word names is literal text after its last expansion: a path such as
+    "$(git rev-parse --show-toplevel)"/tools/x.sh or $VENV/bin/pytest names its program, x.sh or pytest."""
+    end, i = 0, 0
+    while i < len(word):
+        if word.startswith("$(", i):
+            i = closing_paren(word, i + 1)
+            end = i + 1
+        elif word[i] == "`":
+            close = word.find("`", i + 1)
+            i = len(word) if close < 0 else close
+            end = i + 1
+        elif word[i] == "$":
+            match = SHELL_VARIABLE.match(word, i)
+            i = match.end() - 1 if match else i
+            end = i + 1
+        i += 1
+    tail = word[end:]
+    return "/" in tail and bool(tail.rsplit("/", 1)[1])
+
+
+def command_variants(words, env):
+    """The word lists a command can run once the shell expands its command word with the variables the command sets
+    (one per loop item), runners dropped again; None when the command word holds an expansion the hooks can't resolve
+    to text and the program's own name isn't literal (see literal_program)."""
+    done, pending = [], [words]
+    for _ in range(3):
+        later = []
+        for item in pending:
+            if not item or not re.search(r"[$`]", item[0]):
+                done.append(item)
+                continue
+            texts = resolved_texts(item[0], env)
+            if texts is None:
+                if not literal_program(item[0]):
+                    return None
+                done.append(item)
+                continue
+            later += [unwrapped(text.split() + item[1:])[1] for text in texts]
+        pending = later
+    return done + pending
+
+
+HIDDEN_PROGRAM_REFUSAL = ("%s runs a program from a command substitution or a variable the hooks can't resolve to "
+                          "text, which they can't read: write the commands out.")
+HIDDEN_COMMAND_REFUSAL = ("It runs %s, a command named by a command substitution or a variable the hooks can't resolve "
+                          "to text, which they can't read: write the command out.")
+# Words that start a command that writes files or runs one: after an unknown program's options, such a word may be the
+# command that program runs (taskset 3 rm ..., a runner the hooks don't know).
+COMMAND_STARTS = MUTATORS + SHELLS + INTERPRETERS + RUNNERS + ("eval", "fish", "git", "gh", "dd", "shred", "find",
+                                                               "xargs", "parallel", "ln", "link", "cp", "install",
+                                                               "rsync", "ditto")
+# Programs whose arguments are text, patterns or files, never a command they run.
+TEXT_PROGRAMS = ("echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "cat", "ls", "head", "tail", "wc",
+                 "less", "more", "jq", "yq", "sort", "uniq", "diff", "cmp", "tr", "cut", "test", "[", "[[",
+                 "basename", "dirname", "realpath", "readlink", "which", "type", "whereis", "man", "file", "stat",
+                 "du", "df", "printenv", "cd", "pushd", "popd", "read", "set", "unset", "shift", "export", "local",
+                 "declare", "typeset", "readonly", "alias", "unalias", "hash", "sleep", "kill", "wait", "true",
+                 "false", ":", "source", ".", "trap")
+
+
+def runs_unknown_runner(words):
+    """The index where the command an unknown program may run starts (taskset 3 rm ..., /tmp/timeout 5 sh -c ...),
+    or None. A runner reaching here is one by a path outside the system's, which may be anything."""
+    prog = program(words)
+    if prog in TEXT_PROGRAMS + CODE_PROGRAMS or is_runtime(prog) or (prog in COMMAND_STARTS and prog not in RUNNERS):
+        return None
+    return next((j for j in range(1, len(words)) if program([words[j]]) in COMMAND_STARTS or is_runtime(words[j])
+                 or engine_script(words[j])), None)
+FUNCTION_REFUSAL = ("It calls %s, a function whose body the hooks can't read, or that calls functions deeper than they "
+                    "follow: define it as %s() { ...; }, or write its commands out.")
 
 
 def reaches_git_dir(full):
@@ -1819,8 +2151,8 @@ def written_paths(segment, words):
     elif prog in ("sed", "gsed", "perl") and any(w.startswith("-i") or w.startswith("-pi") or w == "--in-place"
                                                 for w in words[1:]):
         paths += args[1:]
-    elif prog == "git" and len(words) > 1 and words[1] in ("rm", "mv"):
-        paths += [w for w in words[2:] if not w.startswith("-")]
+    elif git_subcommand(words) in ("rm", "mv"):
+        paths += [w for w in words[git_options(words)[1] + 1:] if not w.startswith("-")]
     return [p.strip("'\"") for p in paths]
 
 
@@ -1837,13 +2169,14 @@ def git_command_config(words):
     """Why a git call sets a command for git to run, or None: -c, --config-env or git config with an alias that starts
     with ! or a key whose value git runs (core.sshCommand, core.pager, credential helpers, filters...)."""
     pairs = []
-    for i, word in enumerate(words[1:], 1):
-        if word == "-c" and i + 1 < len(words):
-            pairs.append(words[i + 1].partition("=")[::2])
-        elif word.startswith("--config-env"):
-            pairs.append((word.split("=", 1)[-1].partition("=")[0], "!"))
+    options, at = git_options(words)
+    for name, value in options:
+        if name == "-c":
+            pairs.append(value.partition("=")[::2])
+        elif name == "--config-env":
+            pairs.append((value.partition("=")[0], "!"))
     if git_subcommand(words) == "config":
-        rest = [w for w in words[words.index("config") + 1:] if not w.startswith("-")]
+        rest = [w for w in words[at + 1:] if not w.startswith("-")]
         if len(rest) >= 2 and not any(w in GIT_CONFIG_READS for w in words):
             pairs.append((rest[0], rest[1]))
     for key, value in pairs:
@@ -1854,14 +2187,12 @@ def git_command_config(words):
 
 
 def git_findings(words):
-    args = words[1:]
-    while args and args[0].startswith("-"):
-        if args[0] == "-c" and len(args) > 1 and args[1].lower().startswith("core.hookspath"):
-            return ["git -c core.hooksPath=... turns off the harness git hooks."]
-        args = args[2:] if args[0] in ("-c", "-C") else args[1:]
-    if not args:
+    options, at = git_options(words)
+    if any(name in ("-c", "--config-env") and value.lower().startswith("core.hookspath") for name, value in options):
+        return ["git -c core.hooksPath=... turns off the harness git hooks."]
+    if at >= len(words):
         return []
-    sub, rest = args[0], args[1:]
+    sub, rest = words[at], words[at + 1:]
     found = []
     if sub == "commit" and "n" in short_flags(rest):
         found.append("git commit -n is --no-verify: it skips the harness git hooks; fix what the hook reports instead.")
@@ -2047,105 +2378,146 @@ def engine_findings(prog, words, written):
     return []
 
 
-def shell_findings(command, cwd=None, depth=0):
-    """Blocking problems with a shell command, beyond the @bash guardrail rules."""
+def names_protected(words, cwd, env):
+    """Whether words name a harness-protected path, the git directory, the harness's install or the engine, or a path
+    the hooks can't resolve: what an unknown runner's command is checked for (brew install node names none)."""
+    for word in words:
+        if (PROTECTED_MENTION.search(word) or GIT_DIR_HINT.search(word) or ENGINE_NAME.search(word)
+                or ENGINE_IMPORT.search(word) or engine_script(word) or word in ENGINE_MODULES + ("runpy",)):
+            return True
+        if word.startswith("-"):
+            continue
+        fulls, unresolved = shell_path(word, cwd, env)
+        if unresolved or any(protected_path(full, cwd) or install_path(full, cwd) for full in fulls):
+            return True
+    return False
+
+
+def trap_action(words):
+    """The commands a trap runs (trap 'rm -f "$T"' EXIT), or None when it only lists, resets or names signals."""
+    i = 1
+    while i < len(words) and words[i].startswith("-") and words[i] != "-":
+        i += 1
+        if words[i - 1] == "--":
+            break
+    rest = words[i:]
+    return rest[0] if len(rest) >= 2 and rest[0] != "-" else None
+
+
+def segment_findings(found, segment, op, words, index, segments, cwd, dirs, depth, env, functions):
+    """Adds to found the problems with one command of a segment (words, its command word expanded); returns the
+    directory the commands after it run in."""
+    prog = program(words)
+    if prog in ("cd", "pushd"):
+        target = next((w for w in words[1:] if not w.startswith("-")), os.path.expanduser("~"))
+        fulls, unresolved = shell_path(target, cwd, env)
+        if prog == "pushd":
+            dirs.append(cwd)
+        cwd = UNKNOWN_DIR if unresolved or len(fulls) != 1 else fulls[0]
+        return cwd
+    if prog == "popd":
+        cwd = dirs.pop() if dirs else UNKNOWN_DIR
+        return cwd
+    if prog in functions:
+        if functions[prog] is None or depth >= 3:
+            found.append(FUNCTION_REFUSAL % (prog, prog))
+        else:
+            args = [(resolved_texts(w, env) or [w])[0] if re.search(r"[$`]", w) else w for w in words[1:]]
+            found.extend(shell_findings(functions[prog], cwd, depth + 1, dict(env, **positional_env(args)),
+                                        functions))
+    producer = shell_words(segments[index - 1][0])[1] if index > 0 and segments[index - 1][1] == "|" else None
+    found.extend(engine_findings(prog, words, written_paths(segment, words)))
+    script = next((i for i, w in enumerate(words) if engine_script(w)), None)
+    refusal = eval_out_refusal(words, script, cwd) if script is not None else None
+    if refusal:
+        found.append(refusal)
+    found.extend(program_findings(prog, words, producer, cwd, env))
+    found.extend(git_dir_findings(prog, words, segment, cwd, env))
+    for path in dict.fromkeys(full for written in written_paths(segment, words)
+                              for full in shell_path(written, cwd, env)[0]):
+        label = install_path(path, cwd)
+        if label:
+            found.append("%s is in %s, which decides this project's gates; agents may not change it."
+                         % (path, label))
+            continue
+        name = protected_path(path, cwd)
+        if name and (name == ".git" or name.startswith(".git/") or in_git_dir(path, cwd)):
+            found.append(GIT_DIR_REFUSAL % name)
+        elif name:
+            found.append("Shell writes to %s skip the harness gates; change it with the Write or Edit tool "
+                         "(or not at all, for verdicts and user-only settings)." % name)
+    if prog == "git":
+        found.extend(git_findings(words))
+        configured = git_command_config(words)
+        if configured:
+            found.append(configured)
+    elif prog in ("awk", "gawk", "mawk", "nawk") and AWK_RUNS.search(segment):
+        found.append("awk runs a command (system(), or a pipe to or from one), which the hooks can't read; run the "
+                     "command itself.")
+    elif prog in ("source", ".") and (len(words) < 2 or script_operand(["sh"] + words[1:]) == ""):
+        found.append("%s runs commands from stdin or a process substitution, which the hooks can't read; source a "
+                     "file." % prog)
+    elif prog == "gh" and profile() in NO_MERGE_PROFILES and (
+            gh_parts(words)[:2] == ("pr", "merge")
+            or (gh_parts(words)[0] == "api" and any(MERGE_ENDPOINT.search(w) for w in words))):
+        found.append("Merging is refused under HARNESS_PROFILE=%s: only a human merges, on GitHub." % profile())
+    elif prog == "find" and ("-delete" in words or ("-exec" in words and "rm" in words)):
+        start = next((w for w in words[1:] if not w.startswith("-")), ".")
+        if start.rstrip("/") in ("", "~", "$HOME", "${HOME}") or (start.startswith("/") and start.count("/") <= 1):
+            found.append("find ... -delete on %s deletes from the filesystem root or home." % start)
+    elif (prog in SHELLS or prog in ("eval", "trap")) and depth < 3:
+        marked = command_words(shell_words(literal_marked(segment))[1])
+        marked = marked if len(marked) == len(words) else words
+        source = (shell_script(marked)[0] if prog in SHELLS else trap_action(marked) if prog == "trap"
+                  else " ".join(marked[1:]) or None)
+        texts = None if source is None else resolved_texts(source, env)
+        if source is not None and texts is None:
+            found.append(HIDDEN_PROGRAM_REFUSAL % prog)
+        # eval and a trap run their commands in this shell, with its variables; sh -c starts another.
+        inner_env = None if prog in SHELLS else env
+        for text in texts or []:
+            found.extend(shell_findings(unmarked(text), cwd, depth + 1, inner_env, functions))
+    elif prog in INTERPRETERS or RUNTIMES.fullmatch(prog):
+        flag = next((f for f in ("-c", "-e", "-pe", "-ne") if f in words), None)
+        if flag and words.index(flag) + 1 < len(words):
+            found.extend(code_findings(words[words.index(flag) + 1], "That %s one-liner" % prog))
+    at = runs_unknown_runner(words)
+    if at is not None and depth < 3 and names_protected(words[at:], cwd, env):
+        found.extend(shell_findings(" ".join(shlex.quote(w) for w in words[at:]), cwd, depth + 1, env, functions))
+    if (prog in SQL_CLIENTS or any(w in SQL_CLIENTS for w in words[:6])) and DELETE_ALL.search(segment):
+        found.append("DELETE without a WHERE clause removes every row.")
+    if prog in ("curl", "wget") and op == "|" and index + 1 < len(segments):
+        if program(shell_words(segments[index + 1][0])[1]) in SHELLS:
+            found.append("Piping a download into a shell runs unreviewed remote code.")
+    return cwd
+
+
+def shell_findings(command, cwd=None, depth=0, env=None, functions=None):
+    """Blocking problems with a shell command, beyond the @bash guardrail rules. env and functions are the variables
+    and functions the shell running it has (a function's call passes its own)."""
     found = []
     command, bodies = split_heredocs(command)
+    functions = dict(functions or {}, **function_bodies(command))
     if depth < 3:
         for inner in scan_expansions(command)[0]:
-            found.extend(shell_findings(inner, cwd, depth + 1))
+            found.extend(shell_findings(inner, cwd, depth + 1, functions=functions))
     segments = split_segments(command)
-    env, dirs = {}, []   # what the command itself assigns, and pushd's stack
+    env, dirs = dict(env or {}), []   # what the command itself assigns, and pushd's stack
     for index, (segment, op) in enumerate(segments):
         assignments, words = shell_words(segment)
-        while words and words[0] in SHELL_KEYWORDS:
-            words = words[1:]
         for assignment in assignments:
             if SETTING_ASSIGNMENT.match(assignment):
                 found.append("Setting %s from the shell overrides a harness setting or skips a check; only the user "
                              "may do that, in their own terminal." % assignment.split("=", 1)[0])
-        if not words:
-            for assignment in assignments:
-                name, _, value = assignment.partition("=")
-                env[name] = assigned_value(value, env)
+        if note_shell_state(segment, env) or not words:
             continue
-        if words[0] in ("for", "select") and words[2:3] == ["in"]:
-            items = words[3:]
-            env[words[1]] = None if any(re.search(r"\$\(|`", w) for w in items) else items
+        # A command named by a variable the command set, such as "$@" in a function's body, is that command.
+        variants = command_variants(words, env)
+        if variants is None:
+            found.append(HIDDEN_COMMAND_REFUSAL % words[0])
             continue
-        if words[0] == "read":
-            names = [w for w in words[1:] if not w.startswith("-")]
-            env.update({name: None for name in names})
-        if words[0] in ("-S", "--split-string") or words[0].startswith(("-S", "--split-string=")):
-            split = " ".join(([words[0][2:]] if words[0][:2] == "-S" and len(words[0]) > 2 else
-                              [words[0].split("=", 1)[1]] if "=" in words[0] else []) + words[1:])
-            if depth < 3:
-                found.extend(shell_findings(split, cwd, depth + 1))
-            continue
-        prog = program(words)
-        if prog in ("cd", "pushd"):
-            target = next((w for w in words[1:] if not w.startswith("-")), os.path.expanduser("~"))
-            fulls, unresolved = shell_path(target, cwd, env)
-            if prog == "pushd":
-                dirs.append(cwd)
-            cwd = UNKNOWN_DIR if unresolved or len(fulls) != 1 else fulls[0]
-            continue
-        if prog == "popd":
-            cwd = dirs.pop() if dirs else UNKNOWN_DIR
-            continue
-        producer = shell_words(segments[index - 1][0])[1] if index > 0 and segments[index - 1][1] == "|" else None
-        found.extend(engine_findings(prog, words, written_paths(segment, words)))
-        script = next((i for i, w in enumerate(words) if engine_script(w)), None)
-        refusal = eval_out_refusal(words, script, cwd) if script is not None else None
-        if refusal:
-            found.append(refusal)
-        found.extend(program_findings(prog, words, producer, cwd, env))
-        found.extend(git_dir_findings(prog, words, segment, cwd, env))
-        for path in dict.fromkeys(full for written in written_paths(segment, words)
-                                  for full in shell_path(written, cwd, env)[0]):
-            label = install_path(path, cwd)
-            if label:
-                found.append("%s is in %s, which decides this project's gates; agents may not change it."
-                             % (path, label))
-                continue
-            name = protected_path(path, cwd)
-            if name and (name == ".git" or name.startswith(".git/") or in_git_dir(path, cwd)):
-                found.append(GIT_DIR_REFUSAL % name)
-            elif name:
-                found.append("Shell writes to %s skip the harness gates; change it with the Write or Edit tool "
-                             "(or not at all, for verdicts and user-only settings)." % name)
-        if prog == "git":
-            found.extend(git_findings(words))
-            configured = git_command_config(words)
-            if configured:
-                found.append(configured)
-        elif prog in ("awk", "gawk", "mawk", "nawk") and AWK_RUNS.search(segment):
-            found.append("awk runs a command (system(), or a pipe to or from one), which the hooks can't read; run the "
-                         "command itself.")
-        elif prog in ("source", ".") and (len(words) < 2 or script_operand(["sh"] + words[1:]) == ""):
-            found.append("%s runs commands from stdin or a process substitution, which the hooks can't read; source a "
-                         "file." % prog)
-        elif prog == "gh" and profile() in NO_MERGE_PROFILES and (
-                words[1:3] == ["pr", "merge"] or (words[1:2] == ["api"] and any(MERGE_ENDPOINT.search(w) for w in words))):
-            found.append("Merging is refused under HARNESS_PROFILE=%s: only a human merges, on GitHub." % profile())
-        elif prog == "find" and ("-delete" in words or ("-exec" in words and "rm" in words)):
-            start = next((w for w in words[1:] if not w.startswith("-")), ".")
-            if start.rstrip("/") in ("", "~", "$HOME", "${HOME}") or (start.startswith("/") and start.count("/") <= 1):
-                found.append("find ... -delete on %s deletes from the filesystem root or home." % start)
-        elif prog in SHELLS and depth < 3:
-            if "-c" in words and words.index("-c") + 1 < len(words):
-                found.extend(shell_findings(words[words.index("-c") + 1], cwd, depth + 1))
-        elif prog == "eval" and depth < 3:
-            found.extend(shell_findings(" ".join(words[1:]), cwd, depth + 1))
-        elif prog in INTERPRETERS or RUNTIMES.fullmatch(prog):
-            flag = next((f for f in ("-c", "-e", "-pe", "-ne") if f in words), None)
-            if flag and words.index(flag) + 1 < len(words):
-                found.extend(code_findings(words[words.index(flag) + 1], "That %s one-liner" % prog))
-        if (prog in SQL_CLIENTS or any(w in SQL_CLIENTS for w in words[:6])) and DELETE_ALL.search(segment):
-            found.append("DELETE without a WHERE clause removes every row.")
-        if prog in ("curl", "wget") and op == "|" and index + 1 < len(segments):
-            if program(shell_words(segments[index + 1][0])[1]) in SHELLS:
-                found.append("Piping a download into a shell runs unreviewed remote code.")
+        for words in filter(None, variants):
+            cwd = segment_findings(found, segment, op, words, index, segments, cwd, dirs, depth, env, functions)
     for opening, body in bodies:
         _, words = shell_words(split_segments(opening)[0][0] if split_segments(opening) else "")
         prog = program(words)
@@ -2167,7 +2539,7 @@ def rule_text(command):
     parts = []
     for segment, op in split_segments(stripped):
         _, words = shell_words(segment)
-        if program(words) == "git" and any(w in ("commit", "tag") for w in words[1:3]):
+        if git_subcommand(words) in ("commit", "tag"):
             segment = COMMIT_MESSAGE.sub(lambda m: m.group(1) + "''", segment)
         parts.append(segment + op)
     return "".join(parts) + "".join("\n" + body for body in executed)
@@ -2202,6 +2574,15 @@ def consecutive_fails(history):
             break
         fails += 1
     return fails
+
+
+def spec_stale(task, entry, current=None):
+    """Why a judge, review or tester record doesn't cover task's current spec (and its ADRs): "spec" when it was
+    recorded on another revision, "unrecorded" when it carries none, or None when it covers it. A record from before
+    verdicts carried the spec revision can't show what it judged, so it never counts as current (ADR-007)."""
+    if not entry.get("spec"):
+        return "unrecorded"
+    return None if entry["spec"] == (current or spec_fingerprint(task)) else "spec"
 
 
 def code_fingerprint(include_backbone=False):
@@ -2434,7 +2815,8 @@ def record_verdict(data, kind):
             if report["test_run"] is not None:
                 verdict, reasons = effective_judge(task, report)
         details = {"criteria": report.get("criteria"), "findings": report.get("findings"), "tests": report.get("tests"),
-                   "test_run": report.get("test_run"), "sandbox": sandbox.evidence(conf()["HARNESS_SANDBOX_BACKEND"])}
+                   "test_run": report.get("test_run"), "sandbox": sandbox.evidence(conf()["HARNESS_SANDBOX_BACKEND"]),
+                   "spec": spec_fingerprint(task)}
     history = verdict_history(task, kind)
     entry = {"verdict": verdict, "claimed": report.get("verdict"), "reasons": reasons, "fingerprint": fingerprint,
              "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "summary": report.get("summary")}
@@ -2586,7 +2968,7 @@ def content_risks(text, changed=None):
     values = conf()
     # Skills only says which skills the agents load, and explaining why `security` isn't needed ("no auth or
     # personal data") would read as risk. What the work does is in the other sections and in the diff.
-    outside = without_approval(text)
+    outside = frozen_text(text)
     body = without_section(outside, "Skills", view=comment_free(outside))
     reasons = []
     unread = spec_reading_problem(text)
@@ -3138,8 +3520,9 @@ def light_drift(task):
             "line, then have the architect and the griller review the spec." % (task, "; ".join(why)))
 
 
-def start_problems(task):
-    """Why task cannot be [WIP] (or done): spec, grill and approval. None when it may start."""
+def start_problems(task, action="start"):
+    """Why task cannot start (become [WIP]) or, with action "finish", leave [WIP]: spec, grill and approval. None when
+    it may."""
     spec = spec_rel(task)
     if task in blocked_tasks(read(TASKS)):
         return ("Task %s is BLOCKED by an escalation; the user resolves it in backbone/escalations.md and "
@@ -3148,41 +3531,49 @@ def start_problems(task):
     history = verdict_history(task, "grill")
     last = history[-1] if history else None
     if invalid:
-        return ("Task %s cannot start: %s is not ready:\n      - %s\n    The analyst writes requirements "
+        return ("Task %s cannot %s: %s is not ready:\n      - %s\n    The analyst writes requirements "
                 "and acceptance criteria, the architect the ADRs and Architecture section."
-                % (task, spec, "\n      - ".join(invalid)))
+                % (task, action, spec, "\n      - ".join(invalid)))
+    approval = approved(read(spec_path(task)))
+    renew = ("Task %s cannot finish: its spec is no longer approved. The approval was removed, so the spec may have "
+             "changed since the task started: ask the user to review %s and approve it again ('Approved-by: <name> "
+             "(<date>)' under '## Approval'); agents cannot." % (task, spec)) if action == "finish" else None
     note = ""
     if light_marked(task):
         reasons = light_reasons(task)
         if not reasons:
-            return None if approved(read(spec_path(task))) else (
+            return None if approval else renew or (
                 "Task %s cannot start: the user has not approved the spec (light lane: no grilling needed). Ask them "
                 "to review %s and add 'Approved-by: <name> (<date>)' under '## Approval' themselves." % (task, spec))
         note = " It is marked (light), but %s, so it goes through the griller." % "; ".join(reasons)
     if last is None:
-        return ("Task %s cannot start: the spec has not been grilled. Ask the griller agent to review %s.%s"
-                % (task, spec, note))
+        return ("Task %s cannot %s: the spec has not been grilled. Ask the griller agent to review %s.%s"
+                % (task, action, spec, note))
     if last.get("verdict") != "pass":
-        return ("Task %s cannot start: the griller failed the spec (%s). Take its open questions to the user (have "
+        return ("Task %s cannot %s: the griller failed the spec (%s). Take its open questions to the user (have "
                 "the analyst or architect apply the recommendations marked apply without asking), update the spec "
-                "and grill again." % (task, "; ".join(last.get("reasons") or [])[:400]))
+                "and grill again." % (task, action, "; ".join(last.get("reasons") or [])[:400]))
     if last.get("fingerprint") != spec_fingerprint(task):
-        return "Task %s cannot start: the spec or its ADRs changed after the griller passed it. Grill again." % task
+        return ("Task %s cannot %s: the spec or its ADRs changed after the griller passed it. Grill again."
+                % (task, action))
     report = dict(last, verdict=last.get("claimed"))
     rederived, reasons = effective_grill(task, report)
     if rederived != "pass":
-        return "Task %s cannot start: the recorded grill pass does not hold up (%s)." % (task, "; ".join(reasons)[:400])
-    if not approved(read(spec_path(task))):
-        return ("Task %s cannot start: the user has not approved the spec. Ask them to review %s and add "
-                "'Approved-by: <name> (<date>)' under '## Approval' themselves; agents cannot." % (task, spec))
+        return ("Task %s cannot %s: the recorded grill pass does not hold up (%s)."
+                % (task, action, "; ".join(reasons)[:400]))
+    if not approval:
+        return renew or ("Task %s cannot start: the user has not approved the spec. Ask them to review %s and add "
+                         "'Approved-by: <name> (<date>)' under '## Approval' themselves; agents cannot." % (task, spec))
     return None
 
 
 def start_gate(before, after):
-    """Starting a task requires a valid spec, a current griller pass and the user's approval."""
+    """Starting a task, and finishing one, requires a valid spec, a current griller pass and the user's approval: a
+    spec that changed during the build needs both again (ADR-007)."""
     if not gate_on("HARNESS_SPEC_GATE"):
         return None
     problems = [p for p in (start_problems(task) for task in started_tasks(before, after)) if p]
+    problems += [p for p in (start_problems(task, "finish") for task in finished_tasks(before, after)) if p]
     return "\n".join("  - " + p for p in problems) if problems else None
 
 
@@ -3209,6 +3600,13 @@ def judge_problems(task, current, max_rounds):
     rederived, why = effective_judge(task, report)
     if rederived != "pass":
         return "The recorded judge pass for task %s does not hold up: %s." % (task, "; ".join(why)[:400])
+    stale = spec_stale(task, last)
+    if stale == "spec":
+        return ("The spec of task %s changed after the judge passed it (an acceptance criterion, constraint, "
+                "assumption or ADR may differ from what was judged). Run the judge again on the current spec." % task)
+    if stale:
+        return ("The judge pass for task %s records no spec revision (it predates spec-bound verdicts), so it can't "
+                "show which spec it judged. Run the judge again." % task)
     review = review_problems(task, current, max_rounds)
     if review:
         return review
@@ -3257,6 +3655,9 @@ def review_problems(task, current, max_rounds):
                                 "then judge and review again." % (lens, task, issues))
         elif current and last.get("fingerprint") != current:
             problems.append("The code changed after the %s review of task %s passed. Review it again." % (lens, task))
+        elif spec_stale(task, last):
+            problems.append("The spec changed after the %s review of task %s passed (or the review records no spec "
+                            "revision). Review it again." % (lens, task))
     return " ".join(problems) or None
 
 
@@ -3275,6 +3676,10 @@ def acceptance_problem(task):
     if acceptance_fingerprint(task) != history[-1].get("fingerprint"):
         return ("The acceptance tests of task %s changed after the tester recorded them. Only the tester may change "
                 "them: restore them (git checkout -- <file>), or ask the tester to revise and re-record them."
+                % task)
+    if spec_stale(task, history[-1]):
+        return ("The spec of task %s changed after the tester recorded its acceptance tests (or the record has no "
+                "spec revision). Ask the tester to check them against the current criteria and record them again."
                 % task)
     return None
 
@@ -3310,6 +3715,50 @@ def spec_guard(before, after):
         return ("  - This spec is approved and therefore frozen. If it must change, ask the user to remove their "
                 "approval first; it will need grilling and approval again.")
     return None
+
+
+def approval_reused(name, before, after):
+    """The freeze as verify sees it, for changes made outside the hooks: a spec whose text changes while its Approved-by
+    lines stay as they were keeps an approval given on the earlier text (ADR-007)."""
+    if before is None or after is None:
+        return None
+    before, after = line_endings(before), line_endings(after)
+    if not approved(before) or approved(after) != approved(before) or \
+            approval_lines(outline(before)) != approval_lines(outline(after)) or \
+            frozen_text(before) == frozen_text(after):
+        return None
+    return ("%s changed while its Approved-by lines stayed the same, so the approval was "
+            "given on the earlier text. The user removes the approval before the spec changes and, once the griller "
+            "has passed the new text, approves it with a new Approved-by line. A deliberate exception is committed "
+            "with HARNESS_VERIFY=off (in CI, the harness-change-approved label)." % name)
+
+
+def approval_state(text):
+    if text is None:
+        return None
+    text = line_endings(text)
+    return approved(text), approval_lines(outline(text))
+
+
+def reused_approvals(steps):
+    """approval_reused over steps ((revision, its parents, the paths it changes), oldest first): a step that changes an
+    approved spec's text but keeps its Approved-by lines is refused unless a later step changes those lines. A range is
+    checked step by step, since its two ends can show the same line although the user removed the approval with the
+    change and gave it again later. A merge is refused only when it reuses the approval of every parent."""
+    pending = {}
+    for rev, parents, names in steps:
+        for name in names:
+            if not re.match(r"^backbone/specs/[^/]+\.md$", name):
+                continue
+            after = show(rev, name)
+            befores = [show(parent, name) for parent in parents]
+            if all(approval_state(before) != approval_state(after) for before in befores):
+                pending.pop(name, None)
+            label = "%s (commit %s)" % (name, rev[:12]) if rev else name
+            reused = [approval_reused(label, before, after) for before in befores]
+            if reused and all(reused):
+                pending[name] = reused[0]
+    return [pending[name] for name in sorted(pending)]
 
 
 def user_only_change(before, after):
@@ -3413,6 +3862,12 @@ def verify_changes(before, after, changed, done_fingerprint, allow_user_changes=
             problem = start_problems(task)
             if problem:
                 problems.append(problem)
+        for task in sorted((new_done - old_done) & old_wip):
+            problem = start_problems(task, "finish")
+            if problem:
+                problems.append(problem)
+    if before and not allow_user_changes:
+        problems.extend(reused_approvals(range_steps(before, after) if after else [(after, [before], changed)]))
     if values["HARNESS_JUDGE_GATE"] != "off":
         max_rounds = int(values["HARNESS_JUDGE_MAX_ROUNDS"] or 2)
         for task in sorted(new_done - old_done):
@@ -3506,6 +3961,14 @@ def verify_range(spec, allow_user_changes=False):
                           allow_user_changes)
 
 
+def range_steps(base, tip):
+    """The commits of base..tip, oldest first, each with its parents and the specs it changes (reused_approvals)."""
+    lines = [line.split() for line in git("rev-list", "--reverse", "--parents", "%s..%s" % (base, tip)).splitlines()]
+    return [(line[0], line[1:], sorted({name for parent in line[1:]
+                                        for name in diff_names(parent, line[0], "--", "backbone/specs")}))
+            for line in lines if line]
+
+
 def done_commit(task, commits, tip):
     """The first of commits (oldest first) whose task list marks task done, else tip."""
     tasks_rel = TASKS.relative_to(ROOT).as_posix()
@@ -3532,9 +3995,19 @@ def verify_command(argv):
 # --------------------------------------------------------------------------- attestation (ADR-005)
 
 STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
-VERDICTS_PREDICATE = "https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1"
+# v1 is v0.1 plus verification.approval, and the first type a release carries: from v1 on, a breaking change gets a new
+# type, and the readers (attest verify, attest policy) keep reading every type the engine ever wrote.
+VERDICTS_PREDICATE = "https://github.com/soyPeter/agentic-harness/attestation/verdicts/v1"
+VERDICTS_PREDICATES = ("https://github.com/soyPeter/agentic-harness/attestation/verdicts/v0.1", VERDICTS_PREDICATE)
 VERIFIER_ID = "https://github.com/soyPeter/agentic-harness"
-ATTEST_USAGE = "usage: harness.py attest --range <base>..<tip> [--allow-user-changes]\n"
+APPROVAL_LABEL = "harness-change-approved"
+ATTEST_USAGE = (
+    "usage: harness.py attest --range <base>..<tip> [--allow-user-changes [--pull-request <number>]]\n"
+    "usage: harness.py attest verify <statement> <bundle> (--key <public key or KMS reference> | "
+    "--certificate-identity <identity> --certificate-oidc-issuer <issuer>) <policy>\n"
+    "usage: harness.py attest policy <statement> <policy>\n"
+    "  <policy>: (--commit <full commit id> | --tree <full tree id>)... [--type <predicate type>]... "
+    "[--require NAME=VALUE]... [--accept-user-changes]\n")
 
 
 def verdict_brief(history):
@@ -3599,8 +4072,9 @@ def verification_settings():
     return {key: {"value": values[key], "environment": key in os.environ} for key in sorted(values)}
 
 
-def attest_statement(base_ref, tip_ref, allow_user_changes=False):
-    """(in-toto Statement, []) for a range that passes verify, checked out at its tip; else (None, problems)."""
+def attest_statement(base_ref, tip_ref, allow_user_changes=False, pull_request=None):
+    """(in-toto Statement, []) for a range that passes verify, checked out at its tip; else (None, problems).
+    pull_request is the merged pull request whose approval label allowed the user changes."""
     commits_of = {}
     for ref in (base_ref, tip_ref):
         commits_of[ref] = git("rev-parse", "-q", "--verify", ref + "^{commit}").strip()
@@ -3630,27 +4104,228 @@ def attest_statement(base_ref, tip_ref, allow_user_changes=False):
         "predicate": {
             "verifier": {"id": VERIFIER_ID, "engineSha256": sha256(__file__), "baseLock": base_lock(base)},
             "verification": {"base": base, "tip": tip, "result": "PASSED", "allowUserChanges": allow_user_changes,
+                             "approval": {"label": APPROVAL_LABEL, "pullRequest": pull_request} if pull_request
+                             else None,
                              "settings": verification_settings()},
             "tasks": [attested_task(task, commits, tip) for task in finished],
         },
     }, []
 
 
+def command_options(argv, valued, flags=()):
+    """(positional words, {option: [values]}, {flags}) of argv; None when an option is unknown or lacks its value."""
+    positional, values, seen = [], {}, set()
+    words = iter(argv)
+    for word in words:
+        if word in flags:
+            seen.add(word)
+        elif word in valued:
+            value = next(words, None)
+            if value is None:
+                return None
+            values.setdefault(word, []).append(value)
+        elif word.startswith("--"):
+            return None
+        else:
+            positional.append(word)
+    return positional, values, seen
+
+
 def attest_command(argv):
-    """Print the in-toto Statement of a verified range; nothing on stdout when the range doesn't verify."""
-    allow = "--allow-user-changes" in argv
-    args = [a for a in argv if a != "--allow-user-changes"]
-    if args[:1] != ["--range"] or len(args) != 2 or ".." not in args[1] or args[1].startswith(".."):
+    """Print the in-toto Statement of a verified range; nothing on stdout when the range doesn't verify. attest verify
+    and attest policy check one instead."""
+    if argv[:1] == ["verify"]:
+        return attest_verify_command(argv[1:])
+    if argv[:1] == ["policy"]:
+        return attest_policy_command(argv[1:])
+    parsed = command_options(argv, ("--range", "--pull-request"), ("--allow-user-changes",))
+    positional, values, flags = parsed or ([], {}, set())
+    ranges, pulls = values.get("--range", []), values.get("--pull-request", [])
+    allow = "--allow-user-changes" in flags
+    if parsed is None or positional or len(ranges) != 1 or ".." not in ranges[0] or ranges[0].startswith("..") \
+            or len(pulls) > 1 or (pulls and not (allow and re.fullmatch(r"[1-9][0-9]{0,9}", pulls[0]))):
         sys.stderr.write(ATTEST_USAGE)
         return 64
-    base, _, tip = args[1].partition("..")
-    statement, problems = attest_statement(base, tip or "HEAD", allow)
+    base, _, tip = ranges[0].partition("..")
+    statement, problems = attest_statement(base, tip or "HEAD", allow, int(pulls[0]) if pulls else None)
     for problem in problems:
         sys.stderr.write("attest: %s\n" % problem)
     if problems:
         return 1
     sys.stdout.write(json.dumps(statement, indent=2, sort_keys=True) + "\n")
     return 0
+
+
+POLICY_GATES = {"HARNESS_SPEC_GATE": "on", "HARNESS_JUDGE_GATE": "on", "HARNESS_REVIEW": "on"}
+POLICY_OPTIONS = ("--commit", "--tree", "--type", "--require")
+OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def attest_policy(values, flags):
+    """A consumer's policy from the options of attest verify or attest policy; None when it names no commit or code
+    to check, or an option is malformed."""
+    commits, trees = values.get("--commit", []), values.get("--tree", [])
+    if not commits + trees or not all(OBJECT_ID.fullmatch(name) for name in commits + trees):
+        return None
+    required = dict(POLICY_GATES)
+    for item in values.get("--require", []):
+        name, equals, value = item.partition("=")
+        if not equals or not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+            return None
+        required[name] = value
+    return {"commits": commits, "trees": trees, "types": values.get("--type") or list(VERDICTS_PREDICATES),
+            "required": required, "accept_user_changes": "--accept-user-changes" in flags}
+
+
+def shown(value):
+    return "'%s'" % value if isinstance(value, str) else "missing" if value is None else json.dumps(value)
+
+
+def member(value, key):
+    """value[key] when value is an object and holds one, else None: statements are read as untrusted JSON."""
+    return value.get(key) if isinstance(value, dict) else None
+
+
+def policy_problems(statement, policy):
+    """(problems, a summary of what was checked) of a verdict statement, v0.1 or v1, against a consumer's policy."""
+    if member(statement, "_type") != STATEMENT_TYPE:
+        return ["not an in-toto Statement v1 (_type is %s)" % shown(member(statement, "_type"))], None
+    problems = []
+    kind = statement.get("predicateType")
+    if not isinstance(kind, str) or kind not in policy["types"]:
+        problems.append("the predicate type %s is not one the policy accepts (%s)" % (kind, ", ".join(policy["types"])))
+    subjects = statement.get("subject") if isinstance(statement.get("subject"), list) else []
+    for wanted, name, algorithm in [(c, "commit", "gitCommit") for c in policy["commits"]] + \
+            [(t, "code", "gitTree") for t in policy["trees"]]:
+        if wanted not in [member(member(s, "digest"), algorithm) for s in subjects if member(s, "name") == name]:
+            problems.append("no %s subject is %s" % (name, wanted))
+    verification = member(member(statement, "predicate"), "verification")
+    if member(verification, "result") != "PASSED":
+        problems.append("verify's result is %s, not PASSED" % (
+            member(verification, "result") if isinstance(member(verification, "result"), str)
+            else shown(member(verification, "result"))))
+    settings = member(verification, "settings")
+    for name, value in sorted(policy["required"].items()):
+        found = member(member(settings, name), "value")
+        if found != value:
+            problems.append("%s is %s; the policy requires '%s'" % (name, shown(found), value))
+    allowed, approval = member(verification, "allowUserChanges"), member(verification, "approval")
+    by = "approved by pull request #%s" % member(approval, "pullRequest") if member(approval, "pullRequest") \
+        else "no approval recorded"
+    if allowed is True and not policy["accept_user_changes"]:
+        problems.append("the range was verified with --allow-user-changes (%s): it may change the harness or its "
+                        "user-only settings. Pass --accept-user-changes to accept such a change" % by)
+    elif allowed is not True and allowed is not False:
+        problems.append("allowUserChanges is %s, not true or false" % shown(allowed))
+    if problems:
+        return problems, None
+    return [], "ok: " + ", ".join(
+        [kind] + ["commit %s" % c for c in policy["commits"]] + ["code %s" % t for t in policy["trees"]]
+        + ["verify PASSED", " ".join("%s=%s" % item for item in sorted(policy["required"].items()))]
+        + (["user changes accepted (%s)" % by] if allowed is True else []))
+
+
+def report_policy(label, statement, policy):
+    problems, summary = policy_problems(statement, policy)
+    for problem in problems:
+        print("%s: %s" % (label, problem))
+    if not problems:
+        print("%s: %s" % (label, summary))
+    return 1 if problems else 0
+
+
+def attest_policy_command(argv):
+    """attest policy: a consumer's policy on a statement, without its signature (attest verify checks that)."""
+    parsed = command_options(argv, POLICY_OPTIONS, ("--accept-user-changes",))
+    policy = attest_policy(parsed[1], parsed[2]) if parsed and len(parsed[0]) == 1 else None
+    if policy is None:
+        sys.stderr.write(ATTEST_USAGE)
+        return 64
+    try:
+        statement = json.loads(Path(parsed[0][0]).read_text(encoding="utf-8"))
+    except OSError:
+        print("attest policy: can't read %s" % parsed[0][0])
+        return 1
+    except ValueError as exc:
+        print("attest policy: the statement doesn't parse: %s" % exc)
+        return 1
+    print("attest policy: no signature checked (attest verify checks it)")
+    return report_policy("attest policy", statement, policy)
+
+
+def bundle_statement(data):
+    """(the in-toto statement a Sigstore bundle's DSSE envelope carries, None), or (None, why not)."""
+    try:
+        envelope = member(json.loads(data.decode("utf-8")), "dsseEnvelope")
+        if member(envelope, "payloadType") != "application/vnd.in-toto+json":
+            return None, "no DSSE envelope of an in-toto payload"
+        return json.loads(base64.b64decode(envelope.get("payload") or "", validate=True).decode("utf-8")), None
+    except ValueError as exc:
+        return None, "it doesn't decode: %s" % exc
+
+
+def cosign_check(cosign, bundle, statement, policy, signer):
+    """(ok, cosign's last words) of cosign verify-blob-attestation on bundle (its bytes): the signature, the predicate
+    type and the first commit (or code) the policy names. cosign reads a copy, so it checks the bytes read here."""
+    digest = (policy["commits"][0], "gitCommit") if policy["commits"] else (policy["trees"][0], "gitTree")
+    with tempfile.TemporaryDirectory(prefix="harness-attest-") as folder:
+        copy = Path(folder) / "bundle.sigstore.json"
+        copy.write_bytes(bundle)
+        words = [cosign, "verify-blob-attestation", "--bundle", str(copy), "--type",
+                 str(member(statement, "predicateType")), "--digest", digest[0], "--digestAlg", digest[1]] + signer
+        try:
+            result = subprocess.run(words, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return False, "cosign took longer than 120 s"
+    said = [line for line in (result.stderr + result.stdout).splitlines() if line.strip()
+            and not line.startswith(("WARNING", "Verified OK"))]
+    return result.returncode == 0, said[-1] if said else "cosign exited with %d" % result.returncode
+
+
+def attest_verify_command(argv):
+    """attest verify: cosign checks the bundle's signature, then the consumer's policy is applied to the statement the
+    bundle signs, which must be the statement file's."""
+    parsed = command_options(argv, POLICY_OPTIONS + ("--key", "--certificate-identity", "--certificate-oidc-issuer"),
+                             ("--accept-user-changes",))
+    positional, values, flags = parsed or ([], {}, set())
+    keys, identities = values.get("--key", []), values.get("--certificate-identity", [])
+    issuers = values.get("--certificate-oidc-issuer", [])
+    policy = attest_policy(values, flags) if parsed else None
+    if policy is None or len(positional) != 2 or max(len(keys), len(identities), len(issuers)) > 1 \
+            or bool(keys) == bool(identities or issuers) or bool(identities) != bool(issuers):
+        sys.stderr.write(ATTEST_USAGE)
+        return 64
+    try:
+        text, bundle = Path(positional[0]).read_text(encoding="utf-8"), Path(positional[1]).read_bytes()
+    except OSError as exc:
+        print("attest verify: can't read %s" % exc.filename)
+        return 1
+    signed, problem = bundle_statement(bundle)
+    if problem:
+        print("attest verify: %s is not a Sigstore bundle of an in-toto statement (%s)" % (positional[1], problem))
+        return 1
+    try:
+        same = json.loads(text) == signed
+    except ValueError:
+        same = False
+    if not same:
+        print("attest verify: the statement is not the one the bundle signs (the bundle carries its own)")
+        return 1
+    cosign = shutil.which("cosign")
+    if not cosign:
+        print("attest verify: cosign is not installed (https://docs.sigstore.dev/cosign/system_config/installation/); "
+              "attest policy checks the statement without its signature")
+        return 1
+    # A key-signed bundle from the attest job has no transparency log entry, by design (ADR-005); a keyless one has.
+    signer = ["--key", keys[0], "--insecure-ignore-tlog"] if keys else \
+        ["--certificate-identity", identities[0], "--certificate-oidc-issuer", issuers[0]]
+    ok, said = cosign_check(cosign, bundle, signed, policy, signer)
+    if not ok:
+        print("attest verify: the signature doesn't verify: %s" % said)
+        return 1
+    print("attest verify: signature: ok (cosign, %s)" % (
+        "key %s" % keys[0] if keys else "certificate of %s from %s" % (identities[0], issuers[0])))
+    return report_policy("attest verify", signed, policy)
 
 
 ATTEST_ENVIRONMENT = "harness-attest"
@@ -3730,6 +4405,181 @@ def repository_check_command(argv):
     if not copies:
         print("repository-check: no repository-level %s" % " or ".join(ATTEST_SECRETS))
     return 1 if copies else 0
+
+
+def merged_approval(pulls, base, tip, branch):
+    """(the number of the pull request that approved the push base..tip, None), or (None, why not), from GitHub's
+    list of tip's pull requests (GET repos/<r>/commits/<tip>/pulls). Exactly one is merged into branch with tip as its
+    merge commit, it carries the approval label, and the push is that merge alone: one commit on base (a squash, or the
+    rebase of one commit) or a merge commit of base and the pull request's head. More in the push would pass under a
+    label that never saw it."""
+    if not isinstance(pulls, list):
+        return None, "GitHub's answer is not a list of pull requests"
+    merged = [p for p in pulls if isinstance(p, dict) and p.get("merged_at") and p.get("merge_commit_sha") == tip
+              and member(p.get("base"), "ref") == branch and type(p.get("number")) is int and p["number"] > 0]
+    if not merged:
+        return None, "no pull request merged into %s has %s as its merge commit" % (branch, tip[:12])
+    if len(merged) > 1:
+        return None, "pull requests %s and #%d %s name %s as their merge commit" % (
+            ", ".join("#%d" % p["number"] for p in merged[:-1]), merged[-1]["number"],
+            "both" if len(merged) == 2 else "all", tip[:12])
+    number = merged[0]["number"]
+    parents = git("rev-list", "--parents", "-n", "1", tip).split()[1:]
+    if parents != [base] and not (len(parents) == 2 and parents[0] == base
+                                  and parents[1] == member(merged[0].get("head"), "sha")):
+        return None, ("the push is more than pull request #%d's merge: %s is neither one commit on %s nor a merge of "
+                      "%s and the pull request's head" % (number, tip[:12], base[:12], base[:12]))
+    if APPROVAL_LABEL not in [member(label, "name") for label in merged[0].get("labels") or []]:
+        return None, "pull request #%d doesn't carry %s" % (number, APPROVAL_LABEL)
+    return number, None
+
+
+def approval_check_command(argv):
+    """harness-verify's attest job: the pull request that approved the pushed range, from GitHub's JSON (ADR-005).
+    Prints its number; exit 1 and nothing on stdout when no pull request approved the whole push."""
+    if len(argv) != 3 or argv[1].count("..") != 1 or argv[1].startswith("..") or argv[1].endswith(".."):
+        sys.stderr.write("usage: harness.py approval-check <pulls.json> <base>..<tip> <branch>\n")
+        return 64
+    commits = []
+    for ref in argv[1].split(".."):
+        commits.append(git("rev-parse", "-q", "--verify", ref + "^{commit}").strip())
+        if not commits[-1]:
+            sys.stderr.write("approval-check: %s is not a commit\n" % ref)
+            return 1
+    try:
+        pulls = json.loads(read(argv[0]) or "null")
+    except ValueError as exc:
+        sys.stderr.write("approval-check: GitHub's answer doesn't parse: %s\n" % exc)
+        return 1
+    number, problem = merged_approval(pulls, commits[0], commits[1], argv[2])
+    if problem:
+        sys.stderr.write("approval-check: %s\n" % problem)
+        return 1
+    sys.stderr.write("approval-check: pull request #%d, merged into %s as %s, carries %s\n" % (
+        number, argv[2], commits[1][:12], APPROVAL_LABEL))
+    print(number)
+    return 0
+
+
+SIGNING_MODES = ("key", "kms", "keyless")
+KMS_SETTINGS = ("HARNESS_ATTEST_KMS_KEY", "HARNESS_ATTEST_KMS_IDENTITY")
+# (cloud, key reference, identity the job's OIDC token logs in as, what that identity is). An AWS key is named by its
+# ARN because the ARN names the region the SDK must call.
+KMS_CLOUDS = (
+    ("gcp", r"gcpkms://projects/[^/\s]+/locations/[^/\s]+/keyRings/[^/\s]+/cryptoKeys/[^/\s]+"
+            r"(?:/(?:cryptoKeyVersions|versions)/[^/\s]+)?",
+     r"(projects/[0-9]+/locations/global/workloadIdentityPools/[^/\s]+/providers/[^/\s]+)"
+     r"(?: ([^\s@]+@[^\s@]+\.iam\.gserviceaccount\.com))?",
+     "a workload identity provider (projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/"
+     "<provider>), optionally followed by the email of the service account to act as"),
+    ("aws", r"awskms://[^/\s]*/arn:aws[a-z-]*:kms:([a-z0-9-]+):[0-9]{12}:(?:key|alias)/\S+",
+     r"(arn:aws[a-z-]*:iam::[0-9]{12}:role/\S+)", "the ARN of the IAM role to assume"),
+    ("azure", r"azurekms://[^/\s]+/[^/\s]+(?:/[^/\s]+)?", r"([0-9a-f-]{36}) ([0-9a-f-]{36})",
+     "the tenant ID and the client ID of the app registration, separated by a space"),
+    ("vault", r"hashivault://[^/\s]+", r"(https://[^/\s]+) (\S+)",
+     "the Vault address (https://<host>[:<port>]) and the role of its JWT login, separated by a space"),
+)
+
+
+def kms_login(key, identity):
+    """({the attest job's variables}, None) for signing with the KMS key reference key, logged in through the job's
+    OIDC token as identity; or (None, why not)."""
+    for cloud, key_pattern, identity_pattern, wanted in KMS_CLOUDS:
+        named = re.fullmatch(key_pattern, key)
+        if not named:
+            continue
+        login = re.fullmatch(identity_pattern, identity)
+        if not login:
+            return None, "HARNESS_ATTEST_KMS_IDENTITY for %s %s key is %s" % (
+                "an" if cloud[0] in "aeiou" else "a", cloud, wanted)
+        found = {"ATTEST_KMS_KEY": key, "ATTEST_KMS_CLOUD": cloud}
+        if cloud == "gcp":
+            found.update(ATTEST_OIDC_AUDIENCE="https://iam.googleapis.com/" + login.group(1),
+                         ATTEST_GCP_PROVIDER=login.group(1), ATTEST_GCP_SERVICE_ACCOUNT=login.group(2) or "")
+        elif cloud == "aws":
+            found.update(ATTEST_OIDC_AUDIENCE="sts.amazonaws.com", ATTEST_AWS_ROLE=login.group(1),
+                         ATTEST_AWS_REGION=named.group(1))
+        elif cloud == "azure":
+            found.update(ATTEST_OIDC_AUDIENCE="api://AzureADTokenExchange", ATTEST_AZURE_TENANT=login.group(1),
+                         ATTEST_AZURE_CLIENT=login.group(2))
+        else:
+            found.update(ATTEST_OIDC_AUDIENCE=login.group(1), ATTEST_VAULT_ADDR=login.group(1),
+                         ATTEST_VAULT_ROLE=login.group(2))
+        return found, None
+    return None, ("HARNESS_ATTEST_KMS_KEY %s a gcpkms://, awskms:// (with the key's ARN), azurekms:// or hashivault:// "
+                  "key reference, which kms signing needs" % ("%s is not" % shown(key) if key else "is not set: it is"))
+
+
+def signing_settings(values, key_configured):
+    """({the attest job's signing variables}, []) from the signing settings in values (harness.conf at the commit the
+    push starts from) and whether the HARNESS_ATTEST_KEY secret is set; or (None, problems). One signing source at a
+    time, and keyless only when HARNESS_ATTEST_SIGNING says keyless: it publishes the workflow's identity for good."""
+    mode = values.get("HARNESS_ATTEST_SIGNING")
+    kms = sorted(name for name in KMS_SETTINGS if name in values)
+    if mode is None and not kms and not key_configured:
+        return None, ["no signing is configured: no HARNESS_ATTEST_KEY in %s, and no HARNESS_ATTEST_SIGNING in "
+                      "harness.conf" % ATTEST_ENVIRONMENT]
+    mode = "key" if mode is None else mode
+    if mode not in SIGNING_MODES:
+        return None, ["HARNESS_ATTEST_SIGNING is %s: it is key (the default), kms or keyless" % shown(mode)]
+    problems = []
+    if mode != "kms" and kms:
+        problems.append("harness.conf sets %s, but HARNESS_ATTEST_SIGNING is %s: set it to kms, or remove them"
+                        % (" and ".join(kms), mode))
+    if mode == "key" and not key_configured:
+        problems.append("HARNESS_ATTEST_SIGNING is key, but there is no HARNESS_ATTEST_KEY in %s" % ATTEST_ENVIRONMENT)
+    if mode != "key" and key_configured:
+        problems.append("HARNESS_ATTEST_KEY is set, but HARNESS_ATTEST_SIGNING is %s: delete the secret, so that one "
+                        "key signs" % mode)
+    found = {"ATTEST_MODE": mode}
+    if mode == "kms":
+        login, problem = kms_login(values.get("HARNESS_ATTEST_KMS_KEY", ""),
+                                   values.get("HARNESS_ATTEST_KMS_IDENTITY", ""))
+        problems += [problem] if problem else []
+        found.update(login or {})
+    return (None, problems) if problems else (found, [])
+
+
+def signing_check_command(argv):
+    """harness-verify's attest job: its signing mode, from harness.conf at the commit the push starts from (a push
+    can't choose how it is signed) and whether the key secret is set, as lines for $GITHUB_ENV (ADR-005)."""
+    if len(argv) != 2 or argv[1] not in ("true", "false"):
+        sys.stderr.write("usage: harness.py signing-check <commit> <true|false>   (true: HARNESS_ATTEST_KEY is set)\n")
+        return 64
+    commit = git("rev-parse", "-q", "--verify", argv[0] + "^{commit}").strip()
+    if not commit:
+        sys.stderr.write("signing-check: %s is not a commit\n" % argv[0])
+        return 1
+    found, problems = signing_settings(parse_conf(show(commit, CONF_FILE.relative_to(ROOT).as_posix()) or ""),
+                                       argv[1] == "true")
+    for problem in problems:
+        sys.stderr.write("signing-check: %s\n" % problem)
+    if problems:
+        return 1
+    sys.stderr.write("signing-check: %s\n" % signing_description(found, commit[:12]))
+    sys.stdout.write("".join("%s=%s\n" % item for item in found.items()))
+    return 0
+
+
+def signing_description(found, where):
+    if found["ATTEST_MODE"] == "kms":
+        return "kms: %s, logged in through the job's OIDC token (%s)" % (found["ATTEST_KMS_KEY"],
+                                                                         found["ATTEST_KMS_CLOUD"])
+    if found["ATTEST_MODE"] == "keyless":
+        return ("keyless (HARNESS_ATTEST_SIGNING at %s): a Fulcio certificate for the workflow's identity, written to "
+                "the public Rekor log for good" % where)
+    return "key: HARNESS_ATTEST_KEY in %s" % ATTEST_ENVIRONMENT
+
+
+def signing_line(default):
+    """(the signing the attest job takes from the default branch's harness.conf, as ci-protect states it, whether it
+    needs harness-attest.pub)."""
+    values = parse_conf(show(default, CONF_FILE.relative_to(ROOT).as_posix()) or "")
+    mode = values.get("HARNESS_ATTEST_SIGNING", "key")
+    found, problems = signing_settings(values, mode == "key")
+    if problems:
+        return "signing on %s: the job refuses to sign (%s)" % (default, "; ".join(problems)), True
+    return "signing on %s: %s" % (default, signing_description(found, default)), mode != "keyless"
 
 
 def attest_repository(name):
@@ -3817,7 +4667,10 @@ def ci_protect_attest(name, default, dry_run, recorded=False, delete_copies=Fals
         print("ci-protect --attest: attest mode with %s in %s: %s" % (
             ATTEST_POLICY_SECRET, ATTEST_ENVIRONMENT, attest_mode(True, recorded)))
         print("ci-protect --attest: attest mode without it: %s" % attest_mode(False, recorded))
-        print("ci-protect --attest: %s" % public_key_line(default))
+        signing, needs_key = signing_line(default)
+        print("ci-protect --attest: %s" % signing)
+        if needs_key:
+            print("ci-protect --attest: %s" % public_key_line(default))
         return 0 if dry_run else 1
     _, _, copies = attest_repository(name)
     if copies is None:
@@ -3871,7 +4724,10 @@ def ci_protect_attest(name, default, dry_run, recorded=False, delete_copies=Fals
               ATTEST_POLICY_SECRET))
     print("ci-protect --attest: attest mode: %s" % attest_mode(
         None if names is None else ATTEST_POLICY_SECRET in names, recorded))
-    print("ci-protect --attest: %s" % public_key_line(default))
+    signing, needs_key = signing_line(default)
+    print("ci-protect --attest: %s" % signing)
+    if needs_key:
+        print("ci-protect --attest: %s" % public_key_line(default))
     return 0
 
 
@@ -5036,11 +5892,7 @@ def default_branch():
 
 
 # The deliverer's gh calls, read as the shell and gh would read them. What the harness can't read is refused.
-RUNNERS = ("timeout", "gtimeout", "nice", "nohup", "stdbuf", "time", "env", "sudo", "doas", "command", "exec",
-           "watch", "ionice", "chronic", "caffeinate", "flock", "setsid", "unbuffer", "script", "su")
 SHELL_KEYWORDS = ("!", "(", ")", "{", "}", "if", "then", "else", "elif", "fi", "do", "done", "while", "until")
-# bash's and zsh's precommand modifiers, which take no options: the command follows them.
-PRECOMMANDS = ("builtin", "noglob", "nocorrect")
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 REDIRECTION = re.compile(r"^[0-9]*(<<<|<<-?|<>|<&|>&|>>|>\||&>>|&>|<|>)")
 EXPANSION = re.compile(r"\$\S|`")
@@ -5217,8 +6069,9 @@ def scan_expansions(text, quotes=True):
     return commands, bare
 
 
-def closing_paren(text, start):
-    """The index of the ) that closes the ( at text[start] (quotes and nested $(...) included), or len(text)."""
+def closing_paren(text, start, pair="()"):
+    """The index of the ) that closes the ( at text[start] (quotes and nested $(...) included), or len(text). With
+    pair="{}", the } that closes a {."""
     depth, quote, i = 0, None, start
     while i < len(text):
         ch = text[i]
@@ -5233,9 +6086,9 @@ def closing_paren(text, start):
                 i = closing_paren(text, i + 1)
         elif ch in "'\"":
             quote = ch
-        elif ch == "(":
+        elif ch == pair[0]:
             depth += 1
-        elif ch == ")":
+        elif ch == pair[1]:
             depth -= 1
             if depth == 0:
                 return i
@@ -5284,18 +6137,24 @@ def shell_split_marked(text):
 def run_words(words):
     """(the words of the command a segment runs, why the harness can't read it or ""). Keywords, grouping, leading
     assignments and redirections go; runners such as timeout 60, env -i or nice -n 5 run the command after their own
-    options. xargs, parallel and find -exec add arguments the command line doesn't show, and a command named by an
-    expansion can be any command."""
+    options, and a runner the harness doesn't know runs the gh, git or shell its words name. A runner that hands a
+    shell a command line (env -S, script -c, watch) stays, for segment_calls to read the line. xargs, parallel and
+    find -exec add arguments the command line doesn't show, and a command named by an expansion can be any command."""
     while words:
         first = words[0]
-        if first == "case":
+        split = runner_split(words)
+        if split is not None and split[2] is None:
+            words = words[split[1]:]
+        elif split is not None:
+            break
+        elif first == "case":
             words = words[words.index("in") + 1:] if "in" in words else []
         elif first == "function":
             words = words[2:]
         elif REDIRECTION.match(first):
             words = words[1 + (REDIRECTION.match(first).end() == len(first)):]
-        elif (first in SHELL_KEYWORDS or first in WRAPPERS or first in PRECOMMANDS or ASSIGNMENT.match(first)
-              or first.endswith("()") or (first.endswith(")") and "(" not in first)):
+        elif (first in SHELL_KEYWORDS or ASSIGNMENT.match(first) or first.endswith("()")
+              or (first.endswith(")") and "(" not in first)):
             words = words[1:]
         elif first[:1] in ("(", "{") and first.lstrip("({"):
             words = [first.lstrip("({")] + words[1:]
@@ -5320,6 +6179,10 @@ def run_words(words):
                 return inner, hidden or why
             if EXPANSION.search(words[j]):
                 return words[j:], named
+    elif runs_unknown_runner(words) is not None and not program_refusal(words):
+        at = next((j for j in range(1, len(words)) if program(words[j:]) in runs + ("git",)), None)
+        if at is not None:
+            return run_words(words[at:])
     return words, ""
 
 
@@ -5392,8 +6255,13 @@ def segment_calls(segment, piped, depth):
                 piped or operands or any(re.match(r"^[0-9]*<(?![<&>])", w) for w in words)):
             return [(segment, words, SHELL_INPUT_REFUSAL)]
         return []
+    if prog == "trap" and trap_action(words):
+        return [(segment, words, "")] + gh_calls(trap_action(words), depth + 1)
+    split = runner_split(words) if prog in RUNNERS else None
+    if split and split[2] is not None:
+        return gh_calls(split[2], depth + 1)
     if prog in RUNNERS or prog.startswith("-"):
-        # watch 'gh ...', script -c 'gh ...': the command is one word
+        # a runner by a path the harness doesn't trust: its command may be one word, as in watch 'gh ...'
         return ([call for w in words[1:] if re.search(r"\s", w.strip()) for call in gh_calls(w, depth + 1)]
                 or [(segment, words, problem)])
     return [(segment, words, "")]
@@ -5432,13 +6300,16 @@ def command_problem(marked, words):
 
 
 def program_index(words):
-    """The index of the word a command runs: past the options and times of a runner such as timeout 60 or nice -n 5."""
-    if not words or program(words) not in RUNNERS:
-        return 0
-    for i in range(1, len(words)):
-        if not (words[i].startswith("-") or re.match(r"^\d+[smhd]?$", words[i]) or ASSIGNMENT.match(words[i])):
-            return i
-    return len(words)
+    """The index of the word a command runs: past runners and their options, such as timeout 60 or nice -n 5."""
+    at = 0
+    while at < len(words):
+        split = runner_split(words[at:])
+        if split is None:
+            return at
+        at += split[1]
+        if split[2] is not None:
+            break
+    return at
 
 
 def real_name(prog):
@@ -5853,14 +6724,31 @@ def writes_default(word, targets):
     return dst in targets
 
 
+# git's own options that take a value in the next word, as well as after = (git --git-dir .git, --git-dir=.git).
+GIT_VALUE_OPTIONS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env",
+                     "--attr-source")
+
+
+def git_options(words):
+    """(git's own options in a git call, as (name, value) pairs, the index of its subcommand)."""
+    options, i = [], 1
+    while i < len(words) and words[i].startswith("-"):
+        if words[i] in GIT_VALUE_OPTIONS:
+            options.append((words[i], words[i + 1] if i + 1 < len(words) else ""))
+            i += 2
+            continue
+        name, _, value = words[i].partition("=") if words[i].startswith("--") else (words[i], "", "")
+        options.append((name, value))
+        i += 1
+    return options, i
+
+
 def git_subcommand(words):
     """The subcommand of a git call, past git's own options, or None."""
     if program(words) != "git":
         return None
-    i = 1
-    while i < len(words) and words[i].startswith("-"):
-        i += 2 if words[i] == "-C" else 1
-    return words[i] if i < len(words) else None
+    at = git_options(words)[1]
+    return words[at] if at < len(words) else None
 
 
 def git_refusal(segment, words, targets, on_default):
@@ -5868,15 +6756,12 @@ def git_refusal(segment, words, targets, on_default):
     command may move the default branch, by name or by the branch it's on."""
     if program(words) != "git":
         return None
-    args = words[1:]
-    i = 0
-    while i < len(args) and args[i].startswith("-"):
-        if args[i].split("=", 1)[0] in GIT_OPTIONS_REFUSED:
-            return GIT_OPTION_REFUSAL
-        i += 2 if args[i] == "-C" else 1
-    if i >= len(args):
+    options, at = git_options(words)
+    if any(name in GIT_OPTIONS_REFUSED for name, _ in options):
+        return GIT_OPTION_REFUSAL
+    if at >= len(words):
         return None
-    sub, rest = args[i], args[i + 1:]
+    sub, rest = words[at], words[at + 1:]
     if any(w.split("=", 1)[0] in ("--exec", "--upload-pack", "--receive-pack") for w in rest):
         return GIT_EXEC_REFUSAL
     if sub == "config":
@@ -6007,9 +6892,15 @@ def role_command_refusal(agent, command, cwd=None):
     written = written_files(command)
     calls = gh_calls(command)
     switches = any(git_subcommand(words) in BRANCH_CHANGES for _, words, _ in calls)
+    env = {}
     for segment, words, why in calls:
+        note_shell_state(segment, env)
+        expanded = git_word_lists(words, env)[0] if program(words) == "git" else [words]
+        if expanded is None:
+            return GIT_EXPANSION_REFUSAL
         refusal = (why or program_refusal(words) or gh_refusal(segment, words, cwd, risk_added)
-                   or git_refusal(segment, words, targets, on_default) or written_run_refusal(words, written))
+                   or next(filter(None, (git_refusal(segment, w, targets, on_default) for w in expanded)), None)
+                   or written_run_refusal(words, written))
         if not refusal and switches and git_subcommand(words) == "push":
             refusal = PUSH_AFTER_SWITCH_REFUSAL
         if refusal:
@@ -6087,18 +6978,20 @@ def task_status(task, fingerprint=code_fingerprint):
     state = task_state(task)
     exists = spec_path(task).is_file()
     text = read(spec_path(task)) if exists else ""
+    spec = spec_fingerprint(task, text)
     grill = verdict_history(task, "grill")
     judge = verdict_history(task, "judge")
     last_grill, last_judge = (grill[-1] if grill else None), (judge[-1] if judge else None)
+    stale = last_judge and ("code" if last_judge.get("fingerprint") != fingerprint()
+                            else spec_stale(task, last_judge, spec))
     return {
         "task": task, "title": task_title(task), "state": state, "spec": spec_rel(task) if exists else None,
         "change_class": change_class(text)[0] if exists else None,
         "spec_problems": validate_spec(task) if exists else ["no spec yet"],
         "grill": last_grill and {"verdict": last_grill.get("verdict"),
-                                 "current": last_grill.get("fingerprint") == spec_fingerprint(task)},
+                                 "current": last_grill.get("fingerprint") == spec},
         "approved": bool(exists and approved(text)),
-        "judge": last_judge and {"verdict": last_judge.get("verdict"),
-                                 "current": last_judge.get("fingerprint") == fingerprint()},
+        "judge": last_judge and {"verdict": last_judge.get("verdict"), "current": not stale, "stale": stale or None},
         "escalations": [e for e in open_escalations() if re.search(r"\bTask %s:" % re.escape(task), e)],
     }
 
@@ -6177,17 +7070,30 @@ def next_step(task, fingerprint=code_fingerprint):
                                                    and s["grill"]["verdict"] == "pass"):
         return dict(step, step="grill", role="griller", reason="the spec changed during the build (an answered "
                                                                  "question); grill it again before going on")
+    if s["spec"] and not s["approved"] and gate_on("HARNESS_SPEC_GATE"):
+        reason = ("the spec is no longer approved: its approval was removed, so the spec may have changed since the "
+                  "task started")
+        if autonomous():
+            return dict(step, step="approve", role=None, reason=reason,
+                        command="python3 scripts/harness/lib/harness.py approve %s" % task)
+        return dict(step, step="approve", role=None, reason=reason,
+                    needed="the user's Approved-by: line in %s again" % s["spec"])
+    spec = spec_fingerprint(task)
     if tester_on():
         tests = verdict_history(task, "tests")
-        if not tests or acceptance_fingerprint(task) != tests[-1].get("fingerprint"):
-            return dict(step, step="test", role="tester",
-                        reason="no acceptance tests yet" if not tests else "the acceptance tests changed since the "
-                                                                          "tester recorded them")
+        reason = ("no acceptance tests yet" if not tests else
+                  "the acceptance tests changed since the tester recorded them"
+                  if acceptance_fingerprint(task) != tests[-1].get("fingerprint") else
+                  "the spec changed since the tester recorded the acceptance tests (or the record has no spec "
+                  "revision)" if spec_stale(task, tests[-1], spec) else None)
+        if reason:
+            return dict(step, step="test", role="tester", reason=reason)
     judge = s["judge"]
     if judge and judge["current"] and judge["verdict"] == "pass" and review_on():
         current = fingerprint()
         reviews = lens_reviews(task)
-        on_current = {lens: e for lens, e in reviews.items() if e and e.get("fingerprint") == current}
+        on_current = {lens: e for lens, e in reviews.items()
+                      if e and e.get("fingerprint") == current and not spec_stale(task, e, spec)}
         failed = [lens for lens, e in on_current.items() if e.get("verdict") != "pass"]
         if failed:
             return dict(step, step="fix", role="implementer", reason="must-fix findings from the %s review"
@@ -6213,7 +7119,10 @@ def next_step(task, fingerprint=code_fingerprint):
                     **({"needs": owners} if owners else {}))
     if not judge and not code_changed():
         return dict(step, step="implement", role="implementer")
-    return dict(step, step="judge", role="judge", reason="no judge verdict on the current code")
+    reason = {"spec": "the spec changed after the judge's last verdict: judge the task against the current spec",
+              "unrecorded": "the judge's last verdict records no spec revision (it predates spec-bound verdicts): "
+                            "judge it again"}.get((judge or {}).get("stale"), "no judge verdict on the current code")
+    return dict(step, step="judge", role="judge", reason=reason)
 
 
 def latest_delivery(head, signed=False, task=None):
@@ -6310,7 +7219,7 @@ def start_command(task):
 
 
 def finish_command(task):
-    problems = set_task_marker(task, "x", (blocked_guard, judge_gate))
+    problems = set_task_marker(task, "x", (blocked_guard, start_gate, judge_gate))
     print("finish: task %s is [x]; commit it with its code, tests, spec and verdicts" % task if not problems
           else "finish: task %s can't finish:\n%s" % (task, "\n".join(problems)))
     return 1 if problems else 0
@@ -6323,7 +7232,14 @@ def state_command(argv):
         print(json.dumps({"autonomous": autonomous(), "tasks": states, "halted": halt_file().exists()}, indent=2))
         return 0
     for s in states:
-        print("%-8s %-8s %s" % (s["task"], s["state"], s["title"]))
+        notes = []
+        if s["state"] == "wip" and s["judge"] and s["judge"]["stale"]:
+            notes.append("judge %s on %s" % (s["judge"]["verdict"], {
+                "code": "earlier code", "spec": "an earlier spec", "unrecorded": "an unrecorded spec revision"}[
+                s["judge"]["stale"]]))
+        if s["state"] == "wip" and s["spec"] and not s["approved"]:
+            notes.append("not approved")
+        print("%-8s %-8s %s%s" % (s["task"], s["state"], s["title"], "  (%s)" % "; ".join(notes) if notes else ""))
     return 0
 
 
@@ -6466,10 +7382,46 @@ GIT_PUSHES = {"push": None, "send-pack": None, "http-push": None, "subtree": Non
               "lfs": ("push",)}
 
 
+def git_word_lists(words, env):
+    """(the word lists a git call can run once the shell expands its words, whether a word after the subcommand is
+    left unexpanded), or (None, True) when git's options or its subcommand hold an expansion the hooks can't resolve
+    to text. The value of an option such as -C or --git-dir may be anything."""
+    at = git_options(words)[1]
+    lists, unresolved = [[]], False
+    for i, word in enumerate(words):
+        texts = resolved_texts(word, env) if re.search(r"[$`]", word) else [word]
+        if texts is None:
+            if i <= at and words[i - 1:i] not in [[o] for o in GIT_VALUE_OPTIONS]:
+                return None, True
+            unresolved = True
+        splits = [[word]] if texts is None or texts == [word] else [text.split() for text in texts]
+        lists = [found + split for found in lists for split in splits]
+        if len(lists) > 64:
+            return None, True
+    return lists, unresolved
+
+
+def external_git_refusal(words, unresolved):
+    """Whether a git call (its words expanded) may push or change what git runs, under external delivery."""
+    sub = git_subcommand(words)
+    options = git_options(words)[0]
+    pushes = sub in GIT_PUSHES and (GIT_PUSHES[sub] is None or unresolved or any(w in GIT_PUSHES[sub] for w in words))
+    if any(name in ("-c", "--config-env", "--exec-path") for name, _ in options) or pushes:
+        return True
+    if sub == "config" and not any(w in GIT_CONFIG_READS for w in words) and \
+            len([w for w in words[words.index("config") + 1:] if not w.startswith("-")]) >= 2:
+        return True
+    return bool(sub and git("config", "--get", "alias." + sub).strip())
+
+
 def external_refusal(command):
     """Why a command is refused to every agent under external delivery, or None: the factory pushes and talks to
-    GitHub from its trusted clone, so the lane runs no gh write and no git push, by any name."""
+    GitHub from its trusted clone, so the lane runs no gh write and no git push, by any name. A git subcommand from a
+    variable is read as the command sets it (P=push; git $P, set -- push; git "$@"), and refused when the hooks can't
+    resolve it."""
+    env = {}
     for segment, words, why in gh_calls(command):
+        note_shell_state(segment, env)
         prog = program(words[program_index(words):])
         if why:
             return "%s (%s)" % (EXTERNAL_REFUSAL, why.rstrip("."))
@@ -6480,18 +7432,13 @@ def external_refusal(command):
         if prog == "gh":
             name, sub, args = gh_parts(words)
             reads = EXTERNAL_GH_READS.get(name, ())
+            if name is None:
+                continue
             if (name == "api" and api_write(args)) or (name != "api" and reads is not None and sub not in reads):
                 return EXTERNAL_REFUSAL
         elif prog == "git":
-            options = words[1:words.index(git_subcommand(words))] if git_subcommand(words) in words else words[1:]
-            sub = git_subcommand(words)
-            pushes = sub in GIT_PUSHES and (GIT_PUSHES[sub] is None or any(w in GIT_PUSHES[sub] for w in words))
-            if any(o.split("=", 1)[0] in ("-c", "--config-env", "--exec-path") for o in options) or pushes:
-                return EXTERNAL_REFUSAL
-            if sub == "config" and not any(w in GIT_CONFIG_READS for w in words) and \
-                    len([w for w in words[words.index("config") + 1:] if not w.startswith("-")]) >= 2:
-                return EXTERNAL_REFUSAL
-            if sub and git("config", "--get", "alias." + sub).strip():
+            lists, unresolved = git_word_lists(words, env)
+            if lists is None or any(external_git_refusal(expanded, unresolved) for expanded in lists):
                 return EXTERNAL_REFUSAL
     return None
 
@@ -7913,7 +8860,7 @@ NAME_RUN = re.compile(r"[A-Za-z0-9_.-]+")
 SECRET_WORDS = re.compile(r"(?i)key|token|secret|pass|pwd|credential|auth|cookie")
 HIGH_ENTROPY_RUN = re.compile(r"[A-Za-z0-9+/=_-]{32,}")
 FLAG_GAP = re.compile(r"[ \t]{1,8}(?=[^\s-])")   # --password <value>
-ASSIGNED = re.compile(r"[\"']?[ \t]{0,8}(?:=|:(?!//))[ \t]{0,8}")
+SECRET_ASSIGNED = re.compile(r"[\"']?[ \t]{0,8}(?:=|:(?!//))[ \t]{0,8}")
 UNQUOTED = re.compile(r"[^\s;&|<>()\"'`,]+")
 AUTH_SCHEMES = ("bearer", "basic", "token", "bot", "digest")
 REDACTED = "REDACTED"
@@ -7983,7 +8930,7 @@ def redact_assigned(text, found):
         pos = name.end()
         if not secret_name(name.group()):
             continue
-        assigned = ASSIGNED.match(text, pos)
+        assigned = SECRET_ASSIGNED.match(text, pos)
         if not assigned and name.group().startswith("-"):
             assigned = FLAG_GAP.match(text, pos)
         if not assigned or text.startswith("=", assigned.end()):
@@ -9216,6 +10163,12 @@ def receipt_data(task, base=None, code=None):
         return None, "no spec at %s" % spec_rel(task)
     if passed.get("fingerprint") != (code or code_fingerprint()):
         return None, "the code changed after the judge passed task %s; judge it again first" % task
+    stale = spec_stale(task, passed)
+    if stale == "spec":
+        return None, "the spec changed after the judge passed task %s; judge it again first" % task
+    if stale:
+        return None, ("the judge pass of task %s records no spec revision (it predates spec-bound verdicts); judge it "
+                      "again first" % task)
     body = comment_free(spec_text)
     title = re.match(r"^#\s+Spec\s+\S+:\s*(.+)$", body.strip().splitlines()[0]) if body.strip() else None
     base = receipt_base(task, spec_text, base)
@@ -9280,6 +10233,7 @@ def receipt_data(task, base=None, code=None):
         "risks": risk_reasons(task, base),
         "rounds": {"grill": len(grills), "judge": len(judge), "debug": len(verdict_history(task, "debug"))},
         "judged_at": passed.get("at"),
+        "judged_on": {"spec": passed.get("spec"), "code": passed.get("fingerprint")},
         "sandbox": sandbox.normalized(passed.get("sandbox")),
         "approval": approval_lines(approval_section(spec_text) or ""),
         "approval_needed": approval_needed,
@@ -9335,7 +10289,8 @@ def receipt_text(d):
     lines += ["  %-8s %s" % (c["status"], c["path"]) for c in d["changed"]] or ["  (no code changes)"]
     if d["backbone_changed"]:
         lines.append("  backbone: %s" % ", ".join(c["path"] for c in d["backbone_changed"]))
-    sections = (("VERIFIED (judge pass %s, re-checked by the harness)" % d["judged_at"], d["verified"]),
+    sections = (("VERIFIED (judge pass %s on spec %s and code %s, re-checked by the harness)"
+                 % (d["judged_at"], d["judged_on"]["spec"][:12], (d["judged_on"]["code"] or "?")[:12]), d["verified"]),
                 ("NOT VERIFIED", d["not_verified"] or ["nothing outside the acceptance criteria"]),
                 ("SANDBOX (where the judge pass was recorded)", sandbox_lines(d["sandbox"])),
                 ("COST (the runner's agent sessions for this task)", cost_lines(d.get("cost"))),
@@ -10188,8 +11143,8 @@ def record_tests(data):
         deny("No acceptance test file (HARNESS_ACCEPTANCE_PATHS) mentions %s yet. Write a test for each, naming its "
              "AC id, then stop again." % ", ".join(missing))
     history = verdict_history(task, "tests")
-    entry = {"fingerprint": acceptance_fingerprint(task), "files": covered, "missing": missing,
-             "red": report.get("red"), "problems": report.get("problems") or [],
+    entry = {"fingerprint": acceptance_fingerprint(task), "spec": spec_fingerprint(task), "files": covered,
+             "missing": missing, "red": report.get("red"), "problems": report.get("problems") or [],
              "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "summary": report.get("summary")}
     history.append(entry)
     VERDICTS.mkdir(parents=True, exist_ok=True)
@@ -10251,7 +11206,7 @@ def record_review(data):
     verdict = "fail" if any(f.get("severity") == "must-fix" for f in findings) else "pass"
     history = verdict_history(task, "review")
     history.append({"lens": lens, "verdict": verdict, "claimed": report.get("verdict"),
-                    "fingerprint": code_fingerprint(), "findings": findings,
+                    "fingerprint": code_fingerprint(), "spec": spec_fingerprint(task), "findings": findings,
                     "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "summary": report.get("summary")})
     VERDICTS.mkdir(parents=True, exist_ok=True)
     verdict_path(task, "review").write_text(json.dumps({"task": task, "kind": "review", "history": history}, indent=2)
@@ -10439,6 +11394,10 @@ def main(argv):
         return environment_check_command(argv[2:])
     if argv[1:2] == ["repository-check"]:
         return repository_check_command(argv[2:])
+    if argv[1:2] == ["approval-check"]:
+        return approval_check_command(argv[2:])
+    if argv[1:2] == ["signing-check"]:
+        return signing_check_command(argv[2:])
     if len(argv) == 3 and argv[1] == "approve":
         return approve_command(argv[2])
     if argv[1:2] == ["escalate"]:
