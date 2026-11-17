@@ -15,13 +15,18 @@
     `$HOME`, and spelled in any case on a disk that ignores case (macOS: `~/.CLAUDE/Settings.json`). The
     `claude plugin|mcp|config` and `codex mcp|features` commands that change them are refused too, and so is an
     archive extracted, or a folder's contents copied, into the home folder or `~/.config` (`tar -x -C ~`,
-    `unzip -d ~`, `rsync -a dir/ ~`). Reading them still works, and so does the rest of `~/.claude` (transcripts,
-    auto-memory).
+    `unzip -d ~`, `rsync -a dir/ ~`), with its options read the way the tool parses them (bundled `tar -xC ~`,
+    old-style `tar xCf ~`, `unzip -qod ~`, `cpio -iD ~`, `cp -t`, options after the operands, `TAR_OPTIONS` and
+    `UNZIP`). So is an extraction that keeps the archive's absolute or `../` names (`tar -P`, `unzip -:`, `7z -spf`,
+    `cpio --insecure`) or whose folder the hooks can't resolve. Reading them still works, and so does the rest of
+    `~/.claude` (transcripts, auto-memory).
   - Agents can't start a nested agent session without the harness's hooks: `claude --bare`, `--safe-mode`,
     `--restricted`, `--setting-sources` without `project`, `--settings` that turns hooks off or names a file,
     `--agents` redefining a harness role; `codex -c features.hooks=false` (and other `-c` overrides of hooks, project
     trust or the shell environment), `--disable hooks`, `exec --ignore-user-config`; `opencode --pure`; or any of them
     with `CLAUDE_CODE_SIMPLE`, a moved home or config folder, `PATH` or `PYTHON*` set for it, also through `npx`.
+    Their options count in every form the CLIs take: `-c=value`, `-cvalue`, `--config=value`, after a subcommand or
+    the prompt; text after `--` is the prompt.
   - Session start, `doctor`, `run` and `orca` report as errors, and `run` and `orca` refuse to start on:
     `disableAllHooks`; managed `allowManagedHooksOnly` without the harness; an `env` block setting `PYTHON*`,
     `PATH`, `LD_*`/`DYLD_*`, `BASH_ENV`, `GIT_DIR` and the like, or `HARNESS_*`; the plugin turned off in thin mode; Codex hooks switched off or a
