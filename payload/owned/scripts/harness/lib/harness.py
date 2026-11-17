@@ -1924,52 +1924,181 @@ def agent_config_path(path_str, cwd, whole=False):
     return None
 
 
-def extraction_folders(prog, words):
-    """The folders an archive extraction writes into ("." for the current one): names from the archive, which the
-    hooks can't read, so a folder that holds the CLIs' configuration (the home folder) counts as written whole. ditto
-    copies a folder's contents the same way."""
-    args = words[1:]
-    flags = short_flags(args)
-    if prog in ("tar", "bsdtar", "gtar"):
-        bundled = args[:1] and not args[0].startswith("-") and "x" in args[0]
-        if not (bundled or "x" in flags or {"--extract", "--get"} & set(args)):
-            return []
-        return flag_values(args, "-C", "--directory") or ["."]
-    if prog == "unzip":
-        return [] if flags & set("lvtpZ") else flag_values(args, "-d") or ["."]
-    operands = [w for w in args if not w.startswith("-")]
-    if prog == "ditto":
-        return operands[-1:] if len(operands) > 1 else []
-    if prog in ("7z", "7za", "7zz"):
-        if operands[:1] not in (["x"], ["e"]):
-            return []
-        return [w[2:] for w in args if w.startswith("-o") and len(w) > 2] or ["."]
-    operands = [w for w in args if not w.startswith("-")]
-    if prog in ("cpio", "bsdcpio"):
-        return operands[-1:] if "p" in flags else ["."] if "i" in flags or "--extract" in args else []
-    if prog == "pax":
-        return operands[-1:] if {"r", "w"} <= flags else ["."] if "r" in flags else []
-    return []
+TAR_LONG_VALUED = ("--directory", "--cd", "--file", "--files-from", "--exclude-from", "--exclude", "--include",
+                   "--newer", "--newer-mtime", "--format", "--options", "--use-compress-program", "--transform",
+                   "--xform", "--strip-components", "--owner", "--group", "--mode", "--mtime", "--label",
+                   "--starting-file", "--blocking-factor", "--record-size", "--listed-incremental", "--info-script",
+                   "--new-volume-script", "--rsh-command", "--rmt-command", "--to-command", "--checkpoint-action",
+                   "--index-file", "--suffix", "--uid", "--gid", "--tape-length", "--volno-file")
+# Each archiver as GNU's and BSD's (libarchive's) builds parse it: a letter takes a value in one and not the other,
+# so a command is read both ways and a destination either finds counts.
+EXTRACTORS = {
+    "tar": [dict(valued="bCfFgHIKLNTVX", long_valued=TAR_LONG_VALUED, old_style=True, abbreviations=True,
+                 long_flags=("--extract", "--get", "--absolute-names")),
+            dict(valued="bCfIsTX", long_valued=TAR_LONG_VALUED, old_style=True, abbreviations=True,
+                 long_flags=("--extract", "--get", "--absolute-paths", "--insecure"))],
+    "unzip": [dict(valued="dPIO")],
+    "cpio": [dict(valued="CDEFHIMOR", abbreviations=True, long_flags=("--extract", "--pass-through"),
+                  long_valued=("--directory", "--file", "--format", "--pattern-file", "--owner", "--io-size",
+                               "--message", "--rsh-command")),
+             dict(valued="CEFfHIOR", abbreviations=True, long_flags=("--extract", "--pass-through", "--insecure"),
+                  long_valued=("--file", "--format", "--owner", "--passphrase"))],
+    "pax": [dict(valued="bfopsxBGTU")],
+    "jar": [dict(valued="fmeC", old_style=True, long_flags=("--extract",),
+                 long_valued=("--file", "--dir", "--manifest", "--main-class", "--module-version", "--release"))],
+}
+for alias, name in (("bsdtar", "tar"), ("gtar", "tar"), ("bsdcpio", "cpio")):
+    EXTRACTORS[alias] = EXTRACTORS[name]
+# The variables these archivers read options from before their command line's.
+OPTION_VARIABLES = {"tar": ("TAR_OPTIONS",), "gtar": ("TAR_OPTIONS",), "unzip": ("UNZIP", "UNZIPOPT")}
+ROOT_EXTRACTION = "/"   # names from the archive land where they say, absolute or ../ included
 
 
-def flag_values(args, *names):
-    """The values args give the flags names: --flag value, --flag=value, -f value or -fvalue."""
-    values = []
-    for i, word in enumerate(args):
-        for name in names:
-            if word == name:
-                values.append(args[i + 1] if i + 1 < len(args) else "")
-            elif name.startswith("--") and word.startswith(name + "="):
-                values.append(word[len(name) + 1:])
-            elif not name.startswith("--") and word.startswith(name) and len(word) > len(name) \
-                    and not word.startswith("--"):
-                values.append(word[len(name):])
-    return values
+def option_variable_words(prog, assignments, env):
+    """The options prog reads from its variables (TAR_OPTIONS, UNZIP): a value the hooks can't know reads as a
+    folder they can't resolve."""
+    words = []
+    for name in OPTION_VARIABLES.get(prog, ()):
+        given = [a.split("=", 1)[1] for a in assignments if a.split("=", 1)[0] == name]
+        value = given[-1] if given else (env or {}).get(name, os.environ.get(name))
+        if (value is None and name in (env or {})) or (isinstance(value, str) and
+                                                         re.search(r"[$`]", os.path.expandvars(value))):
+            words += ["-C" if prog != "unzip" else "-d", "$(%s)" % name]
+        elif isinstance(value, str):
+            try:
+                words += shlex.split(value)
+            except ValueError:
+                words += value.split()
+    return words
 
 
-def config_operands(segment, words):
+def cumulative(folders):
+    """A later relative -C is taken from the folder an earlier one changed to; each folder alone counts too."""
+    found, here = [], None
+    for folder in folders:
+        here = folder if here is None or folder.startswith(("/", "~", "$")) else os.path.join(here, folder)
+        found += [folder, here]
+    return found
+
+
+def extraction_folders(prog, words, assignments=(), env=None):
+    """The folders an archive extraction writes into ("." for the current one, "/" when the archive's own absolute or
+    ../ names are kept): names from the archive, which the hooks can't read, so a folder that holds the CLIs'
+    configuration (the home folder) counts as written whole."""
+    args = option_variable_words(prog, assignments, env) + words[1:]
+    found = []
+    for table in EXTRACTORS.get(prog, []):
+        options, operands, _ = parse_options(args, **table)
+        given = {name for name, _ in options}
+        if prog in ("tar", "bsdtar", "gtar", "jar"):
+            if given & {"-x", "--extract", "--get"}:
+                found += cumulative(option_values(options, "-C", "--directory", "--cd", "--dir")) or ["."]
+                found += [ROOT_EXTRACTION] if given & {"-P", "--absolute-names", "--absolute-paths", "--insecure"} \
+                    else []
+        elif prog == "unzip":
+            if not given & {"-l", "-v", "-t", "-p", "-c", "-z", "-Z"} or any(w.startswith("--") for w in args):
+                found += option_values(options, "-d") or ["."]
+                found += [ROOT_EXTRACTION] if "-:" in given else []
+        elif prog in ("cpio", "bsdcpio"):
+            folders = option_values(options, "-D", "--directory")
+            if given & {"-p", "--pass-through"}:
+                found += cumulative(folders + operands[-1:]) if operands else []
+            elif given & {"-i", "--extract"}:
+                found += cumulative(folders) or ["."]
+            found += [ROOT_EXTRACTION] if "--insecure" in given and given & {"-i", "-p", "--extract",
+                                                                             "--pass-through"} else []
+        elif prog == "pax" and "-r" in given:
+            found += operands[-1:] if "-w" in given else ["."]
+    if prog in ("7z", "7za", "7zz", "7zr"):
+        # 7-Zip's switches are case-blind and take their value attached: -o<folder>.
+        switches = [w for w in words[1:] if w.startswith("-")]
+        command = next((w.lower() for w in words[1:] if not w.startswith("-")), "")
+        if command in ("x", "e"):
+            found += [w[2:] for w in switches if w[:2].lower() == "-o" and len(w) > 2] or ["."]
+            found += [ROOT_EXTRACTION] if any(w.lower().startswith("-spf") for w in switches) else []
+    elif prog == "unar":
+        args = words[1:]
+        found += [args[i + 1] for i, w in enumerate(args[:-1]) if w in ("-o", "-output-directory",
+                                                                        "--output-directory")] or ["."]
+    elif re.fullmatch(r"python[\d.]*", prog) and "-m" in words[:-1]:
+        rest = words[words.index("-m") + 1:]
+        if rest[0] in ("zipfile", "tarfile") and set(rest) & {"-e", "--extract"}:
+            at = next(i for i, w in enumerate(rest) if w in ("-e", "--extract"))
+            operands = [w for w in rest[at + 1:] if not w.startswith("-")]
+            found += operands[1:2] or ["."]
+    return found
+
+
+COPY_LONG_FLAGS = ("--recursive", "--archive", "--force", "--verbose", "--interactive", "--no-clobber", "--update",
+                   "--dereference", "--no-dereference", "--parents", "--symbolic", "--relative", "--link",
+                   "--no-target-directory", "--backup", "--preserve", "--reflink", "--keepParent", "--rsrc",
+                   "--norsrc", "--extattr", "--noextattr", "--acl", "--noacl", "--qtn", "--noqtn", "--delete",
+                   "--checksum", "--progress", "--partial", "--dry-run", "--itemize-changes", "--human-readable",
+                   "--mkpath", "--times", "--perms", "--owner", "--group", "--hard-links", "--sparse", "--quiet",
+                   "--stats", "--compress", "--one-file-system", "--ignore-existing", "--existing", "--inplace",
+                   "--append", "--copy-links", "--safe-links", "--links", "--whole-file")
+RSYNC_LONG_VALUED = ("--rsh", "--rsync-path", "--filter", "--exclude", "--exclude-from", "--include",
+                     "--include-from", "--files-from", "--link-dest", "--compare-dest", "--copy-dest", "--backup-dir",
+                     "--suffix", "--chmod", "--chown", "--usermap", "--groupmap", "--log-file", "--log-file-format",
+                     "--out-format", "--partial-dir", "--temp-dir", "--timeout", "--contimeout", "--bwlimit",
+                     "--max-size", "--min-size", "--max-delete", "--max-alloc", "--port", "--sockopts",
+                     "--password-file", "--iconv", "--remote-option", "--modify-window", "--compress-level",
+                     "--compress-choice", "--checksum-choice", "--skip-compress", "--checksum-seed", "--info",
+                     "--debug", "--address", "--protocol", "--write-batch", "--only-write-batch", "--read-batch",
+                     "--stop-after", "--stop-at", "--block-size", "--outbuf", "--copy-as", "--early-input")
+GNU_TARGET = ("--target-directory", "--suffix")
+COPIERS = {
+    "cp": [dict(valued="St", flags="aRrfHiLlnPpsTuvxXcNbdZ", long_valued=GNU_TARGET + ("--sparse", "--no-preserve"),
+                long_flags=COPY_LONG_FLAGS, abbreviations=True)],
+    "mv": [dict(valued="St", flags="bfhinuvTZ", long_valued=GNU_TARGET, long_flags=COPY_LONG_FLAGS,
+                abbreviations=True)],
+    "ln": [dict(valued="St", flags="bdFfhiLnPrsTvw", long_valued=GNU_TARGET, long_flags=COPY_LONG_FLAGS,
+                abbreviations=True)],
+    "install": [dict(valued="gmoSt", flags="bcCdDpsTvZ", long_valued=GNU_TARGET + ("--group", "--mode", "--owner",
+                                                                                   "--strip-program"),
+                     long_flags=COPY_LONG_FLAGS, abbreviations=True),
+                dict(valued="BDfghlMmNoT", flags="bCcpSsUvd")],
+    "rsync": [dict(valued="eBfTM", flags="vqcarRbudlLkKHpEAXogDtUNOJSnWxCzhPiF0yms468", long_valued=RSYNC_LONG_VALUED,
+                   long_flags=COPY_LONG_FLAGS)],
+    "scp": [dict(valued="cFiJloPSDX", flags="346ABCOpqRrsTv")],
+    "ditto": [dict(flags="VXcCkxzjvh", long_valued=("--arch", "--bom", "--zlibCompressionLevel"),
+                   long_flags=COPY_LONG_FLAGS + ("--sequesterRsrc", "--hfsCompression", "--nohfsCompression",
+                                                 "--preserveHFSCompression", "--nopreserveHFSCompression",
+                                                 "--password", "--clone", "--nocache"))],
+}
+INTO = "into"   # a destination that receives content whose names the hooks can't read
+
+
+def copy_targets(prog, args):
+    """[(path, whole)] a copy, move or link writes: its target, what lands in it, the sources a move or link takes
+    away, and the target as a whole when a folder's contents land in it (cp -T, rsync src/, ditto). The target is the
+    -t folder, or the last operand, or one before it that only options this table doesn't know follow."""
+    found = []
+    for table in COPIERS[prog]:
+        options, operands, maybe = parse_options(args, **table)
+        given = {name for name, _ in options}
+        targets = [(t, operands) for t in option_values(options, "-t", "--target-directory")]
+        if not targets:
+            for at in range(len(operands) - 1, 0, -1):
+                targets.append((operands[at], operands[:at]))
+                if at not in maybe:
+                    break
+        for target, sources in targets:
+            found += [(target, False)] + [(os.path.join(target, os.path.basename(s.rstrip("/"))), False)
+                                          for s in sources]
+            contents = any(s.endswith("/") or os.path.basename(s.rstrip("/")) in ("", ".", "..") for s in sources)
+            if prog == "ditto" or (prog in ("cp", "rsync", "scp") and (
+                    contents or given & {"-T", "--no-target-directory"})):
+                found.append((target, INTO))
+            if prog in ("ln", "mv"):
+                found += [(s, True) for s in sources]
+    return found
+
+
+def config_operands(segment, words, assignments=(), env=None):
     """[(path, whole)] a shell segment may change: its redirection targets, and every word of a program that doesn't
-    only read (cp and the like: their target, and what lands in a target folder)."""
+    only read (cp and the like: their target, and what lands in a target folder). whole is INTO for a folder that
+    receives names the hooks can't read (an archive's, a folder's contents)."""
     found = [(p.strip("'\""), False) for p in
              re.findall(r"(?:^|[^<>&0-9])(?:[0-9]?>>?|&>>?)\s*('[^']*'|\"[^\"]*\"|[^\s;|&<>]+)", segment)]
     prog, args = program(words), words[1:]
@@ -1980,15 +2109,11 @@ def config_operands(segment, words):
     sub = CONFIG_COMMANDS.get(prog, {}).get(operands[0] if operands else "")
     if prog in CONFIG_COMMANDS and not sub:
         return found
-    found += [(folder, True) for folder in extraction_folders(prog, words)]
-    if prog in ("cp", "install", "rsync", "scp", "ln", "mv") and len(operands) > 1:
-        target, sources = operands[-1], operands[:-1]
-        found += [(target, False)] + [(os.path.join(target, os.path.basename(s.rstrip("/"))), False) for s in sources]
-        if prog in ("cp", "rsync", "scp") and any(s.endswith(("/", "/.")) for s in sources):
-            found.append((target, True))   # a folder's contents land in the target, whatever their names
-        if prog in ("ln", "mv"):
-            found += [(s, True) for s in sources]
-        return found
+    command = redirections(words)[0]
+    found += [(folder, INTO) for folder in extraction_folders(prog, command, assignments, env)]
+    copies = copy_targets(prog, command[1:]) if prog in COPIERS else []
+    if copies:
+        return found + copies
     found += [(w, prog in REMOVERS) for w in args]
     found += [(w.split("=", 1)[1], False) for w in args if "=" in w]
     return found
@@ -2000,14 +2125,25 @@ def config_findings(segment, words, cwd, env=None):
         return ["%s %s %s changes %s's own configuration, which decides whether the harness's hooks run; only the "
                 "user does that." % (prog, operands[0], operands[1], "Claude Code" if prog == "claude" else "Codex")]
     found = []
-    for path, whole in config_operands(segment, words):
+    for path, whole in config_operands(segment, words, shell_words(segment)[0], env):
         if not path or path.startswith("-"):
             continue
         fulls, unresolved = shell_path(path, cwd, env)
+        shown = {".": "The current folder", ROOT_EXTRACTION: "/ (the archive's own absolute and ../ names)"}.get(
+            path, path)
+        if unresolved and whole == INTO:
+            found.append("%s receives files whose names the hooks can't read (an archive's, a folder's contents), and "
+                         "the hooks can't tell which folder that is: it may hold the agent CLIs' configuration, which "
+                         "can turn the harness's hooks off. Name the folder." % shown)
+            continue
         label = next((label for label in (agent_config_path(full, None, whole) for full in fulls) if label), None)
         if not label and unresolved and AGENT_CONFIG_MENTION.search(path):
             label = "the agent CLIs' configuration"
-        if label:
+        if label and whole == INTO:
+            found.append("%s receives files whose names the hooks can't read (an archive's, a folder's contents), and "
+                         "it holds %s, which can turn the harness's hooks off; agents may read it but not change it. "
+                         "Extract or copy into a folder of its own." % (shown, label))
+        elif label:
             found.append("%s is in %s, which can turn the harness's hooks off; agents may read it but not change it."
                          % (path, label))
     return found

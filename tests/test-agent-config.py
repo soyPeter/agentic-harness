@@ -252,6 +252,31 @@ class WritesToAgentConfiguration(Fixture):
             with self.subTest(command=command):
                 self.assertAllowed(self.bash(command), command)
 
+    def test_bundled_attached_and_late_options_still_name_the_destination(self):
+        home, notes = shlex.quote(str(self.home)), shlex.quote(str(self.home / "notes"))
+        for command in ("unzip -qod ~ e.zip", "unzip -od ~ e.zip", "unzip -od~ e.zip", "unzip e.zip -qod ~",
+                        "UNZIP='-d ~' unzip e.zip", "export UNZIPOPT='-qd ~'; unzip e.zip",
+                        "tar -xC ~ -f e.tar", "tar -xvzC ~ -f e.tgz", "tar xCf ~ e.tar", "tar xvfC e.tar ~",
+                        "tar -xf e.tar --directory=~", "tar -xf e.tar --dir ~", "tar --ext -f e.tar -C ~",
+                        "tar -xf e.tar -C %s -C %s" % (shlex.quote(str(self.home.parent)), self.home.name),
+                        "TAR_OPTIONS='-C ~' tar -xf e.tar", 'TAR_OPTIONS="$(cat opts)" tar -xf e.tar', "tar -xPf e.tar", "tar -x --absolute-names -f e.tar",
+                        "unzip -: e.zip -d notes",
+                        "cpio -idD ~ < e.cpio", "cpio -i -D ~ < e.cpio", "cpio -i --directory=~ < e.cpio",
+                        "cpio -pd ~ < list.txt", "cpio -i --insecure < e.cpio",
+                        "rsync -a e/ ~ --exclude x", "rsync -av --exclude .git e/ ~", "rsync -a . ~",
+                        "cp -R . ~", "cp -rT evil ~", "cp -t ~/.claude settings.json", "ditto evil ~ --arch arm64",
+                        "7z x -o~ e.7z", "7z X e.7z -O%s" % home, "7z x -spf e.7z", "unar -o ~ e.zip",
+                        "cd ~ && jar xf e.jar", "python3 -m zipfile -e e.zip ~", "python3 -m tarfile -e e.tar ~",
+                        'tar -xf e.tar -C "$(cat dir.txt)"', 'cd "$(cat dir.txt)" && unzip e.zip'):
+            with self.subTest(command=command):
+                self.assertRefused(self.bash(command), command)
+        for command in ("tar -xC ~/notes -f e.tar", "tar xCf %s e.tar" % notes, "unzip -qod ~/notes e.zip",
+                        "tar -xfC e.tar ~", "unzip -qql e.zip", "cpio -it < e.cpio", "cpio -idD ~/notes < e.cpio",
+                        "rsync -a e/ ~/notes --exclude x", "7z l e.7z", "7z x e.7z -o%s" % notes,
+                        "python3 -m zipfile -l e.zip", "UNZIP=-q unzip e.zip -d ~/notes"):
+            with self.subTest(command=command):
+                self.assertAllowed(self.bash(command), command)
+
     def test_the_rest_of_the_home_folder_is_left_alone(self):
         for path in (self.home / "notes.txt", self.home / ".claude/projects/x/memory/note.md",
                      self.home / ".claude/todos/x.json", self.home / ".config/other/x.json"):
