@@ -2546,13 +2546,16 @@ def config_operands(segment, words, assignments=(), env=None):
     return found
 
 
-def config_findings(segment, words, cwd, env=None):
+def config_findings(segment, words, cwd, env=None, assignments=None):
     prog, operands = program(words), [w for w in words[1:] if not w.startswith("-")]
     if operands[1:2] and operands[1] in CONFIG_COMMANDS.get(prog, {}).get(operands[0], ()):
         return ["%s %s %s changes %s's own configuration, which decides whether the harness's hooks run; only the "
                 "user does that." % (prog, operands[0], operands[1], "Claude Code" if prog == "claude" else "Codex")]
+    if assignments is None:
+        assignments = shell_words(segment)[0]
     found = []
-    for path, whole in config_operands(segment, words, shell_words(segment)[0], env):
+    # A long command repeats words; each distinct one is resolved once.
+    for path, whole in dict.fromkeys(config_operands(segment, words, assignments, env)):
         if not path or path.startswith("-"):
             continue
         fulls, unresolved = shell_path(path, cwd, env)
@@ -2960,7 +2963,7 @@ def segment_findings(found, segment, op, words, assignments, index, segments, cw
             args = [(resolved_texts(w, env) or [w])[0] if re.search(r"[$`]", w) else w for w in words[1:]]
             found.extend(shell_findings(functions[prog], cwd, depth + 1, dict(env, **positional_env(args)),
                                         functions))
-    found.extend(config_findings(segment, words, cwd, env))
+    found.extend(config_findings(segment, words, cwd, env, assignments))
     found.extend(nested_session_findings(words, assignments, env))
     producer = shell_words(segments[index - 1][0])[1] if index > 0 and segments[index - 1][1] == "|" else None
     found.extend(engine_findings(prog, words, written_paths(segment, words)))
