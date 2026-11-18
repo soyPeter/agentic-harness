@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **A redirection isn't an argument of the gh or git call it follows.** The deliverer's gate read
+  `gh repo view --json defaultBranchRef > /dev/null` (or `2>&1`, `&>file`, `</dev/null`, `>|file`) as `gh repo view`
+  with a `>` or `2>&` argument and refused it as another repository; the same happened after a subshell,
+  `( gh repo view --json defaultBranchRef ) 2>&1 | cat`. The gh and git checks now read a call's words without its
+  redirections, operator and target, wherever they are written (`2>&1>out` too). A quoted or escaped `>` is still
+  text, so `--body ">" --add-label automerge` is refused as before, and `-R x/y` or `--repo x/y` after a redirection
+  is still refused as another repository. Other checks still see the redirections (a shell reading a file, writes).
+  New regression tests pin the subshell forms that ADR-006's tokenizer (#93) fixed: `( gh repo view ... )`,
+  `(gh pr ls)` and `-R x/y)`, which the deliverer gate's shell property had found at random. A false refusal, not a
+  bypass.
+
 - **Third-party skills are reference until the user admits a reviewed copy (ADR-006, Proposed).** The user records a
   vendor's or an SDK's skill bundle in `backbone/admissions.conf` (new, user-only like `tools.conf`): its path, an
   Accepted ADR that names it, source, revision, digest, purpose, compatible versions, dependencies, data destinations

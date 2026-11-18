@@ -1568,6 +1568,58 @@ def operators_apart(segment):
     return OPERATORS_APART[segment]
 
 
+REDIRECTION_WORD = re.compile(r"[0-9]*(?:%s)" % "|".join(re.escape(op) for op in REDIRECT_OPERATORS))
+
+
+def redirections_removed(segment):
+    """segment without its redirections, operator and target, as the program gets its arguments: gh pr view 7 2>&1 >out
+    is gh pr view 7. operators_apart sets each unquoted operator apart, so a word that is all operator is one; a
+    quoted or escaped < or > is part of a word and stays. The text is cut into words at the same quotes and
+    expansions, and joined from slices: a long segment stays linear."""
+    text = operators_apart(segment)
+    if "<" not in text and ">" not in text:
+        return segment
+    words, start, quote, i = [], None, None, 0
+    while i < len(text):
+        ch, end = text[i], i + 1
+        if quote == "'":
+            quote = None if ch == "'" else quote
+        elif ch == "\\":
+            end = i + 2
+        elif quote == '"' and ch == '"':
+            quote = None
+        elif ch == "`":
+            close = text.find("`", i + 1)
+            end = len(text) if close < 0 else close + 1
+        elif text.startswith("$(", i) or (quote is None and text.startswith(("<(", ">("), i)):
+            end = closing_paren(text, i + 1) + 1
+        elif text.startswith("${", i):
+            close = text.find("}", i + 2)
+            end = len(text) if close < 0 else close + 1
+        elif quote:
+            pass
+        elif ch in "'\"":
+            quote = ch
+        elif ch.isspace():
+            if start is not None:
+                words.append(text[start:i])
+            start, i = None, end
+            continue
+        start, i = (i if start is None else start), end
+    if start is not None:
+        words.append(text[start:])
+    kept, target = [], False
+    for word in words:
+        if target:
+            # 2>&1>out: operators_apart leaves 1> as one word, the target and the next operator.
+            target = bool(REDIRECTION_WORD.fullmatch(word))
+        elif REDIRECTION_WORD.fullmatch(word):
+            target = True
+        else:
+            kept.append(word)
+    return " ".join(kept)
+
+
 # shlex builds a word one character at a time, in time quadratic in its length, past the hook's budget on a long one.
 # A long run of characters it reads literally is swapped for a short stand-in and put back in the words.
 LITERAL_RUN = re.compile(r"[A-Za-z0-9_./:=+,@%^~-]{256,}")
@@ -7268,6 +7320,10 @@ def segment_calls(segment, piped, depth):
     if prog == "alias" or any(ALIAS_TABLE.match(word) for word in written):
         return [(segment, words, ALIAS_REFUSAL)]
     problem = command_problem(marked, words)
+    if prog in ("gh", "git") and not problem and ("<" in segment or ">" in segment):
+        # A redirection is the shell's, not an argument: gh repo view --json x > out names no repository.
+        bare = run_words(shell_split(redirections_removed(segment)))[0]
+        words = bare if program(bare) == prog else words
     if problem or prog in ("gh", "git"):
         return [(segment, words, problem)]
     if prog in ("source", "."):
