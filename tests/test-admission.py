@@ -375,10 +375,11 @@ class Admission(unittest.TestCase):
             "command": "timeout 5 git checkout %s -- backbone/admissions.conf" % before}), "backbone/admissions.conf")
         for command in ("sh $(echo %s)" % SCRIPT, "sh .claude/skills/*/scripts/setup.sh", "sh <(cat %s)" % SCRIPT,
                         "eval \"$(cat %s)\"" % SCRIPT, "bash -c \"$(cat %s)\"" % SCRIPT, "cat $F | sh",
-                        "sh \"$S\""):
+                        "sh \"$S\"", "$RUN"):
             with self.subTest(unreadable=command):
                 self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command}))
-        for command in ("cat $F | sh", "sh \"$S\"", "$RUN"):
+        # $RUN is refused before the bundle check, as any command named by an unresolved variable is.
+        for command in ("cat $F | sh", "sh \"$S\""):
             with self.subTest(unreadable=command):
                 self.assertRefused(self.project.hook("pre-tool-use", "Bash", {"command": command}), "can't tell")
         for command in ("cat %s" % SCRIPT, "timeout 5 sh build.sh", "head %s | grep echo" % SCRIPT,

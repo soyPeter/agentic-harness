@@ -48,6 +48,86 @@
   Everyday commands with attached redirections (`echo hi>out.txt`, `sort<in.txt`, `python3 script.py>log`) stay
   allowed, and a quoted `>` (`echo 'x>AGENTS.md'`) is no longer taken for a write.
 
+- **Refused hook calls can be replayed against a rule or engine change (ADR-002 follow-up (c)).** When a hook refuses
+  a call, the harness keeps its input in `.git/harness/captures/` (never committed), and it keeps the 20 newest
+  distinct allowed calls per gate, so a false block can be measured too; an allowed file change keeps only its path,
+  size and digest, never its content, and isn't replayed. Secrets are replaced first, by shape (private-key and other
+  non-public `BEGIN` blocks, AWS, GitHub, GitLab, Anthropic, OpenAI-style, Stripe, Google, npm and Slack tokens, JWTs,
+  32+ character runs that look random), by flag (`-p<password>`, `-u user:<password>`, `--password <value>`, passwords
+  and token-like user names in URLs) and by name: any value given to a name or field holding key, token, secret, pass,
+  pwd, credential, auth or cookie, in any case, quoted values whole. A token keeps its prefix and length, so the rule
+  that refused it still fires. The project and home folders become placeholders. Every pattern is linear and text is
+  cut before it is redacted, and a hook writes its refusal before it captures the call, so capture never delays an
+  answer past Claude Code's hook timeout. At most 100 refusals are kept per gate; a flood evicts its own captures first
+  (the session with the most, then the reason given most). An input over 64 KiB keeps only its metadata. Each capture
+  says whether its outcome depends only on the input and the rules (shell checks, guardrail rules, tool contracts,
+  protected paths, scopes, the deliverer's gate) or also on state (the task, spec, verdict and skill gates, the kill
+  switch, install folders, GitHub labels, a path through a symlink), and why. `harness.py report --json` gives each
+  harness candidate an `id`, `kind`, `reason`, `tasks` and its captures by id and digest; the text report prints the
+  ids. `harness.py eval export <candidate-id>|--refusals|--allows [--out DIR]` writes reviewable fixtures (input,
+  expected outcome, the reason a refusal must still give, provenance, redaction note) into `.git/harness/eval-drafts/`,
+  never committed, and leaves out any whose input still looks like it holds a secret. Judge-fail and escalation
+  candidates become eval prompts, which aren't replayed. `backbone/evals/` is the user's, like `tools.conf`: the hooks
+  refuse agents' writes there by any path (and in another worktree of the repository), `eval export` itself refuses an
+  `--out` that resolves there, and verify refuses commits that change it. Agents can't write the harness's records in
+  the git folder either. `harness.py eval replay [DIR] [--engine <harness.py>] [--json]` runs the state-free fixtures
+  through `hook pre-tool-use` in a throwaway checkout of the project's rules and settings; for `backbone/evals/` (the
+  default) it reads the fixtures committed at HEAD and names the files the work tree changes there. It reports each one
+  as still as expected, newly allowed (a hole), newly blocked (a false block), blocked for another reason, skipped (with
+  why) or an error, and exits 1 on any but the first and skipped, and on a missing folder or no committed fixture. The
+  refusal reasons in the event log and the command names in the out-of-band snapshot are redacted the same way. CI
+  doesn't run the replay yet.
+- **git's own options, runners and command names the hooks can't read.** Three more spellings got past the shell
+  checks. git's options that take a value (`-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--super-prefix`,
+  `--config-env`, `--attr-source`, as `--git-dir .git` or `--git-dir=.git`) are read before its subcommand, so
+  `git --git-dir .git push` is a push under external delivery and in the deliverer's gate. Runners are looked through
+  with their own options and operands, nested too (`timeout -s KILL 5 rm -rf .git/harness`, `nice -n 5 ...`,
+  `sudo -u x -E bash -c '...'`, `stdbuf`, `caffeinate`, `ionice`, `chrt`, `taskset`, `setsid`, `doas`, `unbuffer`,
+  `script`, `xvfb-run`, `flock`, `chronic`, `watch`, `su`); `env -S`, `script -c`, `flock -c`, `su -c` and `watch` are
+  read as `sh -c` with their command line. A program the hooks don't know is checked from the first word after it that
+  starts a command, and refused only when that command would be. A command whose name comes from a command
+  substitution or a variable the hooks can't resolve is refused (`$(echo ... | base64 -d)`, `X=$(...); $X`), unless
+  the program's own name is written out (`"$(git rev-parse --show-toplevel)"/tools/build.sh`); a trap's commands are
+  checked as commands (`trap 'rm -rf .git/harness' EXIT`). The no-merge profile reads `gh pr merge` behind runners
+  and after `-R`.
+
+- **Shell functions, hidden -c programs and git subcommands from variables.** Three spellings got past the agent shell
+  gate. A function body (`f() { rm -rf .git/harness; }; f`, `function f { ...; }`, `f() ( ... )`) is now checked as
+  the commands it is, and again at each call with the call's arguments; calling a function whose body the hooks can't
+  read is refused. `sh -c`, `bash -lc` and `eval` are read with the variables the command sets resolved, and refused
+  when their program comes from a command substitution or a variable the hooks can't resolve (`sh -c "$(echo ... |
+  base64 -d)"`). Under external delivery, and in the deliverer's gate, a git subcommand from a variable is read as
+  the command sets it (`P=push; git $P`, `set -- push; git "$@"`, a loop's list) and refused when it can't be
+  resolved (`git $(echo push)`). These checks stay defence in depth: credentials, CI's verify and human review are
+  the boundaries.
+- **A spec change makes the evidence and approval given on the earlier text stale (ADR-007, Proposed; first slice).**
+  Judge, review and tester records now carry the spec fingerprint (the grill's: the spec except its `Approved-by:` lines,
+  and every ADR it references) next to the code fingerprint. A pass counts only on the code and the spec it judged, so
+  any change to the spec but its `Approved-by:` lines (a criterion, a constraint, an assumption, the Change-Class, or
+  only a reworded sentence) or to a referenced ADR sends the task back to the griller, the judge, the tester and every
+  review lens even when the code is the same. Finishing a task (the hook, `finish`,
+  pre-commit and CI `verify`) now passes the start gate again, as HOOKS.md already said verify did: a spec whose
+  approval the user removed to change it needs a current grill pass and their approval again. Verify also refuses a
+  commit that changes an approved spec while its `Approved-by:` lines stay as they were, since that approval was given
+  on the earlier text (the user approves the new text with a new line; in CI the `harness-change-approved` label lets
+  it through). A range is checked commit by commit, so an approval removed with the change and given again later with
+  the same line is a renewal, and a change committed under the old approval passes once a later commit changes the
+  `Approved-by:` lines. Verify can't tell who wrote an `Approved-by:` line: a commit that changes an approved spec
+  and the date on its approval line together passes it, as before; the snapshot of protected files is the check on
+  that. `next` routes a changed `[WIP]` task to `grill`, `approve`, `test` and `judge` with a `reason`; `state
+  --json` gives the judge verdict's `stale` (`code`, `spec` or `unrecorded`); the receipt refuses a pass on an
+  earlier spec and names the spec and code it was judged on (`judged_on`). Stale passes stay in the append-only
+  history. Upgrade note: a judge, review or tester record from an earlier release has no spec fingerprint, so it
+  counts as stale: run them again for tasks in progress. ADR-007's implementation notes hold the audit (P0) this
+  slice came from, and what it leaves out.
+- **Text under a spec's `## Approval` heading is part of the spec (ADR-007).** The grill fingerprint, the freeze on an
+  approved spec, verify and the risk assessment left out the whole Approval section, but the gates read acceptance
+  criteria from anywhere in the spec, and the template puts Approval last, so a criterion appended to a spec landed
+  there: rewording it left the grill and judge passes current, an agent could change it after approval, and policy
+  approval didn't see a risk term in it. Only the `Approved-by:` lines (and comments and blank lines in that section)
+  are left out now. Upgrade note: a spec with other text under `## Approval` gets a new fingerprint, so its grill and
+  judge passes go stale: grill and judge it again (its approval stays). A note that goes with an approval belongs in
+  the `Approved-by:` line or in a comment.
 - **Attestations: approved harness changes, a verify helper, predicate v1, KMS and keyless signing (ADR-005,
   follow-ups).** Built and tested locally; the cloud and Sigstore paths are not run end to end yet (the ADR's
   "Follow-up status" says what was and wasn't tested).
