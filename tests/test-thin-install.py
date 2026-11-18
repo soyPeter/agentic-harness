@@ -49,6 +49,9 @@ class ThinInstall(unittest.TestCase):
         self.run_at(self.source, "git", "add", "-A")
         self.run_at(self.source, "git", "commit", "-qm", "next thin engine")
         self.run_at(self.source, "git", "tag", "v0.30.1")
+        self.plugin = self.work / "installed-plugin"
+        self.run_at(self.work, "git", "clone", "-q", "--branch", "v0.30.0", str(self.source), str(self.plugin))
+        self.launcher = self.plugin / "plugin/launcher.py"
         self.run_at(self.project, "git", "init", "-q", "-b", "main")
 
     def set_release_version(self, version):
@@ -69,7 +72,7 @@ class ThinInstall(unittest.TestCase):
         settings_path = self.project / ".claude/settings.json"
         settings_path.parent.mkdir()
         settings_path.write_text(json.dumps({"permissions": {"deny": ["Read(./.env)"]}}))
-        self.run_at(self.project, "python3", "-B", str(ENGINE), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(ENGINE), "init", "--thin", "--version", "0.30.0")
         lock_path = self.project / "backbone/.harness-lock.json"
         lock = json.loads(lock_path.read_text())
         harness_docs = ROOT / "payload/owned/backbone"
@@ -86,9 +89,9 @@ class ThinInstall(unittest.TestCase):
         self.assertTrue((self.project / ".githooks/pre-commit").stat().st_mode & 0o111)
         self.assertEqual(self.run_at(self.project, "git", "config", "--get", "core.hooksPath").stdout.strip(),
                          ".githooks")
-        self.assertEqual(self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin",
+        self.assertEqual(self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin",
                                      check=False).returncode, 2)
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "pin", "0.30.1")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "pin", "0.30.1")
         lock = json.loads(lock_path.read_text())
         self.assertEqual(lock["version"], "0.30.1")
         self.assertEqual(lock["commit"], self.run_at(self.source, "git", "rev-parse", "v0.30.1").stdout.strip())
@@ -99,7 +102,7 @@ class ThinInstall(unittest.TestCase):
         self.assertTrue(settings["enabledPlugins"]["agentic-harness@agentic-harness"])
 
     def test_pre_commit_fetches_pinned_engine_on_a_fresh_clone(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         shutil.rmtree(self.work / "cache/0.30.0")
         self.run_at(self.project, "git", "add", "-A")
         result = self.run_at(self.project, "python3", "-B", ".githooks/pre-commit", check=False)
@@ -110,28 +113,28 @@ class ThinInstall(unittest.TestCase):
                          json.loads((self.project / "backbone/.harness-lock.json").read_text())["commit"])
 
     def test_session_start_supplies_rules_without_a_project_agents_file(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         self.assertFalse((self.project / "AGENTS.md").exists())
-        result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "hook", "session-start")
+        result = self.run_at(self.project, "python3", "-B", str(self.launcher), "hook", "session-start")
         self.assertIn("Agent rules from the pinned engine", result.stdout)
         self.assertIn("## 1. First-run setup", result.stdout)
         self.assertIn("## 5. Guardrails", result.stdout)
         self.assertIn("payload/owned/scripts/harness/lib/harness.py' catalog", result.stdout)
         self.assertNotIn("Before changing anything read: AGENTS.md", result.stdout)
         self.assertNotIn("Harness problems", result.stdout)
-        codex = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "hook", "session-start",
+        codex = self.run_at(self.project, "python3", "-B", str(self.launcher), "hook", "session-start",
                             "--from", "codex")
         context = json.loads(codex.stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertIn("Agent rules from the pinned engine", context)
         self.assertIn("## 5. Guardrails", context)
-        doctor = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "doctor")
+        doctor = self.run_at(self.project, "python3", "-B", str(self.launcher), "doctor")
         self.assertNotIn("git hooks inactive", doctor.stdout)
 
     def test_existing_project_file_is_kept_without_partial_install(self):
         document = self.project / "backbone/8-WORKFLOW.md"
         document.parent.mkdir()
         document.write_text("project workflow\n")
-        result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin",
+        result = self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin",
                              "--version", "0.30.0", check=False)
         self.assertEqual(result.returncode, 2)
         self.assertEqual(document.read_text(), "project workflow\n")
@@ -144,13 +147,13 @@ class ThinInstall(unittest.TestCase):
         prd.parent.mkdir()
         claude.write_text("Existing project instructions\n")
         prd.write_text("Existing product requirements\n")
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         self.assertEqual(claude.read_text(), "Existing project instructions\n")
         self.assertEqual(prd.read_text(), "Existing product requirements\n")
         self.assertTrue((self.project / "backbone/.harness-lock.json").exists())
 
     def test_old_release_is_rejected_before_project_files_are_written(self):
-        result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin",
+        result = self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin",
                              "--version", "0.26.1", check=False)
         self.assertEqual(result.returncode, 2)
         self.assertIn("does not support thin mode", result.stderr)
@@ -158,27 +161,39 @@ class ThinInstall(unittest.TestCase):
         self.assertFalse((self.project / ".github/workflows/harness-verify.yml").exists())
 
     def test_default_version_must_be_published_before_installing(self):
-        self.run_at(self.source, "git", "tag", "-d", "v0.30.0")
+        version = (ROOT / "VERSION").read_text().strip()
+        self.run_at(self.source, "git", "tag", "-d", "v" + version, check=False)
         result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin", check=False)
         self.assertEqual(result.returncode, 2)
-        self.assertIn("release v0.30.0 was not found", result.stderr)
+        self.assertIn("release v%s was not found" % version, result.stderr)
         self.assertFalse((self.project / "backbone/.harness-lock.json").exists())
+
+    def test_default_version_initializes_the_current_release(self):
+        version = (ROOT / "VERSION").read_text().strip()
+        self.set_release_version(version)
+        self.run_at(self.source, "git", "add", "-A")
+        self.run_at(self.source, "git", "commit", "-qm", "current engine", "--allow-empty")
+        self.run_at(self.source, "git", "tag", "-f", "v" + version)
+        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        lock = json.loads((self.project / "backbone/.harness-lock.json").read_text())
+        self.assertEqual(lock["version"], version)
+        self.assertEqual(lock["commit"], self.run_at(self.source, "git", "rev-parse", "v" + version).stdout.strip())
 
     def test_init_copies_assets_from_the_pinned_release(self):
         workflow = "payload/owned/.github/workflows/harness-verify.yml"
         (self.source / workflow).write_text("modified working tree\n")
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         expected = self.run_at(self.source, "git", "show", "v0.30.0:" + workflow).stdout
         self.assertEqual((self.project / ".github/workflows/harness-verify.yml").read_text(), expected)
 
     def test_modified_engine_cache_is_rejected(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         cached = self.work / "cache/0.30.0/plugin/pre-commit"
         cached.write_text("modified cache\n")
         other = self.work / "other-project"
         other.mkdir()
         self.run_at(other, "git", "init", "-q", "-b", "main")
-        result = self.run_at(other, "python3", "-B", str(LAUNCHER), "init", "--thin", check=False)
+        result = self.run_at(other, "python3", "-B", str(self.launcher), "init", "--thin", check=False)
         self.assertEqual(result.returncode, 2)
         self.assertIn("has local changes", result.stderr)
         self.assertFalse((other / "backbone/.harness-lock.json").exists())
@@ -186,7 +201,7 @@ class ThinInstall(unittest.TestCase):
     def hook(self, event, tool, tool_input, **fields):
         payload = json.dumps(dict({"session_id": "s", "tool_name": tool, "tool_input": tool_input,
                                    "cwd": str(self.project)}, **fields))
-        return subprocess.run(["python3", "-B", str(LAUNCHER), "hook", event], cwd=self.project, env=self.env,
+        return subprocess.run(["python3", "-B", str(self.launcher), "hook", event], cwd=self.project, env=self.env,
                               input=payload, capture_output=True, text=True)
 
     def assert_hook(self, code, tool, tool_input, says=None, **fields):
@@ -196,7 +211,7 @@ class ThinInstall(unittest.TestCase):
             self.assertIn(says, result.stderr)
 
     def test_hooks_refuse_an_engine_cache_with_local_changes(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         engine = self.work / "cache/0.30.0/payload/owned/scripts/harness/lib/harness.py"
         engine.write_text("import sys\nsys.exit(0)\n" + engine.read_text())
         self.assert_hook(2, "Bash", {"command": "echo hello"}, "local changes")
@@ -207,9 +222,9 @@ class ThinInstall(unittest.TestCase):
         self.assertIn("local changes", commit.stdout + commit.stderr)
 
     def test_agents_cannot_write_the_engine_cache_or_the_plugin(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         cached = self.work / "cache/0.30.0/payload/owned/scripts/harness/guardrails.core.conf"
-        launcher = ROOT / "plugin/launcher.py"
+        launcher = self.launcher
         for tool, tool_input in (
                 ("Write", {"file_path": str(cached), "content": ""}),
                 ("Edit", {"file_path": str(launcher), "old_string": "a", "new_string": "b"}),
@@ -225,9 +240,9 @@ class ThinInstall(unittest.TestCase):
         self.assert_hook(0, "Bash", {"command": "echo hello > '%s'" % (self.work / "scratch.txt")})
 
     def test_agents_cannot_move_the_pin(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         engine = self.work / "cache/0.30.0/payload/owned/scripts/harness/lib/harness.py"
-        for command in ("python3 '%s' pin 0.30.1" % LAUNCHER,
+        for command in ("python3 '%s' pin 0.30.1" % self.launcher,
                         "python3 '%s' pin 0.30.1" % engine,
                         "cd '%s' && python3 tools/thin.py pin 0.30.1" % ROOT):
             with self.subTest(command=command):
@@ -235,7 +250,7 @@ class ThinInstall(unittest.TestCase):
         self.assert_hook(0, "Bash", {"command": "python3 '%s' doctor" % LAUNCHER})
 
     def test_a_malformed_lock_fails_closed(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         lock = self.project / "backbone/.harness-lock.json"
         lock.write_text("<<<<<<< HEAD\n" + lock.read_text() + "=======\n{}\n>>>>>>> other\n")
         self.assert_hook(2, "Bash", {"command": "echo hello"}, ".harness-lock.json")
@@ -245,35 +260,35 @@ class ThinInstall(unittest.TestCase):
         self.assertIn(".harness-lock.json", start.stdout)
 
     def test_session_start_reports_a_plugin_that_is_not_the_pinned_release(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         self.assertNotIn("plugin is v", self.hook("session-start", None, None).stdout)
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "pin", "0.30.1")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "pin", "0.30.1")
         start = self.hook("session-start", None, None)
         self.assertIn("plugin is v0.30.0, but this project pins v0.30.1", start.stdout)
         self.assert_hook(0, "Bash", {"command": "echo hello"})
 
     def test_autonomous_work_stops_while_the_plugin_is_not_the_pinned_release(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         self.env["HARNESS_AUTONOMY"] = "autonomous"
         self.assert_hook(0, "Bash", {"command": "echo hello"})
-        self.assertNotIn("plugin is v", self.run_at(self.project, "python3", "-B", str(LAUNCHER), "run", "--dry-run",
+        self.assertNotIn("plugin is v", self.run_at(self.project, "python3", "-B", str(self.launcher), "run", "--dry-run",
                                                     check=False).stdout)
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "pin", "0.30.1")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "pin", "0.30.1")
         self.assert_hook(2, "Bash", {"command": "echo hello"}, "plugin is v0.30.0, but this project pins v0.30.1")
         self.assert_hook(0, "Read", {"file_path": str(self.project / "CLAUDE.md")})
         for command in ("run", "orca"):
             with self.subTest(command=command):
-                result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), command, "--dry-run", check=False)
+                result = self.run_at(self.project, "python3", "-B", str(self.launcher), command, "--dry-run", check=False)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("plugin is v0.30.0, but this project pins v0.30.1", result.stdout + result.stderr)
 
 
     def test_subagents_are_told_where_the_pinned_engine_is(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         engine = (self.work / "cache/0.30.0/payload/owned").resolve()
         for source in ((), ("--from", "codex")):
             with self.subTest(source=source):
-                result = subprocess.run(["python3", "-B", str(LAUNCHER), "hook", "subagent-start", *source],
+                result = subprocess.run(["python3", "-B", str(self.launcher), "hook", "subagent-start", *source],
                                         cwd=self.project, env=self.env, capture_output=True, text=True,
                                         input=json.dumps({"agent_type": "griller", "agent_id": "a1"}))
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -285,7 +300,7 @@ class ThinInstall(unittest.TestCase):
                 self.assertIn(str(engine / "scripts/harness/routing.core.conf"), context)
 
     def test_codex_and_opencode_sessions_install_the_pinned_role_agents(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         engine = self.work / "cache/0.30.0/payload/owned"
         codex = self.work / "codex/agents"
         codex.mkdir(parents=True)
@@ -293,7 +308,7 @@ class ThinInstall(unittest.TestCase):
         (codex / "reviewer.toml").write_text(mine)
         (codex / "judge.toml").write_text("# Agentic harness: generated from .claude/agents/judge.md by "
                                           "tools/gen_agents.py (harness-owned).\nname = \"judge\"\n")
-        start = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "hook", "session-start", "--from", "codex")
+        start = self.run_at(self.project, "python3", "-B", str(self.launcher), "hook", "session-start", "--from", "codex")
         context = json.loads(start.stdout)["hookSpecificOutput"]["additionalContext"]
         for agent in sorted((engine / ".codex/agents").glob("*.toml")):
             if agent.name != "reviewer.toml":
@@ -301,21 +316,21 @@ class ThinInstall(unittest.TestCase):
         self.assertEqual((codex / "reviewer.toml").read_text(), mine)
         self.assertIn("restart Codex", context)
         self.assertIn(str(codex / "reviewer.toml"), context)
-        again = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "hook", "session-start", "--from", "codex")
+        again = self.run_at(self.project, "python3", "-B", str(self.launcher), "hook", "session-start", "--from", "codex")
         context = json.loads(again.stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertNotIn("restart Codex", context)
         self.assertIn(str(codex / "reviewer.toml"), context)
-        opencode = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "hook", "session-start",
+        opencode = self.run_at(self.project, "python3", "-B", str(self.launcher), "hook", "session-start",
                                "--from", "opencode")
         for agent in sorted((engine / ".opencode/agents").glob("*.md")):
             self.assertEqual((self.work / "opencode/agents" / agent.name).read_text(), agent.read_text(), agent.name)
         self.assertIn("restart OpenCode", opencode.stdout)
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "hook", "session-start")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "hook", "session-start")
         self.assertFalse((self.work / "xdg").exists())
 
     def test_agents_cannot_change_the_installed_role_agents(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "hook", "session-start", "--from", "codex")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "hook", "session-start", "--from", "codex")
         judge = self.work / "codex/agents/judge.toml"
         for tool, tool_input in (
                 ("Write", {"file_path": str(judge), "content": ""}),
@@ -327,7 +342,7 @@ class ThinInstall(unittest.TestCase):
         self.assert_hook(0, "Write", {"file_path": str(self.work / "codex/agents/mine.toml"), "content": ""})
 
     def test_opencode_sessions_get_the_session_start_context(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         script = """
 import plugin from './plugin/opencode.js';
 const project = process.env.TEST_PROJECT;
@@ -358,7 +373,7 @@ console.log(JSON.stringify(texts));
 
 
     def test_run_drives_a_task_in_its_own_worktree(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         tasks = self.project / "backbone/3-TASKS.md"
         tasks.write_text(tasks.read_text() + "- [ ] **Task 6.1: Item** (spec: backbone/specs/6.1.md)\n")
         self.run_at(self.project, "git", "add", "-A")
@@ -375,7 +390,7 @@ console.log(JSON.stringify(texts));
         prompt = self.work / "prompt.txt"
         env = dict(self.env, HARNESS_AUTONOMY="autonomous", HARNESS_TEST_CMD="true", HARNESS_VERIFY="block",
                    HARNESS_DELIVER="off", HARNESS_AGENT_CMD=shlex.quote(str(agent)), PROMPT_OUT=str(prompt))
-        result = subprocess.run(["python3", "-B", str(LAUNCHER), "run", "--worktree", "--only", "6.1"],
+        result = subprocess.run(["python3", "-B", str(self.launcher), "run", "--worktree", "--only", "6.1"],
                                 cwd=self.project, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertRegex(result.stdout, r"run: done\s+task 6.1")
@@ -385,7 +400,7 @@ console.log(JSON.stringify(texts));
         self.assertNotIn("python3 scripts/harness/lib/harness.py", prompt.read_text())
 
     def test_orca_drives_tasks_with_the_pinned_engine(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         tasks = self.project / "backbone/3-TASKS.md"
         tasks.write_text(tasks.read_text() + "- [ ] **Task 6.1: Item** (spec: backbone/specs/6.1.md)\n")
         self.run_at(self.project, "git", "add", "-A")
@@ -396,7 +411,7 @@ console.log(JSON.stringify(texts));
         env = dict(self.env, HARNESS_AUTONOMY="autonomous", HARNESS_TEST_CMD="true", HARNESS_VERIFY="block",
                    HARNESS_ORCA_BIN=str(orca), HARNESS_ORCA_LAUNCH_WAIT="0", FAKE_ORCA_STATE=str(state),
                    FAKE_ORCA_WT=str(self.work / "orca-worktrees"))
-        result = subprocess.run(["python3", "-B", str(LAUNCHER), "orca", "--tasks", "6.1", "--wait-ms", "10"],
+        result = subprocess.run(["python3", "-B", str(self.launcher), "orca", "--tasks", "6.1", "--wait-ms", "10"],
                                 cwd=self.project, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True)
         specs = json.loads(state.read_text()).get("specs") if state.exists() else None
         self.assertTrue(specs, result.stdout + result.stderr)
@@ -405,7 +420,7 @@ console.log(JSON.stringify(texts));
         self.assertNotIn("python3 scripts/harness/lib/harness.py", specs[0])
 
     def test_commits_in_a_linked_worktree_run_the_pinned_engine(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         self.run_at(self.project, "git", "add", "-A")
         self.run_at(self.project, "git", "commit", "-qm", "chore: adopt agentic harness")
         tree = self.work / "tree"
@@ -424,7 +439,7 @@ console.log(JSON.stringify(texts));
         self.assertIn("7.1", refused.stdout + refused.stderr)
 
     def test_pin_brings_the_release_files_to_the_new_release(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         shim = self.source / "plugin/pre-commit"
         shim.write_text(shim.read_text() + "# 0.30.2\n")
         workflow = self.source / "payload/owned/.github/workflows/harness-verify.yml"
@@ -433,7 +448,7 @@ console.log(JSON.stringify(texts));
         self.run_at(self.source, "git", "add", "-A")
         self.run_at(self.source, "git", "commit", "-qm", "release 0.30.2")
         self.run_at(self.source, "git", "tag", "v0.30.2")
-        result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "pin", "0.30.2")
+        result = self.run_at(self.project, "python3", "-B", str(self.launcher), "pin", "0.30.2")
         self.assertEqual((self.project / ".githooks/pre-commit").read_text(), shim.read_text())
         self.assertTrue((self.project / ".githooks/pre-commit").stat().st_mode & 0o111)
         self.assertEqual((self.project / ".github/workflows/harness-verify.yml").read_text(), workflow.read_text())
