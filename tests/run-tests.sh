@@ -83,6 +83,7 @@ impact-invalidation|impact invalidation: a spec change stales its verdicts, rece
 attest-signing|attest job: the merged pull request's approval, KMS and keyless signing (ADR-005; properties need hypothesis)
 attest-verify|attest verify and attest policy: a consumer's check of a signed statement, v1 and v0.1 (ADR-005)
 spec-structure|spec structure: lists, quotes, HTML blocks, setext and sections as Markdown reads them (properties need hypothesis and markdown-it-py)
+eval-replay|eval: captured hook calls, candidate ids, fixtures and replay with another engine (ADR-002 (c); properties need hypothesis)
 triage-labels|receipt: suggested labels for each Change-Class and risk (ADR-002)
 trace-export|trace export: ReqIF, .reqifz, needs.json and the HTML matrix, and trace link (ADR-004; properties need hypothesis)
 trace-workflow|harness-verify's traceability steps: the base engine's matrix, its link and the signed .reqifz (ADR-004; signing needs cosign)
