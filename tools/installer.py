@@ -273,6 +273,8 @@ def add_harness_settings(settings, fragment_path=SETTINGS_FRAGMENT):
     for rule in fragment["permissions"]["allow"]:
         if rule not in allow:
             allow.append(rule)
+    # Claude Code reads the highest-precedence value, so this keeps the harness's hooks on against a user-level true.
+    settings["disableAllHooks"] = fragment["disableAllHooks"]
     return settings
 
 
@@ -283,6 +285,8 @@ def drop_harness_settings(settings, fragment_path=SETTINGS_FRAGMENT):
     fragment = json.loads(fragment_path.read_text(encoding="utf-8"))
     if not drop_harness_hooks(settings):
         del settings["hooks"]
+    if settings.get("disableAllHooks") is fragment["disableAllHooks"]:
+        del settings["disableAllHooks"]
     permissions = settings.get("permissions")
     allow = permissions.get("allow") if isinstance(permissions, dict) else None
     if isinstance(allow, list):

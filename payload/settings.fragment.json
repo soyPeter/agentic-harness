@@ -8,13 +8,14 @@
       "mcp__knowledge"
     ]
   },
+  "disableAllHooks": false,
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py\" hook session-start",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py\" hook session-start",
             "timeout": 15
           }
         ]
@@ -26,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py\" hook pre-tool-use",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py\" hook pre-tool-use",
             "timeout": 30
           }
         ]
@@ -38,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py\" hook post-tool-use",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py\" hook post-tool-use",
             "timeout": 30
           }
         ]
@@ -50,7 +51,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py\" hook post-tool-use",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py\" hook post-tool-use",
             "timeout": 30
           }
         ]
@@ -61,8 +62,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py\" hook stop",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py\" hook stop",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "ConfigChange": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py\" hook config-change",
+            "timeout": 15
           }
         ]
       }
