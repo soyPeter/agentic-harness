@@ -4,7 +4,7 @@
 - **Date:** 2026-11-08 (Europe/Madrid).
 - **Target repository:** https://github.com/soyPeter/agentic-harness
 - **Suggested destination:** `docs/research/2026-11-delegation-contracts-qualification-plan.md`.
-- **Why this location:** narrow local directory read found `docs/research/2026-11-agent-sdlc-landscape.md` and `docs/adr/ADR-001..003`. This is a qualification/PR plan under the existing architecture, not another architectural decision competing with [ADR-007](../adr/ADR-007-evidence-closed-loop.md). It creates no ADR number.
+- **Why this location:** qualification work packages remain in research; [ADR-009](../adr/ADR-009-delegation-contracts-qualification.md) records the bounded decision under [ADR-007](../adr/ADR-007-evidence-closed-loop.md).
 - **Related decisions:** [ADR-002](../adr/ADR-002-change-class-ladder.md), [ADR-007 evidence-driven closed loop](../adr/ADR-007-evidence-closed-loop.md).
 
 
@@ -13,6 +13,14 @@
 Pedro accepted the following default:
 
 - Run only the audits (P0, and the P0-V reuse map). Build nothing unless those audits show real gaps.
+
+## P0 results (2026-11-11)
+
+P0 and P0-V ran against main at `dd2f9e9` (v0.30.0). The gap table and the reuse map are in
+[ADR-007's implementation notes](../adr/ADR-007-evidence-closed-loop.md#implementation-notes-2026-11-11). One real gap
+was built, as the first part of P1: evidence and approval given on an earlier spec revision now go stale (the
+qualification matrix row "approved task changes spec, target or security constraint midway"). The other gaps are
+deferred there, each with its owner or reason.
 
 ## Baseline and scope
 

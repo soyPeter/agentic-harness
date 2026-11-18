@@ -1,6 +1,21 @@
 # Plan: run the open harness plans and ADR follow-ups through Orca
 
-- Status: Accepted (2026-11-10). Pedro accepted the 16 defaults in [Decisions (2026-11-10)](#6-decisions-2026-11-10). Nothing has started in the repository and no code has changed.
+Decision record: [ADR-013](../adr/ADR-013-orca-self-rollout.md). The plan retains its recorded decisions, work packages and evidence.
+
+## Current execution baseline (2026-11-13)
+
+The historical inventory and wave tables below describe the 10 November plan. Use the
+[factory readiness audit](2026-11-factory-integration-readiness.md) and `backbone/3-TASKS.md` for the reconciled queue
+at `11215d8`, after PR #90. ADR-003 through ADR-008 are now Accepted; acceptance is distinct from implementation.
+PR #90 implemented the harness-side contract, locks, intake, task accounting, external delivery and generic
+no-merge profile. Their factory-side deployment remains unverified. ADR-004's matrix workflow and ReqIF archive
+are in main, so duplicate build tasks 2.5 and 3.9 have been removed from the future queue. No task is marked done
+without its required evidence. The engine pin remains v0.30.0, before PR #90; live factory qualification waits for
+a capable release, reviewed pin/configuration and the pilot's deployment entry conditions.
+
+## Historical plan metadata (10 November 2026)
+
+- Status at that date: Accepted. Pedro accepted the 16 defaults in [Decisions (2026-11-10)](#6-decisions-2026-11-10). At that point, nothing had started in the repository and no code had changed.
 - Date: 10 Nov 2026 (Europe/Madrid). Accepted the same day.
 - Repository: soyPeter/agentic-harness. The inventory below was taken against origin/main at `6e2f8ac` (v0.30.0). By the afternoon of 10 Nov 2026, origin/main had moved to `8d31682` and already included the merges of PR 78 and PR 80.
 - Related: the plans and ADRs in this folder and in `docs/adr/`, and [PR 82](https://github.com/soyPeter/agentic-harness/pull/82).

@@ -95,8 +95,10 @@ only).
 ![The evidence chain from spec to receipt, where it is checked again, and the proposed ADRs that extend it](docs/sdlc/4-evidence.svg)
 
 The receipt is built from evidence, not from what the agents said. Two fingerprints tie each verdict to what it judged
-(the spec and its ADRs for the grill pass, the code tree for the judge and review passes), so a later edit makes the
-pass stale.
+(the spec and its ADRs for the grill pass; the code tree and that same spec fingerprint for the judge, review and tester
+records), so a later edit makes the pass stale. Any change to the spec other than its `Approved-by:` lines, or to an
+ADR it references, sends the task back to the griller and the judge even when the code is the same, and finishing needs
+the user's approval of the changed spec ([ADR-007](docs/adr/ADR-007-evidence-closed-loop.md), Proposed).
 
 - **Change receipt**: `harness.py receipt <id>` states what the harness can prove about a judged task: what changed,
   each acceptance criterion with its tests, what is *not* verified, the decisions and risks, and what still needs the
@@ -115,18 +117,21 @@ pass stale.
   git, which stay the record: one-way, no network, nothing reads it back. Each task says whether its judge pass is on
   the current code, which commits carry the judged code, and the gaps it can see. `harness-verify` uploads the matrix
   of each pull request that verifies, written by the base branch's engine, and the deliverer links it from the pull
-  request (`harness.py trace link`); with the ADR-005 key, the push job signs a `.reqifz`. It is not validated or PCI
+  request (`harness.py trace link`); with ADR-005 signing, the push job signs a `.reqifz`. It is not validated or PCI
   DSS evidence; the ADR lists what it can and can't support.
-- **Signed verdict attestations** (optional, [ADR-005](docs/adr/ADR-005-verdict-attestations.md), Proposed):
-  `harness.py attest --range <base>..<tip>` prints an in-toto Statement about the tip commit with each finished task's
-  verdict chain (spec fingerprint, grill, judge and review verdicts, Change-Class, risk and receipt), only for a range
-  that passes `verify --range`, and the same bytes for the same commits. On each push to the default branch, the
-  `attest` job of `harness-verify` writes it with the engine the push starts from (the previous tip, never the pushed
-  one) and signs it with cosign, without a transparency log, when the `harness-attest` environment holds the key
-  (`HARNESS_ATTEST_KEY`, `HARNESS_ATTEST_PASSWORD`). The key must match the public key committed as
-  `harness-attest.pub`, an enforcement file like the harness's own. `harness.py ci-protect --attest` sets up the
-  environment, restricted to the default branch. Pull requests never see the key, and the statement claims no SLSA
-  level. Details and limits in `backbone/HOOKS.md`.
+- **Signed verdict attestations** (optional, [ADR-005](docs/adr/ADR-005-verdict-attestations.md), Accepted):
+  `harness.py attest --range <base>..<tip>` prints an in-toto Statement (predicate `verdicts/v1`) about the tip commit
+  with each finished task's verdict chain (spec fingerprint, grill, judge and review verdicts, Change-Class, risk and
+  receipt), only for a range that passes `verify --range`, and the same bytes for the same commits. On each push to the
+  default branch, the `attest` job of `harness-verify` writes it with the engine the push starts from (the previous
+  tip, never the pushed one) and signs it with cosign in the `harness-attest` environment: with a key
+  (`HARNESS_ATTEST_KEY`, `HARNESS_ATTEST_PASSWORD`) by default and without a transparency log, with a cloud KMS key, or,
+  only when `harness.conf` opts in, keyless on Sigstore's public log. The key must match the public key committed as
+  `harness-attest.pub`, an enforcement file like the harness's own. A harness change is attested when a pull request
+  labelled `harness-change-approved` made the push, and the statement names it. `harness.py ci-protect --attest` sets
+  up the environment, restricted to the default branch; `harness.py attest verify` checks a signed statement and a
+  policy on it. Pull requests never see the key, and the statement claims no SLSA level. Details and limits in
+  `backbone/HOOKS.md`.
 - **What binds whom**: the hooks and gates bind agents. The user can still switch a gate off in `harness.conf` or
   commit with `HARNESS_VERIFY=off`; CI's `harness-verify` is what binds everyone, once it is required.
 - **Safe updates**: harness files are tracked by hash. Local edits are detected and never overwritten silently.
@@ -154,6 +159,16 @@ pass stale.
 - **Observability**: `harness.py report` summarises the event log, and `harness.py trace <id>` shows one task's
   history: the context and skills its agents loaded, the files they edited, what the hooks refused, test runs and
   verdicts.
+- **Eval replay** ([ADR-002](docs/adr/ADR-002-change-class-ladder.md) follow-up (c)): the hooks keep each refused call,
+  and the newest allowed ones per gate, redacted, in `.git/harness/captures/`. `harness.py report --json` gives each
+  harness candidate an id and its captures by id and digest. `harness.py eval export <candidate-id>|--refusals|--allows
+  [--out DIR]` drafts reviewable fixtures into `.git/harness/eval-drafts/`; the user moves the ones to keep into
+  `backbone/evals/`, which agents can't change, and commits them. `harness.py eval replay [DIR] [--engine <harness.py>]
+  [--json]` runs the committed state-free ones through `hook pre-tool-use` in a throwaway checkout and exits 1 on a
+  refusal now allowed (a hole),
+  an allowed call now blocked (a false block) or a refusal that gives another reason. Judge failures and escalations
+  are exported as eval prompts and not replayed; model-based replay is
+  [ADR-007](docs/adr/ADR-007-evidence-closed-loop.md)'s.
 
 ## Documentation
 

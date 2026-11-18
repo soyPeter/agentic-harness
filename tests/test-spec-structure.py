@@ -4,7 +4,7 @@ throwaway projects.
 A heading or code fence that a reader would take for something else makes the spec invalid, so every gate refuses it:
 an indented heading or fence, one after a list or quote marker, one in an HTML block, a setext heading. Headings the
 gates read are the ones a reader sees at column 0, and a section ends at the next '#' or '##' heading. Once the user
-approves a spec, everything outside its Approval section is frozen, whatever section follows it. Spaces are the ASCII
+approves a spec, everything but its Approved-by lines is frozen, whatever section follows it. Spaces are the ASCII
 space and tab, as CommonMark has them: a line break a reader may take for one, or an unusual space beside a tag, heading
 or fence, makes the spec invalid rather than being read one way or another.
 
@@ -578,7 +578,7 @@ class LineEndings(unittest.TestCase):
 
 class SetextAndSections(unittest.TestCase):
     """A setext heading is refused, since the gates don't read it as a section. A section ends at the next '#' or '##'
-    heading, and the approved spec is frozen outside its Approval section, whichever section follows it."""
+    heading, and the approved spec is frozen but for its Approved-by lines, whichever section follows it."""
 
     def setUp(self):
         self.project = new_project(self)

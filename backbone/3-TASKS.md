@@ -2,7 +2,7 @@
 
 The task index. Each task has a spec in `backbone/specs/<id>.md` and goes through the pipeline in `8-WORKFLOW.md`. Only one task may be `[WIP]` at a time in a single worktree. Orca runs one worktree per task. Edit lines in place.
 
-Wave 1 is ready. The lines below are the only ones the engine parses. Later waves are in a comment, so `orca` does not start them. Pedro uncomments a later line after he has read the audit it depends on and merged that pull request.
+Wave 1 remains the audit queue; no audit below is marked done without its own gate evidence. The lines below are the only ones the engine parses. Later waves are in a comment, so `orca` does not start them. Pedro uncomments a later line after he has read the audit it depends on and merged that pull request.
 
 A worker reads the plan at the path on the line from the base branch. A path that is not on the base branch is not a plan yet.
 
@@ -11,6 +11,18 @@ A worker reads the plan at the path on the line from the base branch. A path tha
 | Milestone | Status | Description |
 |---|---|---|
 | M1 | planned | Wave 1 audits. Docs class. Policy can approve them. |
+
+## Reconciled baseline (2026-11-13)
+
+The [factory readiness audit](../docs/research/2026-11-factory-integration-readiness.md) reads `11215d8` after PR #90.
+Contract v1, task locks, provenance intake, task budget accounting, external delivery and the generic no-merge
+profile are implemented in main. Do not queue them for another build. Factory deployment qualification remains
+open; the project still pins v0.30.0, which does not contain those changes.
+
+ADR-004's HTML matrix workflow and ReqIF archive are also in main. Original build tasks 2.5 and 3.9 are retired
+from the future queue below, not marked `[x]`: this backlog has no judge/approval records for them. Task 1.6 still
+checks their current coverage and deployment/signing limits. The other original audits remain necessary; PR #90
+does not implement the shared dependency gate or lost-write reconciliation.
 
 ## M1: Wave 1 audits
 
@@ -21,8 +33,11 @@ A worker reads the plan at the path on the line from the base branch. A path tha
 - [ ] **Task 1.5: Design challenge D0 reuse map** (spec: backbone/specs/1.5.md) (plan: docs/research/2026-11-design-challenge-agent-onboarding-plan.md)
 - [ ] **Task 1.6: ADR-003, ADR-004 and ADR-005 follow-up triage** (spec: backbone/specs/1.6.md) (plan: docs/adr/ADR-003-sandbox-backends.md) (plan: docs/adr/ADR-004-traceability-export.md) (plan: docs/adr/ADR-005-verdict-attestations.md)
 - [ ] **Task 1.7: Model change WP1 baseline on fixture tasks** (spec: backbone/specs/1.7.md) (plan: docs/research/2026-11-model-change-instruction-review-plan.md)
+- [ ] **Task 1.8: Factory integration qualification and live-pilot readiness** (spec: backbone/specs/1.8.md) (plan: docs/research/2026-11-factory-integration-readiness.md)
 
 Task 1.6 triages the local-code follow-ups only. It does not build them. Task 1.7 runs on the fixture tasks in `tests/coefficiency` and `tests/colsum` and spends model tokens.
+Task 1.8 has a scoped local evidence note; the live pilot remains blocked by its entry conditions. It is not
+authorization to cut a release, move the pin, start the real runner or change deployment credentials.
 
 ## Later waves (not started)
 
@@ -35,7 +50,6 @@ Wave 2. Small changes. 2.1 and 2.3 both touch next, run and delivery, so 2.3 wai
 - [ ] **Task 2.2: PR body WP2 template** (spec: backbone/specs/2.2.md) (after: 1.2) (plan: docs/research/2026-11-pr-body-reviewer-opener-plan.md)
 - [ ] **Task 2.3: Indeterminate outcome WP1 journal and outcome** (spec: backbone/specs/2.3.md) (after: 1.3, 2.1) (plan: docs/research/2026-11-indeterminate-side-effect-outcome-plan.md)
 - [ ] **Task 2.4: Model change WP2 checklist** (spec: backbone/specs/2.4.md) (after: 1.7) (plan: docs/research/2026-11-model-change-instruction-review-plan.md)
-- [ ] **Task 2.5: ADR-004 follow-up 1 HTML matrix step in harness-verify** (spec: backbone/specs/2.5.md) (after: 1.6) (plan: docs/adr/ADR-004-traceability-export.md)
 - [ ] **Task 2.6: ADR-005 follow-up 1 read the merged PR harness-change-approved label** (spec: backbone/specs/2.6.md) (after: 1.6) (plan: docs/adr/ADR-005-verdict-attestations.md)
 
 Wave 3. Follow-on work packages. ADR-003 follow-ups 1, 4 and 8 are one task each.
@@ -50,7 +64,6 @@ Wave 3. Follow-on work packages. ADR-003 follow-ups 1, 4 and 8 are one task each
 - [ ] **Task 3.10: ADR-003 follow-up 4 gate on sandbox evidence** (spec: backbone/specs/3.10.md) (after: 1.6) (plan: docs/adr/ADR-003-sandbox-backends.md)
 - [ ] **Task 3.11: ADR-003 follow-up 8 egress denials in the receipt** (spec: backbone/specs/3.11.md) (after: 1.6) (plan: docs/adr/ADR-003-sandbox-backends.md)
 - [ ] **Task 3.8: ADR-005 follow-up 5 cosign check and predicate policy helper** (spec: backbone/specs/3.8.md) (after: 1.6) (plan: docs/adr/ADR-005-verdict-attestations.md)
-- [ ] **Task 3.9: ADR-004 follow-up 3 reqifz with the receipt** (spec: backbone/specs/3.9.md) (after: 1.6) (plan: docs/adr/ADR-004-traceability-export.md)
 
 Wave 4. Docs and qualification, only where an audit found a real gap. Delegation and design-challenge lines stay commented until that audit says there is a gap. ADR-006 is decided with the design-challenge work.
 
