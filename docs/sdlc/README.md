@@ -70,7 +70,7 @@ delivery, then feedback, KB drafts and cleanup signals. ADR-008 retains the cont
   - verify on every commit;
   - `harness-verify` in CI, with the base branch's verifier.
 
-  Then a person merges the pull request. The deliverer can't merge, and under the `triple` profile no agent can;
+  Then a person merges the pull request. A judge pass still leaves deploy risk open. That person reads the review notes and the receipt's "Not verified" list first. The deliverer can't merge, and under the `triple` profile no agent can;
   `harness-verify` blocks a merge only once it is a required check in branch protection.
 - **What fails becomes the next task.**
   - Red CI becomes a fix task on the same pull request.

@@ -476,3 +476,17 @@ Not built, and why:
   are not in this repository.
 - Intake de-duplication across clones: the index is per clone, and a fresh clone finds earlier intakes only through the
   Source sections its checkout holds. The factory's inbox drops repeats before intake.
+
+## Amendment: judge-round hygiene (added 2026-11-18)
+
+Added on 2026-11-18. Status stays Accepted; the decision above is unchanged.
+
+The independent judge and the three review lenses stay mandatory before delivery, and a person still merges. These practices tighten how a round is briefed and scored. The living operator text is in `payload/owned/backbone/8-WORKFLOW.md` (Phase 3) and `payload/owned/AGENTS.md` (section 4).
+
+1. Confirm each finding against the code before fixing it. Record disproved findings next to confirmed ones.
+2. A judge pass still leaves deploy risk open. The person who merges reads the review notes and the receipt's "Not verified" list first.
+3. Treat a short or unread review as a failed round. Guidance until the recorder enforces it.
+4. If the named judge is out of usage, run the same round with another installed model family. Guidance until the launcher does this itself.
+5. Keep the judge brief unsteered: the spec, the git range of the change, and how the product is used. Leave earlier findings and any request for approval out of it.
+
+Sources: review habits in [phuryn/product-engineering](https://github.com/phuryn/product-engineering) (MIT) and Eduardo (@martiano)'s Claude-calls-Codex loop.

@@ -9,7 +9,7 @@ hooks:
   Stop:
     - hooks:
         - type: command
-          command: 'if [ -n "$CLAUDE_PLUGIN_ROOT" ]; then H="$CLAUDE_PLUGIN_ROOT/plugin/launcher.py"; else H="$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py"; fi; python3 "$H" hook review-stop'
+          command: 'if [ -n "$CLAUDE_PLUGIN_ROOT" ]; then H="$CLAUDE_PLUGIN_ROOT/plugin/launcher.py"; else H="$CLAUDE_PROJECT_DIR/scripts/harness/lib/harness.py"; fi; python3 -I "$H" hook review-stop'
           timeout: 120
 ---
 
