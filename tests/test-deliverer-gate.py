@@ -34,14 +34,16 @@ SAME_AS_DIRECT = ("{c}", "x=$({c})", 'echo "$({c})"', 'echo "$(echo "$({c})")"',
                   "watch -n 5 {q}", "env -S {q}", "bash <<'EOF'\n{c}\nEOF", "bash <<< {q}",
                   "cat <<EOF\nit's $({c})\nEOF", "true && {c}", "{c} | cat", "( {c} )", "({c} )", "{{ {c}; }}",
                   "if FOO=1 {c}; then :; fi", "while false; do {c}; done", "case x in x) {c};; esac",
-                  "f() {{ {c}; }}", "function f {{ {c}; }}", "2>/dev/null {c}", "> /dev/null {c}",
-                  "builtin eval {q}", "noglob {c}", "nocorrect {c}",
+                  "f() {{ {c}; }}", "f () {{ {c}; }}", "function f {{ {c}; }}", "2>/dev/null {c}", "> /dev/null {c}",
+                  "builtin eval {q}", "noglob {c}", "nocorrect {c}", "({c})", "{c}>/dev/null", "({c})2>&1",
+                  "bash<<<{q}",
                   # A quote inside "$(...)" belongs to the substitution, not to the string around it.
                   'echo "$(printf \'"\')"; {c}; echo "$(printf \'"\')"', 'x="$(echo "$(printf \'"\')"; {c})"')
 # Ways of running it that add arguments or commands the harness can't read.
 UNREADABLE = ("echo 7 | xargs {c}", "echo 7 | timeout 60 xargs {c}", "parallel {c} ::: 1",
               "find . -name x -exec {c} ';'", "echo {q} | bash", "echo {q} | env bash", "source <(echo {q})",
-              ". /dev/stdin <<< {q}", "source ./deliver.sh")
+              ". /dev/stdin <<< {q}", "source ./deliver.sh", "sh<deliver.sh", "bash -e<deliver.sh",
+              "(sh)<deliver.sh", "sh <>deliver.sh", "busybox sh<deliver.sh")
 # The gh commands delivery needs, as the deliverer's instructions use them, and gh's own aliases for them.
 DELIVERY_GH = ("gh pr create --base main --title t --body b", "gh pr new --title t --body b", "gh pr edit 7 --body b",
                "gh pr view --json labels", "gh pr checks --watch --fail-fast", "gh pr list --head feat/x", "gh pr ls",
@@ -402,7 +404,12 @@ DEFAULT_BRANCH_MOVES = ("git checkout main && git merge feat/x && git push origi
                         "git push origin HEAD:heads/main", "git push origin HEAD:refs/heads/main",
                         "git push origin HEAD:$'main'", 'git push origin HEAD:"$(echo main)"',
                         "git push origin HEAD:`echo main`", 'git push origin "HEAD:main"', "git push origin :main",
-                        "git push origin main")
+                        "git push origin main", "git $(echo push) origin main", "P=push; git $P origin main",
+                        'set -- push origin main; git "$@"', 'f() { git "$@"; }; f push origin main',
+                        "git `echo push` origin main", "for s in status push; do git $s origin main; done",
+                        "git --namespace x push origin main", "git --namespace=x checkout main",
+                        "timeout -s KILL 5 git push origin main", "sudo -u root git checkout main",
+                        "stdbuf -o L git push origin main", "taskset 3 git push origin main")
 # Globs and braces that the shell expands into words the harness can't read, in gh and git calls and in a command's
 # name; the others are literal text (a glob in ls's argument, a placeholder in a gh api endpoint).
 GLOB_REFUSED = ("gh pr view 7 --json labels *", "git push origin HEAD *", "git fetch origin *", "env ?h pr merge 7",
@@ -424,7 +431,10 @@ DELIVERER_FLOW = ("python3 scripts/harness/lib/harness.py verify --range origin/
                   "python3 scripts/harness/lib/harness.py receipt 2.1 --base main",
                   "gh pr create --base main --title t --body-file - <<'EOF'\nWhat it does.\nEOF",
                   "gh api repos/o/r/pulls/7", "git push -u origin HEAD", "git merge-base origin/main HEAD",
-                  "git log origin/main..HEAD --oneline", "git checkout feat/x", "gh pr checks 7 --watch")
+                  "git log origin/main..HEAD --oneline", "git checkout feat/x", "gh pr checks 7 --watch",
+                  "S=status; git $S", "for s in status log; do git $s -1; done",
+                  "timeout 60 git push -u origin HEAD", "git --no-pager log origin/main..HEAD --oneline",
+                  "nice -n 5 gh pr checks 7 --watch")
 
 
 class DelivererRound3(GateProject):
