@@ -53,6 +53,7 @@ Every task goes through five phases. You, the main session, are the **orchestrat
 - Tasks in `3-TASKS.md` are list lines: `- [ ] **Task <id>: <title>** (spec: backbone/specs/<id>.md)`. `[WIP]` goes on task lines only.
 - Only one task may be `[WIP]`. If another is already in progress, ask the user (in autonomous mode, resume it or escalate; section 7).
 - After `HARNESS_JUDGE_MAX_ROUNDS` judge fails, stop retrying and take the findings to the user.
+- Confirm each judge or review finding against the code before fixing it, and record disproved findings next to confirmed ones. The rest of the judge-round hygiene is in `8-WORKFLOW.md` (Phase 3). A judge pass still leaves deploy risk open. A person reads the review notes and the receipt's "Not verified" list before merging.
 - To abandon a task, change its line back to `- [ ]` without rewording it.
 - A task is finished only when the Definition of Done in `8-WORKFLOW.md` is met, including the commit.
 

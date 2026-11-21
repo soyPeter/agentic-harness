@@ -20,7 +20,7 @@ import unittest
 from hypothesis_profiles import examples
 
 try:
-    from hypothesis import given, settings, strategies as st
+    from hypothesis import example, given, settings, strategies as st
 except ImportError:
     given = None
 
@@ -775,6 +775,64 @@ NON_INTERACTIVE_REBASES = ("git rebase --autosquash origin/main", "git rebase -q
                            "git pull --rebase=merges origin main", "git pull --no-rebase origin main")
 
 
+# A subshell's ) ends the command, glued to its last word or not; { ... } closes with } after a ;. A redirection is
+# the shell's, not an argument of the command, wherever it is written.
+SUBSHELLS = ("( {c} )", "({c})", "({c} )", "( {c})", "( ( {c} ) )", "((({c})))", "( true; {c} )", "( {c}; true )",
+             "( {c} ) > /dev/null", "( {c} ) 2>&1 | cat", "( {c} ) && true", "{{ {c}; }}", "{{ {c};}}",
+             "{c} > /dev/null", "{c} >/dev/null 2>&1", "{c} 2>&1>/dev/null", "{c} &>/dev/null", "{c} 2>/dev/null",
+             "{c} </dev/null", "{c} >| /dev/null", "( {c} >/dev/null )", "{{ {c}; }} 2>&1 | cat",
+             "x=$( ( {c} ) )", "( {c} )\n( {c})", "! ( {c} )", "if ( {c} ); then ( {c} ); fi", "f() ( {c} )",
+             "while ( {c} ); do :; done")
+# Another repository, as gh reads it: the refusal holds inside a subshell, with the ) glued to the name or not.
+OTHER_REPOSITORIES = ("gh repo view x/y", "gh repo view x/y --json name", "gh pr view -R x/y", "gh pr view --repo x/y",
+                      "gh pr view --repo=x/y", "gh pr view -Rx/y", "gh pr view https://github.com/x/y/pull/7",
+                      "gh pr view 7 -R github.example.com/o/r", "gh repo view ')'", 'gh repo view ")"',
+                      "gh repo view \\)", "gh pr view 7 >/dev/null -R x/y", "gh pr view 7 2>&1 --repo x/y",
+                      "gh repo view '>' x/y", "gh repo view \\> 2>/dev/null")
+
+
+class DelivererSubshells(GateProject):
+    def test_a_delivery_gh_command_runs_in_a_subshell_or_a_group(self):
+        self.pr_has()
+        for command in DELIVERY_GH:
+            for carrier in SUBSHELLS:
+                with self.subTest(command=command, carrier=carrier):
+                    code, message = self.decision(carrier.format(c=command))
+
+                    self.assertEqual(code, 0, message)
+
+    def test_another_repository_is_refused_in_a_subshell_and_past_a_redirection(self):
+        self.pr_has()
+        for command in OTHER_REPOSITORIES:
+            for carrier in ("{c}",) + SUBSHELLS:
+                with self.subTest(command=command, carrier=carrier):
+                    code, message = self.decision(carrier.format(c=command))
+
+                    self.assertEqual(code, 2, message)
+                    self.assertIn("another repository or host", message)
+
+    def test_what_follows_a_subshell_still_reads_its_pipe(self):
+        self.pr_has()
+        for command in ("( echo {q} ) | bash", "(echo {q})|sh", "( echo {q} ) 2>&1 | bash", "( ( echo {q} ) ) | bash"):
+            with self.subTest(command=command):
+                code, message = self.decision(command.format(q=shlex.quote("gh pr merge 7")))
+
+                self.assertEqual(code, 2, message)
+
+    def test_a_quoted_paren_or_redirection_is_an_argument(self):
+        self.pr_has()
+        for command in ("gh pr create --title ')' --label harness-change-approved --body b",
+                        "gh pr create --title \\) --label harness-change-approved --body b",
+                        "gh pr edit 7 --body \")\" --add-label automerge",
+                        "gh pr edit 7 --body \">\" --add-label automerge", "gh pr edit 7 --body \\> --add-label automerge",
+                        "gh pr edit 7 --body '2>' --add-label automerge >/dev/null"):
+            for carrier in ("{c}", "( {c} )", "({c})"):
+                with self.subTest(command=command, carrier=carrier):
+                    code, message = self.decision(carrier.format(c=command))
+
+                    self.assertEqual(code, 2, message)
+
+
 class DelivererRound6(GateProject):
     def test_an_interactive_rebase_is_refused_in_every_form(self):
         self.pr_has()
@@ -877,6 +935,8 @@ if given is not None:
         @settings(max_examples=examples(40), deadline=None)
         @given(agent=deliverers, command=st.sampled_from(DELIVERY_GH + OTHER_GH),
                carrier=st.sampled_from(SAME_AS_DIRECT))
+        @example(agent="deliverer", command="gh repo view --json defaultBranchRef", carrier="( {c} )")
+        @example(agent="deliverer", command="gh repo view --json defaultBranchRef", carrier="({c} )")
         def test_the_deliverer_runs_only_delivery_gh_commands_however_the_shell_runs_them(self, agent, command,
                                                                                          carrier):
             self.pr_has()
