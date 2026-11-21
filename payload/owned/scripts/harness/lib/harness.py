@@ -2306,7 +2306,9 @@ def install_path(path_str, cwd):
             return "the harness's role agents"
     for private in (sandbox.approvals_file(), sandbox.private_runs()):
         private = os.path.realpath(str(private))
-        if full == private or full.startswith(private + os.sep) or private.startswith(full.rstrip(os.sep) + os.sep):
+        # A folder holding them (~, ~/.agentic-harness) is the machine settings' check: it refuses deleting or moving
+        # the folder and still lets a command put a new file in ~.
+        if full == private or full.startswith(private + os.sep):
             return "the sandbox definitions approved and brought up on this machine"
     return None
 
