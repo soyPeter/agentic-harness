@@ -55,6 +55,7 @@ Usage:
   harness.py ci-protect --attest [--dry-run] [--recorded-fallback] [--delete-repo-copies]
                                                                   (the harness-attest environment: default branch only)
   harness.py doctor
+  harness.py accept-agent-config                                  (user only: accept the agent CLIs' configuration)
 """
 import base64
 import fnmatch
@@ -456,7 +457,7 @@ def gate_on(key):
 # and git calls inside hooks time out well before that.
 GIT_TIMEOUT = 120
 HOOK_BUDGET = 25
-FAIL_CLOSED_HOOKS = ("pre-tool-use", "agent-guard")
+FAIL_CLOSED_HOOKS = ("pre-tool-use", "agent-guard", "config-change")
 VERDICT = []   # the exit code a gate hook has decided on, once it has
 
 
@@ -1675,6 +1676,62 @@ def short_flags(words):
     return {c for w in words if w.startswith("-") and not w.startswith("--") for c in w[1:]}
 
 
+def parse_options(args, valued="", flags=None, long_valued=(), long_flags=(), old_style=False, clap=False,
+                  abbreviations=False):
+    """(options [(name, value or None)], operands, the indexes of operands that may be an option's value), as
+    getopt_long or clap reads args: bundled short options (-xvf), a short option's value attached (-Cdir; clap also
+    takes -C=dir) or in the next word, --name=value or --name value, options after operands, and -- ending them.
+    old_style: a first word without a dash is bundled options whose values are the next words in order (tar xCf dir
+    file). abbreviations: getopt_long takes a prefix of a long option (--dir for --directory). An operand that follows
+    an option this table doesn't know (not in flags or long_flags; flags None knows no short one) may be its value."""
+    known = tuple(long_valued) + tuple(long_flags)
+    options, operands, maybe, i, open_option = [], [], set(), 0, False
+    if old_style and args and not args[0].startswith("-"):
+        i = 1
+        for letter in args[0]:
+            options.append(("-" + letter, args[i] if letter in valued and i < len(args) else None))
+            i += letter in valued
+    while i < len(args):
+        word, i = args[i], i + 1
+        if word == "--":
+            operands += args[i:]
+            break
+        if word.startswith("--"):
+            name, eq, value = word.partition("=")
+            if abbreviations and name not in known and len(name) > 3:
+                name = next((n for n in known if n.startswith(name)), name)
+            if name in long_valued and not eq:
+                value, i = (args[i] if i < len(args) else ""), i + 1
+            options.append((name, value if eq or name in long_valued else None))
+            open_option = not eq and name not in known
+            continue
+        if word.startswith("-") and word != "-":
+            open_option = True
+            for at, letter in enumerate(word[1:], 2):
+                if letter not in valued:
+                    options.append(("-" + letter, None))
+                    open_option = flags is None or letter not in flags
+                    continue
+                value = word[at:]
+                if clap and value.startswith("="):
+                    value = value[1:]
+                elif not value:
+                    value, i = (args[i] if i < len(args) else ""), i + 1
+                options.append(("-" + letter, value))
+                open_option = False
+                break
+            continue
+        if open_option:
+            maybe.add(len(operands))
+        operands.append(word)
+        open_option = False
+    return options, operands, maybe
+
+
+def option_values(options, *names):
+    return [value for name, value in options if name in names and value is not None]
+
+
 REAL_PATHS = {}   # a hook process answers one call; a long command names the same path many times
 
 
@@ -2243,6 +2300,483 @@ def install_path(path_str, cwd):
     return None
 
 
+# --------------------------------------------------------------------------- the agent CLIs' own configuration
+# What the CLIs read from outside the project. A setting there (disableAllHooks, a hook beside the harness's, an env
+# block that every hook process inherits) turns the harness off or hijacks it in every project, and Claude Code applies
+# a changed settings file within the running session. Agents may read it; only the user changes it.
+CLAUDE_CONFIG_NAMES = ("settings.json", "settings.local.json", ".claude.json", "CLAUDE.md", "rules", "agents", "skills",
+                       "commands", "output-styles", "plugins", "workflows", "hooks*")
+CODEX_CONFIG_NAMES = ("config.toml", "*.config.toml", "managed_config.toml", "requirements.toml", "hooks.json",
+                      "AGENTS.md", "AGENTS.override.md", "rules", "agents", "skills", "prompts", "plugins")
+SYSTEM_CONFIG_DIRS = (("/Library/Application Support/ClaudeCode", "Claude Code's managed settings"),
+                      ("/etc/claude-code", "Claude Code's managed settings"),
+                      ("/etc/codex", "Codex's managed configuration"),
+                      ("/Library/Application Support/opencode", "OpenCode's system configuration"),
+                      ("/etc/opencode", "OpenCode's system configuration"))
+AGENT_CONFIG_MENTION = re.compile(r"(?:^|[^\w.-])\.(?:claude|codex)(?:\.json)?(?![\w-])|\bopencode\b|"
+                                  r"\.agentic-harness\b|\b(?:CLAUDE_CONFIG_DIR|CODEX_HOME|OPENCODE_CONFIG(?:_DIR)?|XDG_CONFIG_HOME)\b|"
+                                  r"ClaudeCode|claude-code/|/etc/codex\b|managed-settings")
+CODE_CHANGES = re.compile(r"(?i)write|append|symlink|link\(|copy|move|rename|replace|remove|unlink|rmtree|rmdir|rmSync|"
+                          r"mkdir|chmod|chown|truncate|dump\(|open\([^)]*['\"][wax]")
+# Programs that only read the paths they name; any other program naming a configuration path may change it.
+CONFIG_READERS = ("cat", "head", "tail", "less", "more", "grep", "egrep", "fgrep", "rg", "ls", "stat", "file", "wc",
+                  "diff", "cmp", "jq", "yq", "md5", "md5sum", "shasum", "sha1sum", "sha256sum", "realpath", "readlink",
+                  "test", "[", "echo", "printf", "pwd", "bat", "tree", "du", "xxd", "hexdump", "od", "strings", "sort",
+                  "uniq", "cut", "column", "basename", "dirname", "true", "false")
+FIND_WRITES = ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls")
+REMOVERS = ("rm", "rmdir", "unlink", "mv", "chmod", "chown", "chflags", "chattr", "trash", "srm", "shred")
+# The CLIs' own commands that write their user configuration.
+CONFIG_COMMANDS = {"claude": {"config": ("set", "add", "remove", "reset"),
+                              "plugin": ("install", "i", "uninstall", "remove", "enable", "disable", "update",
+                                         "marketplace"),
+                              "mcp": ("add", "add-json", "remove", "add-from-claude-desktop",
+                                      "reset-project-choices")},
+                   "codex": {"mcp": ("add", "remove"), "features": ("enable", "disable")}}
+CONFIG_COMMANDS["claude"]["plugins"] = CONFIG_COMMANDS["claude"]["plugin"]
+
+
+def home_dir():
+    return Path(os.path.expanduser("~"))
+
+
+def claude_user_dir():
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or home_dir() / ".claude")
+
+
+def claude_state_file():
+    """~/.claude.json, which moves into $CLAUDE_CONFIG_DIR with the rest."""
+    return claude_user_dir() / ".claude.json" if os.environ.get("CLAUDE_CONFIG_DIR") else home_dir() / ".claude.json"
+
+
+def codex_user_dir():
+    return Path(os.environ.get("CODEX_HOME") or home_dir() / ".codex")
+
+
+def opencode_user_dirs():
+    dirs = [os.environ.get("OPENCODE_CONFIG_DIR")]
+    if os.environ.get("XDG_CONFIG_HOME"):
+        dirs.append(os.path.join(os.environ["XDG_CONFIG_HOME"], "opencode"))
+    dirs.append(str(home_dir() / ".config" / "opencode"))
+    return [Path(d) for d in dirs if d]
+
+
+def agent_config_locations():
+    """[(file or folder, the names in the folder or None for all of it, label)]. A variable that moves a folder
+    doesn't unprotect the default one: a session started without it reads that."""
+    places = [(folder, CLAUDE_CONFIG_NAMES, "Claude Code's user configuration")
+              for folder in (claude_user_dir(), home_dir() / ".claude")]
+    places.append((home_dir() / ".claude.json", None, "Claude Code's user configuration"))
+    places += [(folder, CODEX_CONFIG_NAMES, "Codex's user configuration")
+               for folder in (codex_user_dir(), home_dir() / ".codex")]
+    places += [(folder, None, "OpenCode's user configuration") for folder in opencode_user_dirs()]
+    if os.environ.get("OPENCODE_CONFIG"):
+        places.append((Path(os.environ["OPENCODE_CONFIG"]), None, "OpenCode's user configuration"))
+    places.append((home_dir() / ".agentic-harness", None, "the harness's machine settings"))
+    places += [(Path(folder), None, label) for folder, label in SYSTEM_CONFIG_DIRS]
+    return places
+
+
+CASE_PROBES = {}
+
+
+def disk_ignores_case(path):
+    """Whether the disk holding path matches names whatever their case (macOS's and Windows' default), judged on the
+    nearest existing part of path whose name has letters."""
+    probe = path
+    while probe != os.path.dirname(probe):
+        name = os.path.basename(probe)
+        if name.swapcase() != name and os.path.lexists(probe):
+            if probe not in CASE_PROBES:
+                other = os.path.join(os.path.dirname(probe), name.swapcase())
+                try:
+                    CASE_PROBES[probe] = os.path.samefile(probe, other)
+                except OSError:
+                    CASE_PROBES[probe] = False
+            return CASE_PROBES[probe]
+        probe = os.path.dirname(probe)
+    return False
+
+
+CONFIG_BASES = {}   # resolved once per environment: a long command names many paths
+CONFIG_LOOKUPS = {}
+
+
+def resolved_config_locations():
+    """[(the location resolved, folded to lower case on a disk that ignores case, names, label, folded)]."""
+    key = (os.path.expanduser("~"), str(ROOT)) + tuple(os.environ.get(name) for name in (
+        "CLAUDE_CONFIG_DIR", "CODEX_HOME", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "XDG_CONFIG_HOME"))
+    if key not in CONFIG_BASES:
+        CONFIG_BASES.clear()
+        CONFIG_LOOKUPS.clear()
+        places = []
+        for folder, names, label in agent_config_locations():
+            real_base = os.path.realpath(str(folder))
+            # realpath keeps the case it was given, and the CLIs' folders are the same files spelled any way on such a
+            # disk.
+            folded = disk_ignores_case(real_base)
+            places.append((real_base.lower() if folded else real_base, names, label, folded))
+        CONFIG_BASES[key] = (places, os.path.realpath(str(ROOT)))
+    return CONFIG_BASES[key]
+
+
+def agent_config_path(path_str, cwd, whole=False):
+    """Which CLI configuration path_str is in, else None. whole: also a folder that holds some (deleting or moving it
+    takes the configuration with it)."""
+    if not path_str or path_str.startswith("-"):
+        return None
+    places, real_root = resolved_config_locations()
+    key = (path_str, cwd, whole)
+    if key in CONFIG_LOOKUPS:
+        return CONFIG_LOOKUPS[key]
+    if len(CONFIG_LOOKUPS) > 10000:
+        CONFIG_LOOKUPS.clear()
+    path = os.path.expandvars(os.path.expanduser(path_str))
+    if not os.path.isabs(path):
+        path = os.path.join(cwd or str(ROOT), path)
+    CONFIG_LOOKUPS[key] = label = config_location_of(real_path(path), real_root, places, whole)
+    return label
+
+
+def config_location_of(resolved, real_root, places, whole):
+    for base, names, label, folded in places:
+        full, root = (p.lower() if folded else p for p in (resolved, real_root))
+        if root == base or root.startswith(base + os.sep):
+            continue   # a project kept in one of these folders keeps its own gates
+        if full.startswith(base + os.sep):
+            first = full[len(base) + 1:].split(os.sep)[0]
+            if names is None or any(fnmatch.fnmatchcase(first, name.lower() if folded else name) for name in names):
+                return label
+        if full == base:
+            return label
+        if whole and base.startswith(full.rstrip(os.sep) + os.sep):
+            return label
+    return None
+
+
+TAR_LONG_VALUED = ("--directory", "--cd", "--file", "--files-from", "--exclude-from", "--exclude", "--include",
+                   "--newer", "--newer-mtime", "--format", "--options", "--use-compress-program", "--transform",
+                   "--xform", "--strip-components", "--owner", "--group", "--mode", "--mtime", "--label",
+                   "--starting-file", "--blocking-factor", "--record-size", "--listed-incremental", "--info-script",
+                   "--new-volume-script", "--rsh-command", "--rmt-command", "--to-command", "--checkpoint-action",
+                   "--index-file", "--suffix", "--uid", "--gid", "--tape-length", "--volno-file")
+# Each archiver as GNU's and BSD's (libarchive's) builds parse it: a letter takes a value in one and not the other,
+# so a command is read both ways and a destination either finds counts.
+EXTRACTORS = {
+    "tar": [dict(valued="bCfFgHIKLNTVX", long_valued=TAR_LONG_VALUED, old_style=True, abbreviations=True,
+                 long_flags=("--extract", "--get", "--absolute-names")),
+            dict(valued="bCfIsTX", long_valued=TAR_LONG_VALUED, old_style=True, abbreviations=True,
+                 long_flags=("--extract", "--get", "--absolute-paths", "--insecure"))],
+    "unzip": [dict(valued="dPIO")],
+    "cpio": [dict(valued="CDEFHIMOR", abbreviations=True, long_flags=("--extract", "--pass-through"),
+                  long_valued=("--directory", "--file", "--format", "--pattern-file", "--owner", "--io-size",
+                               "--message", "--rsh-command")),
+             dict(valued="CEFfHIOR", abbreviations=True, long_flags=("--extract", "--pass-through", "--insecure"),
+                  long_valued=("--file", "--format", "--owner", "--passphrase"))],
+    "pax": [dict(valued="bfopsxBGTU")],
+    "jar": [dict(valued="fmeC", old_style=True, long_flags=("--extract",),
+                 long_valued=("--file", "--dir", "--manifest", "--main-class", "--module-version", "--release"))],
+}
+for alias, name in (("bsdtar", "tar"), ("gtar", "tar"), ("bsdcpio", "cpio")):
+    EXTRACTORS[alias] = EXTRACTORS[name]
+# The variables these archivers read options from before their command line's.
+OPTION_VARIABLES = {"tar": ("TAR_OPTIONS",), "gtar": ("TAR_OPTIONS",), "unzip": ("UNZIP", "UNZIPOPT")}
+ROOT_EXTRACTION = "/"   # names from the archive land where they say, absolute or ../ included
+
+
+def option_variable_words(prog, assignments, env):
+    """The options prog reads from its variables (TAR_OPTIONS, UNZIP): a value the hooks can't know reads as a
+    folder they can't resolve."""
+    words = []
+    for name in OPTION_VARIABLES.get(prog, ()):
+        given = [a.split("=", 1)[1] for a in assignments if a.split("=", 1)[0] == name]
+        value = given[-1] if given else (env or {}).get(name, os.environ.get(name))
+        if (value is None and name in (env or {})) or (isinstance(value, str) and
+                                                         re.search(r"[$`]", os.path.expandvars(value))):
+            words += ["-C" if prog != "unzip" else "-d", "$(%s)" % name]
+        elif isinstance(value, str):
+            try:
+                words += shlex.split(value)
+            except ValueError:
+                words += value.split()
+    return words
+
+
+def cumulative(folders):
+    """A later relative -C is taken from the folder an earlier one changed to; each folder alone counts too."""
+    found, here = [], None
+    for folder in folders:
+        here = folder if here is None or folder.startswith(("/", "~", "$")) else os.path.join(here, folder)
+        found += [folder, here]
+    return found
+
+
+def extraction_folders(prog, words, assignments=(), env=None):
+    """The folders an archive extraction writes into ("." for the current one, "/" when the archive's own absolute or
+    ../ names are kept): names from the archive, which the hooks can't read, so a folder that holds the CLIs'
+    configuration (the home folder) counts as written whole."""
+    args = option_variable_words(prog, assignments, env) + words[1:]
+    found = []
+    for table in EXTRACTORS.get(prog, []):
+        options, operands, _ = parse_options(args, **table)
+        given = {name for name, _ in options}
+        if prog in ("tar", "bsdtar", "gtar", "jar"):
+            if given & {"-x", "--extract", "--get"}:
+                found += cumulative(option_values(options, "-C", "--directory", "--cd", "--dir")) or ["."]
+                found += [ROOT_EXTRACTION] if given & {"-P", "--absolute-names", "--absolute-paths", "--insecure"} \
+                    else []
+        elif prog == "unzip":
+            if not given & {"-l", "-v", "-t", "-p", "-c", "-z", "-Z"} or any(w.startswith("--") for w in args):
+                found += option_values(options, "-d") or ["."]
+                found += [ROOT_EXTRACTION] if "-:" in given else []
+        elif prog in ("cpio", "bsdcpio"):
+            folders = option_values(options, "-D", "--directory")
+            if given & {"-p", "--pass-through"}:
+                found += cumulative(folders + operands[-1:]) if operands else []
+            elif given & {"-i", "--extract"}:
+                found += cumulative(folders) or ["."]
+            found += [ROOT_EXTRACTION] if "--insecure" in given and given & {"-i", "-p", "--extract",
+                                                                             "--pass-through"} else []
+        elif prog == "pax" and "-r" in given:
+            found += operands[-1:] if "-w" in given else ["."]
+    if prog in ("7z", "7za", "7zz", "7zr"):
+        # 7-Zip's switches are case-blind and take their value attached: -o<folder>.
+        switches = [w for w in words[1:] if w.startswith("-")]
+        command = next((w.lower() for w in words[1:] if not w.startswith("-")), "")
+        if command in ("x", "e"):
+            found += [w[2:] for w in switches if w[:2].lower() == "-o" and len(w) > 2] or ["."]
+            found += [ROOT_EXTRACTION] if any(w.lower().startswith("-spf") for w in switches) else []
+    elif prog == "unar":
+        args = words[1:]
+        found += [args[i + 1] for i, w in enumerate(args[:-1]) if w in ("-o", "-output-directory",
+                                                                        "--output-directory")] or ["."]
+    elif re.fullmatch(r"python[\d.]*", prog) and "-m" in words[:-1]:
+        rest = words[words.index("-m") + 1:]
+        if rest[0] in ("zipfile", "tarfile") and set(rest) & {"-e", "--extract"}:
+            at = next(i for i, w in enumerate(rest) if w in ("-e", "--extract"))
+            operands = [w for w in rest[at + 1:] if not w.startswith("-")]
+            found += operands[1:2] or ["."]
+    return found
+
+
+COPY_LONG_FLAGS = ("--recursive", "--archive", "--force", "--verbose", "--interactive", "--no-clobber", "--update",
+                   "--dereference", "--no-dereference", "--parents", "--symbolic", "--relative", "--link",
+                   "--no-target-directory", "--backup", "--preserve", "--reflink", "--keepParent", "--rsrc",
+                   "--norsrc", "--extattr", "--noextattr", "--acl", "--noacl", "--qtn", "--noqtn", "--delete",
+                   "--checksum", "--progress", "--partial", "--dry-run", "--itemize-changes", "--human-readable",
+                   "--mkpath", "--times", "--perms", "--owner", "--group", "--hard-links", "--sparse", "--quiet",
+                   "--stats", "--compress", "--one-file-system", "--ignore-existing", "--existing", "--inplace",
+                   "--append", "--copy-links", "--safe-links", "--links", "--whole-file")
+RSYNC_LONG_VALUED = ("--rsh", "--rsync-path", "--filter", "--exclude", "--exclude-from", "--include",
+                     "--include-from", "--files-from", "--link-dest", "--compare-dest", "--copy-dest", "--backup-dir",
+                     "--suffix", "--chmod", "--chown", "--usermap", "--groupmap", "--log-file", "--log-file-format",
+                     "--out-format", "--partial-dir", "--temp-dir", "--timeout", "--contimeout", "--bwlimit",
+                     "--max-size", "--min-size", "--max-delete", "--max-alloc", "--port", "--sockopts",
+                     "--password-file", "--iconv", "--remote-option", "--modify-window", "--compress-level",
+                     "--compress-choice", "--checksum-choice", "--skip-compress", "--checksum-seed", "--info",
+                     "--debug", "--address", "--protocol", "--write-batch", "--only-write-batch", "--read-batch",
+                     "--stop-after", "--stop-at", "--block-size", "--outbuf", "--copy-as", "--early-input")
+GNU_TARGET = ("--target-directory", "--suffix")
+COPIERS = {
+    "cp": [dict(valued="St", flags="aRrfHiLlnPpsTuvxXcNbdZ", long_valued=GNU_TARGET + ("--sparse", "--no-preserve"),
+                long_flags=COPY_LONG_FLAGS, abbreviations=True)],
+    "mv": [dict(valued="St", flags="bfhinuvTZ", long_valued=GNU_TARGET, long_flags=COPY_LONG_FLAGS,
+                abbreviations=True)],
+    "ln": [dict(valued="St", flags="bdFfhiLnPrsTvw", long_valued=GNU_TARGET, long_flags=COPY_LONG_FLAGS,
+                abbreviations=True)],
+    "install": [dict(valued="gmoSt", flags="bcCdDpsTvZ", long_valued=GNU_TARGET + ("--group", "--mode", "--owner",
+                                                                                   "--strip-program"),
+                     long_flags=COPY_LONG_FLAGS, abbreviations=True),
+                dict(valued="BDfghlMmNoT", flags="bCcpSsUvd")],
+    "rsync": [dict(valued="eBfTM", flags="vqcarRbudlLkKHpEAXogDtUNOJSnWxCzhPiF0yms468", long_valued=RSYNC_LONG_VALUED,
+                   long_flags=COPY_LONG_FLAGS)],
+    "scp": [dict(valued="cFiJloPSDX", flags="346ABCOpqRrsTv")],
+    "ditto": [dict(flags="VXcCkxzjvh", long_valued=("--arch", "--bom", "--zlibCompressionLevel"),
+                   long_flags=COPY_LONG_FLAGS + ("--sequesterRsrc", "--hfsCompression", "--nohfsCompression",
+                                                 "--preserveHFSCompression", "--nopreserveHFSCompression",
+                                                 "--password", "--clone", "--nocache"))],
+}
+INTO = "into"   # a destination that receives content whose names the hooks can't read
+
+
+def copy_targets(prog, args):
+    """[(path, whole)] a copy, move or link writes: its target, what lands in it, the sources a move or link takes
+    away, the target as a whole when a folder's contents land in it (cp -T, rsync src/, ditto), and every folder
+    install -d makes. The target is the
+    -t folder, or the last operand, or one before it that only options this table doesn't know follow."""
+    found = []
+    for table in COPIERS[prog]:
+        options, operands, maybe = parse_options(args, **table)
+        given = {name for name, _ in options}
+        targets = [(t, operands) for t in option_values(options, "-t", "--target-directory")]
+        if not targets:
+            for at in range(len(operands) - 1, 0, -1):
+                targets.append((operands[at], operands[:at]))
+                if at not in maybe:
+                    break
+        for target, sources in targets:
+            found += [(target, False)] + [(os.path.join(target, os.path.basename(s.rstrip("/"))), False)
+                                          for s in sources]
+            contents = any(s.endswith("/") or os.path.basename(s.rstrip("/")) in ("", ".", "..") for s in sources)
+            if prog == "ditto" or (prog in ("cp", "rsync", "scp") and contents) or (
+                    prog == "cp" and given & {"-T", "--no-target-directory"}):
+                found.append((target, INTO))
+            if prog in ("ln", "mv"):
+                found += [(s, True) for s in sources]
+        if prog == "install" and "-d" in given:
+            found += [(o, False) for o in operands]
+    return found
+
+
+def config_operands(segment, words, assignments=(), env=None):
+    """[(path, whole)] a shell segment may change: its redirection targets, and every word of a program that doesn't
+    only read (cp and the like: their target, and what lands in a target folder). whole is INTO for a folder that
+    receives names the hooks can't read (an archive's, a folder's contents)."""
+    found = [(p.strip("'\""), False) for p in
+             re.findall(r"(?:^|[^<>&0-9])(?:[0-9]?>>?|&>>?)\s*('[^']*'|\"[^\"]*\"|[^\s;|&<>]+)", segment)]
+    prog, args = program(words), words[1:]
+    operands = [w for w in args if not w.startswith("-")]
+    if (prog in CONFIG_READERS or (prog == "find" and not set(args) & set(FIND_WRITES))
+            or (prog in ("sed", "gsed") and not any(w.startswith("-i") or w == "--in-place" for w in args))):
+        return found
+    sub = CONFIG_COMMANDS.get(prog, {}).get(operands[0] if operands else "")
+    if prog in CONFIG_COMMANDS and not sub:
+        return found
+    command = redirections(words)[0]
+    found += [(folder, INTO) for folder in extraction_folders(prog, command, assignments, env)]
+    copies = copy_targets(prog, command[1:]) if prog in COPIERS else []
+    if copies:
+        return found + copies
+    found += [(w, prog in REMOVERS) for w in args]
+    found += [(w.split("=", 1)[1], False) for w in args if "=" in w]
+    return found
+
+
+def config_findings(segment, words, cwd, env=None, assignments=None):
+    prog, operands = program(words), [w for w in words[1:] if not w.startswith("-")]
+    if operands[1:2] and operands[1] in CONFIG_COMMANDS.get(prog, {}).get(operands[0], ()):
+        return ["%s %s %s changes %s's own configuration, which decides whether the harness's hooks run; only the "
+                "user does that." % (prog, operands[0], operands[1], "Claude Code" if prog == "claude" else "Codex")]
+    if assignments is None:
+        assignments = shell_words(segment)[0]
+    found = []
+    # A long command repeats words; each distinct one is resolved once.
+    for path, whole in dict.fromkeys(config_operands(segment, words, assignments, env)):
+        if not path or path.startswith("-"):
+            continue
+        fulls, unresolved = shell_path(path, cwd, env)
+        shown = {".": "The current folder", ROOT_EXTRACTION: "/ (the archive's own absolute and ../ names)"}.get(
+            path, path)
+        if unresolved and whole == INTO:
+            found.append("%s receives files whose names the hooks can't read (an archive's, a folder's contents), and "
+                         "the hooks can't tell which folder that is: it may hold the agent CLIs' configuration, which "
+                         "can turn the harness's hooks off. Name the folder." % shown)
+            continue
+        label = next((label for label in (agent_config_path(full, None, whole) for full in fulls) if label), None)
+        if not label and unresolved and AGENT_CONFIG_MENTION.search(path):
+            label = "the agent CLIs' configuration"
+        if label and whole == INTO:
+            found.append("%s receives files whose names the hooks can't read (an archive's, a folder's contents), and "
+                         "it holds %s, which can turn the harness's hooks off; agents may read it but not change it. "
+                         "Extract or copy into a folder of its own." % (shown, label))
+        elif label:
+            found.append("%s is in %s, which can turn the harness's hooks off; agents may read it but not change it."
+                         % (path, label))
+    return found
+
+
+CLI_PACKAGES = {"@anthropic-ai/claude-code": "claude", "@openai/codex": "codex", "opencode-ai": "opencode"}
+# Variables that start a nested session in bare or safe mode, or with OpenCode configuration from elsewhere; with
+# HOOK_ENV_HIJACK (a moved home or config folder, PATH, PYTHON*), what a nested session's environment may not set.
+NESTED_SESSION_ENV = re.compile(r"^(?:CLAUDE_CODE_(?:SIMPLE|SAFE_MODE)|OPENCODE_\w+)$")
+CODEX_HOOK_FEATURES = ("hooks", "codex_hooks", "plugins")
+
+
+def started_agent_cli(words):
+    """(the agent CLI words start, directly or through a package runner such as npx, its arguments), or (None, [])."""
+    prog, rest = program(words), words[1:]
+    if prog in ("claude", "codex", "opencode"):
+        return prog, rest
+    if prog in ("pnpm", "yarn") and rest[:1] == ["dlx"]:
+        rest = rest[1:]
+    elif prog not in ("npx", "bunx", "pnpx"):
+        return None, []
+    for i, word in enumerate(rest):
+        if not word.startswith("-"):
+            return CLI_PACKAGES.get(re.sub(r"(?<=.)@[^/]*$", "", word)), rest[i + 1:]
+    return None, []
+
+
+def settings_override_problems(value, what):
+    """Why a --settings or --agents value (inline JSON, or a file) may leave the harness's hooks out."""
+    if not value.lstrip().startswith("{"):
+        return ["%s %s: a file can change between this check and the session reading it; pass the JSON inline"
+                % (what, value or "''")]
+    try:
+        data = json.loads(value)
+    except ValueError:
+        return ["%s with JSON the hooks can't read" % what]
+    if not isinstance(data, dict):
+        return []
+    if what == "--agents":
+        roles = sorted(set(data) & set(PIPELINE_AGENTS))
+        return ["--agents redefining %s, which replaces the harness's agent of that name and the hooks it carries"
+                % ", ".join(roles)] if roles else []
+    found = ["--settings %s" % key for key in ("disableAllHooks", "allowManagedHooksOnly") if data.get(key) is True]
+    env = data.get("env") if isinstance(data.get("env"), dict) else {}
+    found += ["--settings setting %s in its env" % name for name in sorted(env) if HOOK_ENV_HIJACK.match(str(name))]
+    plugins = data.get("enabledPlugins") if isinstance(data.get("enabledPlugins"), dict) else {}
+    if plugins.get(PLUGIN_ID) is False:
+        found.append("--settings turning the agentic-harness plugin off")
+    return found
+
+
+def codex_override_problems(args):
+    options = parse_options(args, valued="c", long_valued=("--config", "--disable", "--enable"), clap=True)[0]
+    found = []
+    for value in option_values(options, "-c", "--config"):
+        key, _, raw = (part.strip() for part in value.partition("="))
+        key = re.sub(r"[\"'\s]", "", key)
+        names = re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*=", raw) + [key.rsplit(".", 1)[-1]]
+        if (key in ["features.%s" % f for f in CODEX_HOOK_FEATURES] and raw != "true") or (
+                key == "features" and re.search(r"\b(?:%s)\s*=\s*(?!true\b)" % "|".join(CODEX_HOOK_FEATURES), raw)) \
+                or (key == "allow_managed_hooks_only" and raw != "false") or re.match(r"^projects(?:\.|$)", key) \
+                or (key.startswith("shell_environment_policy") and any(HOOK_ENV_HIJACK.match(n) for n in names)):
+            found.append("-c %s" % value)
+    found += ["--disable %s" % v for v in option_values(options, "--disable") if v in CODEX_HOOK_FEATURES]
+    found += ["--ignore-user-config, which drops the project's trust and the plugins"] \
+        if "--ignore-user-config" in [name for name, _ in options] else []
+    return found
+
+
+def nested_session_findings(words, assignments, env):
+    """Why a command starts an agent CLI without the harness's hooks: flags that skip or turn them off, settings or
+    configuration from elsewhere, or an environment that moves the CLI's configuration."""
+    cli, args = started_agent_cli(words)
+    if not cli:
+        return []
+    names = {a.split("=", 1)[0] for a in assignments} | set(env)
+    found = ["%s set for it" % name for name in sorted(names)
+             if HOOK_ENV_HIJACK.match(name) or NESTED_SESSION_ENV.match(name)]
+    options = parse_options(args, long_valued=("--settings", "--setting-sources", "--agents"))[0]
+    given = [name for name, _ in options]
+    if cli == "claude":
+        found += [flag for flag in ("--bare", "--safe-mode", "--restricted") if flag in given]
+        found += ["--setting-sources %s, which leaves out the project's settings" % (value or "''")
+                  for value in option_values(options, "--setting-sources")
+                  if "project" not in [s.strip() for s in value.split(",")]]
+        for flag in ("--settings", "--agents"):
+            for value in option_values(options, flag):
+                found += settings_override_problems(value, flag)
+    elif cli == "codex":
+        found += codex_override_problems(args)
+    elif "--pure" in given:
+        found.append("--pure, which skips plugins")
+    if not found:
+        return []
+    return ["That starts %s without the harness's hooks (%s), and they are what stop that session's agent too. "
+            "Start it without that; only the user changes how the hooks run." % (cli, "; ".join(found))]
+
+
 # A file a redirection opens for writing, in operators_apart's text. >&1 and >&- duplicate or close a descriptor.
 WRITE_TARGET = re.compile(r"(?:^|\s)([0-9]*(?:>>|>\||>&|<>|>)|&>>?)\s*('[^']*'|\"[^\"]*\"|[^\s;|&<>]+)")
 
@@ -2605,13 +3139,17 @@ def code_findings(code, label):
     if ENGINE_IMPORT.search(code) or (ENGINE_NAME.search(code) and CODE_RUNS.search(code)):
         found.append("%s runs the harness engine from code the hooks don't read; run harness.py itself, with the "
                      "commands agents may run." % label)
+    if AGENT_CONFIG_MENTION.search(code) and CODE_CHANGES.search(code):
+        found.append("%s may change the agent CLIs' configuration (~/.claude, ~/.claude.json, ~/.codex, "
+                     "~/.config/opencode), which can turn the harness's hooks off; agents may read it but not change it."
+                     % label)
     return found
 
 
 # The commands only the user, CI, an agent factory or an Orca automation's precheck runs. Their dry runs (where they
 # have one) change nothing.
 USER_COMMANDS = ("run", "orca", "orca-nightly", "snapshot", "linear", "intake", "delivery-record", "ci-judge",
-                 "ci-protect")
+                 "ci-protect", "accept-agent-config")
 FIND_EXEC = ("-exec", "-execdir", "-ok", "-okdir")
 PLANNING_COMMANDS = ("orca", "orca-nightly", "linear")
 ENGINE_MODULES = ("harness", "launcher", "thin")
@@ -2622,7 +3160,7 @@ CODE_RUNS = re.compile(r"\bexec(?:file)?\s*\(|\bcompile\s*\(|\bimportlib\b|\bsub
                        r"\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\b(?:spawn|exec)Sync\b")
 USER_COMMAND_REFUSAL = ("harness.py %s is for the user, CI, an agent factory or an Orca automation's precheck, not "
                         "agents, however the engine is started: run, orca, orca-nightly, snapshot, linear, intake, "
-                        "delivery-record, ci-judge, ci-protect and pin are theirs.")
+                        "delivery-record, ci-judge, ci-protect, accept-agent-config and pin are theirs.")
 
 
 def engine_script(word):
@@ -2810,6 +3348,8 @@ def segment_findings(found, segment, op, words, index, segments, cwd, dirs, dept
             args = [(resolved_texts(w, env) or [w])[0] if re.search(r"[$`]", w) else w for w in words[1:]]
             found.extend(shell_findings(functions[prog], cwd, depth + 1, dict(env, **positional_env(args)),
                                         functions))
+    found.extend(config_findings(segment, words, cwd, env, assignments))
+    found.extend(nested_session_findings(words, assignments, env))
     producer = shell_words(segments[index - 1][0])[1] if index > 0 and segments[index - 1][1] == "|" else None
     found.extend(engine_findings(prog, words, written_paths(segment, words)))
     script = next((i for i, w in enumerate(words) if engine_script(w)), None)
@@ -5157,9 +5697,274 @@ def plugin_mismatch():
             % (plugin, pinned, pinned, plugin))
 
 
+# Variables a settings env block hands to every hook process: each runs other code in place of the harness's hooks,
+# points them at another engine or repository, or changes a user-only setting.
+HOOK_ENV_HIJACK = re.compile(r"^(?:PYTHON(?!(?:DONTWRITEBYTECODE|UNBUFFERED|IOENCODING|UTF8)$)\w*|PATH|HOME|LD_\w+|"
+                             r"DYLD_\w+|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|PS4|NODE_OPTIONS|NODE_PATH|PERL5OPT|PERL5LIB|"
+                             r"PERLLIB|RUBYOPT|RUBYLIB|GIT_(?:DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|"
+                             r"ALTERNATE_OBJECT_DIRECTORIES|COMMON_DIR|CONFIG\w*|EXEC_PATH|TEMPLATE_DIR)|HARNESS_\w+|"
+                             r"SKIP_BUILD|CLAUDE_PROJECT_DIR|CLAUDE_PLUGIN_ROOT|PLUGIN_ROOT|CLAUDE_CONFIG_DIR|"
+                             r"CODEX_HOME|XDG_CONFIG_HOME|OPENCODE_CONFIG\w*)$")
+PLUGIN_ID = "agentic-harness@agentic-harness"
+# Settings that run a command, or add hooks or tools beside the harness's. Their values are accepted once (the first
+# health check in a repository, or accept-agent-config) and a change after that is an error until the user accepts it.
+COMMAND_SETTINGS = ("apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper", "statusLine",
+                    "fileSuggestion", "hooks", "enabledPlugins", "extraKnownMarketplaces", "enableAllProjectMcpServers",
+                    "enabledMcpjsonServers", "mcpServers")
+# A file of each kind the gates depend on: an allow rule whose path covers one pre-allows changing it.
+GATE_FILES = ("scripts/harness/lib/harness.py", ".claude/settings.json", ".claude/settings.local.json",
+              ".claude/agents/judge.md", ".codex/hooks.json", ".opencode/plugins/harness.js", ".githooks/pre-commit",
+              ".github/workflows/harness-verify.yml", "backbone/.verdicts/task.judge.json",
+              "backbone/.harness-lock.json", "backbone/tools.conf", "backbone/harness.conf", "harness-attest.pub")
+CODEX_COMMAND_TABLES = re.compile(r"^(?:hooks(?!\.state)|mcp_servers|profiles|features|shell_environment_policy|notify)"
+                                  r"(?:\.|$)")
+
+
+def json_object(path):
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def managed_claude_dir():
+    return Path("/Library/Application Support/ClaudeCode" if sys.platform == "darwin" else "/etc/claude-code")
+
+
+def claude_layers():
+    """[(name, path, settings)] in Claude Code's precedence, lowest first; managed settings win."""
+    user = claude_user_dir()
+    layers = [("user settings", user / "settings.json"), ("user settings", user / "settings.local.json"),
+              ("project settings", ROOT / ".claude/settings.json"),
+              ("local settings", ROOT / ".claude/settings.local.json"),
+              ("managed settings", managed_claude_dir() / "managed-settings.json")]
+    drop_ins = sorted((managed_claude_dir() / "managed-settings.d").glob("*.json"))
+    layers += [("managed settings", path) for path in drop_ins]
+    return [(name, path, json_object(path)) for name, path in layers if path.is_file()]
+
+
+def toml_entries(text):
+    """[(dotted key, raw value, line)] of a TOML file, key = value lines only (Python 3.10 has no TOML parser).
+    Continuation lines of a multi-line value belong to its key."""
+    entries, table, key = [], "", None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        header = re.match(r"^\[\[?\s*([^\[\]]+?)\s*\]\]?\s*(#.*)?$", stripped)
+        if header:
+            table, key = re.sub(r"[\"'\s]", "", header.group(1)), None
+            continue
+        pair = re.match(r"^([A-Za-z0-9_.\"' -]+?)\s*=\s*(.*)$", stripped)
+        if pair:
+            key = ".".join(filter(None, (table, re.sub(r"[\"'\s]", "", pair.group(1)))))
+            entries.append((key, pair.group(2).strip(), stripped))
+        elif key:
+            entries.append((key, stripped, stripped))
+    return entries
+
+
+def codex_configs():
+    """[(name, path)] of the Codex configuration files that switch hooks on or off."""
+    user = codex_user_dir()
+    return [("Codex's user config.toml", user / "config.toml"), ("the project's .codex/config.toml",
+                                                                 ROOT / ".codex/config.toml"),
+            ("Codex's managed config", Path("/etc/codex/managed_config.toml")),
+            ("Codex's managed requirements", Path("/etc/codex/requirements.toml"))]
+
+
+def opencode_configs():
+    files = [Path(os.environ["OPENCODE_CONFIG"])] if os.environ.get("OPENCODE_CONFIG") else []
+    for folder in opencode_user_dirs() + [ROOT, ROOT / ".opencode"]:
+        files += [folder / "opencode.json", folder / "opencode.jsonc"]
+    return [path for path in dict.fromkeys(files) if path.is_file()]
+
+
+def allow_rule_protected(rule):
+    """Whether a permission allow rule lets a tool change, without asking, files the gates depend on: a Bash rule for a
+    command the shell checks refuse, or a file-tool rule whose path (Claude Code's syntax: ~/, //absolute, relative to
+    the project) covers the CLIs' configuration or one of GATE_FILES."""
+    m = re.match(r"^\s*(Write|Edit|MultiEdit|NotebookEdit|Bash)\((.*)\)\s*$", str(rule))
+    if not m:
+        return False
+    tool, spec = m.groups()
+    if tool == "Bash":
+        # A prefix rule matches the command with arguments after it: python3:* is not python3 reading stdin.
+        command = re.sub(r"(?::\*|\s+\*)$", " x", spec)
+        return bool(shell_findings(command))
+    prefix = re.split(r"[*?\[{]", spec, maxsplit=1)[0]
+    if not prefix.strip("./"):
+        return False
+    if prefix.startswith("//"):
+        path = prefix[1:]
+    elif prefix.startswith(("~", "$")):
+        path = os.path.expandvars(os.path.expanduser(prefix))
+    else:
+        path = os.path.join(str(ROOT), prefix.lstrip("/"))
+    if agent_config_path(path, str(ROOT), whole=True):
+        return True
+    name = os.path.relpath(os.path.realpath(path), os.path.realpath(str(ROOT))).replace(os.sep, "/")
+    return not name.startswith("..") and any(f == name or f.startswith(name.rstrip("/") + "/") or name == "."
+                                             for f in GATE_FILES)
+
+
+def agent_config_problems(changes=True):
+    """(level, message) for CLI configuration that turns the harness's hooks off, hands their processes a hijacking
+    environment, or pre-allows changing what the gates depend on; with changes, also command-running settings changed
+    since the user accepted them."""
+    issues, effective = [], {}
+    for name, path, data in claude_layers():
+        where = "Claude Code's %s (%s)" % (name, path)
+        if "disableAllHooks" in data:
+            effective["disableAllHooks"] = (data["disableAllHooks"], where)
+        plugins = data.get("enabledPlugins")
+        if isinstance(plugins, dict) and PLUGIN_ID in plugins:
+            effective["plugin"] = (plugins[PLUGIN_ID], where)
+        env = data.get("env")
+        hijack = sorted(str(k) for k in env if HOOK_ENV_HIJACK.match(str(k))) if isinstance(env, dict) else []
+        if hijack:
+            issues.append(("error", "%s sets %s in its env block, which every hook process inherits: it can run other "
+                                    "code in place of the harness's hooks or change their settings. Remove it."
+                           % (where, ", ".join(hijack))))
+        permissions = data.get("permissions") if isinstance(data.get("permissions"), dict) else {}
+        for rule in permissions.get("allow") or [] if isinstance(permissions.get("allow"), list) else []:
+            if allow_rule_protected(rule):
+                issues.append(("warn", "%s allows %s without asking. The harness's hooks still check each such call "
+                                       "and refuse what they refuse; the rule only skips Claude Code's own prompt, "
+                                       "which is the last check left if the hooks are ever off. It covers the CLIs' "
+                                       "configuration, harness files or a command the hooks refuse; consider removing "
+                                       "it." % (where, rule)))
+        if name == "managed settings" and data.get("allowManagedHooksOnly") is True and HOOK_MARK not in json.dumps(
+                data.get("hooks") or {}) and "launcher.py" not in json.dumps(data.get("hooks") or {}):
+            issues.append(("error", "%s sets allowManagedHooksOnly, which skips the project's and the plugin's hooks, "
+                                    "the harness's too, and runs none of the harness's itself." % where))
+    value, where = effective.get("disableAllHooks", (False, None))
+    if value is True:
+        issues.append(("error", "%s sets disableAllHooks, which turns off every hook, the harness's too. Remove it "
+                                "(the project's .claude/settings.json sets it to false)." % where))
+    value, where = effective.get("plugin", (True, None))
+    if thin_mode() and value is False:
+        issues.append(("error", "%s turns the agentic-harness plugin off, and with it every harness hook in this "
+                                "project." % where))
+    for name, path in codex_configs():
+        try:
+            entries = toml_entries(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
+        for key, raw, _ in entries:
+            if re.search(r"(?:^|\.)features\.(?:codex_)?hooks$", key) and raw.split("#")[0].strip() == "false":
+                issues.append(("error", "%s (%s) sets %s = false, which turns off Codex's hooks, the harness's too."
+                               % (name, path, key)))
+            if key == "allow_managed_hooks_only" and raw.split("#")[0].strip() == "true" and "harness" not in \
+                    path.read_text(encoding="utf-8"):
+                issues.append(("error", "%s (%s) sets allow_managed_hooks_only, which skips the project's hooks, the "
+                                        "harness's too." % (name, path)))
+            names = re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*=", raw) if key == "shell_environment_policy.set" else \
+                [key.rsplit(".", 1)[-1]] if key.startswith("shell_environment_policy.set.") else []
+            hijack = sorted(n for n in names if HOOK_ENV_HIJACK.match(n))
+            if hijack:
+                issues.append(("error", "%s (%s) sets %s for Codex's commands (shell_environment_policy), which can "
+                                        "run other code in place of the harness's checks. Remove it."
+                               % (name, path, ", ".join(hijack))))
+    for path in opencode_configs():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for array in re.findall(r"\"plugins?\"\s*:\s*\[([^\]]*)\]", text):
+            removed = [r for r in re.findall(r"\"(-[^\"]*)\"", array) if "*" in r or "harness" in r]
+            if removed:
+                issues.append(("error", "OpenCode's configuration (%s) removes plugins (%s), which can switch off the "
+                                        "harness's OpenCode plugin." % (path, ", ".join(removed))))
+    changed, since = agent_config_changes() if changes else ([], None)
+    if changed:
+        issues.append(("error", "The agent CLIs' configuration changed since it was accepted%s: %s. These settings run "
+                                "commands, or add hooks, plugins or tools beside the harness's, in every session. "
+                                "Check them; if the user made the changes, the user (not an agent) accepts them with "
+                                "`python3 %s accept-agent-config`."
+                       % (" on %s" % since if since else "", ", ".join(changed),
+                          shlex.quote(str(ENGINE / "scripts/harness/lib/harness.py")))))
+    return issues
+
+
+def agent_config_commands():
+    """{what: value} of the settings that run commands or add hooks beside the harness's, outside the project's
+    committed files."""
+    found = {}
+    user = claude_user_dir()
+    for path in (user / "settings.json", user / "settings.local.json", ROOT / ".claude/settings.local.json"):
+        data = json_object(path)
+        found.update(("%s %s" % (path, key), data[key]) for key in COMMAND_SETTINGS if key in data)
+    state = json_object(claude_state_file())
+    if "mcpServers" in state:
+        found["%s mcpServers" % claude_state_file()] = state["mcpServers"]
+    project = (state.get("projects") or {}).get(str(ROOT)) if isinstance(state.get("projects"), dict) else None
+    if isinstance(project, dict) and "mcpServers" in project:
+        found["%s mcpServers of %s" % (claude_state_file(), ROOT)] = project["mcpServers"]
+    codex = codex_user_dir()
+    if (codex / "hooks.json").is_file():
+        found[str(codex / "hooks.json")] = read(codex / "hooks.json")
+    for path in [codex / "config.toml"] + sorted(codex.glob("*.config.toml")):
+        lines = [line for key, _, line in toml_entries(read(path)) if CODEX_COMMAND_TABLES.match(key)]
+        if lines:
+            found["%s (hooks, MCP servers, profiles, features, notify, shell environment)" % path] = lines
+    for folder in opencode_user_dirs():
+        for path in [folder / "opencode.json", folder / "opencode.jsonc"] + sorted((folder / "plugins").glob("*")) + \
+                sorted((folder / "plugin").glob("*")):
+            if path.is_file():
+                found[str(path)] = read(path)
+    return found
+
+
+def agent_config_baseline():
+    return events_file().parent / "agent-config.json"
+
+
+def accept_agent_config():
+    current = {name: hashlib.sha256(json.dumps(value, sort_keys=True).encode("utf-8")).hexdigest()
+               for name, value in agent_config_commands().items()}
+    path = agent_config_baseline()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps({"accepted": time.strftime("%Y-%m-%d %H:%M"), "settings": current}, indent=2,
+                                    sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(str(temporary), str(path))
+    return current
+
+
+def agent_config_changes():
+    """([what changed], when the configuration was last accepted). The first check in a repository accepts what it
+    finds: it can't tell the user's settings from an agent's, so a configuration changed before then goes unnoticed."""
+    try:
+        accepted = json.loads(agent_config_baseline().read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        try:
+            accept_agent_config()
+        except OSError:
+            pass
+        return [], None
+    except (OSError, ValueError):
+        accepted = {}
+    before = accepted.get("settings") if isinstance(accepted, dict) and isinstance(accepted.get("settings"), dict) \
+        else {}
+    now = {name: hashlib.sha256(json.dumps(value, sort_keys=True).encode("utf-8")).hexdigest()
+           for name, value in agent_config_commands().items()}
+    changed = sorted(name for name in set(before) | set(now) if before.get(name) != now.get(name))
+    return changed, accepted.get("accepted")
+
+
+def accept_agent_config_command():
+    accepted = accept_agent_config()
+    print("accepted the agent CLIs' configuration (%d setting(s)) in %s:" % (len(accepted), agent_config_baseline()))
+    for name in sorted(accepted):
+        print("  %s" % name)
+    return 0
+
+
 def health():
     """List of (level, message) for misconfigurations; level is 'error' or 'warn'."""
-    issues = []
+    issues = agent_config_problems()
     thin = thin_mode()
     hooks_path = git("config", "--get", "core.hooksPath").strip()
     if thin:
@@ -6491,6 +7296,20 @@ def hook_session_start(_data):
         print("\n".join(lines))
 
 
+def hook_config_change(data):
+    """Claude Code's ConfigChange: a settings file changed during the session. Blocking keeps the running session on
+    the settings it had (a change to managed settings can't be blocked, and the file on disk stays as written)."""
+    if data.get("source") in ("skills", "policy_settings"):
+        return
+    # In supervised mode the user may be the one changing a command-running setting; the next session start reports it.
+    problems = [message for level, message in agent_config_problems(changes=autonomous()) if level == "error"]
+    if problems:
+        log_event("config-change-blocked", source=data.get("source"), file=data.get("file_path"))
+        sys.stderr.write("Harness blocked this settings change from taking effect:\n%s\n"
+                         % "\n".join("  - " + p for p in problems))
+        sys.exit(2)
+
+
 def hook_subagent_start(_data):
     # Role agents' instructions name the full-install paths, and a subagent doesn't see the session-start context.
     if thin_mode():
@@ -6557,6 +7376,10 @@ def hook_pre_tool_use(data):
     if label:
         deny("Harness blocked this change to %s: it is in %s, which decides this project's gates. The user changes "
              "it (with pin, or a plugin update)." % (path_str, label))
+    label = agent_config_path(path_str, data.get("cwd"))
+    if label:
+        deny("Harness blocked this change to %s: it is in %s, which decides whether the harness's hooks run (and can "
+             "run commands in every session). Agents may read it; only the user changes it." % (path_str, label))
     path = canonical(rel(path_str))
     if data.get("harness_role"):
         hook_agent_guard(data, data["harness_role"])
@@ -12302,6 +13125,7 @@ HOOKS = {
     "subagent-start": hook_subagent_start,
     "pre-tool-use": hook_pre_tool_use,
     "post-tool-use": hook_post_tool_use,
+    "config-change": hook_config_change,
     "stop": hook_stop,
     "grill-stop": lambda data: record_verdict(data, "grill"),
     "judge-stop": lambda data: record_verdict(data, "judge"),
@@ -12360,7 +13184,7 @@ def main(argv):
         if not command.is_file():
             sys.stderr.write("thin: this engine has no thin-mode installer\n")
             return 2
-        return subprocess.run([sys.executable, str(command)] + argv[1:]).returncode
+        return subprocess.run([sys.executable, "-I", str(command)] + argv[1:]).returncode
     if argv[1:2] == ["hook"] and "--from" in argv:
         i = argv.index("--from")
         HOOK_SOURCE = argv[i + 1] if i + 1 < len(argv) and argv[i + 1] in HOOK_SOURCES else "claude"
@@ -12405,6 +13229,8 @@ def main(argv):
         return spec_check(argv[2])
     if argv[1:] == ["doctor"]:
         return doctor()
+    if argv[1:] == ["accept-agent-config"]:
+        return accept_agent_config_command()
     if argv[1:2] == ["scan"]:
         return scan_report(quiet="--quiet" in argv[2:])
     if argv[1:] == ["catalog"]:
