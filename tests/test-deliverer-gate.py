@@ -1075,13 +1075,13 @@ class LargeCommands(GateProject):
                 self.assertLess(large, 7 * small)
 
     def test_a_gate_stuck_in_one_search_still_refuses_in_time(self):
-        # Every > starts a search to the end of the command. On Python 3.10 such a search holds off signals.
+        # Every a starts a search to the end of the command. On Python 3.10 such a search holds off signals.
         rules = self.project / "backbone/guardrails.conf"
         kept = rules.read_text()
         self.addCleanup(rules.write_text, kept)
-        rules.write_text(kept + "block | @bash | >[^z]*zz | Never zz here.\n")
+        rules.write_text(kept + "block | @bash | a[^z]*zz | Never zz here.\n")
 
-        code, message = self.decision("echo '%s'" % (">" * 250000), "implementer", timeout=30, HARNESS_HOOK_BUDGET="5")
+        code, message = self.decision("echo " + "a" * 900000, "implementer", timeout=30, HARNESS_HOOK_BUDGET="5")
 
         self.assertEqual(code, 2, message)
         self.assertIn("ran out of time", message)
