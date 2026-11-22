@@ -7419,22 +7419,33 @@ def shell_write_intent(data):
 def shell_write_begin(data):
     intent = shell_write_intent(data)
     if intent:
+        state = "the write journal (.git/harness/writes.jsonl) already held an attempt"
         try:
             _, previous = write_journal_store().begin(*intent)
             if previous:
+                reads_state(state)
                 deny("This outward write was already observed; inspect its result rather than repeat it.")
         except write_journal.IndeterminateWrite as exc:
+            reads_state(state)
             deny(str(exc))
+
+
+def sole_gh_call(command, words):
+    """Whether command runs the gh call with these words and nothing else, so its exit status is that call's. A
+    redirection is the shell's, so it isn't among words, but >out;true and >out& still run something else."""
+    segments = split_segments(command.strip())
+    try:
+        return (len(segments) == 1 and not segments[0][1] and command.strip().startswith("gh ")
+                and shlex.split(redirections_removed(command)) == words)
+    except ValueError:
+        return False
 
 
 def shell_write_observe(data):
     intent = shell_write_intent(data)
     command = (data.get("tool_input") or {}).get("command") or ""
     writes = outward_actions(command)
-    try:
-        direct = len(writes) == 1 and shlex.split(command) == writes[0][1] and command.strip().startswith("gh ")
-    except ValueError:
-        direct = False
+    direct = len(writes) == 1 and sole_gh_call(command, writes[0][1])
     if intent and direct and tool_result(data) == "succeeded":
         key = write_journal.digest(list(intent))
         try:
@@ -11891,6 +11902,8 @@ def replay_fixture(fixture, engine, root, temp, current):
     why = replay_git(root, call.get("git"), current)
     if why:
         return "error", None, why
+    # A replayed write is never sent, so the attempt it leaves must not refuse the next fixture's.
+    (Path(root) / ".git/harness/writes.jsonl").unlink(missing_ok=True)
     try:
         result = subprocess.run([sys.executable, "-B", str(engine), "hook", "pre-tool-use", "--from",
                                  str(call.get("source") or "claude")],

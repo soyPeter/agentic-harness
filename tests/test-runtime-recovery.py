@@ -64,6 +64,58 @@ class Dependencies(unittest.TestCase):
             self.p.write('backbone/3-TASKS.md', before)
 
 
+class DependenciesAcrossTheGates(unittest.TestCase):
+    """The dependency rule next to the checks main added to finishing a task (ADR-007) and to verify."""
+
+    def setUp(self):
+        self.p = Project('dependency gates ')
+        self.addCleanup(self.p.cleanup)
+        self.p.add_task('9.3', 'Dependent')
+        self.p.add_task('9.2', 'Prerequisite')
+        self.p.write('backbone/3-TASKS.md', self.p.read('backbone/3-TASKS.md').replace(
+            '(spec: backbone/specs/9.3.md)', '(spec: backbone/specs/9.3.md) (after: 9.2)'))
+        self.p.write('backbone/specs/9.3.md', self.p.spec_text('9.3'))
+        self.p.grill_pass('9.3')
+        self.p.write('backbone/specs/9.3.md', self.p.read('backbone/specs/9.3.md') +
+                     'Approved-by: fixture (2026-11-15)\n')
+        self.p.commit('chore: two tasks, one waiting for the other')
+        self.p.set_marker('9.3', 'WIP')
+
+    def test_verify_refuses_a_task_started_before_its_dependency(self):
+        self.p.command('git', 'add', '-A')
+        staged = self.p.harness('git', 'pre-commit', check=False, env={'HARNESS_VERIFY': 'block'})
+        self.p.commit('chore: start 9.3 early')
+        pushed = self.p.harness('verify', '--range', 'HEAD~1..HEAD', check=False)
+        for result in (staged, pushed):
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn('Task 9.3 cannot start: it waits for 9.2', result.stdout + result.stderr)
+
+    def test_an_edit_that_adds_a_dependency_and_starts_the_task_waits_for_it(self):
+        waiting = self.p.read('backbone/3-TASKS.md')
+        self.p.write('backbone/3-TASKS.md', waiting.replace(' (after: 9.2)', '').replace(
+            '[WIP] **Task 9.3', '[ ] **Task 9.3'))
+        started = self.p.file_tool('Write', 'backbone/3-TASKS.md', agent=None, content=waiting)
+        self.assertEqual(started.returncode, 2, started.stdout + started.stderr)
+        self.assertIn('Task 9.3 cannot start: it waits for 9.2', started.stderr)
+
+    def test_a_task_already_in_progress_may_finish_without_its_dependency(self):
+        self.p.judged_task('9.3')
+        tasks = self.p.read('backbone/3-TASKS.md')
+        finished = self.p.file_tool('Write', 'backbone/3-TASKS.md', agent=None,
+                                    content=tasks.replace('[WIP] **Task 9.3', '[x] **Task 9.3'))
+        self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+
+    def test_finishing_still_needs_the_approval_main_asks_for(self):
+        self.p.judged_task('9.3')
+        self.p.write('backbone/specs/9.3.md', self.p.read('backbone/specs/9.3.md').replace(
+            'Approved-by: Ana (2026-11-01)\n', ''))
+        tasks = self.p.read('backbone/3-TASKS.md')
+        finished = self.p.file_tool('Write', 'backbone/3-TASKS.md', agent=None,
+                                    content=tasks.replace('[WIP] **Task 9.3', '[x] **Task 9.3'))
+        self.assertEqual(finished.returncode, 2)
+        self.assertIn('its spec is no longer approved', finished.stderr)
+
+
 class Writes(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -207,6 +259,27 @@ class HookRecovery(unittest.TestCase):
             finally:
                 p.cleanup()
 
+    def test_a_redirection_leaves_a_single_write_observable(self):
+        for command in ('gh pr edit 7 --title example 2>&1', 'gh pr edit 7 --title example > out.txt',
+                        'gh pr edit 7 --title "a > b" 2>/dev/null'):
+            with self.subTest(command=command):
+                self.assertEqual(self.pending_after_success(command), 0)
+
+    def test_a_redirection_does_not_hide_what_runs_after_the_write(self):
+        for command in ('gh pr edit 7 --title example >out;true', 'gh pr edit 7 --title example >out|cat',
+                        'gh pr edit 7 --title example >out&', 'gh pr edit 7 --title example 2>&1 || true',
+                        'gh pr edit 7 --title example >out\ntrue'):
+            with self.subTest(command=command):
+                self.assertEqual(self.pending_after_success(command), 1)
+
+    def pending_after_success(self, command):
+        p = Project('redirected write ')
+        self.addCleanup(p.cleanup)
+        data = {'session_id': 'fixture', 'tool_name': 'Bash', 'tool_input': {'command': command}}
+        p.hook('pre-tool-use', data, check=True)
+        p.hook('post-tool-use', dict(data, tool_response={'exit_code': 0}), check=True)
+        return len(json.loads(p.harness('write-reconcile').stdout))
+
     def test_inline_journal_imports_are_refused(self):
         p = Project('journal import guard ')
         self.addCleanup(p.cleanup)
@@ -239,6 +312,28 @@ exit 13
         self.assertEqual(len(dirty), 1, trees)
         self.assertEqual(dirty[0].read_text(), 'dirty')
 
+    def test_worktree_runner_keeps_the_worktree_when_the_pull_request_reply_is_lost(self):
+        p = Project('lost pr reply ')
+        self.addCleanup(p.cleanup)
+        p.command('git', 'init', '-q', '--bare', str(p.base / 'remote.git'))
+        p.command('git', 'remote', 'add', 'origin', str(p.base / 'remote.git'))
+        p.add_task('1.1', 'Example')
+        p.commit('chore: fixture task')
+        binary = p.base / 'bin'
+        binary.mkdir()
+        gh = binary / 'gh'
+        gh.write_text('#!/bin/sh\nprintf accepted >> "' + str(p.base / 'accepted') + '"\nexit 1\n')
+        gh.chmod(0o755)
+        body = "printf kept > unfinished.txt\npython3 -B scripts/harness/lib/harness.py escalate 1.1 " \
+               "--kind decision --reason fixture\n"
+        env = p.trust_agent('escalating-worker.sh', body, HARNESS_VERIFY='block',
+                            PATH=str(binary) + ':' + p.env['PATH'])
+        result = p.harness('run', '--worktree', '--pr', check=False, env=env)
+        self.assertEqual((p.base / 'accepted').read_text(), 'accepted', result.stdout + result.stderr)
+        kept = list(p.path.glob('.git/harness/worktrees/*/unfinished.txt'))
+        self.assertEqual(len(kept), 1, result.stdout + result.stderr)
+        self.assertEqual(len(json.loads(p.harness('write-reconcile').stdout)), 1)
+
     def test_unresolved_attempt_is_shared_with_linked_worktree(self):
         p = Project('shared write journal ')
         self.addCleanup(p.cleanup)
@@ -270,6 +365,41 @@ exit 13
         self.assertIn('no retry', result.stdout + result.stderr)
         p.harness('write-reconcile', pending[0]['key'], '--observed', 'fixture confirmed PR fields')
         self.assertEqual(json.loads(p.harness('write-reconcile').stdout), [])
+
+
+class EvalReplay(unittest.TestCase):
+    """eval replay runs the captured calls in one throwaway checkout, where nothing is ever written to GitHub."""
+
+    def setUp(self):
+        self.p = Project('journal replay ')
+        self.addCleanup(self.p.cleanup)
+        for title in ('one', 'two'):
+            data = self.edit(title)
+            self.p.hook('pre-tool-use', data, check=True)
+            self.p.hook('post-tool-use', dict(data, tool_response={'exit_code': 0}), check=True)
+        self.p.hook('pre-tool-use', self.edit('unanswered'), check=True)
+        self.refused = self.p.hook('pre-tool-use', self.edit('retry'))
+
+    def edit(self, title):
+        return {'session_id': 'fixture', 'tool_name': 'Bash',
+                'tool_input': {'command': 'gh pr edit 7 --title ' + title}}
+
+    def replay(self, kind):
+        drafts = self.p.base / 'drafts'
+        self.p.harness('eval', 'export', kind, '--out', str(drafts))
+        return self.p.harness('eval', 'replay', str(drafts), '--json', check=False)
+
+    def test_allowed_writes_replay_as_allowed_one_after_another(self):
+        result = self.replay('--allows')
+        self.assertEqual({f['status'] for f in json.loads(result.stdout)['results']}, {'as-expected'}, result.stdout)
+        self.assertEqual(result.returncode, 0)
+
+    def test_a_refusal_by_the_journal_is_not_replayed_as_a_rule(self):
+        self.assertEqual(self.refused.returncode, 2, self.refused.stdout + self.refused.stderr)
+        result = self.replay('--refusals')
+        fixtures = json.loads(result.stdout)['results']
+        self.assertEqual([f['status'] for f in fixtures], ['skipped'], result.stdout)
+        self.assertIn('write journal', fixtures[0]['detail'])
 
 
 if __name__ == '__main__':
