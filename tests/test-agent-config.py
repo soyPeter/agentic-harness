@@ -277,6 +277,36 @@ class WritesToAgentConfiguration(Fixture):
             with self.subTest(command=command):
                 self.assertAllowed(self.bash(command), command)
 
+    def test_busybox_and_toybox_extract_like_the_archivers_their_applets_are(self):
+        for box in ("busybox", "/bin/busybox", "busybox.static", "/bin/busybox.static", "busybox-static", "toybox",
+                    "timeout 5 busybox", "busybox busybox", "B=toybox; $B"):
+            for command in ("%s tar -xf e.tar -C ~", "%s tar xCf ~ e.tar", "cd ~ && %s tar -xf e.tar",
+                            "%s unzip e.zip -d ~", "%s unzip -qod ~/.config e.zip", "cd && %s unzip e.zip",
+                            "%s cpio -idD ~ < e.cpio"):
+                with self.subTest(command=command % box):
+                    self.assertRefused(self.bash(command % box), command % box)
+        for command in ("busybox tar -xf e.tar", "busybox tar -xf e.tar -C ~/notes", "busybox tar -tf e.tar",
+                        "busybox.static unzip e.zip -d ~/notes", "toybox tar -cf x.tar -C ~ notes", "toybox ls ~",
+                        "busybox unzip -l e.zip", "busybox", "toybox"):
+            with self.subTest(command=command):
+                self.assertAllowed(self.bash(command), command)
+
+    def test_pax_extracting_or_copying_into_it_or_renaming_what_it_writes(self):
+        home = shlex.quote(str(self.home))
+        for command in ("cd ~ && pax -r < e.tar", "cd ~ && pax -rvf e.tar", "cd ~/.config && pax -rf e.tar",
+                        "pax -rw e ~", "pax -w -r e ~", "pax -rwl e ~", "pax -rw -p e e ~", "pax -rw e ~ -E 3",
+                        "pax -rw -- e ~", "pax -rw e ~/.claude", 'pax -rw e "$(cat dir.txt)"',
+                        "pax -rf e.tar -s ',^,'%s'/.claude/,'" % home, "pax -r -f e.tar -s,^,$HOME/,",
+                        "pax -rs ',.*,../../.claude/settings.json,' -f e.tar", "pax -rw -s ',^,.claude/,' e ~",
+                        "pax -rw -s ',^,../.claude/,' e notes", "pax -rws ',^,/etc/claude-code/,' e notes",
+                        "pax -rif e.tar", "pax -r --insecure -f e.tar"):
+            with self.subTest(command=command):
+                self.assertRefused(self.bash(command), command)
+        for command in ("pax -rf e.tar", "cd ~/notes && pax -rf e.tar", "pax -rw src ~/notes", "pax -rw src build",
+                        "pax -f e.tar", "pax -f e.tar -s ',a,b,'", "pax -wf out.tar -s ',^,x/,' src"):
+            with self.subTest(command=command):
+                self.assertAllowed(self.bash(command), command)
+
     def test_the_rest_of_the_home_folder_is_left_alone(self):
         for path in (self.home / "notes.txt", self.home / ".claude/projects/x/memory/note.md",
                      self.home / ".claude/todos/x.json", self.home / ".config/other/x.json"):
