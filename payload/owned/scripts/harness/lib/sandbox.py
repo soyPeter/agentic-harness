@@ -12,14 +12,18 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 
 EVIDENCE_FIELDS = ("backend", "isolation_class", "base_image_digest", "allowlist_hash", "region", "control_plane",
                    "credential_mode")
-ISOLATION_CLASSES = ("none", "container", "userspace-kernel", "microVM", "dedicated-VM")
+# custom: a container that harness.py run brought up from a definition other than the shipped one (with only the
+# allowed differences), which the user approved: as isolated as that definition says, and no more is known.
+ISOLATION_CLASSES = ("none", "custom", "container", "userspace-kernel", "microVM", "dedicated-VM")
 CREDENTIAL_VARIABLES = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
 PINNED = re.compile(r"@(sha256:[0-9a-f]{64})$")
 NOT_ISOLATED = {"isolation_class": "none", "base_image_digest": "none", "allowlist_hash": "none", "region": "local",
-                "control_plane": "none", "credential_mode": "host"}
+                "control_plane": "none", "credential_mode": "host", "egress_denials": None}
 CONTAINER_MARKERS = ("/.dockerenv", "/run/.containerenv")
 PROC_STATUS = "/proc/self/status"
 # linux/capability.h. The agent's container drops NET_ADMIN and NET_RAW and has no sudo.
@@ -29,26 +33,70 @@ JSONC_TOKEN = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.DOTALL)
 JSONC_COMMA = re.compile(r'"(?:\\.|[^"\\])*"|,(?=\s*[}\]])')
 # The egress container's published list, in the agent's container (docker-compose.yml). Only this path counts.
 ALLOWLIST_PATH = "/run/harness-egress/allowlist"
+# What the egress container denied (egress.py), on the same read-only volume.
+DENIALS_PATH = "/run/harness-egress/denials.jsonl"
+DENIALS_CITED = 10
+# What a denied target may show of itself: a host name, an address, a port, a protocol. The agent chooses the names it
+# asks for, and the receipt that cites them goes into pull requests.
+UNPRINTABLE = re.compile(r"[^A-Za-z0-9._:/\[\]()-]")
+# The sandbox a project carries, relative to its root; HARNESS_SANDBOX_START brings it up with the devcontainer CLI.
+DEVCONTAINER_CONFIG = ".devcontainer/harness-agent/devcontainer.json"
+# Written into the private copy run brings up once it is checked: it mounts the workspace by its absolute path, which
+# the copy's own relative mount no longer reaches, and the copy's devcontainer.json is rewritten to name it.
+WORKSPACE_OVERRIDE = "docker-compose.workspace.yml"
+UNREADABLE = "unreadable"
+# devcontainer.json keys that act on the host, or widen the container past the Compose file run checks: refused even
+# in a definition the user approved.
+HOST_KEYS = ("initializeCommand", "mounts", "runArgs", "privileged", "capAdd", "securityOpt", "workspaceMount")
+# Compose keys that read files outside the private copy (other Compose files, env files, secrets and configs), as a
+# block or a flow mapping; a definition with one is refused even when approved.
+FILE_KEYS = re.compile(r"(?m)(?:^|[{,])[ \t]*[\"']?(extends|include|env_file|secrets|configs)[\"']?[ \t]*:")
+FILE_KEY_NAMES = ("extends", "include", "env_file", "secrets", "configs")
+# Where run tells the agent's container which definition it was brought up from (a read-only bind of a file in the
+# run's private folder): "shipped", or "custom: <why>".
+DEFINITION_MARKER = "/run/harness-sandbox/definition"
+# A definition counts as the shipped one only when its files are the shipped ones byte for byte, apart from these.
+# Lines are split on \n alone: Docker splits a Dockerfile only there, so a line split anywhere else (\f, \r, \x1c)
+# would hide a change from the comparison. Every byte of a line not listed here is compared, and an allowed value
+# holds only printable ASCII, so no other line break or escape reaches YAML, JSON or Docker.
+# The hosts the egress container allows, as one double-quoted, space-separated list.
+FIREWALL_ALLOW = re.compile(rb'"[A-Za-z0-9.:/ -]*"')
+WORKSPACE_FOLDER = re.compile(rb'"/workspace(?:/(?!\.{1,2}[/"])[A-Za-z0-9_.-]+)*",')
+# Resource limits only lower what the container may use; they may be added right after a service's build line.
+RESOURCE_LIMIT = re.compile(rb'    (cpus|mem_limit|memswap_limit|pids_limit): ("?)[0-9]+(?:\.[0-9]+)?[bkmg]?\2')
+LIMITS_AFTER = {"docker-compose.yml": b"    build: ."}
+# A build on a cold cache installs the agent CLI; a session's own timeout is enforced inside the container too.
+UP_SECONDS = 1800
+EXEC_GRACE_SECONDS = 60
+
+
+class SandboxError(Exception):
+    """The sandbox can't be used, and no session may run."""
 
 
 class Sandbox(object):
-    """One sandbox: the workspace its sessions run in, as the sandbox sees it."""
+    """One sandbox: the workspace its sessions run in, as the sandbox sees it. A sandbox the backend brought up has
+    its container, the workspace inside it, the agent command it defines and the (isolation_class, reason) the host
+    found in it."""
 
-    def __init__(self, workspace):
+    def __init__(self, workspace, container=None, remote_workspace=None, agent_command=None):
         self.workspace = Path(workspace)
+        self.container, self.remote_workspace, self.agent_command = container, remote_workspace, agent_command
+        self.isolation = None
 
 
 class SandboxBackend(object):
     """What every backend provides. `name` is the HARNESS_SANDBOX_BACKEND value that selects it."""
     name = None
 
-    def create(self, workspace):
-        """A Sandbox for the task's workspace."""
+    def create(self, workspace, env=None):
+        """A Sandbox for the task's workspace; env is the harness settings a check inside it gets. Raises SandboxError
+        when the sandbox can't be used."""
         raise NotImplementedError
 
-    def exec(self, sandbox, command, stdin=None, log=None, timeout=None):
-        """Run a shell command in the sandbox's workspace with stdin as its input and its output (stdout and stderr) to
-        the log file. The exit code, or None once the timeout stopped it."""
+    def exec(self, sandbox, command, stdin=None, log=None, timeout=None, env=None):
+        """Run a shell command in the sandbox's workspace with stdin as its input, env added to its environment and its
+        output (stdout and stderr) to the log file. The exit code, or None once the timeout stopped it."""
         raise NotImplementedError
 
     def copy_in(self, sandbox, host_path, sandbox_path):
@@ -66,26 +114,155 @@ class SandboxBackend(object):
         raise NotImplementedError
 
     def identity(self):
-        """The sandbox evidence: one value per EVIDENCE_FIELDS name, and isolation_reason."""
+        """The sandbox evidence: one value per EVIDENCE_FIELDS name, isolation_reason, and egress_denials (a summary of
+        what the sandbox's egress control denied, or None when nothing logged it)."""
         raise NotImplementedError
 
 
 class Devcontainer(SandboxBackend):
-    """The local .devcontainer/harness-agent/ sandbox. The runner runs where its sessions run: inside the container when
-    the user started it there, otherwise on the host. So this backend starts and destroys nothing. HARNESS_SANDBOX_IMAGE
-    is set by the image's environment, which a host can set too, so the container is claimed only when the process
-    shows the container's restrictions and the egress container's list (isolation)."""
+    """The local .devcontainer/harness-agent/ sandbox. By default sessions run where the runner runs: inside the
+    container when the user started it there, otherwise on the host, and this backend starts and destroys nothing.
+    With start (HARNESS_SANDBOX_START=on) a runner on the host brings the project's sandbox up with the devcontainer
+    CLI, from a private, checked copy of its definition, for each session: it checks from the host that the session
+    will be isolated, has the harness inside check it (harness: its command there), runs the session with the agent
+    command the sandbox defines, then removes the containers, so nothing a session leaves there reaches the next one.
+    HARNESS_SANDBOX_IMAGE is set by the image's environment, which a host can set too, so the container is claimed only
+    when the process shows the container's restrictions and the egress container's list (isolation)."""
     name = "devcontainer"
 
-    def create(self, workspace):
-        return Sandbox(workspace)
+    def __init__(self, start=False, harness=None, reference=None):
+        self.start, self.harness, self.reference = start, harness, reference
+        self.private = self.config = None
 
-    def exec(self, sandbox, command, stdin=None, log=None, timeout=None):
+    def starts_sandbox(self):
+        return self.start and isolation()[0] == "none"
+
+    def create(self, workspace, env=None):
+        if not self.starts_sandbox():
+            return Sandbox(workspace)
+        problem = start_problem(workspace, self.reference)
+        if problem:
+            raise SandboxError(problem)
+        # With nothing running that can write the workspace, nothing an agent left behind can change the definition
+        # while it is checked and copied.
+        if self.running(workspace):
+            raise SandboxError("the project's sandbox, or another container that mounts the project, is already up (an "
+                               "editor's Reopen in Container, say). run brings the sandbox up itself for each session "
+                               "and removes it afterwards, so that nothing an agent left running can change its "
+                               "definition while it is checked. Stop it first (close the editor's container, or "
+                               "docker stop it)")
+        self.private, self.config = private_definition(workspace, self.reference)
+        box = Sandbox(workspace)
         try:
-            return subprocess.run(command, shell=True, cwd=str(sandbox.workspace), input=stdin, stdout=log,
-                                  stderr=subprocess.STDOUT, text=True, timeout=timeout).returncode
+            up = subprocess.run(self.cli(workspace, "up") + ["--remove-existing-container"], capture_output=True,
+                                text=True, timeout=UP_SECONDS, cwd=str(self.private), env=self.cli_env(workspace))
+        except subprocess.TimeoutExpired:
+            self.teardown(box)
+            raise SandboxError("devcontainer up did not finish in %d seconds" % UP_SECONDS)
+        result = last_json(up.stdout)
+        box = Sandbox(workspace, result.get("containerId"), result.get("remoteWorkspaceFolder") or "/workspace")
+        if up.returncode != 0 or result.get("outcome") != "success":
+            self.teardown(box)
+            entitlement = "additional privileges requested" in up.stdout + up.stderr
+            raise SandboxError("devcontainer up failed: %s%s" % (
+                result.get("message") or up.stderr.strip()[-600:] or "exit %d" % up.returncode,
+                ". docker buildx refused to read the build file the devcontainer CLI writes outside the build context "
+                "(its file entitlement check, ADR-003): run again, and if it keeps failing, build with "
+                "BUILDX_BAKE_ENTITLEMENTS_FS=0 set" if entitlement else ""))
+        isolated, reason = box.isolation = self.probe(box)
+        if isolated not in ("container", "custom"):
+            self.teardown(box)
+            raise SandboxError("the sandbox devcontainer up brought up doesn't isolate its sessions: isolation_class %s "
+                               "(%s)" % (isolated, reason))
+        checked = self.inside(box, "%s doctor" % self.harness, env)
+        if checked.returncode != 0:
+            self.teardown(box)
+            raise SandboxError("the harness inside the sandbox refuses it:\n%s" % checked.stdout.strip()[-1500:])
+        box.agent_command = self.inside(box, 'printf %s "$HARNESS_AGENT_CMD"').stdout.strip()
+        if not box.agent_command:
+            self.teardown(box)
+            raise SandboxError("the sandbox sets no HARNESS_AGENT_CMD (the agent service in docker-compose.yml)")
+        return box
+
+    def exec(self, sandbox, command, stdin=None, log=None, timeout=None, env=None):
+        if sandbox.container is None:
+            try:
+                return subprocess.run(command, shell=True, cwd=str(sandbox.workspace), input=stdin, stdout=log,
+                                      stderr=subprocess.STDOUT, text=True, timeout=timeout,
+                                      env=dict(os.environ, **(env or {}))).returncode
+            except subprocess.TimeoutExpired:
+                return None
+        # Stopping `devcontainer exec` on the host would leave the session running inside, so the timeout is enforced
+        # there; the host's own limit is only a backstop.
+        bounded = ["timeout", "-k", "10", str(timeout), "/bin/sh", "-c", command] if timeout else \
+            ["/bin/sh", "-c", command]
+        started = time.time()
+        try:
+            code = subprocess.run(self.in_workspace(sandbox, bounded, env), input=stdin, stdout=log,
+                                  stderr=subprocess.STDOUT, text=True, cwd=str(self.private),
+                                  env=self.cli_env(sandbox.workspace),
+                                  timeout=timeout + EXEC_GRACE_SECONDS if timeout else None).returncode
         except subprocess.TimeoutExpired:
             return None
+        if timeout and code in (124, 137) and time.time() - started >= timeout:
+            return None
+        return code
+
+    def cli(self, workspace, command):
+        return ["devcontainer", command, "--workspace-folder", str(workspace),
+                "--config", str(self.config or Path(workspace) / DEVCONTAINER_CONFIG)]
+
+    def cli_env(self, workspace):
+        """The environment for the devcontainer CLI: the Compose project named by the harness, not by a .env an agent
+        could write."""
+        return dict(os.environ, COMPOSE_PROJECT_NAME=compose_project(workspace))
+
+    def in_workspace(self, sandbox, argv, env=None):
+        remote_env = [arg for key, value in sorted((env or {}).items())
+                      for arg in ("--remote-env", "%s=%s" % (key, value))]
+        return (self.cli(sandbox.workspace, "exec") + remote_env +
+                ["/bin/sh", "-c", 'cd "$1" && shift && exec "$@"', "sh", sandbox.remote_workspace] + argv)
+
+    def inside(self, sandbox, script, env=None):
+        return subprocess.run(self.in_workspace(sandbox, ["/bin/sh", "-c", script], env), capture_output=True,
+                              text=True, timeout=600, cwd=str(self.private), env=self.cli_env(sandbox.workspace))
+
+    def probe(self, sandbox):
+        """(isolation_class, reason) of a process in the sandbox, worked out by this module's own code, not by the
+        harness inside, which the workspace holds. It runs with no environment but the two variables the check reads,
+        taken from the container's configuration, so no PATH, HOME or shell startup file stands in for it."""
+        inspected = subprocess.run(["docker", "inspect", "-f", "{{json .Config.Env}}", str(sandbox.container)],
+                                   capture_output=True, text=True)
+        try:
+            pairs = [item.split("=", 1) for item in json.loads(inspected.stdout or "[]") if "=" in item]
+        except ValueError:
+            pairs = []
+        kept = ["%s=%s" % (key, value) for key, value in pairs
+                if key in ("HARNESS_SANDBOX_IMAGE", "HARNESS_EGRESS_ALLOWLIST")]
+        source = Path(__file__).read_text(encoding="utf-8") + "\nprint(json.dumps(isolation()))\n"
+        argv = (self.cli(sandbox.workspace, "exec") + ["--default-user-env-probe", "none", "/usr/bin/env", "-i"] +
+                kept + ["/usr/bin/python3", "-I", "-B", "-"])
+        try:
+            found = subprocess.run(argv, input=source, capture_output=True, text=True, timeout=120,
+                                   cwd=str(self.private), env=self.cli_env(sandbox.workspace))
+            return tuple(last_json_value(found.stdout))
+        except (subprocess.TimeoutExpired, TypeError, ValueError):
+            return "unknown", "the isolation check didn't answer"
+
+    def running(self, workspace):
+        """The ids of the running containers that belong to the workspace's sandbox or mount the workspace. Raises
+        SandboxError when docker can't say."""
+        found = set()
+        real = os.path.realpath(str(workspace))
+        for selector in sorted({"label=devcontainer.local_folder=%s" % workspace,
+                                "label=devcontainer.local_folder=%s" % real, "volume=%s" % workspace,
+                                "volume=%s" % real, "label=com.docker.compose.project=%s" % compose_project(workspace)}):
+            listed = subprocess.run(["docker", "ps", "-q", "--filter", selector], capture_output=True, text=True)
+            if listed.returncode != 0:
+                raise SandboxError("docker can't list the containers: %s" % (listed.stderr.strip()[-300:]
+                                                                            or "exit %d" % listed.returncode))
+            found.update(listed.stdout.split())
+        return sorted(found)
 
     def copy_in(self, sandbox, host_path, sandbox_path):
         shutil.copy2(str(host_path), str(sandbox_path))
@@ -94,16 +271,26 @@ class Devcontainer(SandboxBackend):
         shutil.copy2(str(sandbox_path), str(host_path))
 
     def egress_policy(self):
-        if isolation()[0] != "container":
+        if isolation()[0] not in ("container", "custom"):
             return None
         return published_hosts(ALLOWLIST_PATH)
 
     def teardown(self, sandbox):
-        pass
+        """Removes the containers this backend brought up, and its private copy of the definition: whatever a session
+        left running or changed in them doesn't reach the next session. Named volumes stay."""
+        if self.private is None:
+            return
+        listed = subprocess.run(["docker", "ps", "-aq", "--filter",
+                                 "label=com.docker.compose.project=%s" % compose_project(sandbox.workspace)],
+                                capture_output=True, text=True).stdout.split()
+        if listed:
+            subprocess.run(["docker", "rm", "-f"] + listed, capture_output=True, text=True)
+        shutil.rmtree(str(self.private), ignore_errors=True)
+        self.private = self.config = None
 
     def identity(self):
         isolation_class, reason = isolation()
-        if isolation_class != "container":
+        if isolation_class not in ("container", "custom"):
             return dict(NOT_ISOLATED, backend=self.name, isolation_reason=reason)
         pinned = PINNED.search(os.environ["HARNESS_SANDBOX_IMAGE"])
         hosts = self.egress_policy()
@@ -112,7 +299,7 @@ class Devcontainer(SandboxBackend):
                 "allowlist_hash": allowlist_hash(hosts) if hosts is not None else "none",
                 "region": "local", "control_plane": "local",
                 "credential_mode": "env" if any(os.environ.get(v) for v in CREDENTIAL_VARIABLES) else "login",
-                "isolation_reason": reason}
+                "isolation_reason": reason, "egress_denials": egress_denials(DENIALS_PATH)}
 
 
 BACKENDS = {Devcontainer.name: Devcontainer}
@@ -121,8 +308,9 @@ BACKENDS = {Devcontainer.name: Devcontainer}
 def isolation():
     """(isolation_class, reason): the boundary this process runs behind. Only a Linux process in a container, with the
     restrictions the agent's container is started with (no-new-privileges, no network or system capabilities), and
-    with the egress container's allowlist published at ALLOWLIST_PATH, is a container. Anything else is none, and the
-    reason says which check failed."""
+    with the egress container's allowlist published at ALLOWLIST_PATH, and brought up by harness.py run from the
+    shipped definition (DEFINITION_MARKER), is a container. With all of that but the marker, it is custom; anything
+    else is none, and the reason says which check failed."""
     if not os.environ.get("HARNESS_SANDBOX_IMAGE"):
         return "none", "not in the harness-agent image (HARNESS_SANDBOX_IMAGE is unset)"
     unverified = "HARNESS_SANDBOX_IMAGE is set, but "
@@ -147,8 +335,19 @@ def isolation():
     if published_hosts(ALLOWLIST_PATH) is None:
         return "none", unverified + "%s can't be read, so no egress container is known to limit this process" \
             % ALLOWLIST_PATH
-    return "container", "in a container with NoNewPrivs set, no NET_ADMIN, NET_RAW or SYS_ADMIN, and the egress " \
-        "allowlist published at %s" % ALLOWLIST_PATH
+    reason = "in a container with NoNewPrivs set, no NET_ADMIN, NET_RAW or SYS_ADMIN, and the egress allowlist " \
+        "published at %s" % ALLOWLIST_PATH
+    try:
+        marked = Path(DEFINITION_MARKER).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return "custom", reason + ", but nothing says which definition it was brought up from (%s, which harness.py " \
+            "run mounts, can't be read), so it isn't known to be the shipped one" % DEFINITION_MARKER
+    if marked == "shipped":
+        return "container", reason + ", brought up by harness.py run from the shipped definition"
+    # The host wrote the marker; only control characters need keeping out of the evidence.
+    why = re.sub(r"[\x00-\x1f\x7f]", "?", marked[len("custom:"):].strip() if marked.startswith("custom:") else marked)
+    return "custom", reason + ", but brought up by harness.py run from a definition the user approved that isn't the " \
+        "shipped one: %s" % why[:400]
 
 
 def proc_status():
@@ -167,6 +366,398 @@ def published_hosts(path):
     except (OSError, UnicodeDecodeError):
         return None
     return sorted({line.strip().lower() for line in text.splitlines() if line.strip()}) or None
+
+
+def egress_denials(path):
+    """A summary of the egress container's denial log: since when it logs, how many packets it denied, the targets
+    denied most, and the log's sha256, so the receipt can cite it. None when there is no log to read."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return None
+    started, truncated, counts = None, False, {}
+    for line in data.decode("utf-8", "replace").splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        started = started or record.get("started")
+        truncated = truncated or record.get("truncated") is True
+        if isinstance(record.get("kind"), str) and isinstance(record.get("target"), str):
+            key = (printable(record["kind"], 20), printable(record["target"]))
+            counts[key] = counts.get(key, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:DENIALS_CITED]
+    return {"log": str(path), "log_sha256": "sha256:" + hashlib.sha256(data).hexdigest(), "since": started,
+            "count": sum(counts.values()), "truncated": truncated,
+            "top": [{"kind": kind, "target": target, "count": count} for (kind, target), count in ranked]}
+
+
+def printable(text, limit=255):
+    """text with every character a host name, address or port doesn't use replaced by '?', and cut to limit."""
+    text = UNPRINTABLE.sub("?", str(text))
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def start_problem(workspace, reference=None):
+    """Why a runner here can't bring the workspace's sandbox up (HARNESS_SANDBOX_START=on), or None. reference: the
+    engine's own copy of the definition, when an agent in the sandbox can't write it."""
+    if isolation()[0] != "none":
+        return None
+    if not (Path(workspace) / DEVCONTAINER_CONFIG).is_file():
+        return ("HARNESS_SANDBOX_START is on, but %s is missing, so run has no sandbox to bring up (update.sh or pin "
+                "installs it)" % DEVCONTAINER_CONFIG)
+    missing = [tool for tool in ("devcontainer", "docker") if not shutil.which(tool)]
+    if missing:
+        return ("HARNESS_SANDBOX_START is on, but %s isn't on the PATH, so run can't bring the sandbox up (the "
+                "devcontainer CLI: npm install -g @devcontainers/cli; docker: Docker Desktop, OrbStack or Docker "
+                "Engine)" % " and ".join(missing))
+    return untrusted_definition(Path(workspace) / DEVCONTAINER_CONFIG.rsplit("/", 1)[0], workspace, reference)
+
+
+def untrusted_definition(folder, workspace, reference):
+    """Why this machine doesn't trust the sandbox definition in folder, for workspace, or None. A symlink is never
+    trusted: what it points to can change after the check."""
+    links = [name for name, digest in definition_files(folder) if digest.startswith("symlink:")]
+    if links:
+        return ("the sandbox's definition holds a symlink (%s), which run never trusts: replace it with the file it "
+                "points to" % ", ".join(links))
+    if custom_reason(folder, reference) is None:
+        return None
+    digest = definition_digest(folder)
+    if approved_definitions().get(os.path.realpath(str(workspace))) == digest:
+        return None
+    return ("HARNESS_SANDBOX_START is on, but this machine doesn't trust the sandbox's definition (%s/, %s): it isn't "
+            "the shipped one with only the allowed differences, and you haven't approved it. devcontainer up runs parts "
+            "of it on this host, and an agent in the sandbox can write the workspace, so run brings up only a "
+            "definition you approved. Review the folder, then run harness.py sandbox-approve in your own terminal"
+            % (DEVCONTAINER_CONFIG.rsplit("/", 1)[0], digest))
+
+
+def custom_reason(folder, reference):
+    """Why the definition in folder isn't the shipped one in reference, with only the allowed differences, or None.
+    The files are compared byte for byte, not as Docker, Compose or the devcontainer CLI would read them; allowed: the
+    value of HARNESS_FIREWALL_ALLOW and resource limits after a service's build line in the Compose file, another tag
+    or digest of the base image's repository in the Dockerfile, and a workspaceFolder under /workspace. Anything else,
+    a file added or removed included, is custom."""
+    if reference is None:
+        return ("run has no copy of the shipped definition outside the project to compare it with (a full install's "
+                "only copy is the one the agent can write)")
+    ours, theirs = dict(definition_files(folder)), dict(definition_files(reference))
+    changed = sorted(set(ours) ^ set(theirs))
+    if changed:
+        return "files added or removed: %s" % ", ".join(changed)
+    for name in sorted(ours):
+        if ours[name] == theirs[name]:
+            continue
+        try:
+            mine, shipped = (Path(base, name).read_bytes() for base in (folder, reference))
+        except OSError:
+            return "%s can't be read" % name
+        problem = byte_difference(name, mine, shipped) if name in ALLOWED_VALUES else "it differs"
+        if problem:
+            return "%s: %s" % (name, problem)
+    return None
+
+
+def same_repository(shipped):
+    """The pattern for another tag or digest of the image repository the shipped reference names."""
+    name = shipped.split(b"@", 1)[0]
+    tag = name.rfind(b":")
+    repository = name[:tag] if tag > name.rfind(b"/") else name
+    return re.compile(re.escape(repository) +
+                      rb"(?=[:@])(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?")
+
+
+# Per file: the start of a shipped line whose value may change, and the pattern the new value must match, given the
+# shipped value.
+ALLOWED_VALUES = {"docker-compose.yml": ((b"      HARNESS_FIREWALL_ALLOW: ", lambda shipped: FIREWALL_ALLOW),),
+                  "Dockerfile": ((b"ARG HARNESS_SANDBOX_IMAGE=", same_repository),),
+                  "devcontainer.json": ((b'  "workspaceFolder": ', lambda shipped: WORKSPACE_FOLDER),)}
+
+
+def byte_difference(name, mine, shipped):
+    """Why the file name's bytes, mine, aren't the shipped ones with only the allowed differences, or None."""
+    ours, theirs = mine.split(b"\n"), shipped.split(b"\n")
+    at = 0
+    for original in theirs:
+        if at == len(ours):
+            return "lines removed"
+        line, at = ours[at], at + 1
+        if line != original and not allowed_value(name, line, original):
+            return "line %d differs" % at
+        if original != LIMITS_AFTER.get(name):
+            continue
+        limited = set()
+        while at < len(ours) and RESOURCE_LIMIT.fullmatch(ours[at]):
+            key = RESOURCE_LIMIT.fullmatch(ours[at]).group(1)
+            if key in limited:
+                return "line %d sets %s again" % (at + 1, key.decode())
+            limited.add(key)
+            at += 1
+    return "lines added" if at != len(ours) else None
+
+
+def allowed_value(name, line, original):
+    for start, pattern in ALLOWED_VALUES.get(name, ()):
+        if original.startswith(start) and line.startswith(start):
+            return bool(pattern(original[len(start):]).fullmatch(line[len(start):]))
+    return False
+
+
+def private_runs():
+    """Where run keeps the copies of sandbox definitions it brings up: outside every project, so no sandbox mounts it."""
+    return Path(os.path.expanduser("~/.agentic-harness/sandbox-runs"))
+
+
+def compose_project(workspace):
+    """The Compose project of the sandbox run brings up for workspace: one per project, named by the harness."""
+    return "harness-agent-" + hashlib.sha256(os.path.realpath(str(workspace)).encode("utf-8")).hexdigest()[:12]
+
+
+def private_definition(workspace, reference):
+    """(the run's private folder, the devcontainer.json to bring up): a copy of the workspace's definition in a folder
+    of this run's own, which only this machine's user can open and no sandbox mounts, checked after it was copied, plus
+    a Compose file that mounts the workspace by its absolute path. A change made to the workspace after the check never
+    reaches devcontainer up. Raises SandboxError; the folder is removed then."""
+    private_runs().mkdir(parents=True, exist_ok=True)
+    os.chmod(str(private_runs()), 0o700)
+    private = Path(tempfile.mkdtemp(prefix="run-", dir=str(private_runs())))
+    try:
+        return private, checked_copy(workspace, reference, private)
+    except BaseException:
+        shutil.rmtree(str(private), ignore_errors=True)
+        raise
+
+
+def checked_copy(workspace, reference, private):
+    source = Path(workspace) / DEVCONTAINER_CONFIG.rsplit("/", 1)[0]
+    copy = private / source.name
+    try:
+        shutil.copytree(str(source), str(copy), symlinks=True)
+    except (OSError, shutil.Error) as exc:
+        raise SandboxError("the sandbox's definition can't be copied to check it: %s" % exc)
+    problem = untrusted_definition(copy, workspace, reference)
+    if problem:
+        raise SandboxError(problem)
+    custom = custom_reason(copy, reference)
+    try:
+        config = jsonc_loads((copy / "devcontainer.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise SandboxError("the sandbox's devcontainer.json can't be read: %s" % exc)
+    compose = config.get("dockerComposeFile") if isinstance(config, dict) else None
+    compose = [compose] if isinstance(compose, str) else compose
+    if not compose or not isinstance(config.get("service"), str):
+        raise SandboxError("the sandbox's devcontainer.json names no dockerComposeFile and service to bring up")
+    acting = [key for key in HOST_KEYS if key in config]
+    if acting:
+        raise SandboxError("the sandbox's devcontainer.json sets %s, which run never brings up: these run on the host "
+                           "or widen the container" % ", ".join(acting))
+    files = [Path(os.path.realpath(str(copy / name))) for name in compose]
+    outside = [name for name, path in zip(compose, files) if not str(path).startswith(str(copy.resolve()) + os.sep)]
+    if outside:
+        raise SandboxError("the sandbox's devcontainer.json names Compose files outside its folder (%s), which run "
+                           "can't check" % ", ".join(outside))
+    for name, path in zip(compose, files):
+        keys = file_keys(path)
+        if keys:
+            raise SandboxError("the sandbox's Compose file %s uses %s, which read files run can't check; keep the "
+                               "Compose file self-contained" % (name, ", ".join(keys)))
+    service = config["service"]
+    folder = Path(workspace) / DEVCONTAINER_CONFIG.rsplit("/", 1)[0]
+    here, there = resolved(compose, folder, workspace), resolved(compose, copy, workspace)
+    real = os.path.realpath(str(workspace))
+    target = next((mount for (name, mount), found in sorted(binds(here).items()) if name == service and found == real),
+                  config.get("workspaceFolder") or "/workspace")
+    problem = relative_mounts(here, there, workspace, service, target)
+    if problem:
+        raise SandboxError(problem)
+    marker = private / "definition"
+    marker.write_text(("custom: %s" % custom if custom else "shipped") + "\n", encoding="utf-8")
+    mounts = [{"type": "bind", "source": real, "target": target, "consistency": "cached"},
+              {"type": "bind", "source": str(marker), "target": DEFINITION_MARKER, "read_only": True}]
+    # A volume the agent writes to outlives the session; a tmpfs doesn't. Mode 1777: the agent's user writes it.
+    mounts += [{"type": "tmpfs", "target": volume["target"], "tmpfs": {"mode": 0o1777}}
+               for volume in (there["services"].get(service) or {}).get("volumes") or []
+               if volume.get("type") == "volume" and not volume.get("read_only")]
+    (copy / WORKSPACE_OVERRIDE).write_text(json.dumps({"services": {service: {"volumes": mounts}}}) + "\n",
+                                           encoding="utf-8")
+    final = resolved(compose + [WORKSPACE_OVERRIDE], copy, workspace)
+    problem = outside_or_harness(final, copy, private, marker) or missing_credentials(final, service)
+    if problem:
+        raise SandboxError(problem)
+    # The devcontainer CLI takes no other file name for its configuration.
+    (copy / "devcontainer.json").write_text(json.dumps(dict(config, dockerComposeFile=list(compose) + [WORKSPACE_OVERRIDE]),
+                                                       indent=2) + "\n", encoding="utf-8")
+    return copy / "devcontainer.json"
+
+
+def file_keys(path):
+    """The Compose keys that read other files used in the file at path, found in its text or, for a JSON file, in its
+    parsed keys (so an escaped key counts too). Raises SandboxError when it can't be read."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SandboxError("the sandbox's Compose file %s can't be read: %s" % (Path(path).name, exc))
+    found = set(FILE_KEYS.findall(text))
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        parsed = None
+    pending = [parsed]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            found.update(key for key in value if key in FILE_KEY_NAMES)
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    return sorted(found)
+
+
+def resolved(compose, folder, workspace):
+    """The Compose files in folder as docker compose resolves them for devcontainer up. Raises SandboxError."""
+    argv = ["docker", "compose"] + [arg for name in compose for arg in ("-f", str(Path(folder) / name))] + \
+        ["config", "--format", "json"]
+    found = subprocess.run(argv, capture_output=True, text=True, cwd=str(folder),
+                           env=dict(os.environ, COMPOSE_PROJECT_NAME=compose_project(workspace)))
+    try:
+        config = json.loads(found.stdout)
+    except ValueError:
+        config = None
+    if not isinstance(config, dict) or not isinstance(config.get("services"), dict):
+        raise SandboxError("docker compose can't resolve the sandbox's Compose files: %s" % (
+            found.stderr.strip()[-400:] or "exit %d" % found.returncode))
+    return config
+
+
+def binds(config):
+    """{(service, target): source} of the bind mounts in a resolved Compose configuration."""
+    return {(name, volume.get("target")): os.path.realpath(str(volume.get("source") or ""))
+            for name, service in config["services"].items() for volume in (service or {}).get("volumes") or []
+            if isinstance(volume, dict) and volume.get("type") == "bind"}
+
+
+def relative_mounts(here, there, workspace, service, target):
+    """Why a bind mount resolves differently from the private copy than from the workspace, or None. Only the
+    workspace's own mount, which the generated Compose file replaces, may be relative."""
+    ours, theirs = binds(here), binds(there)
+    real = os.path.realpath(str(workspace))
+    for (name, mount), source in sorted(theirs.items()):
+        if ours.get((name, mount)) != source and not (
+                name == service and mount == target and ours.get((name, mount)) == real):
+            return ("the sandbox's Compose file mounts %s into %s from a path relative to the sandbox's folder, which "
+                    "run can't reproduce from its private copy: mount the workspace at the devcontainer.json's "
+                    "workspaceFolder, or use an absolute path" % (mount, name))
+    return None
+
+
+def outside_or_harness(config, copy, private, marker):
+    """Why the resolved Compose configuration reads a file outside the private copy (a build context) or mounts
+    ~/.agentic-harness, where the approvals and run's copies are, or None. Everything else a definition the user
+    approved does is theirs to decide; it makes the sandbox custom unless it is one of the allowed differences."""
+    harness_home = os.path.realpath(os.path.expanduser("~/.agentic-harness"))
+    copied, checked = os.path.realpath(str(private)), os.path.realpath(str(copy))
+    for name, service in sorted(config["services"].items()):
+        build = (service or {}).get("build") or {}
+        if not isinstance(build, dict):
+            continue
+        context = os.path.realpath(str(build.get("context") or checked))
+        if context != checked and not context.startswith(checked + os.sep) or build.get("additional_contexts"):
+            return "the sandbox's Compose file builds %s from a build context outside its folder, which run can't check" \
+                % name
+    for (name, target), source in sorted(binds(config).items()):
+        if source == os.path.realpath(str(marker)):
+            continue
+        if (source == harness_home or source.startswith(harness_home + os.sep) or source == copied
+                or harness_home.startswith(source.rstrip(os.sep) + os.sep)):
+            return ("the sandbox's Compose file mounts %s into %s, which holds or lies in %s, where this machine keeps "
+                    "the sandbox approvals and run's copies" % (source, name, harness_home))
+    return None
+
+
+def missing_credentials(config, service):
+    """Why Claude Code sessions in the sandbox would have no credentials, or None: run gives each session a fresh
+    ~/.claude, so the login stored there isn't used, and the credentials come from this environment."""
+    environment = (config["services"].get(service) or {}).get("environment") or {}
+    command = str(environment.get("HARNESS_AGENT_CMD") or "") if isinstance(environment, dict) else ""
+    words = command.split()
+    if not words or os.path.basename(words[0]) != "claude" or any(os.environ.get(v) for v in CREDENTIAL_VARIABLES):
+        return None
+    return ("the sandbox's sessions run Claude Code, and run gives each one a fresh ~/.claude, without the login stored "
+            "in the sandbox: set CLAUDE_CODE_OAUTH_TOKEN (from claude setup-token) or ANTHROPIC_API_KEY in the "
+            "environment run starts from")
+
+
+def definition_files(folder):
+    """[(path relative to folder, sha256 of its content or of a symlink's target)] for every file in the sandbox's
+    folder, sorted."""
+    found = []
+    for path in sorted(Path(folder).rglob("*")):
+        name = path.relative_to(folder).as_posix()
+        try:
+            if path.is_symlink():
+                found.append((name, "symlink:" + hashlib.sha256(os.readlink(str(path)).encode("utf-8")).hexdigest()))
+            elif path.is_file():
+                found.append((name, hashlib.sha256(path.read_bytes()).hexdigest()))
+        except OSError:
+            # Gone or unreadable while it was hashed: a definition no one approved.
+            found.append((name, UNREADABLE))
+    return found
+
+
+def definition_digest(folder):
+    """sha256 over the sandbox's folder: every file's path and content, so an added, changed or removed file changes
+    it."""
+    listing = "".join("%s %s\n" % (digest, name) for name, digest in definition_files(folder))
+    return "sha256:" + hashlib.sha256(listing.encode("utf-8")).hexdigest()
+
+
+def definition_differences(folder, reference):
+    """The files of folder that are missing from reference or differ from it, and reference's files folder lacks."""
+    ours, theirs = dict(definition_files(folder)), dict(definition_files(reference))
+    return sorted(name for name in set(ours) | set(theirs) if ours.get(name) != theirs.get(name))
+
+
+def approvals_file():
+    """Where this machine's user records the sandbox definitions they approved: outside every project, so no agent in a
+    sandbox can reach it."""
+    return Path(os.path.expanduser("~/.agentic-harness/sandbox-approvals.json"))
+
+
+def approved_definitions():
+    try:
+        data = json.loads(approvals_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    projects = data.get("projects") if isinstance(data, dict) else None
+    return projects if isinstance(projects, dict) else {}
+
+
+def approve_definition(workspace, digest):
+    projects = approved_definitions()
+    projects[os.path.realpath(str(workspace))] = digest
+    approvals_file().parent.mkdir(parents=True, exist_ok=True)
+    approvals_file().write_text(json.dumps({"projects": projects}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def last_json(text):
+    """The JSON object on the last line of text that holds one, or {}."""
+    value = last_json_value(text, dict)
+    return value if value is not None else {}
+
+
+def last_json_value(text, kind=list):
+    """The JSON value of kind on the last line of text that holds one, or None."""
+    for line in reversed(text.strip().splitlines()):
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, kind):
+            return value
+    return None
 
 
 def unpublished_allowlist():
@@ -203,6 +794,40 @@ def normalized(recorded):
     return renamed
 
 
+def required_isolation(setting, change_class, ladder):
+    """(the isolation class work of change_class needs, None) under HARNESS_SANDBOX_REQUIRE, or (None, why the setting
+    can't be read). The setting is space-separated <class>=<isolation class> pairs; a pair holds for its class and every
+    class above it on the ladder, so work never needs less isolation than the work below it."""
+    named = {}
+    known = {name.lower(): name for name in ISOLATION_CLASSES}
+    for entry in setting.split():
+        cls, sep, level = entry.lower().partition("=")
+        if not sep or cls not in ladder or level not in known:
+            return None, ("'%s' is not <class>=<isolation class>, with a class among %s and an isolation class among %s"
+                          % (entry, ", ".join(ladder), ", ".join(ISOLATION_CLASSES)))
+        if cls in named:
+            return None, "%s is named twice" % cls
+        named[cls] = known[level]
+    reach = ladder[:ladder.index(change_class) + 1]
+    return max((named.get(cls, "none") for cls in reach), key=ISOLATION_CLASSES.index), None
+
+
+def shortfall(evidence, required):
+    """Why the sandbox evidence doesn't reach the required isolation class, or None. Missing evidence, and a class this
+    harness doesn't know, reach nothing above none."""
+    if required == "none":
+        return None
+    if not evidence:
+        return "recorded no sandbox (the judge pass predates sandbox evidence)"
+    recorded = evidence.get("isolation_class")
+    if recorded not in ISOLATION_CLASSES:
+        return "has isolation_class %s, which this harness doesn't know" % recorded
+    if ISOLATION_CLASSES.index(recorded) >= ISOLATION_CLASSES.index(required):
+        return None
+    reason = evidence.get("isolation_reason")
+    return "has isolation_class %s%s" % (recorded, " (%s)" % reason if reason else "")
+
+
 def problem(name):
     """Why HARNESS_SANDBOX_BACKEND can't be used, or None."""
     if name in BACKENDS:
@@ -211,8 +836,17 @@ def problem(name):
             % (name or "empty", ", ".join(sorted(BACKENDS))))
 
 
-def backend(name):
-    return BACKENDS[name]()
+def backend(name, **options):
+    return BACKENDS[name](**options)
+
+
+def session_isolation(name):
+    """The isolation_class and isolation_reason of the sandbox this process runs in, as the named backend sees it: what
+    the gates compare, without the rest of the evidence."""
+    if name not in BACKENDS:
+        return {"isolation_class": "unknown", "isolation_reason": "HARNESS_SANDBOX_BACKEND %s is unknown" % name}
+    isolation_class, reason = isolation()
+    return {"isolation_class": isolation_class, "isolation_reason": reason}
 
 
 def evidence(name):
