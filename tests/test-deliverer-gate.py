@@ -998,6 +998,40 @@ else:
 PADDING = ("plain words ", ">", "> f ", '"k": ', ")", "(", '"', "\\", "\n", ";")
 
 
+# Text that names a call the deliverer doesn't run, and the same words in commands of their own.
+FORBIDDEN_AS_TEXT = ("echo gh pr merge 7", "echo gh x pr\tclose 7", "echo gh; echo ok; echo gh then pr merge",
+                     "echo gh api x/merge", "echo gh; echo gh api; echo gh api and /merge", "echo gh secret set X",
+                     "echo git -c x", "echo git push --mirror", "echo git x; echo push; echo git push x --all",
+                     "echo git x --git-dir=y", "echo pr merge && echo gh run rerun 7")
+ALLOWED_AS_TEXT = ("echo gh; echo pr merge 7", "gh pr view 7 && echo pr close", "echo gh api; echo /merge",
+                   "echo gh | cat api/merge", "echo api /merge gh", "echo git; echo push --mirror",
+                   "echo git push; echo --all", "echo pr merge gh", "echo git\necho --exec", "echo ghx pr merge")
+
+
+# An operator in quotes is text; the same text unquoted runs a gh command delivery doesn't need.
+QUOTED_OPERATORS = ("echo 'a; gh issue list'", 'echo "a; gh issue list"', "echo 'a && gh issue list' b",
+                    'echo "a\\"; gh issue list"', "echo 'a\ngh issue list'", "echo 'a\"'\";gh issue list\"",
+                    "echo a'b|gh issue list'c")
+
+
+class ForbiddenText(GateProject):
+    def test_an_operator_in_quotes_starts_no_command(self):
+        for command in QUOTED_OPERATORS:
+            with self.subTest(command=command):
+                code, message = self.decision(command)
+                unquoted, _ = self.decision("echo a" + re.search(r"(?s)(; ?| && |\n|\|)gh issue list", command).group())
+
+                self.assertEqual((code, unquoted), (0, 2), message)
+
+    def test_a_forbidden_call_named_as_text_is_refused_within_one_command(self):
+        self.pr_has()
+        for command in FORBIDDEN_AS_TEXT + ALLOWED_AS_TEXT:
+            with self.subTest(command=command):
+                code, message = self.decision(command)
+
+                self.assertEqual(code, 2 if command in FORBIDDEN_AS_TEXT else 0, message)
+
+
 class LargeCommands(GateProject):
     """Claude Code and Codex let a call through when its hook runs past 30 s: the deliverer's gate answers a command of
     any size well inside that, with the answer it gives the short one."""
@@ -1047,7 +1081,7 @@ class LargeCommands(GateProject):
         self.addCleanup(rules.write_text, kept)
         rules.write_text(kept + "block | @bash | >[^z]*zz | Never zz here.\n")
 
-        code, message = self.decision("echo '%s'" % (">" * 900000), timeout=20, HARNESS_HOOK_BUDGET="5")
+        code, message = self.decision("echo '%s'" % (">" * 250000), "implementer", timeout=30, HARNESS_HOOK_BUDGET="5")
 
         self.assertEqual(code, 2, message)
         self.assertIn("ran out of time", message)
@@ -1059,7 +1093,7 @@ class GapRules(GateProject):
     RULES = (r"aa[^;&|\n]*bb", r"aa[^;&|\n]*?bb", r"(?i)aa[^;&|\n]*\bcc\b", r"aa[^;&|\n]*bb|dd", r"(aa|bb)[^;&|\n]*cc",
              r"(aa[^;&|\n]*)?dd", r"(aa|bb)[^;&|\n]*(cc|dd)\1", r"aa[^;&|\n]*(?P<e>bb)(?P=e)", r"aa[^;&|\n]*",
              r"aa[^;&|\n]*(?<=b)c", r"\baa\b[^;&|\n]*\s-x\b[^;&|\n]*bb", r"(?:aa)(?=[^;&|\n]*bb)", r"aa\[^;&|\n]*bb",
-             r"aa[b[^;&|\n]*cc", r"aa[^;&|\n]*$", r"aa[^;&|\n]*\sbb")
+             r"aa[b[^;&|\n]*cc", r"aa[^;&|\n]*$", r"aa[^;&|\n]*\sbb", r"dd|aa[^;&|\n]*bb")
 
     @classmethod
     def setUpClass(cls):
@@ -1069,22 +1103,24 @@ class GapRules(GateProject):
                 conf.write("block | @bash | %s | Rule number %d.\n" % (rule, number))
 
     if given is not None:
-        texts = st.lists(st.sampled_from(("aa", "bb", "cc", "dd", "AA", "CC", "b", "c", "[", " ", "\n", ";", "|", "&",
-                                          " -x ", " bb")), min_size=1, max_size=10).map("".join)
+        # The gate reads a command without its blank segments, so none is blank here.
+        texts = st.lists(st.sampled_from(("aa", "bb", "cc", "dd", "AA", "CC", "b", "c", "[", " ", "\nx", ";x", "|x", "&x",
+                                          "\n bb", " -x ", " bb")), min_size=1, max_size=10).map("".join)
 
         @settings(max_examples=examples(150), deadline=None)
         @given(texts)
-        @example("aa bb")
-        @example("aa\n bb")
-        @example("aa x; bb")
-        @example("aaccaa")
-        @example("aa [bb]")
-        @example("dd")
-        @example("bb ccbb")
-        @example("aa bbbb")
-        @example("AA cc")
+        @example(" aa bb")
+        @example(" aa\n bb")
+        @example(" aa x; bb")
+        @example(" aaccaa")
+        @example(" aa [bb]")
+        @example(" dd")
+        @example(" bb ccbb")
+        @example(" aa bbbb")
+        @example(" AA cc")
+        @example(" aa CC")
         def test_a_rule_hits_exactly_what_its_regex_matches(self, text):
-            command = "echo " + text
+            command = "echo x" + text
             expected = {n for n, rule in enumerate(self.RULES) if re.search(rule, command, re.M)}
 
             code, message = self.decision(command, "implementer")
