@@ -1286,11 +1286,35 @@ def skill_gate(data, path):
 
 # --------------------------------------------------------------------------- guardrail rules
 
+RULE_GAP = r"[^;&|\n]*"
+REGEX_ATOM = re.compile(r"\\.|\[\^?\]?(?:\\.|[^\]\\])*\]", re.S)
+
+
+def needed_after_gap(content):
+    """What a rule written as <start>[^;&|\\n]*<end> needs to find somewhere, its <end>, or None for any other rule.
+    Such a rule scans to the end of the command from each <start> it finds: quadratic in a command that repeats it."""
+    pattern = content.pattern
+    at = pattern.find(RULE_GAP)
+    bare = REGEX_ATOM.sub(lambda m: "_" * len(m.group()), pattern)
+    depth, depths = 0, []
+    for ch in bare:
+        depth += (ch == "(") - (ch == ")")
+        depths.append(depth)
+    if at < 0 or depths[at] or bare[at] != "_" or any(ch == "|" and not d for ch, d in zip(bare, depths)) \
+            or content.flags & re.VERBOSE or re.search(r"\\[1-9]|\(\?(?:P=|\()", pattern):
+        return None
+    try:
+        return re.compile(re.sub(r"^[?+]", "", pattern[at + len(RULE_GAP):]), content.flags)
+    except re.error:
+        return None
+
+
 class Rule(object):
     def __init__(self, severity, target, content, message, origin, source):
         self.severity = severity
         self.target = target      # compiled path regex, or None for Bash commands (@bash)
         self.content = content
+        self.needs = needed_after_gap(content)
         self.message = message
         self.origin = origin
         self.source = source
@@ -1330,7 +1354,7 @@ def check_text(rules, path, text, severities=("block", "warn")):
                 continue
         elif rule.target is None or not rule.target.search(path):
             continue
-        match = rule.content.search(text)
+        match = rule.content.search(text) if rule.needs is None or rule.needs.search(text) else None
         if match:
             hits.append((rule, match.group(0)))
     return hits
@@ -1460,48 +1484,65 @@ def split_heredocs(command):
     return "\n".join(kept), bodies
 
 
+SEGMENT_STOP = re.compile(r"['\"&|;\n]")
+PLAIN_STRING = re.compile(r'"([^"`$\\]*)"')
+QUOTED_STOP = re.compile(r'["`$\\]')   # what a double-quoted string ends at, or runs
+SEGMENTS = {}   # command: its segments, from split_segments
+
+
 def split_segments(command):
     """[(segment, operator after it)], splitting on ; && || | & and newlines outside quotes."""
-    segments, current, quote, i = [], [], None, 0
-    while i < len(command):
+    if command in SEGMENTS:
+        return list(SEGMENTS[command])
+    segments, start, i, size = [], 0, 0, len(command)
+    while True:
+        stop = SEGMENT_STOP.search(command, i)
+        if not stop:
+            break
+        i = stop.start()
         ch = command[i]
-        if quote:
-            current.append(ch)
-            if ch == quote:
-                quote = None
-            elif quote == '"' and (ch == "`" or command.startswith("$(", i)):
-                # A quote inside "$(...)" belongs to the substitution, not to the string around it.
-                end = closing_paren(command, i + 1) if ch == "$" else command.find("`", i + 1)
-                end = len(command) if end < 0 else end
-                current.append(command[i + 1:end + 1])
-                i = end
-            elif ch == "\\" and quote == '"' and i + 1 < len(command):
-                current.append(command[i + 1])
-                i += 1
-        elif ch in "'\"":
-            quote = ch
-            current.append(ch)
+        if ch == "'":
+            end = command.find("'", i + 1)
+            i = size if end < 0 else end + 1
+        elif ch == '"':
+            plain = PLAIN_STRING.match(command, i)
+            i = plain.end() if plain else i + 1
+            while not plain and i < size:
+                stop = QUOTED_STOP.search(command, i)
+                i = stop.start() if stop else size
+                if command.startswith('"', i):
+                    i += 1
+                    break
+                if command.startswith(("`", "$("), i):
+                    # A quote inside "$(...)" belongs to the substitution, not to the string around it.
+                    end = closing_paren(command, i + 1) if command[i] == "$" else command.find("`", i + 1)
+                    i = size if end < 0 else end + 1
+                else:
+                    i += 2 if command.startswith("\\", i) else 1
         elif command.startswith(("&&", "||"), i):
-            segments.append(("".join(current), command[i:i + 2]))
-            current = []
-            i += 1
+            segments.append((command[start:i], command[i:i + 2]))
+            i += 2
+            start = i
         elif (ch == "&" and (command[i - 1:i] in (">", "<") or command[i + 1:i + 2] == ">")) or (
                 ch == "|" and command[i - 1:i] == ">"):
-            current.append(ch)  # a redirection such as 2>&1, &>file or >|file
-        elif ch in ";\n|&":
-            segments.append(("".join(current), ch))
-            current = []
+            i += 1  # a redirection such as 2>&1, &>file or >|file
         else:
-            current.append(ch)
-        i += 1
-    segments.append(("".join(current), ""))
-    return [(s, op) for s, op in segments if s.strip()]
+            segments.append((command[start:i], ch))
+            i += 1
+            start = i
+    segments.append((command[start:], ""))
+    segments = [(s, op) for s, op in segments if s.strip()]
+    if len(SEGMENTS) > 64:
+        SEGMENTS.clear()
+    SEGMENTS[command] = segments
+    return list(segments)
 
 
 # What may follow a subshell's ): its redirections, another ), or the end of the segment.
 SUBSHELL_END = re.compile(r"\s*(?:$|[0-9]*[<>]|&>|\))")
 # Longest first. & starts one only before >: anywhere else it ends the command.
 REDIRECT_OPERATORS = ("&>>", "<<<", "<<-", "<<", "<>", "<&", ">&", ">>", ">|", "&>", "<", ">")
+REDIRECT_OPERATOR = re.compile("|".join(re.escape(op) for op in REDIRECT_OPERATORS))
 SPLIT_CHARS = re.compile(r"[<>()]")
 OPERATORS_APART = {}   # segment: its text from operators_apart
 
@@ -1515,39 +1556,67 @@ def operators_apart(segment):
     word of its own. Quotes, backslashes and expansions ($(...), `...`, ${...}, <(...)) stay as they are."""
     if not SPLIT_CHARS.search(segment):
         return segment
-    if segment in OPERATORS_APART:
-        return OPERATORS_APART[segment]
-    # start is where the current word began (None: no word yet). Building the word itself would be quadratic in
-    # its length, and the checks call this on the same long segment several times.
-    parts, start, quote, closes, i, memo = [], None, None, set(), 0, {}
-    while i < len(segment):
-        ch, end = segment[i], i + 1
-        if quote == "'":
-            quote = None if ch == "'" else quote
+    if segment not in OPERATORS_APART:
+        if len(OPERATORS_APART) > 64:
+            OPERATORS_APART.clear()
+        OPERATORS_APART[segment] = apart_text(segment, 0, {})
+    return OPERATORS_APART[segment]
+
+
+# A run of characters the shell reads literally, blanks, or an operator that isn't a <(...) or >(...).
+APART_TOKEN = re.compile(r"([^\\'\"`$<>()&\s]+)|(\s+)|((?![<>]\()(?:%s))" % REDIRECT_OPERATOR.pattern)
+BLANKS = re.compile(r"\s*")
+
+
+def apart_text(segment, i, memo, limit=None):
+    """operators_apart's text for segment[i:], or the start of it: what segment gives up to index limit. memo is
+    closing_paren's for segment."""
+    # start is where the current word began (None: no word yet). Building the word itself would be quadratic in its
+    # length.
+    parts, start, quote, closes, size = [], None, None, set(), len(segment)
+    while i < (size if limit is None else limit):
+        token = APART_TOKEN.match(segment, i) if quote is None else None
+        if token and token.lastindex == 2:
+            parts.append(token.group())
+            start, i = None, token.end()
+            continue
+        if token and token.lastindex == 3:
+            op = token.group()
+            descriptor = op[0] in "<>" and start is not None and re.fullmatch(r"[0-9]+", segment[start:i])
+            parts.append(("" if start is None or descriptor else " ") + op + " ")
+            start, i = None, token.end()
+            continue
+        ch, end = segment[i], token.end() if token else i + 1
+        if token:
+            pass
+        elif quote == "'":
+            end = segment.find("'", i) + 1 or size
+            quote = None
         elif ch == "\\":
             end = i + 2
         elif quote == '"' and ch == '"':
             quote = None
         elif ch == "`":
             close = segment.find("`", i + 1)
-            end = len(segment) if close < 0 else close + 1
+            end = size if close < 0 else close + 1
         elif segment.startswith("$(", i) or (quote is None and segment.startswith(("<(", ">("), i)):
-            end = closing_paren(segment, i + 1) + 1
+            end = closing_paren(segment, i + 1, memo=memo) + 1
         elif segment.startswith("${", i):
             close = segment.find("}", i + 2)
-            end = len(segment) if close < 0 else close + 1
+            end = size if close < 0 else close + 1
         elif quote:
-            pass
+            stop = QUOTED_STOP.search(segment, end)
+            end = stop.start() if stop else size
         elif ch in "'\"":
             quote = ch
         elif ch == "(" and start is None:
             # Nested subshells would each scan to their close again: quadratic in the nesting.
             close = closing_paren(segment, i, memo=memo)
-            if close < len(segment) and not segment[i + 1:close].strip():
+            if close < size and BLANKS.match(segment, i + 1).end() == close:
                 parts.append(" () ")
                 i = close + 1
                 continue
-            if close == len(segment) or SUBSHELL_END.match(segment, close + 1):
+            if close == size or SUBSHELL_END.match(segment, close + 1):
                 closes.add(close)
                 parts.append(" ( ")
             i = end
@@ -1557,26 +1626,14 @@ def operators_apart(segment):
             parts.append(" ")
             start, i = None, end
             continue
-        elif ch.isspace():
-            parts.append(ch)
-            start, i = None, end
-            continue
-        elif ch in "<>&":
-            op = next((o for o in REDIRECT_OPERATORS if segment.startswith(o, i)), None)
-            if op:
-                descriptor = op[0] in "<>" and start is not None and re.fullmatch(r"[0-9]+", segment[start:i])
-                parts.append(("" if start is None or descriptor else " ") + op + " ")
-                start, i = None, i + len(op)
-                continue
         parts.append(segment[i:end])
         start, i = (i if start is None else start), end
-    if len(OPERATORS_APART) > 64:
-        OPERATORS_APART.clear()
-    OPERATORS_APART[segment] = "".join(parts)
-    return OPERATORS_APART[segment]
+    return "".join(parts)
 
 
-REDIRECTION_WORD = re.compile(r"[0-9]*(?:%s)" % "|".join(re.escape(op) for op in REDIRECT_OPERATORS))
+PLAIN_STOP = re.compile(r"[\\`$'\"]|[<>]\(")   # without one, words are what blanks separate
+APART_RUN = re.compile(r"(?:[^\s\\`$'\"<>]|[<>](?!\())+")
+REDIRECTION_WORD = re.compile(r"[0-9]*(?:%s)" % REDIRECT_OPERATOR.pattern)
 
 
 def redirections_removed(segment):
@@ -1587,25 +1644,32 @@ def redirections_removed(segment):
     text = operators_apart(segment)
     if "<" not in text and ">" not in text:
         return segment
-    words, start, quote, i = [], None, None, 0
-    while i < len(text):
+    if not PLAIN_STOP.search(text):
+        return " ".join(unredirected(text.split()))
+    words, start, quote, i, size = [], None, None, 0, len(text)
+    while i < size:
         ch, end = text[i], i + 1
-        if quote == "'":
-            quote = None if ch == "'" else quote
+        run = APART_RUN.match(text, i) if quote is None else None
+        if run:
+            end = run.end()
+        elif quote == "'":
+            end = text.find("'", i) + 1 or size
+            quote = None
         elif ch == "\\":
             end = i + 2
         elif quote == '"' and ch == '"':
             quote = None
         elif ch == "`":
             close = text.find("`", i + 1)
-            end = len(text) if close < 0 else close + 1
+            end = size if close < 0 else close + 1
         elif text.startswith("$(", i) or (quote is None and text.startswith(("<(", ">("), i)):
             end = closing_paren(text, i + 1) + 1
         elif text.startswith("${", i):
             close = text.find("}", i + 2)
-            end = len(text) if close < 0 else close + 1
+            end = size if close < 0 else close + 1
         elif quote:
-            pass
+            stop = QUOTED_STOP.search(text, end)
+            end = stop.start() if stop else size
         elif ch in "'\"":
             quote = ch
         elif ch.isspace():
@@ -1616,6 +1680,11 @@ def redirections_removed(segment):
         start, i = (i if start is None else start), end
     if start is not None:
         words.append(text[start:])
+    return " ".join(unredirected(words))
+
+
+def unredirected(words):
+    """words, cut from operators_apart's text, without the redirection operators and their targets."""
     kept, target = [], False
     for word in words:
         if target:
@@ -1625,7 +1694,7 @@ def redirections_removed(segment):
             target = True
         else:
             kept.append(word)
-    return " ".join(kept)
+    return kept
 
 
 # shlex builds a word one character at a time, in time quadratic in its length, past the hook's budget on a long one.
@@ -1656,17 +1725,17 @@ def shell_words(segment):
     return assignments, words
 
 
-def runner_split(words):
+def runner_split(words, at=0):
     """(the VAR=value words it sets, the index of the command words, the command line it hands a shell or None) for
-    words that start with a runner named by name or by a system path: past its options and the operands it takes
-    first (timeout's duration, flock's lock file). None for any other command."""
-    name = program(words)
-    if name not in RUNNER_OPTIONS or ("/" in words[0] and
-                                      not os.path.realpath(words[0]).startswith(SYSTEM_PREFIXES)):
+    words that at index at start with a runner named by name or by a system path: past its options and the operands it
+    takes first (timeout's duration, flock's lock file). None for any other command."""
+    name = program(words[at:at + 1])
+    if name not in RUNNER_OPTIONS or ("/" in words[at] and
+                                      not os.path.realpath(words[at]).startswith(SYSTEM_PREFIXES)):
         return None
     shorts, longs, operands = RUNNER_OPTIONS[name]
     lines = RUNNER_LINES.get(name, ())
-    assignments, line, i, ended = [], None, 1, False
+    assignments, line, i, ended = [], None, at + 1, False
     while i < len(words):
         word = words[i]
         if not ended and word == "--":
@@ -1706,25 +1775,26 @@ def unwrapped(words):
     """(the VAR=value words before the command, the words of the command): shell keywords, function heads, assignments
     and runners dropped, nested ones too. A runner that hands a shell a command line (env -S, script -c, flock -c, su
     -c, watch) runs sh -c '<line>'."""
-    assignments = []
-    while words:
-        words = command_words(words)
-        if words and ASSIGNMENT.match(words[0]):
-            assignments.append(words[0])
-            words = words[1:]
+    # An index, not a shorter list at each step: dropping many leading words one by one would be quadratic.
+    assignments, at = [], 0
+    while at < len(words):
+        words, at = command_start(words, at)
+        if at < len(words) and ASSIGNMENT.match(words[at]):
+            assignments.append(words[at])
+            at += 1
             continue
-        if program(words) == "busybox" and len(words) > 1:
+        if program(words[at:at + 1]) == "busybox" and len(words) - at > 1:
             # busybox runs the applet its first operand names: busybox sh f is sh f.
-            words = words[1:]
+            at += 1
             continue
-        split = runner_split(words) if words else None
+        split = runner_split(words, at) if at < len(words) else None
         if split is None:
             break
         assignments += split[0]
         if split[2] is not None:
             return assignments, ["sh", "-c", split[2]]
-        words = words[split[1]:]
-    return assignments, words
+        at = split[1]
+    return assignments, words[at:]
 
 
 def program(words):
@@ -1883,12 +1953,20 @@ TEMP_SUBSTITUTION = re.compile(r"\$\(\s*mktemp\b[^)]*\)|`\s*mktemp\b[^`]*`")
 TEMP_VARIABLE = re.compile(r"\$(?:\{(TMPDIR|TMP|TEMP)\}|(TMPDIR|TMP|TEMP)\b)")
 
 
+EXPANDS = re.compile(r"[$`~]")
+EXPANSION_CHAR = re.compile(r"[$`]")
+
+
 def shell_path(path, cwd, env=None):
     """path as the shell would resolve it against cwd: variables the command assigned earlier (env; a loop's list,
     or None when the hooks can't know the value), $PWD, a temp folder for $TMPDIR and $(mktemp), ~ and the
     environment's variables: (the absolute paths it can name, whether an expansion is left that the hooks can't
     resolve). A glob gives the paths it matches now, dotfiles only by a dot."""
     here = cwd if cwd and cwd != UNKNOWN_DIR else str(ROOT)
+    if not EXPANDS.search(path):
+        full = path if os.path.isabs(path) else os.path.join(here, path)
+        if "*" not in full and "?" not in full and "[" not in full:
+            return [full], cwd == UNKNOWN_DIR and full != path
     variants = [TEMP_SUBSTITUTION.sub(lambda _: os.path.join(tempfile.gettempdir(), "mktemp"), path)]
     for name, value in (env or {}).items():
         pattern = re.compile(r"\$(?:\{%s\}|%s(?![A-Za-z0-9_]))" % (re.escape(name), re.escape(name)))
@@ -1927,6 +2005,15 @@ def assigned_value(value, env):
 
 ASSIGNED = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\+?)=(.*)$", re.S)
 SHELL_VARIABLE = re.compile(r"\$(?:\{([^}]*)\}|([A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-]))")
+BARE_VARIABLE = re.compile(r"\$(?!\{)(?:\{([^}]*)\}|([A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-]))")
+
+
+def shell_variables(text):
+    """SHELL_VARIABLE's matches in text. Past the last } a ${ can't match, and each would scan to the end for it."""
+    closed = text.rfind("}") + 1
+    return list(SHELL_VARIABLE.finditer(text, 0, closed)) + list(BARE_VARIABLE.finditer(text, closed))
+
+
 DECLARATIONS = ("export", "local", "declare", "typeset", "readonly")
 
 
@@ -1982,7 +2069,7 @@ def resolved_texts(text, env):
     if re.search(r"\$[('\"]|`", text):
         return None
     texts = [text]
-    for m in reversed(list(SHELL_VARIABLE.finditer(text))):
+    for m in reversed(shell_variables(text)):
         name = m.group(1) if m.group(1) is not None else m.group(2)
         if name in env:
             value = env[name]
@@ -2040,7 +2127,7 @@ FUNCTION_WORD = re.compile(r"^[^\s(){}<>;&|=$`'\"]+\(\)[({]?(.*)$", re.S)
 def function_bodies(command):
     """{name: body} for each function command defines: name() { ...; }, name() ( ... ), function name { ...; }. The
     body is None when it is another compound command (if, while...) or isn't closed: the hooks don't read it."""
-    found, pos = {}, 0
+    found, pos, memos = {}, 0, {"{}": {}, "()": {}}
     for segment, _ in split_segments(command):
         start = command.find(segment, pos)
         pos = start + len(segment)
@@ -2049,7 +2136,8 @@ def function_bodies(command):
             continue
         at = start + m.end()
         opening = command[at:at + 1]
-        end = closing_paren(command, at, "{}" if opening == "{" else "()") if opening and opening in "{(" else None
+        pair = "{}" if opening == "{" else "()"
+        end = closing_paren(command, at, pair, memos[pair]) if opening and opening in "{(" else None
         found[m.group(1) or m.group(2)] = command[at + 1:end] if end is not None and end < len(command) else None
     return found
 
@@ -2057,29 +2145,49 @@ def function_bodies(command):
 def command_words(words):
     """The words of the command a segment runs: shell keywords and a function definition's head (f() {, function f
     {) dropped, so a function's body is checked as the commands it is."""
-    while words:
-        head = FUNCTION_WORD.match(words[0])
-        if words[0] == "case":
-            words = words[words.index("in") + 1:] if "in" in words else []
-        elif words[0] in SHELL_KEYWORDS or (words[0].endswith(")") and "(" not in words[0]):
+    words, at = command_start(words, 0)
+    return words[at:]
+
+
+def after_in(words, at):
+    """The index after the first "in" from at on (a case's patterns), or the end of words."""
+    try:
+        return words.index("in", at) + 1
+    except ValueError:
+        return len(words)
+
+
+def command_start(words, at):
+    """(words, the index where command_words(words[at:]) starts in them): a first word that holds a function's head and
+    its first command (f(){cmd) becomes that command's."""
+    while at < len(words):
+        first = words[at]
+        head = FUNCTION_WORD.match(first)
+        if first == "case":
+            at = after_in(words, at)
+        elif first in SHELL_KEYWORDS or (first.endswith(")") and "(" not in first):
             # A word ending in ) with no ( is a case item's pattern: case x in x) sh f;; esac runs sh f.
-            words = words[1:]
-        elif words[0] == "function" and len(words) > 1:
-            words = words[2:]
-            words = words[1:] if words[:1] == ["()"] else words[2:] if words[:2] == ["(", ")"] else words
+            at += 1
+        elif first == "function" and len(words) - at > 1:
+            at += 2
+            at += 1 if words[at:at + 1] == ["()"] else 2 if words[at:at + 2] == ["(", ")"] else 0
+        elif head and head.group(1):
+            words, at = [head.group(1)] + words[at + 1:], 0
         elif head:
-            words = ([head.group(1)] if head.group(1) else []) + words[1:]
-        elif words[1:2] == ["()"] or words[1:3] == ["(", ")"]:
-            words = words[2 if words[1] == "()" else 3:]
+            at += 1
+        elif words[at + 1:at + 2] == ["()"]:
+            at += 2
+        elif words[at + 1:at + 3] == ["(", ")"]:
+            at += 3
         else:
             break
-    return words
+    return words, at
 
 
 def literal_program(word):
     """Whether the program a command word names is literal text after its last expansion: a path such as
     "$(git rev-parse --show-toplevel)"/tools/x.sh or $VENV/bin/pytest names its program, x.sh or pytest."""
-    end, i = 0, 0
+    end, i, closed = 0, 0, word.rfind("}")
     while i < len(word):
         if word.startswith("$(", i):
             i = closing_paren(word, i + 1)
@@ -2089,7 +2197,7 @@ def literal_program(word):
             i = len(word) if close < 0 else close
             end = i + 1
         elif word[i] == "$":
-            match = SHELL_VARIABLE.match(word, i)
+            match = (SHELL_VARIABLE if i < closed else BARE_VARIABLE).match(word, i)
             i = match.end() - 1 if match else i
             end = i + 1
         i += 1
@@ -2128,6 +2236,7 @@ HIDDEN_COMMAND_REFUSAL = ("It runs %s, a command named by a command substitution
 COMMAND_STARTS = MUTATORS + SHELLS + INTERPRETERS + RUNNERS + ("eval", "fish", "git", "gh", "dd", "shred", "find",
                                                                "xargs", "parallel", "ln", "link", "cp", "install",
                                                                "rsync", "ditto")
+COMMAND_START_NAMES = frozenset(COMMAND_STARTS)
 # Programs whose arguments are text, patterns or files, never a command they run.
 TEXT_PROGRAMS = ("echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "cat", "ls", "head", "tail", "wc",
                  "less", "more", "jq", "yq", "sort", "uniq", "diff", "cmp", "tr", "cut", "test", "[", "[[",
@@ -2141,10 +2250,11 @@ def runs_unknown_runner(words):
     """The index where the command an unknown program may run starts (taskset 3 rm ..., /tmp/timeout 5 sh -c ...),
     or None. A runner reaching here is one by a path outside the system's, which may be anything."""
     prog = program(words)
-    if prog in TEXT_PROGRAMS + CODE_PROGRAMS or is_runtime(prog) or (prog in COMMAND_STARTS and prog not in RUNNERS):
+    if prog in TEXT_PROGRAMS or prog in CODE_PROGRAMS or is_runtime(prog) or (prog in COMMAND_START_NAMES
+                                                                             and prog not in RUNNER_OPTIONS):
         return None
-    return next((j for j in range(1, len(words)) if program([words[j]]) in COMMAND_STARTS or is_runtime(words[j])
-                 or engine_script(words[j])), None)
+    return next((j for j in range(1, len(words)) if program(words[j:j + 1]) in COMMAND_START_NAMES
+                 or is_runtime(words[j]) or engine_script(words[j])), None)
 FUNCTION_REFUSAL = ("It calls %s, a function whose body the hooks can't read, or that calls functions deeper than they "
                     "follow: define it as %s() { ...; }, or write its commands out.")
 
@@ -2236,14 +2346,15 @@ def safe_producer(producer, cwd, env):
     return False
 
 
-def git_dir_findings(prog, words, segment, cwd, env=None):
+def git_dir_findings(prog, words, segment, written, cwd, env=None):
     """Deletes and writes that can reach the git directory, which written_paths alone doesn't name: find -delete or a
     writer run by -exec from a folder that holds it (unless the walk prunes .git or its names can't match), a glob
     or a variable that resolves into it, $PWD, and a write whose target the hooks can't resolve at all."""
     run, _ = runner_command(prog, words)
     destroys = prog == "find" and ("-delete" in words or bool(run and writes_files(run[program_index(run):])))
     starts = find_starts(words) if destroys else []
-    for path in written_paths(segment, words) + starts:
+    # A long command repeats words; each distinct one is resolved once.
+    for path in dict.fromkeys(written + starts):
         fulls, unresolved = shell_path(path, cwd, env)
         if unresolved:
             return [GIT_DIR_REFUSAL % path if GIT_DIR_HINT.search(path) else
@@ -3228,10 +3339,17 @@ USER_COMMAND_REFUSAL = ("harness.py %s is for the user, CI, an agent factory or 
                         "delivery-record, ci-judge, ci-protect, sandbox-approve, accept-agent-config and pin are theirs.")
 
 
+def script_index(words):
+    """The index of the first of words that names a harness script, or None. A long command repeats words; each distinct
+    one is looked at once."""
+    word = next(filter(engine_script, dict.fromkeys(words)), None)
+    return None if word is None else words.index(word)
+
+
 def engine_script(word):
     """The harness script (harness.py, launcher.py, thin.py) word names, a glob included, or None."""
     base = word.rsplit("/", 1)[-1]
-    if any(c in base for c in GLOB_CHARS):
+    if GLOB_CHAR.search(base):
         # '*.py' names every script; 'h*.py' or 'harness.p?' aims at these.
         if not re.sub(r"[%s]" % re.escape(GLOB_CHARS), "", base.rsplit(".", 1)[0]):
             return None
@@ -3248,8 +3366,9 @@ def redirections(words):
     """(words without their redirections, [(operator, target)]): < x, 2>/dev/null, <<EOF and <<< text, wherever they
     stand, a redirection before the command included."""
     kept, found, i = [], [], 0
+    matches = {w: REDIRECTION.match(w) for w in dict.fromkeys(words) if not w.startswith(("<(", ">("))}
     while i < len(words):
-        m = REDIRECTION.match(words[i]) if not words[i].startswith(("<(", ">(")) else None
+        m = matches.get(words[i])
         if not m:
             kept.append(words[i])
             i += 1
@@ -3338,7 +3457,7 @@ def engine_findings(prog, words, written):
     """Why a command that starts, copies or aliases the harness engine is refused to agents. The engine runs from its
     own path, where the hooks read its command; a copy, an alias, a module run or a script word from an expansion
     would run any command unread. A program from stdin or from a runner's input is program_findings'."""
-    script = next((i for i, w in enumerate(words) if engine_script(w)), None)
+    script = script_index(words)
     run = script is not None and (script == 0 or any(w in INTERPRETERS or RUNTIMES.fullmatch(w)
                                                      for w in map(program, ([w] for w in words[:script]))))
     if script is not None and (prog in COPY_PROGRAMS or prog == "alias" or (written and not run)):
@@ -3416,19 +3535,16 @@ def segment_findings(found, segment, op, words, index, segments, cwd, dirs, dept
     found.extend(config_findings(segment, words, cwd, env, assignments))
     found.extend(nested_session_findings(words, assignments, env))
     producer = shell_words(segments[index - 1][0])[1] if index > 0 and segments[index - 1][1] == "|" else None
-    found.extend(engine_findings(prog, words, written_paths(segment, words)))
-    script = next((i for i, w in enumerate(words) if engine_script(w)), None)
+    written = written_paths(segment, words)
+    found.extend(engine_findings(prog, words, written))
+    script = script_index(words)
     refusal = eval_out_refusal(words, script, cwd) if script is not None else None
     if refusal:
         found.append(refusal)
     found.extend(program_findings(prog, words, producer, cwd, env))
-    found.extend(git_dir_findings(prog, words, segment, cwd, env))
-    piped = []
-    while index - len(piped) > 0 and segments[index - len(piped) - 1][1] == "|":
-        piped.insert(0, segments[index - len(piped) - 1][0])
-    found.extend(blocked_bundle_runs(segment, words, cwd, piped))
-    for path in dict.fromkeys(full for written in written_paths(segment, words)
-                              for full in shell_path(written, cwd, env)[0]):
+    found.extend(git_dir_findings(prog, words, segment, written, cwd, env))
+    found.extend(blocked_bundle_runs(segment, words, cwd, segments, index))
+    for path in dict.fromkeys(full for name in dict.fromkeys(written) for full in shell_path(name, cwd, env)[0]):
         label = install_path(path, cwd)
         if label:
             found.append("%s is in %s, which decides this project's gates; agents may not change it."
@@ -7157,13 +7273,16 @@ def any_blocked_bundle():
     return bool(revocations) and any(folder and revoked_digest(folder) for folder in skill_documents().values())
 
 
-def blocked_bundle_runs(segment, words, cwd, piped=()):
+def blocked_bundle_runs(segment, words, cwd, segments=(), index=0):
     """A command that runs a file of a bundle that isn't usable now (changed since its review, or revoked), or runs
     code the harness can't read while such a bundle is in the repository."""
     records, revocations, errors = admissions()
     if not (records or revocations or errors) or not words:
         return []
-    names, unreadable = code_files(segment, words, piped)
+    first = index
+    while first > 0 and segments[first - 1][1] == "|":
+        first -= 1
+    names, unreadable = code_files(segment, words, [piped for piped, _ in segments[first:index]])
     root = os.path.realpath(str(ROOT))
     unreadable |= cwd == UNKNOWN_DIR and any(not os.path.isabs(os.path.expanduser(t)) for t in names)
     for target in names:
@@ -7959,6 +8078,7 @@ DELIVERY_GH_REFUSAL = ("it runs only the gh commands delivery needs: gh pr creat
 # The shell expands these unquoted into other words: a brace expansion names another command or flag, and a glob adds
 # the names of files the harness doesn't see. A comma expands only inside braces, which are refused already.
 GLOB_CHARS = "{}*?[]"
+GLOB_CHAR = re.compile("[%s]" % re.escape(GLOB_CHARS))
 ENV_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=")
 # A browser, pager or editor runs the command it's set to; ssh and askpass commands run for git's network calls; the
 # rest point gh or git at another program or configuration.
@@ -8026,11 +8146,14 @@ REF_COMMANDS = ("checkout", "switch", "merge", "rebase", "reset", "branch", "fet
                 "symbolic-ref", "restore", "cherry-pick", "revert", "am", "worktree", "push")
 # Matched on command_view, the command without a PR's title and body. Heredoc bodies stay in the text, so a merge named
 # in one is refused too; the parser reads only the calls it can see, and this catches a merge it can't.
-FORBIDDEN_TEXT = re.compile(
-    r"\bgh\b[^;&|\n]*?\b(?:pr\s+(?:merge|close|review|ready)\b|api\b[^;&|\n]*?/merge\b|repo\s+(?:edit|delete)\b"
-    r"|--enable-auto-merge\b|workflow\s+run\b|(?:secret|variable)\s+set\b|run\s+rerun\b)"
-    r"|\bgit\b[^;&|\n]*?(?:\s-c\b|--exec\b|--upload-pack\b|--receive-pack\b|--config-env\b|--git-dir\b"
-    r"|--work-tree\b|\bpush\b[^;&|\n]*?--(?:all|mirror)\b)")
+# Each is the steps of one refusal, in turn within one command: the start, and what may not follow it.
+FORBIDDEN_TEXT = [[re.compile(step) for step in steps] for steps in (
+    (r"\bgh\b", r"\b(?:pr\s+(?:merge|close|review|ready)\b|repo\s+(?:edit|delete)\b|--enable-auto-merge\b"
+                r"|workflow\s+run\b|(?:secret|variable)\s+set\b|run\s+rerun\b)"),
+    (r"\bgh\b", r"\bapi\b", r"/merge\b"),
+    (r"\bgit\b", r"\s-c\b|--exec\b|--upload-pack\b|--receive-pack\b|--config-env\b|--git-dir\b|--work-tree\b"),
+    (r"\bgit\b", r"\bpush\b", r"--(?:all|mirror)\b"))]
+COMMAND_END = re.compile(r"[;&|\n]")
 PR_TEXT_VALUE = re.compile(r"""(?<!\S)(?:--body|--title|-b|-t)(?:=|\s+)("(?:[^"\\]|\\.)*"|'[^']*'|\S+)""")
 COPY_REFUSAL = ("it copies or links a program, which can run gh or git under another name; the deliverer runs gh and git "
                 "by name.")
@@ -8078,15 +8201,22 @@ def scan_expansions(text, quotes=True):
     word splitting can make it several words). Nothing expands in single quotes; a heredoc body (quotes=False) has
     no quotes."""
     commands, bare, quote, i = [], False, None, 0
-    while i < len(text):
+    while True:
+        stop = EXPANSION_STOP.search(text, i)
+        if not stop:
+            break
+        i = stop.start()
         ch, after = text[i], text[i + 1:i + 2]
-        if quote == "'":
-            quote = None if ch == "'" else quote
-        elif ch == "\\":
+        if ch == "\\":
             i += 1
         elif quotes and ch == "'" and quote is None:
-            quote = "'"
+            end = text.find("'", i + 1)
+            i = len(text) if end < 0 else end
         elif quotes and ch == '"':
+            plain = PLAIN_STRING.match(text, i) if quote is None else None
+            if plain:
+                i = plain.end()
+                continue
             quote = None if quote else '"'
         elif ch == "`":
             end = text.find("`", i + 1)
@@ -8103,25 +8233,35 @@ def scan_expansions(text, quotes=True):
     return commands, bare
 
 
+EXPANSION_STOP = re.compile(r"[\\'\"`$]|[<>](?=\()")
+PAREN_STOP = {pair: re.compile(r"[\\'\"%s]" % re.escape(pair)) for pair in ("()", "{}")}
+STRING_STOP = re.compile(r'[\\"$]')
+
+
 def closing_paren(text, start, pair="()", memo=None):
     """The index of the ) that closes the ( at text[start] (quotes and nested $(...) included), or len(text). With
     pair="{}", the } that closes a {. memo, a dict kept across calls on the same text, holds the close of every (
     a scan passed unquoted: a later call from one of those returns at once."""
     if memo is not None and start in memo:
         return memo[start]
-    depth, quote, i, opened = 0, None, start, []
-    while i < len(text):
+    depth, quote, i, opened, unquoted = 0, None, start, [], PAREN_STOP[pair]
+    while True:
+        stop = (STRING_STOP if quote else unquoted).search(text, i)
+        if not stop:
+            break
+        i = stop.start()
         ch = text[i]
-        if quote == "'":
-            quote = None if ch == "'" else quote
-        elif ch == "\\":
+        if ch == "\\":
             i += 1
-        elif quote == '"':
+        elif quote:
             if ch == '"':
                 quote = None
-            elif ch == "$" and text[i + 1:i + 2] == "(":
+            elif text.startswith("(", i + 1):
                 i = closing_paren(text, i + 1)
-        elif ch in "'\"":
+        elif ch == "'":
+            end = text.find("'", i + 1)
+            i = len(text) if end < 0 else end
+        elif ch == '"':
             quote = ch
         elif ch == pair[0]:
             depth += 1
@@ -8144,37 +8284,73 @@ def shell_split(text):
     return [word for word, _ in shell_split_marked(text)]
 
 
+# A word with nothing the shell reads specially, and the blanks before it.
+PLAIN_WORD = re.compile(r"\s*([^\s\\`$'\"#{}*?\[\]]+)(?!\S)")
+WORD_STOP = re.compile(r"[\s\\`$'\"#{}*?\[\]]")
+WORD_SPECIAL = re.compile(r"[\\`$'\"#{}*?\[\]]")
+SPLIT_WORDS = {}   # text: its words, from shell_split_marked
+
+
 def shell_split_marked(text):
     """shell_split's words, each with the unquoted brace and glob characters (GLOB_CHARS) it holds."""
-    text = operators_apart(text)
-    words, word, marks, quote, i = [], None, "", None, 0
-    while i < len(text):
-        ch = text[i]
-        if quote == "'":
-            quote, word = (None, word) if ch == "'" else (quote, word + ch)
-        elif ch == "\\" and i + 1 < len(text):
-            nxt = text[i + 1]
-            word = (word or "") + ("" if nxt == "\n" else "\\" + nxt if quote and nxt not in '$`"\\' else nxt)
-            i += 1
+    if text in SPLIT_WORDS:
+        return list(SPLIT_WORDS[text])
+    given, text = text, operators_apart(text)
+    # word holds the pieces of the current word (None: no word yet); joining them at its end keeps a long one linear.
+    words, word, marks, quote, i, size = [], None, [], None, 0, len(text)
+    if not WORD_SPECIAL.search(text):
+        words, i = [(plain, "") for plain in text.split()], size
+    while i < size:
+        if word is None:
+            plain = PLAIN_WORD.match(text, i)
+            if plain:
+                words.append((plain.group(1), ""))
+                i = plain.end()
+                continue
+        ch, end = text[i], i + 1
+        if ch == "\\" and end < size:
+            nxt, end = text[end], i + 2
+            piece = "" if nxt == "\n" else "\\" + nxt if quote and nxt not in '$`"\\' else nxt
         elif ch == "`" or text.startswith("$(", i):
-            end = closing_paren(text, i + 1) if ch == "$" else text.find("`", i + 1)
-            end = len(text) if end < 0 else end
-            word, i = (word or "") + text[i:end + 1], end
-        elif quote == '"':
-            quote, word = (None, word) if ch == '"' else (quote, word + ch)
-        elif ch in "'\"":
-            quote, word = ch, word or ""
+            end = (closing_paren(text, end) if ch == "$" else text.find("`", end)) + 1 or size
+            piece = text[i:end]
+        elif quote:
+            stop = QUOTED_STOP.search(text, end)
+            piece, quote = "", None if ch == quote else quote
+            if quote:
+                end = stop.start() if stop else size
+                piece = text[i:end]
+        elif ch == "'":
+            end = text.find("'", end)
+            end = size if end < 0 else end
+            piece, end = text[i + 1:end], end + 1
+        elif ch == '"':
+            plain = PLAIN_STRING.match(text, i)
+            piece, end, quote = (plain.group(1), plain.end(), None) if plain else ("", end, ch)
         elif ch.isspace():
             if word is not None:
-                words.append((word, marks))
-            word, marks = None, ""
+                words.append(("".join(word), "".join(marks)))
+            word, marks, i = None, [], BLANKS.match(text, end).end()
+            continue
         elif ch == "#" and word is None:
             break
         else:
-            word = (word or "") + ch
-            marks += ch if ch in GLOB_CHARS else ""
-        i += 1
-    return words + ([(word, marks)] if word is not None else [])
+            if ch in GLOB_CHARS:
+                marks.append(ch)
+            elif ch not in "$#":
+                stop = WORD_STOP.search(text, end)
+                end = stop.start() if stop else size
+            piece = text[i:end]
+        if word is None:
+            word = []
+        word.append(piece)
+        i = end
+    if word is not None:
+        words.append(("".join(word), "".join(marks)))
+    if len(SPLIT_WORDS) > 64:
+        SPLIT_WORDS.clear()
+    SPLIT_WORDS[given] = words
+    return list(words)
 
 
 def run_words(words):
@@ -8183,26 +8359,28 @@ def run_words(words):
     options, and a runner the harness doesn't know runs the gh, git or shell its words name. A runner that hands a
     shell a command line (env -S, script -c, watch) stays, for segment_calls to read the line. xargs, parallel and
     find -exec add arguments the command line doesn't show, and a command named by an expansion can be any command."""
-    while words:
-        first = words[0]
-        split = runner_split(words)
+    at = 0
+    while at < len(words):
+        first = words[at]
+        split = runner_split(words, at)
         if split is not None and split[2] is None:
-            words = words[split[1]:]
+            at = split[1]
         elif split is not None:
             break
         elif first == "case":
-            words = words[words.index("in") + 1:] if "in" in words else []
-        elif first == "function" or words[1:2] == ["()"]:
-            words = words[2:]
+            at = after_in(words, at)
+        elif first == "function" or words[at + 1:at + 2] == ["()"]:
+            at += 2
         elif REDIRECTION.match(first):
-            words = words[1 + (REDIRECTION.match(first).end() == len(first)):]
+            at += 1 + (REDIRECTION.match(first).end() == len(first))
         elif (first in SHELL_KEYWORDS or ASSIGNMENT.match(first) or first.endswith("()")
               or (first.endswith(")") and "(" not in first)):
-            words = words[1:]
+            at += 1
         elif first[:1] in ("(", "{") and first.lstrip("({"):
-            words = [first.lstrip("({")] + words[1:]
+            words, at = [first.lstrip("({")] + words[at + 1:], 0
         else:
             break
+    words = words[at:]
     named = "it runs a command named by an expansion ($... or `...`), which the harness can't read."
     if words and EXPANSION.search(words[0]):
         return words, named
@@ -8215,15 +8393,15 @@ def run_words(words):
         hidden = ("%s adds arguments the harness can't read; run gh with them written out." % prog
                   if prog in ("xargs", "parallel") else "")
         for j in range(1, len(words)):
-            if program(words[j:]) in runs:
+            if program(words[j:j + 1]) in runs:
                 return words[j:], hidden
-            if program(words[j:]) in RUNNERS + ("xargs", "parallel", "find"):
+            if program(words[j:j + 1]) in RUNNERS + ("xargs", "parallel", "find"):
                 inner, why = run_words(words[j:])
                 return inner, hidden or why
             if EXPANSION.search(words[j]):
                 return words[j:], named
     elif runs_unknown_runner(words) is not None and not program_refusal(words):
-        at = next((j for j in range(1, len(words)) if program(words[j:]) in runs + ("git",)), None)
+        at = next((j for j in range(1, len(words)) if program(words[j:j + 1]) in runs + ("git",)), None)
         if at is not None:
             return run_words(words[at:])
     return words, ""
@@ -8319,7 +8497,7 @@ def command_problem(marked, words):
     or redirects gh and git, and an unquoted glob or brace that expands into words the harness doesn't read. A glob
     in a command's arguments is read by the command, so only gh and git calls are checked there. marked and words are
     shell_split_marked's words and the words of the command they run."""
-    for word, _ in marked:
+    for word, _ in dict.fromkeys(marked):
         name = ENV_ASSIGNMENT.match(word)
         if name and (name.group(1) in RISKY_ENV or name.group(1).startswith(RISKY_ENV_PREFIXES)):
             return ENV_REFUSAL % name.group(1)
@@ -8327,7 +8505,7 @@ def command_problem(marked, words):
     command = program(words[at:])
     api = command == "gh" and words[at + 1:at + 2] == ["api"]
     for index, (word, marks) in enumerate(marked[offset:]):
-        if word in ("[", "[[", "]", "]]"):
+        if not marks or word in ("[", "[[", "]", "]]"):
             continue
         if "{" in marks and "}" in marks and ("," in word or ".." in word):
             return GLOB_REFUSAL
@@ -8350,19 +8528,24 @@ def program_index(words):
     """The index of the word a command runs: past runners and their options, such as timeout 60 or nice -n 5."""
     at = 0
     while at < len(words):
-        split = runner_split(words[at:])
+        split = runner_split(words, at)
         if split is None:
             return at
-        at += split[1]
+        at = split[1]
         if split[2] is not None:
             break
     return at
 
 
+REAL_NAMES = {}   # a hook process answers one call; a long command runs the same program many times
+
+
 def real_name(prog):
     """The name of the program prog runs once symlinks are followed, as the hook sees the PATH, or ""."""
-    path = prog if "/" in prog else shutil.which(prog)
-    return os.path.basename(os.path.realpath(path)) if path else ""
+    if prog not in REAL_NAMES:
+        path = prog if "/" in prog else shutil.which(prog)
+        REAL_NAMES[prog] = os.path.basename(os.path.realpath(path)) if path else ""
+    return REAL_NAMES[prog]
 
 
 def first_operand(words):
@@ -8517,6 +8700,29 @@ def command_view(command):
             segment = COMMIT_MESSAGE.sub(lambda m: m.group(1) + "''", segment)
         parts.append(segment + op)
     return "".join(parts)
+
+
+def in_one_command(text, steps):
+    """Whether text has a match of each of steps in turn with none of ;, &, | and newline between them, as the regex
+    <step>[^;&|\\n]*?<step>... finds it. That regex scans to the command's end from each start: quadratic, or cubic with
+    three steps. Here a command whose first start fails is done with, since a later one would see less of it."""
+    at = 0
+    while True:
+        first = steps[0].search(text, at)
+        if not first:
+            return False
+        end = COMMAND_END.search(text, first.end())
+        end, at = end.start() if end else len(text), first.end()
+        for step in steps[1:]:
+            found = step.search(text, at)
+            if not found:
+                return False
+            if found.start() > end:
+                break
+            at = found.end()
+        else:
+            return True
+        at = max(text.rfind(ch, end, found.start()) for ch in ";&|\n") + 1
 
 
 def gh_parts(words):
@@ -8882,6 +9088,66 @@ def rebase_branch(rest):
     return len(operands) > ("--root" not in rest)
 
 
+# A redirection's target with nothing the shell reads specially, up to what ends the name.
+PLAIN_TARGET = re.compile(r"(?!#)[^\s\\`$'\"<>()&]+(?=[\s<>()]|\Z)")
+NAME_END = re.compile(r"[<>()]")
+
+
+def redirect_target(segment, at, memo):
+    """The first word of shell_split(segment[at:]) up to its first <, >, ( or ), or "": the name a redirection written
+    before at gives. Only as much of segment as holds that word is split: all of it for each redirection is quadratic.
+    memo is closing_paren's for segment."""
+    if segment.startswith(("<", ">"), at):
+        return ""
+    plain = PLAIN_TARGET.match(segment, at)
+    if plain:
+        return plain.group()
+    reach = at + 64
+    while reach < len(segment):
+        name = first_name(apart_text(segment, at, memo, reach), False)
+        if name is not None:
+            return name
+        reach += 3 * (reach - at)
+    return first_name(apart_text(segment, at, memo), True) or ""
+
+
+def first_name(text, whole):
+    """The first word of text, as shell_split_marked reads it, up to its first <, >, ( or ). text is the start of a
+    segment (whole: all of it); None when the word may go on past text."""
+    pieces, quote, i, size = None, None, 0, len(text)
+    while i < size:
+        ch, end = text[i], i + 1
+        if quote == "'":
+            piece, quote = ("", None) if ch == "'" else (ch, quote)
+        elif ch == "\\" and end < size:
+            nxt, end = text[end], i + 2
+            piece = "" if nxt == "\n" else "\\" + nxt if quote and nxt not in '$`"\\' else nxt
+        elif ch == "`":
+            end = text.find("`", end) + 1
+            if not end and not whole:
+                return None
+            end = end or size
+            piece = text[i:end]
+        elif quote:
+            piece, quote = ("", None) if ch == '"' else (ch, quote)
+        elif ch in "'\"":
+            piece, quote = "", ch
+        elif ch.isspace() or (ch == "#" and pieces is None):
+            if pieces is not None or ch == "#":
+                return "".join(pieces or [])
+            i = end
+            continue
+        else:
+            piece = ch
+        pieces = [] if pieces is None else pieces
+        stop = NAME_END.search(piece)
+        pieces.append(piece[:stop.start()] if stop else piece)
+        if stop:
+            return "".join(pieces)
+        i = end
+    return "".join(pieces or []) if whole else None
+
+
 def written_files(command):
     """The names of the files a command writes: redirection targets, tee's files, the last operand of cp, mv, install
     and ln, dd's of= and a download's -o or -O. Each is read as the shell reads it (quotes and backslashes removed),
@@ -8889,9 +9155,8 @@ def written_files(command):
     kept = split_heredocs(command)[0]
     paths = []
     for segment, _ in split_segments(kept):
-        for match in WRITE_REDIRECTION.finditer(segment):
-            target = shell_split(segment[match.end():])[:1]
-            paths += [re.split(r"[<>()]", target[0])[0]] if target else []
+        memo = {}
+        paths += filter(None, (redirect_target(segment, m.end(), memo) for m in WRITE_REDIRECTION.finditer(segment)))
         words = run_words(shell_split(segment))[0]
         words = words[program_index(words):]
         prog = program(words)
@@ -8952,7 +9217,8 @@ def role_command_refusal(agent, command, cwd=None):
             refusal = PUSH_AFTER_SWITCH_REFUSAL
         if refusal:
             return refusal
-    if FORBIDDEN_TEXT.search(command_view(command)):
+    view = command_view(command)
+    if any(in_one_command(view, steps) for steps in FORBIDDEN_TEXT):
         return FORBIDDEN_TEXT_REFUSAL
     return None
 
@@ -9436,12 +9702,16 @@ def git_word_lists(words, env):
     at = git_options(words)[1]
     lists, unresolved = [[]], False
     for i, word in enumerate(words):
-        texts = resolved_texts(word, env) if re.search(r"[$`]", word) else [word]
+        texts = resolved_texts(word, env) if EXPANSION_CHAR.search(word) else [word]
         if texts is None:
             if i <= at and words[i - 1:i] not in [[o] for o in GIT_VALUE_OPTIONS]:
                 return None, True
             unresolved = True
         splits = [[word]] if texts is None or texts == [word] else [text.split() for text in texts]
+        if len(splits) == 1:
+            for found in lists:
+                found += splits[0]
+            continue
         lists = [found + split for found in lists for split in splits]
         if len(lists) > 64:
             return None, True

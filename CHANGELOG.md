@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **A gate hook that runs out of time always refuses, and the shell gate is fast on large commands (security fix).** A
+  hook refuses a call it can't check in 25 s, because Claude Code and Codex let a call through when its hook runs past
+  30 s. That budget was an alarm the hook handled itself, and on Python 3.10 and older it waits for a running regular
+  expression search to end. There (macOS's own Python is 3.9) a long command could keep one core guardrail searching
+  past the 30 s, and the call went through unchecked; OpenCode's adapter refuses such a call. Now:
+  - the hook's work runs in a child process and the hook answers for it, so it refuses at 26 s whatever the child is
+    doing. The budgets are the same;
+  - the gate's scans take time proportional to the command's length. A deliverer command padded to 1 MB took about 40 to
+    60 s with plain text and ran out of time with `>`; they take about 1 s. The main agent's padded commands take
+    about a third of the time. Nothing is skipped or cut: the same text is scanned, with the same findings;
+  - `tests/gate_equivalence.py` compares the shell gate's answers with another commit's, for changes that must not
+    change them.
+
 ## 0.31.0 (2026-11-22)
 
 This release includes the harness-side prerequisites for factory integration: contract v1, provenance intake,
