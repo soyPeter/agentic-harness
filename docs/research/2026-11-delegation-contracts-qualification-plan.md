@@ -14,6 +14,14 @@ Pedro accepted the following default:
 
 - Run only the audits (P0, and the P0-V reuse map). Build nothing unless those audits show real gaps.
 
+## P0 results (2026-11-11)
+
+P0 and P0-V ran against main at `dd2f9e9` (v0.30.0). The gap table and the reuse map are in
+[ADR-007's implementation notes](../adr/ADR-007-evidence-closed-loop.md#implementation-notes-2026-11-11). One real gap
+was built, as the first part of P1: evidence and approval given on an earlier spec revision now go stale (the
+qualification matrix row "approved task changes spec, target or security constraint midway"). The other gaps are
+deferred there, each with its owner or reason.
+
 ## Baseline and scope
 
 Narrow **documentation-only** lookup on 8 Nov 2026 at **13:54 CET (Europe/Madrid)**: existing local checkout HEAD `c494efa1ea4748303b4113fdd13352641ae44edd`. Read README, ADR-002, and the evidence closed-loop draft (then stored as a local ADR-003, now [ADR-007](../adr/ADR-007-evidence-closed-loop.md)), plus the immediate `docs/adr` and `docs/research` filenames. README documents tool contracts, one-task WIP, trace/receipt, base-verifier CI, independent JUDGE/review, budgets/escalations, Orca/worktrees and human PR merge. This plan does **not** say those are absent or broken, and it does not verify runtime behavior, effective forge controls, remote-main freshness or pending PR implementation. The draft's old PR metadata is historical, not current evidence.

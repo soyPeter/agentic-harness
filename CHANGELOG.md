@@ -12,6 +12,325 @@ signing key outside agent environments. Existing projects upgrade through their 
   checkout. Separate checks cover the current release's default version, both when its tag exists and when it is
   unavailable; changing `VERSION` no longer breaks unrelated thin-install tests.
 
+- **Agents can no longer switch the harness off through the CLIs' user configuration (security fix).** Before,
+  the hooks protected the project's `.claude/settings.json`, `.codex/` and `.opencode/`, but not the CLIs' user- and
+  machine-level configuration. An agent could write `{"disableAllHooks": true}` (or an `env` block with `PYTHONPATH`
+  and a `sitecustomize.py`) to `~/.claude/settings.json`, with Write or the shell, and Claude Code applied it within
+  the same session. Now:
+  - the file tools, `apply_patch` and shell commands are refused, in every role, on Claude Code's `~/.claude`
+    settings, `~/.claude.json`, hooks, agents, skills, commands, plugins, rules and `CLAUDE.md`; Codex's
+    `config.toml`, profiles, `hooks.json`, `AGENTS.md`, rules, agents and prompts; all of OpenCode's
+    `~/.config/opencode`; the managed settings folders; and `~/.agentic-harness`. Also under `$CLAUDE_CONFIG_DIR`,
+    `$CODEX_HOME`, `$OPENCODE_CONFIG_DIR`, `$XDG_CONFIG_HOME` and `$OPENCODE_CONFIG`, through symlinks, `~` and
+    `$HOME`, and spelled in any case on a disk that ignores case (macOS: `~/.CLAUDE/Settings.json`). The
+    `claude plugin|mcp|config` and `codex mcp|features` commands that change them are refused too, and so is an
+    archive extracted, or a folder's contents copied, into the home folder or `~/.config` (`tar -x -C ~`,
+    `unzip -d ~`, `rsync -a dir/ ~`), with its options read the way the tool parses them (bundled `tar -xC ~`,
+    old-style `tar xCf ~`, `unzip -qod ~`, `cpio -iD ~`, `cp -t`, options after the operands, `TAR_OPTIONS` and
+    `UNZIP`). So is an extraction that keeps the archive's absolute or `../` names (`tar -P`, `unzip -:`, `7z -spf`,
+    `cpio --insecure`) or whose folder the hooks can't resolve. Reading them still works, and so does the rest of
+    `~/.claude` (transcripts, auto-memory).
+  - Agents can't start a nested agent session without the harness's hooks: `claude --bare`, `--safe-mode`,
+    `--restricted`, `--setting-sources` without `project`, `--settings` that turns hooks off or names a file,
+    `--agents` redefining a harness role; `codex -c features.hooks=false` (and other `-c` overrides of hooks, project
+    trust or the shell environment), `--disable hooks`, `exec --ignore-user-config`; `opencode --pure`; or any of them
+    with `CLAUDE_CODE_SIMPLE`, a moved home or config folder, `PATH` or `PYTHON*` set for it, also through `npx`.
+    Their options count in every form the CLIs take: `-c=value`, `-cvalue`, `--config=value`, after a subcommand or
+    the prompt; text after `--` is the prompt.
+  - Session start, `doctor`, `run` and `orca` report as errors, and `run` and `orca` refuse to start on:
+    `disableAllHooks`; managed `allowManagedHooksOnly` without the harness; an `env` block setting `PYTHON*`,
+    `PATH`, `LD_*`/`DYLD_*`, `BASH_ENV`, `GIT_DIR` and the like, or `HARNESS_*`; the plugin turned off in thin mode; Codex hooks switched off or a
+    hijacking `shell_environment_policy`; an OpenCode plugin removal. A change to a setting that runs a command or
+    adds hooks (`apiKeyHelper`, `statusLine`, user hooks, plugins, MCP servers, Codex `hooks.json` and `notify`,
+    OpenCode plugins) since the user last accepted it is an error too. The new user-only command `harness.py
+    accept-agent-config` accepts it, and the first check in a repository accepts what it finds. A permission
+    `allow` rule that pre-allows changing these files or harness files is a warning, not an error: the hooks still
+    check those calls.
+  - A new Claude Code `ConfigChange` hook (in `.claude/settings.json` and the plugin) keeps such a change from
+    taking effect in a running session.
+  - The installed `.claude/settings.json` (and a thin project's) sets `"disableAllHooks": false`, which outranks a
+    `true` in the user's settings.
+  - Every hook wiring runs `python3 -I`: the settings hooks, agent frontmatter hooks, the plugin's Claude Code and
+    Codex hooks, `.codex/hooks.json`, the OpenCode plugin, the git hooks and the launcher's engine.
+  - HOOKS.md and the README describe what stays open, and recommend a root-owned `managed-settings.json` with
+    `"disableAllHooks": false` for unattended runs.
+  **Upgrading:** update the project (or move the pin) to get the new settings hooks. Codex asks you to trust the
+  project's changed hooks again in `/hooks`. The first session start or `doctor` after the update records the
+  current user configuration as accepted. Check it first if agents ran unattended before this release.
+- **Judge-round hygiene (docs).** Confirm each finding against the code before fixing it, and record disproved
+  findings next to confirmed ones. Treat a short or unread review as a failed round, and if the named judge is out
+  of usage, run the same round with another installed model family (guidance until the recorder and the launcher
+  enforce this). Keep the judge brief unsteered. A person still reads the review notes and the receipt's
+  "Not verified" list before merging. Operator text is in `payload/owned/AGENTS.md` and
+  `payload/owned/backbone/8-WORKFLOW.md`; ADR-008 records the amendment.
+- **A redirection isn't an argument of the gh or git call it follows.** The deliverer's gate read
+  `gh repo view --json defaultBranchRef > /dev/null` (or `2>&1`, `&>file`, `</dev/null`, `>|file`) as `gh repo view`
+  with a `>` or `2>&` argument and refused it as another repository; the same happened after a subshell,
+  `( gh repo view --json defaultBranchRef ) 2>&1 | cat`. The gh and git checks now read a call's words without its
+  redirections, operator and target, wherever they are written (`2>&1>out` too). A quoted or escaped `>` is still
+  text, so `--body ">" --add-label automerge` is refused as before, and `-R x/y` or `--repo x/y` after a redirection
+  is still refused as another repository. Other checks still see the redirections (a shell reading a file, writes).
+  New regression tests pin the subshell forms that ADR-006's tokenizer (#93) fixed: `( gh repo view ... )`,
+  `(gh pr ls)` and `-R x/y)`, which the deliverer gate's shell property had found at random. A false refusal, not a
+  bypass.
+- **Third-party skills are reference until the user admits a reviewed copy (ADR-006, Proposed).** The user records a
+  vendor's or an SDK's skill bundle in `backbone/admissions.conf` (new, user-only like `tools.conf`): its path, an
+  Accepted ADR that names it, source, revision, digest, purpose, compatible versions, dependencies, data destinations
+  and license. `harness.py admission digest <path>` prints the digest of the files git sees under the path (tracked,
+  or untracked and not ignored; a link counts as where it points; a link out of the bundle makes it inadmissible),
+  and `harness.py admission` shows each record's state. While the bytes match and no revocation names them, the
+  bundle's skills load and satisfy routes as any skill does; otherwise the bundle is reference: the Skill tool is
+  refused, reading its SKILL.md doesn't count as loading it, edits routed to it are refused, and the shell checks
+  refuse agents' commands that run its files (by path, as a shell's or interpreter's operand with its options read as the
+  shell reads them (`sh -e f`, `bash -o errexit f`), on its stdin or through a pipe, through runners such as `timeout`,
+  `xargs` and `find -exec`, in any letter case of the path or the shell), and, while such a bundle is present, commands whose
+  code comes from an expansion or substitution, or from a relative path after a `cd` the hooks can't resolve. A bundle whose SKILL.md registers hooks, runs shell
+  placeholders or pre-approves tools isn't admissible, and a file under an admitted bundle that its
+  digest doesn't cover (one git ignores) doesn't run: admission grants no command or permission, and the tool
+  contracts, shell checks and role scopes govern every call whichever skills are loaded. `[revoke sha256:...]` blocks
+  those bytes in any `.claude/skills/` folder of the repository, even with a matching record; revocations are read
+  from the working copy, the index, HEAD, the default branch and every commit the reflogs record together (so a
+  rebase or reset that drops a local revocation doesn't lift it; agents' `filter-branch`, `filter-repo`, `reflog
+  expire`/`delete` and `gc.reflogExpire*` settings are refused), and a line of the file that is neither an exact
+  section header nor `key = value` (a header with a trailing comment, say) blocks every project skill bundle, and
+  fails verify, until the user fixes it. Agents' git commands that would rewrite
+  `admissions.conf`, `tools.conf`, `harness.conf`, the lock or `escalations.md` (checkout, restore, stash, reset,
+  cherry-pick, revert, apply, am and others) are refused. verify refuses a commit whose admitted
+  bundle doesn't match its record, one that changes the admissions (the user commits it with `HARNESS_VERIFY=off`; a
+  pull request needs the `harness-change-approved` label), and, even with the label, one that brings revoked bytes
+  back or removes a revocation. doctor and the session-start note report the problems. Separately, an agent's Skill
+  call is refused when any skill or command in the repository the name can reach (folder name, frontmatter `name`,
+  nested `.claude/skills/`, namespace) registers hooks or runs `` !`...` `` or ```` ```! ```` placeholders, as
+  Claude Code finds them, or has a frontmatter the harness can't read (a `...` document end included): Claude Code runs those as it loads the skill,
+  outside every tool call the hooks see. Compatibility, dependencies and data
+  destinations are recorded, not checked, and other plugins' bundles, outside the repository, can't be admitted; the
+  ADR's implementation notes list what is deferred and why.
+
+- **The shell checks read a redirection written against a word as the shell does.** `sh<f`, `bash<f`,
+  `python3<f`, `env sh<f` and `(sh)<f` ran `f` as a program from stdin, and a revoked bundle's script with it,
+  past the stdin-program rule and the bundle check, because the redirection stayed part of the command's word; so did
+  `harness.py snapshot>/dev/null` past the user-only command check, and `rm AGENTS.md>/dev/null`, `echo x 12>f`,
+  `echo x>|f` and `echo x>&f` past the protected-path check. Commands are now split into words with each redirection
+  operator (`<`, `<<`, `<<<`, `<&`, `<>`, `>`, `>>`, `>|`, `>&`, `&>`, `&>>`, and the descriptor digits written
+  against it) apart from the words around it, in every check that reads command words, the deliverer's gate
+  included; a subshell's redirection gives its commands their input (`(sh)<f`, `(cd d; sh f)`), and `<>f` counts as
+  stdin. `busybox` runs the applet it names (`busybox sh f` is `sh f`; `ash` and `hush` are shells), and a case
+  item's or a function's command (`case x in x) sh f;; esac`, `f () { sh f; }`) is read as the command it is.
+  Everyday commands with attached redirections (`echo hi>out.txt`, `sort<in.txt`, `python3 script.py>log`) stay
+  allowed, and a quoted `>` (`echo 'x>AGENTS.md'`) is no longer taken for a write.
+
+- **Refused hook calls can be replayed against a rule or engine change (ADR-002 follow-up (c)).** When a hook refuses
+  a call, the harness keeps its input in `.git/harness/captures/` (never committed), and it keeps the 20 newest
+  distinct allowed calls per gate, so a false block can be measured too; an allowed file change keeps only its path,
+  size and digest, never its content, and isn't replayed. Secrets are replaced first, by shape (private-key and other
+  non-public `BEGIN` blocks, AWS, GitHub, GitLab, Anthropic, OpenAI-style, Stripe, Google, npm and Slack tokens, JWTs,
+  32+ character runs that look random), by flag (`-p<password>`, `-u user:<password>`, `--password <value>`, passwords
+  and token-like user names in URLs) and by name: any value given to a name or field holding key, token, secret, pass,
+  pwd, credential, auth or cookie, in any case, quoted values whole. A token keeps its prefix and length, so the rule
+  that refused it still fires. The project and home folders become placeholders. Every pattern is linear and text is
+  cut before it is redacted, and a hook writes its refusal before it captures the call, so capture never delays an
+  answer past Claude Code's hook timeout. At most 100 refusals are kept per gate; a flood evicts its own captures first
+  (the session with the most, then the reason given most). An input over 64 KiB keeps only its metadata. Each capture
+  says whether its outcome depends only on the input and the rules (shell checks, guardrail rules, tool contracts,
+  protected paths, scopes, the deliverer's gate) or also on state (the task, spec, verdict and skill gates, the kill
+  switch, install folders, GitHub labels, a path through a symlink), and why. `harness.py report --json` gives each
+  harness candidate an `id`, `kind`, `reason`, `tasks` and its captures by id and digest; the text report prints the
+  ids. `harness.py eval export <candidate-id>|--refusals|--allows [--out DIR]` writes reviewable fixtures (input,
+  expected outcome, the reason a refusal must still give, provenance, redaction note) into `.git/harness/eval-drafts/`,
+  never committed, and leaves out any whose input still looks like it holds a secret. Judge-fail and escalation
+  candidates become eval prompts, which aren't replayed. `backbone/evals/` is the user's, like `tools.conf`: the hooks
+  refuse agents' writes there by any path (and in another worktree of the repository), `eval export` itself refuses an
+  `--out` that resolves there, and verify refuses commits that change it. Agents can't write the harness's records in
+  the git folder either. `harness.py eval replay [DIR] [--engine <harness.py>] [--json]` runs the state-free fixtures
+  through `hook pre-tool-use` in a throwaway checkout of the project's rules and settings; for `backbone/evals/` (the
+  default) it reads the fixtures committed at HEAD and names the files the work tree changes there. It reports each one
+  as still as expected, newly allowed (a hole), newly blocked (a false block), blocked for another reason, skipped (with
+  why) or an error, and exits 1 on any but the first and skipped, and on a missing folder or no committed fixture. The
+  refusal reasons in the event log and the command names in the out-of-band snapshot are redacted the same way. CI
+  doesn't run the replay yet.
+- **git's own options, runners and command names the hooks can't read.** Three more spellings got past the shell
+  checks. git's options that take a value (`-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--super-prefix`,
+  `--config-env`, `--attr-source`, as `--git-dir .git` or `--git-dir=.git`) are read before its subcommand, so
+  `git --git-dir .git push` is a push under external delivery and in the deliverer's gate. Runners are looked through
+  with their own options and operands, nested too (`timeout -s KILL 5 rm -rf .git/harness`, `nice -n 5 ...`,
+  `sudo -u x -E bash -c '...'`, `stdbuf`, `caffeinate`, `ionice`, `chrt`, `taskset`, `setsid`, `doas`, `unbuffer`,
+  `script`, `xvfb-run`, `flock`, `chronic`, `watch`, `su`); `env -S`, `script -c`, `flock -c`, `su -c` and `watch` are
+  read as `sh -c` with their command line. A program the hooks don't know is checked from the first word after it that
+  starts a command, and refused only when that command would be. A command whose name comes from a command
+  substitution or a variable the hooks can't resolve is refused (`$(echo ... | base64 -d)`, `X=$(...); $X`), unless
+  the program's own name is written out (`"$(git rev-parse --show-toplevel)"/tools/build.sh`); a trap's commands are
+  checked as commands (`trap 'rm -rf .git/harness' EXIT`). The no-merge profile reads `gh pr merge` behind runners
+  and after `-R`.
+
+- **Shell functions, hidden -c programs and git subcommands from variables.** Three spellings got past the agent shell
+  gate. A function body (`f() { rm -rf .git/harness; }; f`, `function f { ...; }`, `f() ( ... )`) is now checked as
+  the commands it is, and again at each call with the call's arguments; calling a function whose body the hooks can't
+  read is refused. `sh -c`, `bash -lc` and `eval` are read with the variables the command sets resolved, and refused
+  when their program comes from a command substitution or a variable the hooks can't resolve (`sh -c "$(echo ... |
+  base64 -d)"`). Under external delivery, and in the deliverer's gate, a git subcommand from a variable is read as
+  the command sets it (`P=push; git $P`, `set -- push; git "$@"`, a loop's list) and refused when it can't be
+  resolved (`git $(echo push)`). These checks stay defence in depth: credentials, CI's verify and human review are
+  the boundaries.
+- **A spec change makes the evidence and approval given on the earlier text stale (ADR-007, Proposed; first slice).**
+  Judge, review and tester records now carry the spec fingerprint (the grill's: the spec except its `Approved-by:` lines,
+  and every ADR it references) next to the code fingerprint. A pass counts only on the code and the spec it judged, so
+  any change to the spec but its `Approved-by:` lines (a criterion, a constraint, an assumption, the Change-Class, or
+  only a reworded sentence) or to a referenced ADR sends the task back to the griller, the judge, the tester and every
+  review lens even when the code is the same. Finishing a task (the hook, `finish`,
+  pre-commit and CI `verify`) now passes the start gate again, as HOOKS.md already said verify did: a spec whose
+  approval the user removed to change it needs a current grill pass and their approval again. Verify also refuses a
+  commit that changes an approved spec while its `Approved-by:` lines stay as they were, since that approval was given
+  on the earlier text (the user approves the new text with a new line; in CI the `harness-change-approved` label lets
+  it through). A range is checked commit by commit, so an approval removed with the change and given again later with
+  the same line is a renewal, and a change committed under the old approval passes once a later commit changes the
+  `Approved-by:` lines. Verify can't tell who wrote an `Approved-by:` line: a commit that changes an approved spec
+  and the date on its approval line together passes it, as before; the snapshot of protected files is the check on
+  that. `next` routes a changed `[WIP]` task to `grill`, `approve`, `test` and `judge` with a `reason`; `state
+  --json` gives the judge verdict's `stale` (`code`, `spec` or `unrecorded`); the receipt refuses a pass on an
+  earlier spec and names the spec and code it was judged on (`judged_on`). Stale passes stay in the append-only
+  history. Upgrade note: a judge, review or tester record from an earlier release has no spec fingerprint, so it
+  counts as stale: run them again for tasks in progress. ADR-007's implementation notes hold the audit (P0) this
+  slice came from, and what it leaves out.
+- **Text under a spec's `## Approval` heading is part of the spec (ADR-007).** The grill fingerprint, the freeze on an
+  approved spec, verify and the risk assessment left out the whole Approval section, but the gates read acceptance
+  criteria from anywhere in the spec, and the template puts Approval last, so a criterion appended to a spec landed
+  there: rewording it left the grill and judge passes current, an agent could change it after approval, and policy
+  approval didn't see a risk term in it. Only the `Approved-by:` lines (and comments and blank lines in that section)
+  are left out now. Upgrade note: a spec with other text under `## Approval` gets a new fingerprint, so its grill and
+  judge passes go stale: grill and judge it again (its approval stays). A note that goes with an approval belongs in
+  the `Approved-by:` line or in a comment.
+- **Attestations: approved harness changes, a verify helper, predicate v1, KMS and keyless signing (ADR-005,
+  follow-ups).** Built and tested locally; the cloud and Sigstore paths are not run end to end yet (the ADR's
+  "Follow-up status" says what was and wasn't tested).
+  - A push merged from a pull request labelled `harness-change-approved` now gets a statement, as the pull request's
+    check passed with the label. The `attest` job reads the pull requests of the pushed commit, and the engine the push
+    starts from (`harness.py approval-check`) approves only the one merged as that commit, carrying the label, whose
+    merge is the whole push (a squash, the rebase of one commit, or a merge commit of the previous tip and its head).
+    The statement says `allowUserChanges: true` and names the pull request. The job needs `pull-requests: read`.
+  - `harness.py attest verify <statement> <bundle> --key <key> --commit <id>` has cosign check the signature, then
+    checks a policy on the statement the bundle signs: the predicate type, the commit (or `--tree`, the code) subject,
+    `result: "PASSED"`, the spec, judge and review gates on (`--require NAME=VALUE` for more), and no
+    `--allow-user-changes` unless `--accept-user-changes`. `harness.py attest policy` applies the policy alone.
+  - The predicate type is now `https://github.com/soyPeter/agentic-harness/attestation/verdicts/v1`: v0.1 (never
+    released) plus `verification.approval`. `attest` writes v1; `attest verify` and `attest policy` read both. A
+    breaking change to v1 gets a new type.
+  - Signing modes in `backbone/harness.conf`, user-only and read at the commit the push starts from:
+    `HARNESS_ATTEST_SIGNING` is `key` (the default, the secret as before), `kms` (`HARNESS_ATTEST_KMS_KEY`, a
+    `gcpkms://`, `awskms://`, `azurekms://` or `hashivault://` key, used through the job's OIDC token as
+    `HARNESS_ATTEST_KMS_IDENTITY`) or `keyless` (Sigstore's public Fulcio and Rekor, an explicit opt-in that publishes
+    the workflow's identity for good). One source at a time; a misspelt mode refuses; the key and KMS paths can't fall
+    back to keyless. `harness.py signing-check` decides, and `ci-protect --attest` states the mode.
+  - Only kms and keyless signing get GitHub's OIDC token: `attest-route` (no secrets, outside the environment) reads
+    the mode at the previous tip and starts `attest` (key, no `id-token`) or `attest-oidc` (`id-token: write`), which
+    run the same steps; the engine in each refuses the other's modes. The KMS login happens inside each step that uses
+    the KMS key, so the cloud's variables and the Vault token reach no other step, and its token and credential files
+    are deleted when the step ends.
+  - Durable storage (release assets, OCI) is deferred.
+  **Upgrading:** the `attest` job's first step now decides whether there is anything to sign with, so a project
+  without a key and without signing settings still does nothing. With kms or keyless signing, the run's signing job is
+  `attest-oidc`, not `attest`: a rule or dashboard that looks for the `attest` check by name needs both. A deploy gate
+  that checks the type by hand (`cosign verify-blob-attestation --type`) moves to `verdicts/v1`.
+- **ADR-003's follow-ups have a dated status.** Follow-ups 1 (DNS), 4 (the gate), 5 (`run` starting the sandbox),
+  8 (denial log) and 9 (thin installs) are done, each in its own entry below. Deferred, with the reason in the ADR:
+  2 (brokered credentials: a broker means TLS interception or an API relay, a trust decision of its own), 3 (pinning
+  the whole image: needs a registry and a signed publishing workflow), 6 (Orca's workers in the sandbox: Orca launches
+  them on the host, and worktrees' git metadata lies outside what the sandbox mounts) and 7 (a first isolated backend:
+  needs its own ADR, a vendor account and the egress parity checks).
+
+- **`run` on the host can bring the sandbox up itself (ADR-003 follow-up 5).** With the new user-only
+  `HARNESS_SANDBOX_START=on` (default `off`), `run` brings `.devcontainer/harness-agent/` up with the devcontainer CLI
+  before each session, has the harness inside run `doctor`, and refuses every session when either fails. Each session
+  runs in the agent's container with the agent command the sandbox defines and the harness settings your environment
+  sets; its timeout is enforced inside the container, and the runner removes the sandbox's containers after each
+  session; it refuses to start while the project's sandbox is already up. `doctor` reports an error without the
+  devcontainer CLI, `docker`
+  or the sandbox files, and `run --worktree` is refused in this mode. A dry run says it would bring the sandbox up.
+  `tests/test-sandbox-evidence.py` covers when `run` may start; `HostRun` in `tests/test-sandbox-egress.py`
+  (`HARNESS_E2E=1`) runs sessions in the real sandbox from the host, a timed-out one included.
+  - `devcontainer up` runs parts of the sandbox's definition on the host, and an agent in the sandbox can write the
+    workspace, so `run` brings up only a definition this machine trusts: the engine's own copy in thin mode, or one
+    you approved with the new `harness.py sandbox-approve` (recorded in `~/.agentic-harness/sandbox-approvals.json`).
+    A changed, added or removed file in `.devcontainer/harness-agent/` stops the run before `up`, and `doctor` says
+    so. `run` brings up a private copy of the definition (in `~/.agentic-harness/sandbox-runs/`), checked after it was
+    copied, so a change made after the check never reaches `devcontainer up`; each run's copy is its own and removed
+    afterwards, and a bind mount the copy would resolve differently, one into `~/.agentic-harness`, or a symlink in the
+    definition stops the run. The Compose project is named by the harness, and the containers are removed after every
+    session, so nothing an agent changes inside them reaches the next. After `up`, the host's own code checks, with an
+    absolute interpreter and no environment, that the agent's container isolates its sessions. Each session gets a
+    fresh `~/.claude` (a tmpfs over every named volume the agent writes to), so Claude Code's credentials must come
+    from the environment (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`); the image's root-owned managed settings
+    keep the harness's hooks on whatever a user settings file says. Only the shipped definition counts as a
+    `container`: in thin mode `run` compares its files byte for byte with the release's copy (as bytes split on `\n`,
+    not as Docker, Compose or the devcontainer CLI would read them) and allows only a `HARNESS_FIREWALL_ALLOW` host
+    list in double quotes, resource limits (`cpus`, `mem_limit`, `memswap_limit`, `pids_limit`) right after a
+    service's `build: .` line, another tag or digest of the base image's repository in the Dockerfile's
+    `ARG HARNESS_SANDBOX_IMAGE=` line, and a `workspaceFolder` under `/workspace`. Anything else, the agent command
+    `HARNESS_AGENT_CMD` included, makes it `custom`, a new isolation class below `container`: `run` brings it up once
+    you approved it, and its judge passes record `custom`, so the default gate refuses schema work there; a full
+    install's definitions are always `custom`, and so is a container no `run` marked as brought up from the shipped
+    definition (one an editor opened, say). `run` prints the class the host found in each session's sandbox. Even
+    approved, a definition that reads files outside its folder (`extends`, `include`, `env_file`, `secrets`,
+    `configs`, an outside build context) or acts on the host (`initializeCommand`, `mounts`, `runArgs` and the like in
+    `devcontainer.json`) stops the run, and a docker buildx file entitlement failure says what to do. In a full install `run` executes the
+    workspace's own `scripts/harness/`, which the sandbox can write too: use thin mode with `HARNESS_SANDBOX_START=on`. Agents can't change
+    the definition, write the approvals or run `sandbox-approve`. **Upgrading:** approve a full install's sandbox once
+    before turning `HARNESS_SANDBOX_START` on, and again after you or an update change it; in a thin project, a
+    sandbox whose agent command you changed in `docker-compose.yml` now needs your approval too, and records `custom`.
+
+- **No data leaves the sandbox in DNS queries (ADR-003 follow-up 1).** `egress.py` now also answers DNS in the
+  `egress` container: it resolves a name, over UDP or TCP, only when it is on the published allowlist (exactly, in any
+  case), and answers NXDOMAIN otherwise, logging the name in the denial log. `init-firewall.sh` redirects every DNS
+  query a process other than root makes, to any resolver, to it, drops port 53 to anywhere else, and keeps everyone but
+  root away from Docker's resolver on `127.0.0.11`. The query sent upstream for a listed name is rebuilt from the name
+  alone (lower case, a fresh id, no EDNS or other section), and a name with a label no host name has (a dot inside it,
+  a space, a control byte) gets FORMERR. DNS over HTTPS to an allowlisted host, and domain fronting through an
+  allowlisted CDN, remain possible: TLS isn't inspected. `tests/test-egress-dns.py` checks the resolver's rule through its
+  command line, with a property check; `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`) checks it in the real sandbox,
+  against other resolvers and Docker's own. **Upgrading:** rebuild the sandbox; a tool that needs a host off the
+  allowlist now fails to resolve it instead of failing to connect, so add the host to `HARNESS_FIREWALL_ALLOW`.
+
+- **The sandbox logs what it denies, and the receipt cites it (ADR-003 follow-up 8).** Every outbound packet the
+  `egress` container's rules drop is logged first (NFLOG, up to 50 a second), and the new `egress.py`, now the
+  `egress` container's main process, appends one line per packet to `/run/harness-egress/denials.jsonl` (target
+  address, port, protocol and the sending uid), which the agent mounts read-only. Each judge pass in a container records
+  `egress_denials` in its sandbox evidence (since when, how many, the ten targets denied most, the log's sha256), and
+  the receipt cites them; an `egress` container from before the log shows "not logged". A target shows only the
+  characters of a host name, address and port (`?` for any other, at most 255), so a name the agent asked for can't
+  add lines to a receipt or a pull request. Covered by
+  `tests/test-sandbox-evidence.py` and, in real containers, `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`).
+  **Upgrading:** rebuild the sandbox.
+
+- **Thin projects get the sandbox (ADR-003 follow-up 9).** `init --thin`, `pin` and `update.sh --to-thin` install
+  `.devcontainer/harness-agent/` from the pinned release. `pin` and `--to-thin` update the sandbox files nobody edited
+  and keep an edited one, writing the release's copy to `<file>.harness-new` and exiting 1, as `update.sh` does; the
+  lock records their hashes under `kept`. When the container starts, the new `thin-engine.py` fetches the release the
+  project pins (from `HARNESS_ENGINE_SOURCE`, passed in from the host, or GitHub), checks it is the pinned commit, and
+  links it into `~/.agentic-harness/plugins/`, which the agent's container names in `CLAUDE_CODE_PLUGIN_DIRS`: every
+  Claude Code session in there loads the pinned plugin, and its judge passes record the container like a full
+  install's. Run the harness there with `python3 ~/.agentic-harness/plugins/agentic-harness/plugin/launcher.py`.
+  Inside the image, `doctor` reports an error (so `run` and `orca` refuse) when a thin project's sessions wouldn't load
+  exactly the pinned plugin. `tests/test-thin-install.py` and `tests/test-thin-convert.py` cover the files and the
+  check; `ThinSandbox` in `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`) brings a thin project's sandbox up for real.
+  **Upgrading:** a thin project gets the sandbox with its next `pin`; rebuild the container after it.
+
+- **Unattended schema work needs the sandbox (ADR-003 follow-up 4).** A new user-only setting,
+  `HARNESS_SANDBOX_REQUIRE`, names the isolation class each Change-Class needs, as space-separated
+  `<class>=<isolation class>` pairs; a pair also covers the classes above it on the ladder. The default, `auto`, is
+  `schema=container` in autonomous mode and nothing in supervised mode; pairs you set apply in both. A task of such a class
+  starts only in a session whose own sandbox has that class, and finishes only when its latest judge pass recorded one:
+  `start`, `finish`, an agent's edit of `3-TASKS.md` and `verify` (pre-commit and CI, from the recorded evidence) all
+  refuse otherwise. While it is `[WIP]`, a session without that sandbox may only read: its write and exec tool calls,
+  and tools without a contract, are refused. A judge pass recorded before the evidence, an unknown isolation class or backend, and a value that
+  can't be read refuse too; the last is a doctor error. `run` skips such a task before starting a session for it
+  (exit 1), and `receipt` says what the class requires and whether the judge pass met it (`sandbox_required` in
+  `--json`). **Upgrading:** supervised projects see no change. In autonomous mode, schema work now has to start in,
+  and be judged in, `.devcontainer/harness-agent/`; a schema task judged on the host before the upgrade needs a judge
+  pass in the sandbox to finish, and the Orca coordinator's workers, which run on the host, can't do schema work. Set
+  `HARNESS_SANDBOX_REQUIRE=""` in `backbone/harness.conf` to keep the earlier behaviour, or `schema=container` to ask
+  for the sandbox in supervised mode too. `tests/test-sandbox-gate.py` drives the gate through every entry point, with a property check of
+  the ladder; `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`) starts and judges schema work in the real image and
+  finishes it on the host.
+
 - **Outward events say what ran; a Source heading and a budget word say less.** `outward` events are logged by
   post-tool-use, once the call has run, with `result` (`succeeded`, `failed`, or `unknown` where the agent CLI doesn't
   say: Codex, OpenCode's version 1 API; the OpenCode adapter now passes OpenCode's status), and cover spellings the deliverer's
@@ -141,9 +460,9 @@ signing key outside agent environments. Existing projects upgrade through their 
   criterion's result and the judge's verdict are now enumerations (`Harness.Result`, `Harness.Verdict`) instead of
   strings, so ALM tools can filter on them. `harness.py trace link <matrix-url> [--task ID]` prints the comment that
   links a matrix and names its commit; the deliverer adds it to the pull request's body once CI passes, and
-  `linear receipt <task> --matrix <url>` adds it to the ticket's receipt comment. With the ADR-005 attest key, the push
-  job also writes the `.reqifz` with the engine the push starts from, signs it with the same key (`cosign sign-blob`)
-  and uploads it as `harness-traceability-signed`.
+  `linear receipt <task> --matrix <url>` adds it to the ticket's receipt comment. When ADR-005 signing is set up, the
+  push job also writes the `.reqifz` with the engine the push starts from, signs it with the attestation's signer (the
+  key, the KMS key or keyless; `cosign sign-blob`) and uploads it as `harness-traceability-signed`.
   **Upgrading:** a ReqIF import mapping that read `Harness.Result` or `Harness.Verdict` as text now gets enumerations
   with the same names and values.
 

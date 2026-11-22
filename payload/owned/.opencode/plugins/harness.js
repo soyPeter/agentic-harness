@@ -46,7 +46,7 @@ function translate(tool, input) {
 
 function hook(root, event, payload) {
   const script = existsSync(join(root, SCRIPT)) ? join(root, SCRIPT) : LAUNCHER;
-  return spawnSync("python3", [script, "hook", event, "--from", "opencode"],
+  return spawnSync("python3", ["-I", script, "hook", event, "--from", "opencode"],
     { input: JSON.stringify(payload), encoding: "utf8", cwd: root, timeout: event === "subagent-stop" ? 1200000 : 30000 });
 }
 

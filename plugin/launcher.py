@@ -176,7 +176,7 @@ def main(argv):
         if not installer.is_file():
             sys.stderr.write("Agentic harness: thin-mode installer is missing from the plugin.\n")
             return 2
-        return subprocess.run([sys.executable, str(installer)] + args).returncode
+        return subprocess.run([sys.executable, "-I", str(installer)] + args).returncode
     event = args[1] if len(args) >= 2 and args[0] == "hook" else None
     if event == "machine-guard":
         return machine_guard(args[args.index("--from") + 1] if "--from" in args[:-1] else "claude")
@@ -188,7 +188,7 @@ def main(argv):
         if event and event not in ("agent-guard", "grill-stop", "judge-stop", "tester-stop", "debug-stop",
                                    "review-stop", "deliver-stop"):
             return 0
-        os.execv(sys.executable, [sys.executable, str(vendored)] + args)
+        os.execv(sys.executable, [sys.executable, "-I", str(vendored)] + args)
     try:
         lock = read_lock(root)
     except EngineUnavailable as exc:
@@ -204,7 +204,7 @@ def main(argv):
         return refuse(event, str(exc))
     env = dict(os.environ, HARNESS_ROOT=str(root), HARNESS_ENGINES=str(engines_dir()),
                HARNESS_PLUGIN_ROOT=str(Path(__file__).resolve().parents[1]))
-    os.execve(sys.executable, [sys.executable, str(script)] + args, env)
+    os.execve(sys.executable, [sys.executable, "-I", str(script)] + args, env)
 
 
 if __name__ == "__main__":
