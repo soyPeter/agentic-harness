@@ -15,7 +15,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "plugin/launcher.py"
-RELEASE_FILES = ("VERSION", "payload", "plugin", "tools/thin.py", ".claude-plugin", ".codex-plugin", "package.json")
+RELEASE_FILES = ("VERSION", "payload", "plugin", "tools/thin.py", "tools/installer.py", ".claude-plugin", ".codex-plugin", "package.json")
 
 SPEC = """# Spec 2.1: Customer search
 
