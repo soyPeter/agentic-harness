@@ -77,6 +77,7 @@ print("Judged.\n\n```json\n" + json.dumps(body, indent=2) + "\n```")' "$@"
 # The last section reports them in this order. Each line: tests/test-<file>.py|the check's name.
 PY_TESTS="change-class|the class table through risk, approve, next, start, finish and receipt (properties need hypothesis)
 deliverer-gate|the deliverer's gate: every way of running a command, and its properties (with hypothesis)
+brace-expansion|the shell gate reads brace expansions as the shell makes them (properties need hypothesis)
 thin-convert|update.sh --to-thin and --to-full, there and back (ADR-001)
 attest|attest: the verdict statement harness-verify signs, and its bytes (ADR-005)
 impact-invalidation|impact invalidation: a spec change stales its verdicts, receipt and approval (ADR-007; properties need hypothesis)

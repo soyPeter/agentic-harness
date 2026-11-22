@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- **The shell gate reads brace expansion (security fix).** bash and zsh make words of an unquoted `{a,b}` or `{1..3}`
+  before a command runs, and the gate read one word: `{rm,-rf,backbone/}` (bash), `rm -rf back{bone,}/`,
+  `cp evil {x,backbone/tools.conf}`, `echo x > ~/.cla{ude,x}/settings.json` and `git push --{mirror,x}` got through.
+  Every gate now reads a command as the shell expands it, in command position, arguments and redirection targets (zsh
+  writes each of them), nested, with quotes and escapes, in `sh -c`, `eval`, subshells, functions, loops, pass-through
+  runners and heredocs a shell reads; the git, gh, engine, nested-session and `@bash` rule checks too. Quoted or
+  escaped braces, `{}`, `{x}`, `${var}`, `{ ...; }`, `HEAD@{1}` and JSON in quotes stay text. A command may expand to
+  10,000 words and 1 MB of text, 64 groups deep; past that, or where bash and zsh read the braces differently
+  (`x{},a,b}`, `{%..+}`), the command is refused unless its program only prints or reads (`echo`, `ls`, `cat`,
+  `grep`...), and so is a write to such a path. Under external delivery a variable's braces that `eval` or `sh -c`
+  would expand are refused too, and an `outward` event now names a push spelled with braces.
+
+- **More archive extraction into the home folder is covered.** `pax -r` and `pax -rw` with `-s` or `-i` (they rename
+  what they write, also to absolute and `../` names) or `--insecure` are refused, and `pax -rw ... ~ -E 3` names its
+  destination. The applets of `busybox.static`, `busybox-static` and `toybox` are read as `busybox`'s are.
+
 ## 0.31.0 (2026-11-22)
 
 This release includes the harness-side prerequisites for factory integration: contract v1, provenance intake,

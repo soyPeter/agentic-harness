@@ -63,6 +63,7 @@ import fnmatch
 import glob
 import hashlib
 import hmac
+import itertools
 import json
 import math
 import os
@@ -1428,6 +1429,7 @@ RUNNERS = tuple(RUNNER_OPTIONS)
 # The options whose value is a command line the runner hands to a shell (watch hands it all of its command's words).
 RUNNER_LINES = {"env": ("-S", "--split-string"), "script": ("-c", "--command"), "flock": ("-c", "--command"),
                 "su": ("-c", "--command", "--session-command")}
+MULTI_CALL = ("busybox", "busybox.static", "busybox-static", "toybox")
 MUTATORS = ("rm", "rmdir", "unlink", "mv", "chmod", "chown", "truncate", "tee", "touch")
 # Not <<<, a here-string: the lines after it are commands, not a body.
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
@@ -1579,14 +1581,9 @@ def operators_apart(segment):
 REDIRECTION_WORD = re.compile(r"[0-9]*(?:%s)" % "|".join(re.escape(op) for op in REDIRECT_OPERATORS))
 
 
-def redirections_removed(segment):
-    """segment without its redirections, operator and target, as the program gets its arguments: gh pr view 7 2>&1 >out
-    is gh pr view 7. operators_apart sets each unquoted operator apart, so a word that is all operator is one; a
-    quoted or escaped < or > is part of a word and stays. The text is cut into words at the same quotes and
-    expansions, and joined from slices: a long segment stays linear."""
-    text = operators_apart(segment)
-    if "<" not in text and ">" not in text:
-        return segment
+def raw_words(text):
+    """The words of operators_apart's text as they are written, quotes included: cut at the same quotes and expansions,
+    and sliced, so a long segment stays linear."""
     words, start, quote, i = [], None, None, 0
     while i < len(text):
         ch, end = text[i], i + 1
@@ -1616,8 +1613,18 @@ def redirections_removed(segment):
         start, i = (i if start is None else start), end
     if start is not None:
         words.append(text[start:])
+    return words
+
+
+def redirections_removed(segment):
+    """segment without its redirections, operator and target, as the program gets its arguments: gh pr view 7 2>&1 >out
+    is gh pr view 7. operators_apart sets each unquoted operator apart, so a word that is all operator is one; a
+    quoted or escaped < or > is part of a word and stays."""
+    text = operators_apart(segment)
+    if "<" not in text and ">" not in text:
+        return segment
     kept, target = [], False
-    for word in words:
+    for word in raw_words(text):
         if target:
             # 2>&1>out: operators_apart leaves 1> as one word, the target and the next operator.
             target = bool(REDIRECTION_WORD.fullmatch(word))
@@ -1626,6 +1633,235 @@ def redirections_removed(segment):
         else:
             kept.append(word)
     return " ".join(kept)
+
+
+# Brace expansion. What one command may expand to: words, characters of text, and nested groups in a word. VALUES is
+# how many times a command's checks may read a word as another value of its loop's or function's list.
+BRACE_WORDS, BRACE_TEXT, BRACE_DEPTH, BRACE_EVENTS, BRACE_VALUES = 10000, 1000000, 64, 100000, 100000
+# What stands in for a word the hooks don't expand, put before its first brace so that the text around it is still
+# checked. Both read as expansions the hooks can't resolve. The first is past a limit, or a word that bash, zsh and
+# their versions expand differently; the second depends on a variable in some shells (zsh expands {$a..$b}, and reads
+# $X{a,b} as ${X}a and ${X}b where bash reads $Xa and $Xb).
+UNEXPANDED = "$(braces)"
+VARIABLE_BRACES = "$(braces-var)"
+BRACES_REFUSAL = ("%s has a brace expansion the hooks don't expand: it makes too many words (%d a command), nests too "
+                  "deep, or shells read it differently. Write the words out, or loop over fewer.")
+BRACE_EVENT = re.compile(r"[\\'\"`$<>{},]|\.\.")
+BRACE_INTEGERS = re.compile(r"(-?\d{1,18})\.\.(-?\d{1,18})(?:\.\.(-?\d{1,18}))?")
+BRACE_LETTERS = re.compile(r"([A-Za-z])\.\.([A-Za-z])")
+BRACE_ODD = re.compile(r".\.\..|[+-]?\d+\.\.[+-]?\d+(?:\.\.[+-]?\d+)?|[A-Za-z]\.\.[A-Za-z]\.\.[+-]?\d+", re.S)
+JOIN = "\x02"
+JOINED_VARIABLE = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*\x02+[A-Za-z0-9_\[]")
+# What is left of the limits; values None: nothing was expanded.
+BRACES = {"words": BRACE_WORDS, "text": BRACE_TEXT, "values": None}
+
+
+def reset_braces():
+    BRACES.update(words=BRACE_WORDS, text=BRACE_TEXT, values=None)
+
+
+def values_left(count):
+    """Whether the checks may read a word as count values of lists. A command without a brace expansion may always:
+    its lists are written out in it."""
+    if BRACES["values"] is None:
+        return True
+    BRACES["values"] -= count - 1
+    return BRACES["values"] >= 0
+
+
+def brace_events(word):
+    """[(index, text)] of the unquoted {, }, comma and .. in a raw word, or None when there are too many."""
+    events, i = [], 0
+    while True:
+        m = BRACE_EVENT.search(word, i)
+        if not m or len(events) > BRACE_EVENTS:
+            return events if not m else None
+        at, ch, i = m.start(), m.group(), m.end()
+        if ch == "\\":
+            i = at + 2
+        elif ch == "'":
+            close = word.find("'", i)
+            while word[at - 1:at] == "$" and close > 0 and word[close - 1] == "\\":   # $'it\'s'
+                close = word.find("'", close + 1)
+            i = len(word) if close < 0 else close + 1
+        elif ch == '"':
+            while i < len(word) and word[i] != '"':
+                if word.startswith("$(", i):
+                    i = closing_paren(word, i + 1)
+                elif word[i] == "`":
+                    close = word.find("`", i + 1)
+                    i = len(word) if close < 0 else close
+                i += 2 if word[i:i + 1] == "\\" else 1
+            i += 1
+        elif ch == "`":
+            close = word.find("`", i)
+            i = len(word) if close < 0 else close + 1
+        elif ch in "$<>":
+            if word.startswith("(", i):
+                i = closing_paren(word, i) + 1
+            elif ch == "$" and word.startswith("{", i):
+                i = closing_paren(word, i, "{}") + 1
+        else:
+            events.append((at, ch))
+
+
+def sequence_values(content, most):
+    """The words {content} makes when it is a sequence (1..3, a..c), None when no shell reads it as one, UNEXPANDED
+    when only some do or it makes more than most words, or VARIABLE_BRACES."""
+    m = BRACE_INTEGERS.fullmatch(content)
+    if m and int(m.group(3) or 1):
+        first, last, step = int(m.group(1)), int(m.group(2)), abs(int(m.group(3) or 1))
+        if abs(last - first) // step > most:
+            return UNEXPANDED
+        padded = any(re.match(r"-?0\d", bound) for bound in m.groups()[:2])
+        width = max(map(len, m.groups()[:2])) if padded else 0
+        return [str(n).zfill(width) for n in range(first, last + (1 if last >= first else -1),
+                                                   step if last >= first else -step)]
+    m = BRACE_LETTERS.fullmatch(content)
+    if m:
+        first, last = ord(m.group(1)), ord(m.group(2))
+        codes = range(first, last + (1 if last >= first else -1), 1 if last >= first else -1)
+        return [chr(c) if chr(c).isalnum() else "\\" + chr(c) for c in codes]
+    if re.search(r"[$`]", content):
+        return VARIABLE_BRACES
+    # A quoted bound ({'a'..c}), a bound that isn't a letter ({%..+}), a stepped letter or a sign: some shells expand it.
+    return UNEXPANDED if BRACE_ODD.fullmatch(re.sub(r"['\"\\]", "", content)) else None
+
+
+def brace_roles(word, events):
+    """{event index: "{", ",", "}" of a group that expands, or a sequence's list of words at its }}, or UNEXPANDED or
+    VARIABLE_BRACES. As bash and zsh match them: a { whose content has an unquoted comma at its own level expands, the
+    outermost first, and one with no comma, or that nothing closes, is text."""
+    roles, opened, text_group, later, left = {}, [], False, False, BRACES["words"]
+    for n, (at, ch) in enumerate(events):
+        if ch == "{":
+            if opened:
+                opened[-1]["inner"] = True
+            opened.append({"at": n, "commas": [], "dots": False, "inner": False})
+        elif ch == "}" and opened:
+            group = opened.pop()
+            if group["commas"]:
+                roles.update(dict.fromkeys(group["commas"], ","))
+                roles.update({group["at"]: "{", n: "}"})
+                continue
+            if group["dots"] and group["inner"]:
+                return UNEXPANDED
+            values = sequence_values(word[events[group["at"]][0] + 1:at], left) if not group["inner"] and (
+                group["dots"] or ".." in word[events[group["at"]][0]:at].replace("\\", "")) else None
+            if isinstance(values, str):
+                return values
+            if values is not None:
+                left -= len(values) - 1
+                roles.update({group["at"]: "{", n: values})
+            elif not opened and not (group["at"] == 0 and word.startswith("{}")):
+                text_group = True   # a {} that starts a word is text to every shell
+        elif ch == "}":
+            if later:
+                return UNEXPANDED   # bash closes a { late, zsh doesn't: x{},a,b} is x} xa xb
+        elif opened:
+            if ch == ",":
+                opened[-1]["commas"].append(n)
+            else:
+                opened[-1]["dots"] = True
+        else:
+            later = later or text_group
+    return roles
+
+
+def brace_product(items):
+    """The texts a part makes (items: text, or the list of texts a group makes), within the limits, or None."""
+    count, size = 1, 0
+    for item in items:
+        count *= len(item) if isinstance(item, list) else 1
+        if count > BRACES["words"]:
+            return None
+    for item in items:
+        size += sum(map(len, item)) * (count // len(item)) if isinstance(item, list) else len(item) * count
+    if size > BRACES["text"]:
+        return None
+    return ["".join(choice) for choice in itertools.product(*(i if isinstance(i, list) else [i] for i in items))]
+
+
+def brace_words(word):
+    """The raw words brace expansion makes of one, as bash and zsh expand it (textually, before quotes and variables
+    are read), [word] when there is nothing to expand, or UNEXPANDED or VARIABLE_BRACES."""
+    if "{" not in word or "}" not in word or ("," not in word and ".." not in word):
+        return [word]
+    events = brace_events(word)
+    roles = UNEXPANDED if events is None else brace_roles(word, events)
+    if isinstance(roles, str):
+        return roles
+    if not roles:
+        return [word]
+    join = JOIN if "$" in word else ""
+    if join and JOIN in word:
+        return UNEXPANDED
+    frames, done = [[[]]], 0
+    for n in sorted(roles):
+        at, role = events[n][0], roles[n]
+        frames[-1][-1].append(word[done:at])
+        done = at + 1
+        if role == "{":
+            frames.append([[]])
+            if len(frames) > BRACE_DEPTH:
+                return UNEXPANDED
+            continue
+        if role == ",":
+            frames[-1].append([])
+            continue
+        parts, values = frames.pop(), role
+        if role == "}":
+            values = []
+            for part in parts:
+                texts = brace_product(part)
+                if texts is None or len(values) + len(texts) > BRACES["words"]:
+                    return UNEXPANDED
+                values += texts
+        frames[-1][-1].append([join + value + join for value in values])
+    texts = brace_product(frames[0][0] + [word[done:]])
+    if texts is None:
+        return UNEXPANDED
+    if join and any(JOINED_VARIABLE.search(text) for text in texts):
+        return VARIABLE_BRACES
+    BRACES["words"] -= len(texts) - 1
+    BRACES["text"] -= sum(map(len, texts))
+    BRACES["values"] = BRACE_VALUES if BRACES["values"] is None else BRACES["values"]
+    texts = [text.replace(join, "") for text in texts] if join else texts
+    # An empty word goes; a # that starts a word here starts no comment.
+    return ["\\" + text if text.startswith("#") else text for text in texts if text]
+
+
+def braces_expanded(segment):
+    """segment with the brace expansions of its words made, as every gate reads it: {rm,-rf,x} is rm -rf x. A
+    redirection's target gives a redirection for each word (zsh writes them all; bash refuses to). An assignment
+    before the command keeps its braces; after export or declare, where bash expands it and zsh doesn't, it is
+    both. A here-document's or here-string's word stays as written."""
+    if "{" not in segment or "}" not in segment or ("," not in segment and ".." not in segment):
+        return segment
+    words, operator, leading, declares, changed = [], "", True, False, False
+    for word in raw_words(operators_apart(segment)):
+        if REDIRECTION_WORD.fullmatch(word):
+            words.append(word)
+            operator = word
+            continue
+        texts = [word]
+        assigns = (leading or declares) and ASSIGNED.match(word)
+        if "<<" not in operator and not (assigns and not declares):
+            texts = brace_words(word)
+        if isinstance(texts, str):
+            at = word.index("{")
+            texts = [word[:at] + texts + word[at:]]
+        if operator:
+            words.append((" %s " % operator).join(texts or [word]))
+        else:
+            words += texts
+            words += [word] if assigns and texts != [word] else []
+            # A keyword, a group's { or (, a function's head or a case pattern starts a command: what follows can assign.
+            leading = bool((leading and (assigns or not texts)) or word in SHELL_KEYWORDS or word in ("()", "time")
+                           or word.endswith((")", "(", "{")))
+            declares = word in DECLARATIONS or (declares and not leading)
+        operator, changed = "", changed or texts != [word]
+    return " ".join(words) if changed else segment
 
 
 # shlex builds a word one character at a time, in time quadratic in its length, past the hook's budget on a long one.
@@ -1713,7 +1949,7 @@ def unwrapped(words):
             assignments.append(words[0])
             words = words[1:]
             continue
-        if program(words) == "busybox" and len(words) > 1:
+        if program(words) in MULTI_CALL and len(words) > 1:
             # busybox runs the applet its first operand names: busybox sh f is sh f.
             words = words[1:]
             continue
@@ -1896,6 +2132,8 @@ def shell_path(path, cwd, env=None):
         for text in variants:
             if not pattern.search(text) or value is None:
                 expanded.append(text)
+            elif not values_left(len(value) if isinstance(value, list) else 1):
+                return [os.path.join(here, path)], True
             else:
                 expanded.extend(pattern.sub(lambda _: item, text) for item in (value if isinstance(value, list)
                                                                                 else [value]))
@@ -1946,9 +2184,16 @@ def note_shell_state(segment, env):
         return True
     declared = words[1:] if words[0] in DECLARATIONS else words
     if all(ASSIGNED.match(w) for w in declared):
+        given, before = {}, {}
         for word in declared:
             name, append, value = ASSIGNED.match(word).groups()
-            env[name] = None if append else assigned_value(value, env)
+            if words[0] in DECLARATIONS:
+                env[name] = before.setdefault(name, env.get(name))   # the shell expands every word before it sets one
+            given.setdefault(name, []).append(None if append else assigned_value(value, env))
+            env[name] = given[name][-1]
+        if words[0] in DECLARATIONS:
+            # export X={a,b} sets X to b in bash and to {a,b} in zsh (braces_expanded writes both).
+            env.update((name, None if None in values else values) for name, values in given.items() if len(values) > 1)
         return True
     if words[0] in DECLARATIONS:
         for word in words[1:]:
@@ -1992,7 +2237,10 @@ def resolved_texts(text, env):
             items = [" ".join(value)] if name in ("@", "*") else value
         else:
             items = [value]
-        if any(item is None or re.search(r"[$`]", item) for item in items) or len(texts) * len(items) > 64:
+        count = len(texts) * len(items)
+        # Each text is checked as a command, which costs more than reading a path.
+        most = 64 if BRACES["values"] is None or not values_left(20 * count) else BRACE_WORDS
+        if any(item is None or re.search(r"[$`]", item) for item in items) or count > most:
             return None
         texts = [t[:m.start()] + item + t[m.end():] for t in texts for item in items]
     return texts
@@ -2537,7 +2785,7 @@ EXTRACTORS = {
                                "--message", "--rsh-command")),
              dict(valued="CEFfHIOR", abbreviations=True, long_flags=("--extract", "--pass-through", "--insecure"),
                   long_valued=("--file", "--format", "--owner", "--passphrase"))],
-    "pax": [dict(valued="bfopsxBGTU")],
+    "pax": [dict(valued="bfopsxBEGTU")],
     "jar": [dict(valued="fmeC", old_style=True, long_flags=("--extract",),
                  long_valued=("--file", "--dir", "--manifest", "--main-class", "--module-version", "--release"))],
 }
@@ -2603,6 +2851,8 @@ def extraction_folders(prog, words, assignments=(), env=None):
                                                                              "--pass-through"} else []
         elif prog == "pax" and "-r" in given:
             found += operands[-1:] if "-w" in given else ["."]
+            # -s and -i rename members, also to an absolute or ../ name: pax -rw writes it wherever it says.
+            found += [ROOT_EXTRACTION] if given & {"-s", "-i", "--insecure"} else []
     if prog in ("7z", "7za", "7zz", "7zr"):
         # 7-Zip's switches are case-blind and take their value attached: -o<folder>.
         switches = [w for w in words[1:] if w.startswith("-")]
@@ -3396,6 +3646,8 @@ def segment_findings(found, segment, op, words, index, segments, cwd, dirs, dept
     """Adds to found the problems with one command of a segment (words, its command word expanded); returns the
     directory the commands after it run in."""
     prog = program(words)
+    if prog not in TEXT_PROGRAMS + CONFIG_READERS and any(UNEXPANDED in w for w in words):
+        found.append(BRACES_REFUSAL % (prog, BRACE_WORDS))
     if prog in ("cd", "pushd"):
         target = next((w for w in words[1:] if not w.startswith("-")), os.path.expanduser("~"))
         fulls, unresolved = shell_path(target, cwd, env)
@@ -3495,31 +3747,44 @@ def shell_findings(command, cwd=None, depth=0, env=None, functions=None):
     """Blocking problems with a shell command, beyond the @bash guardrail rules. env and functions are the variables
     and functions the shell running it has (a function's call passes its own)."""
     found = []
+    if depth == 0:
+        reset_braces()
     command, bodies = split_heredocs(command)
     functions = dict(functions or {}, **function_bodies(command))
     if depth < 3:
         for inner in scan_expansions(command)[0]:
             found.extend(shell_findings(inner, cwd, depth + 1, functions=functions))
-    segments = split_segments(command)
+    written = split_segments(command)
+    segments = [(braces_expanded(segment), op) for segment, op in written]
     env, dirs = dict(env or {}), []   # what the command itself assigns, and pushd's stack
     for index, (segment, op) in enumerate(segments):
-        assignments, words = shell_words(segment)
-        for assignment in assignments:
-            if SETTING_ASSIGNMENT.match(assignment):
-                found.append("Setting %s from the shell overrides a harness setting or skips a check; only the user "
-                             "may do that, in their own terminal." % assignment.split("=", 1)[0])
-        if note_shell_state(segment, env) or not words:
-            continue
-        # A command named by a variable the command set, such as "$@" in a function's body, is that command.
-        variants = command_variants(words, env)
-        if variants is None:
-            found.append(HIDDEN_COMMAND_REFUSAL % words[0])
-            continue
-        for words in filter(None, variants):
-            cwd = segment_findings(found, segment, op, words, index, segments, cwd, dirs, depth, env, functions,
-                                   assignments)
+        readings = [(segment, env, dirs)]
+        if segment != written[index][0]:
+            # A shell without brace expansion (dash, as sh) runs the words as written; nothing carries over from it.
+            readings.insert(0, (written[index][0], dict(env), list(dirs)))
+        here = cwd
+        for segment, state, stack in readings:
+            here = cwd
+            assignments, words = shell_words(segment)
+            for assignment in assignments:
+                if SETTING_ASSIGNMENT.match(assignment):
+                    found.append("Setting %s from the shell overrides a harness setting or skips a check; only the "
+                                 "user may do that, in their own terminal." % assignment.split("=", 1)[0])
+            if UNEXPANDED in segment and command_words(shell_split(segment))[:1] in [[d] for d in DECLARATIONS]:
+                found.append(BRACES_REFUSAL % ("a declaration", BRACE_WORDS))   # export HARNESS_{VERIFY,...}=off
+            if note_shell_state(segment, state) or not words:
+                continue
+            # A command named by a variable the command set, such as "$@" in a function's body, is that command.
+            variants = command_variants(words, state)
+            if variants is None:
+                found.append(HIDDEN_COMMAND_REFUSAL % words[0])
+                continue
+            for words in filter(None, variants):
+                here = segment_findings(found, segment, op, words, index, segments, here, stack, depth, state,
+                                        functions, assignments)
+        cwd = here
     for opening, body in bodies:
-        _, words = shell_words(split_segments(opening)[0][0] if split_segments(opening) else "")
+        _, words = shell_words(braces_expanded(split_segments(opening)[0][0]) if split_segments(opening) else "")
         prog = program(words)
         if prog in SHELLS and depth < 3:
             found.extend(shell_findings(body, cwd, depth + 1))
@@ -3536,13 +3801,18 @@ def rule_text(command):
     stripped, bodies = split_heredocs(command)
     executed = [body for opening, body in bodies
                 if any(re.search(r"\b%s\b" % re.escape(p), opening) for p in SQL_CLIENTS + SHELLS + INTERPRETERS)]
-    parts = []
-    for segment, op in split_segments(stripped):
-        _, words = shell_words(segment)
-        if git_subcommand(words) in ("commit", "tag"):
-            segment = COMMIT_MESSAGE.sub(lambda m: m.group(1) + "''", segment)
-        parts.append(segment + op)
-    return "".join(parts) + "".join("\n" + body for body in executed)
+    reset_braces()
+    segments, views = split_segments(stripped), []
+    expanded = [(braces_expanded(segment), op) for segment, op in segments]
+    for view in [segments] + ([expanded] if expanded != segments else []):
+        parts = []
+        for segment, op in view:
+            _, words = shell_words(segment)
+            if git_subcommand(words) in ("commit", "tag"):
+                segment = COMMIT_MESSAGE.sub(lambda m: m.group(1) + "''", segment)
+            parts.append(segment + op)
+        views.append("".join(parts))
+    return "\n".join(views + executed)
 
 
 # --------------------------------------------------------------------------- verdicts
@@ -8273,6 +8543,9 @@ def gh_calls(command, depth=0):
 
 
 def segment_calls(segment, piped, depth):
+    expanded = braces_expanded(segment)
+    if expanded != segment:
+        return [(expanded, run_words(shell_split(expanded))[0], GLOB_REFUSAL)]
     marked = shell_split_marked(segment)
     written = [word for word, _ in marked]
     words, why = run_words(written)
@@ -9437,6 +9710,8 @@ def git_word_lists(words, env):
     lists, unresolved = [[]], False
     for i, word in enumerate(words):
         texts = resolved_texts(word, env) if re.search(r"[$`]", word) else [word]
+        if texts not in (None, [word]) and any(brace_words(text) != [text] for text in texts):
+            texts = None   # eval and sh -c expand the braces in a variable's value
         if texts is None:
             if i <= at and words[i - 1:i] not in [[o] for o in GIT_VALUE_OPTIONS]:
                 return None, True
