@@ -53,6 +53,7 @@ class ThinInstall(unittest.TestCase):
         shutil.copytree(ROOT / "plugin", self.source / "plugin")
         (self.source / "tools").mkdir()
         shutil.copy2(ROOT / "tools/thin.py", self.source / "tools/thin.py")
+        shutil.copy2(ROOT / "tools/installer.py", self.source / "tools/installer.py")
         shutil.copytree(ROOT / ".claude-plugin", self.source / ".claude-plugin")
         shutil.copytree(ROOT / ".codex-plugin", self.source / ".codex-plugin")
         shutil.copy2(ROOT / "package.json", self.source / "package.json")
@@ -493,7 +494,7 @@ console.log(JSON.stringify(texts));
         return compose
 
     def test_init_installs_the_sandbox_of_the_pinned_release(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
 
         release = self.work / "cache/0.30.0/payload/owned" / SANDBOX
         kept = json.loads((self.project / "backbone/.harness-lock.json").read_text())["kept"]
@@ -506,11 +507,11 @@ console.log(JSON.stringify(texts));
         self.assertTrue((self.project / SANDBOX / "thin-engine.py").is_file())
 
     def test_pin_updates_the_sandbox_files_nobody_edited_and_keeps_an_edited_one(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         compose = self.edit_allowlist()
         release = self.release_sandbox("0.30.2", changed=("Dockerfile", "docker-compose.yml"))
 
-        result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "pin", "0.30.2", check=False)
+        result = self.run_at(self.project, "python3", "-B", str(self.launcher), "pin", "0.30.2", check=False)
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual((self.project / SANDBOX / "Dockerfile").read_bytes(), (release / "Dockerfile").read_bytes())
@@ -522,30 +523,30 @@ console.log(JSON.stringify(texts));
         self.assertEqual(json.loads((self.project / "backbone/.harness-lock.json").read_text())["version"], "0.30.2")
 
     def test_pin_keeps_an_edited_sandbox_file_the_release_did_not_change(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         compose = self.edit_allowlist()
 
-        result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "pin", "0.30.1")
+        result = self.run_at(self.project, "python3", "-B", str(self.launcher), "pin", "0.30.1")
 
         self.assertIn('HARNESS_FIREWALL_ALLOW: "pypi.org"', compose.read_text())
         self.assertFalse((self.project / SANDBOX / "docker-compose.yml.harness-new").exists())
         self.assertNotIn("CONFLICT", result.stdout)
 
     def test_pin_adds_the_sandbox_to_a_project_pinned_before_thin_mode_had_it(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         shutil.rmtree(str(self.project / ".devcontainer"))
         lock_path = self.project / "backbone/.harness-lock.json"
         lock = json.loads(lock_path.read_text())
         lock["kept"] = {name: digest for name, digest in lock["kept"].items() if not name.startswith(SANDBOX)}
         lock_path.write_text(json.dumps(lock, indent=2) + "\n")
 
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "pin", "0.30.1")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "pin", "0.30.1")
 
         self.assertTrue((self.project / SANDBOX / "docker-compose.yml").is_file())
         self.assertIn(SANDBOX + "/docker-compose.yml", json.loads(lock_path.read_text())["kept"])
 
     def test_doctor_in_the_sandbox_needs_claude_code_to_load_the_pinned_plugin(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         image = dict(self.env, HARNESS_SANDBOX_IMAGE="node@sha256:" + "a" * 64)
         image.pop("CLAUDE_CODE_PLUGIN_DIRS", None)
         pinned, other, empty = self.work / "plugins", self.work / "other-plugins", self.work / "no-plugins"
@@ -558,7 +559,7 @@ console.log(JSON.stringify(texts));
             env = dict(image if inside else self.env)
             if plugin_dirs is not None:
                 env["CLAUDE_CODE_PLUGIN_DIRS"] = plugin_dirs
-            result = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "doctor", env=env, check=False)
+            result = self.run_at(self.project, "python3", "-B", str(self.launcher), "doctor", env=env, check=False)
             return result.stdout + result.stderr
 
         missing = "Claude Code sessions in this sandbox would not load the agentic-harness plugin v0.30.0"
@@ -576,7 +577,7 @@ console.log(JSON.stringify(texts));
         self.assertNotIn("Traceback", doctor("%s:%s" % (unreadable, pinned)))
 
     def test_run_trusts_the_pinned_releases_own_sandbox_its_allowed_edits_and_an_approved_one(self):
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         stubs = self.work / "stubs"
         stubs.mkdir()
         for name in ("devcontainer", "docker"):
@@ -586,7 +587,7 @@ console.log(JSON.stringify(texts));
                    HOME=str(self.work / "home"))
 
         def doctor():
-            return self.run_at(self.project, "python3", "-B", str(LAUNCHER), "doctor", env=env, check=False).stdout
+            return self.run_at(self.project, "python3", "-B", str(self.launcher), "doctor", env=env, check=False).stdout
 
         as_released = doctor()
         self.edit_allowlist()
@@ -594,7 +595,7 @@ console.log(JSON.stringify(texts));
         dockerfile = self.project / SANDBOX / "Dockerfile"
         dockerfile.write_text(dockerfile.read_text() + "RUN true\n")
         edited = doctor()
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "sandbox-approve", env=env)
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "sandbox-approve", env=env)
         approved = doctor()
 
         self.assertNotIn("sandbox-approve", as_released)
@@ -606,7 +607,7 @@ console.log(JSON.stringify(texts));
         """The release's own definition, byte for byte, with only the allowlist, resource limits, the base image's tag
         or digest and a workspace subfolder changed, is the sandbox a judge pass may call a container; anything else
         is custom, which runs once approved but records isolation_class custom."""
-        self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         folder = self.project / SANDBOX
         compose, config, dockerfile = (folder / "docker-compose.yml", folder / "devcontainer.json",
                                        folder / "Dockerfile")
@@ -656,14 +657,14 @@ console.log(JSON.stringify(texts));
                 if old is not None:
                     self.assertIn(old.encode(), kept)
                     path.write_bytes(kept.replace(old.encode(), new.encode(), 1))
-                approved = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "sandbox-approve",
+                approved = self.run_at(self.project, "python3", "-B", str(self.launcher), "sandbox-approve",
                                        env=dict(self.env, HOME=str(self.work / "home")))
 
                 self.assertIn("definition: %s" % expected, approved.stdout)
             path.write_bytes(kept)
         extra = folder / "notes.txt"
         extra.write_text("an extra file\n")
-        approved = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "sandbox-approve",
+        approved = self.run_at(self.project, "python3", "-B", str(self.launcher), "sandbox-approve",
                                env=dict(self.env, HOME=str(self.work / "home")))
         self.assertIn("definition: custom", approved.stdout)
         self.assertIn("notes.txt", approved.stdout)
@@ -674,7 +675,7 @@ console.log(JSON.stringify(texts));
                change=st.sampled_from(("replace", "insert", "delete")))
         def test_any_byte_changed_outside_the_allowed_values_makes_the_definition_custom(self, data, name, change):
             if not (self.project / SANDBOX).is_dir():
-                self.run_at(self.project, "python3", "-B", str(LAUNCHER), "init", "--thin")
+                self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
             path = self.project / SANDBOX / name
             shipped = path.read_bytes()
             prefix = ALLOWED_VALUE_AFTER.get(name)
@@ -689,7 +690,7 @@ console.log(JSON.stringify(texts));
                        "delete": shipped[:at] + shipped[at + 1:]}[change]
             path.write_bytes(changed)
             try:
-                approved = self.run_at(self.project, "python3", "-B", str(LAUNCHER), "sandbox-approve",
+                approved = self.run_at(self.project, "python3", "-B", str(self.launcher), "sandbox-approve",
                                        env=dict(self.env, HOME=str(self.work / "home")), check=False)
             finally:
                 path.write_bytes(shipped)
