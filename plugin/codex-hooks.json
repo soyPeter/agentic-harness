@@ -1,23 +1,23 @@
 {
   "hooks": {
     "SessionStart": [
-      {"hooks": [{"type": "command", "command": "python3 \"${PLUGIN_ROOT}/plugin/launcher.py\" hook session-start --from codex", "timeout": 15}]}
+      {"hooks": [{"type": "command", "command": "python3 -I \"${PLUGIN_ROOT}/plugin/launcher.py\" hook session-start --from codex", "timeout": 15}]}
     ],
     "SubagentStart": [
-      {"hooks": [{"type": "command", "command": "python3 \"${PLUGIN_ROOT}/plugin/launcher.py\" hook subagent-start --from codex", "timeout": 15}]}
+      {"hooks": [{"type": "command", "command": "python3 -I \"${PLUGIN_ROOT}/plugin/launcher.py\" hook subagent-start --from codex", "timeout": 15}]}
     ],
     "PreToolUse": [
-      {"matcher": "Bash|apply_patch|mcp__.*", "hooks": [{"type": "command", "command": "python3 \"${PLUGIN_ROOT}/plugin/launcher.py\" hook pre-tool-use --from codex", "timeout": 30}]},
-      {"matcher": "apply_patch|Bash", "hooks": [{"type": "command", "command": "python3 \"${PLUGIN_ROOT}/plugin/launcher.py\" hook machine-guard --from codex", "timeout": 10}]}
+      {"matcher": "Bash|apply_patch|mcp__.*", "hooks": [{"type": "command", "command": "python3 -I \"${PLUGIN_ROOT}/plugin/launcher.py\" hook pre-tool-use --from codex", "timeout": 30}]},
+      {"matcher": "apply_patch|Bash", "hooks": [{"type": "command", "command": "python3 -I \"${PLUGIN_ROOT}/plugin/launcher.py\" hook machine-guard --from codex", "timeout": 10}]}
     ],
     "PostToolUse": [
-      {"matcher": "Bash|apply_patch|mcp__.*", "hooks": [{"type": "command", "command": "python3 \"${PLUGIN_ROOT}/plugin/launcher.py\" hook post-tool-use --from codex", "timeout": 30}]}
+      {"matcher": "Bash|apply_patch|mcp__.*", "hooks": [{"type": "command", "command": "python3 -I \"${PLUGIN_ROOT}/plugin/launcher.py\" hook post-tool-use --from codex", "timeout": 30}]}
     ],
     "SubagentStop": [
-      {"matcher": "griller|judge|tester|debugger|reviewer|deliverer", "hooks": [{"type": "command", "command": "python3 \"${PLUGIN_ROOT}/plugin/launcher.py\" hook subagent-stop --from codex", "timeout": 1200}]}
+      {"matcher": "griller|judge|tester|debugger|reviewer|deliverer", "hooks": [{"type": "command", "command": "python3 -I \"${PLUGIN_ROOT}/plugin/launcher.py\" hook subagent-stop --from codex", "timeout": 1200}]}
     ],
     "Stop": [
-      {"hooks": [{"type": "command", "command": "python3 \"${PLUGIN_ROOT}/plugin/launcher.py\" hook stop --from codex", "timeout": 1200}]}
+      {"hooks": [{"type": "command", "command": "python3 -I \"${PLUGIN_ROOT}/plugin/launcher.py\" hook stop --from codex", "timeout": 1200}]}
     ]
   }
 }

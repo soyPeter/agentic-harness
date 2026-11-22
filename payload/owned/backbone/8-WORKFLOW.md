@@ -30,21 +30,21 @@ Check the state at any time with `python3 scripts/harness/lib/harness.py spec-ch
 
 ### Phase 3: Judge
 
-10. **Judge:** "Judge task `<id>`." Its verdict is recorded in `backbone/.verdicts/<id>.judge.json`. On a fail:
+10. **Judge:** "Judge task `<id>`." Give it an unsteered brief: the spec, the git range of the change, and how the product is used. Leave earlier findings and any request for approval out of it. Its verdict is recorded in `backbone/.verdicts/<id>.judge.json`. Treat a short or unread review as a failed round. The recorder does not yet enforce this, so the orchestrator checks it. If the named judge is out of usage, run the same round with another installed model family. The launcher does not yet do this itself. On a fail:
     - **Debugger** (`HARNESS_DEBUGGER`, default `on`): "Diagnose the judge's failure of task `<id>`." It reproduces the failure, finds the root causes and writes a fix brief (`backbone/.verdicts/<id>.debug.json`), without changing anything. Each cause names its owner: the implementer (code), the tester (an acceptance test contradicts the spec), the analyst (the spec) or the user.
-    - Give the brief to whoever owns each cause, usually the implementer, then judge again.
+    - Confirm each finding against the code before giving the brief to whoever owns each cause, usually the implementer, then judge again. Record disproved findings next to confirmed ones.
     - After `HARNESS_JUDGE_MAX_ROUNDS` fails, stop and take the findings and the brief to the user.
-11. **Reviewers** (`HARNESS_REVIEW`, default `on`): after the judge passes, start one reviewer per lens that `next` lists (`correctness`, `structure`, `lean`), all at once: "Review task `<id>` through the `<lens>` lens." Each records its own verdict. A must-fix finding goes to the implementer, then the judge and the lenses again; a lens that passed on the current code is not rerun.
+11. **Reviewers** (`HARNESS_REVIEW`, default `on`): after the judge passes, start one reviewer per lens that `next` lists (`correctness`, `structure`, `lean`), all at once: "Review task `<id>` through the `<lens>` lens." Each records its own verdict. Confirm a must-fix finding against the code before it goes to the implementer, then the judge and the lenses again; a lens that passed on the current code is not rerun. Record disproved findings next to confirmed ones. Treat a short or unread review as a failed round, as for the judge.
 
 ### Phase 4: Record and finish
 
 12. **Scribe:** "Record task `<id>`." It adds memory entries and ADRs for emergent decisions.
-13. **Finish:** change the task line to `[x]`. The judge gate requires a judge pass and a pass from every review lens on the current code. Then commit the code, tests, spec, ADRs, verdicts and backbone updates together.
+13. **Finish:** change the task line to `[x]`. The judge gate requires a judge pass and a pass from every review lens on the current code and spec, and the start gate's checks hold again: a spec that changed during the build was grilled and approved again. Then commit the code, tests, spec, ADRs, verdicts and backbone updates together.
 14. **Report** to the user with the task's change receipt: `python3 scripts/harness/lib/harness.py receipt <id>`. The harness builds it from the spec, the verdicts and the diff, not from what the agents said: what changed, each AC with the tests that prove it, what is **not** verified (NFRs no AC covers, findings left open), the ADRs and assumptions, the risks, and what still needs the user's decision. Add anything skipped that it can't know.
 
 ### Phase 5: Deliver
 
-15. **Deliverer** (`HARNESS_DELIVER`, default `on`): once the task is committed, `next` returns `deliver`. "Deliver this branch." It pushes the branch, opens or updates the PR with the receipts and the reviews' follow-ups, labels it with the receipts' suggested `risk:*` and `class:*` labels for triage, and watches CI. It never edits files and never merges; merging stays with the user, and a label never approves or merges.
+15. **Deliverer** (`HARNESS_DELIVER`, default `on`): once the task is committed, `next` returns `deliver`. "Deliver this branch." It pushes the branch, opens or updates the PR with the receipts and the reviews' follow-ups, labels it with the receipts' suggested `risk:*` and `class:*` labels for triage, and watches CI. It never edits files and never merges; merging stays with the user, and a label never approves or merges. A judge pass still leaves deploy risk open. The person who merges reads the review notes and the receipt's "Not verified" list first.
     - `delivered`: the task is `done`; give the user the PR link.
     - `delivery-failed` (a red check, or a `hold`): each finding names its owner. Add a task for the fixes (the light lane suits small ones, when the user has it on) and run it through the pipeline; its delivery updates the same PR. Take `user` findings to the user.
 

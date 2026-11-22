@@ -5,7 +5,8 @@
   update.sh --to-full <target> [--force] [--force-hooks-path] [--dry-run]
 
 --to-thin deletes the vendored harness files nobody edited and keeps edited ones as <file>.harness-bak; backbone/ and
-the adopted packs' files stay, and the pin keeps the hashes the full install recorded for them ("kept"). It pins the
+the adopted packs' files stay, and the pin keeps the hashes the full install recorded for them ("kept"). The sandbox
+(.devcontainer/harness-agent/) stays too, brought to the pinned release as update.sh would. It pins the
 installed release (or --version) and adds what thin mode runs from: the pre-commit shim, core.hooksPath=.githooks and
 the plugin entries in .claude/settings.json, whose harness hooks and installed release's permission rules it takes out.
 --to-full vendors the pinned release again as update.sh would, telling edited files apart by those hashes, and takes
@@ -219,10 +220,11 @@ def to_thin(target, args):
     locked, adopted = lock.get("files", {}), lock.get("adopted", {})
     packs = pack_files(adopted)
     kept = {name: digest for name, digest in locked.items() if name.startswith("backbone/") or name in packs}
+    sandbox = {name: digest for name, digest in locked.items() if name.startswith(thin.SANDBOX + "/")}
     release_files = dict(thin.RELEASE_FILES)
     removed, backed_up = [], []
     for name, digest in sorted(locked.items()):
-        if name in kept or name in release_files or not (target / name).is_file():
+        if name in kept or name in sandbox or name in release_files or not (target / name).is_file():
             continue
         (removed if installer.file_digest(target / name) == digest else backed_up).append(name)
     if (target / VENDORED_ENGINE).is_file() and VENDORED_ENGINE not in removed + backed_up:
@@ -230,6 +232,8 @@ def to_thin(target, args):
                            "on the full install first" % (VENDORED_ENGINE, LOCK_REL))
 
     commit, release = thin.release_checkout(version)
+    sandbox_sources = thin.sandbox_sources(release)
+    kept.update(installer.sync_owned(installer.Plan(target, dry_run=True), sandbox_sources, sandbox, force=False))
     updated = installer.settings_text(thin.plugin_settings(
         installer.drop_harness_settings(settings, installed_fragment(lock, version, release)), version))
     written = []
@@ -267,8 +271,13 @@ def to_thin(target, args):
     plan.note("pin", LOCK_REL, "v%s, commit %s" % (version, commit))
     note_claude_import(plan, thin_mode=True)
     if args.dry_run:
+        installer.sync_owned(plan, sandbox_sources, sandbox, force=False)
         print_plan(plan, "Would switch %s to thin mode (dry run)" % target)
         return 0
+    # sync_owned sets the release's file mode on files whose content already matches, without going through the plan.
+    for name in sandbox:
+        if (target / name).is_file():
+            plan.save(name)
 
     def switch():
         for name in backed_up:
@@ -276,6 +285,7 @@ def to_thin(target, args):
         for name in removed:
             plan.remove(name)
         prune(target, removed + backed_up)
+        installer.sync_owned(plan, sandbox_sources, sandbox, force=False)
         for name, data in written:
             plan.write(name, data)
             if name == thin.SHIM:
@@ -289,10 +299,13 @@ def to_thin(target, args):
     carry_out(plan, switch)
     print_plan(plan, "Switched %s to thin mode: the agentic-harness plugin runs the pinned release v%s"
                % (target, version))
+    conflicts = [path for action, path, _ in plan.report if action == "CONFLICT"]
+    if conflicts:
+        print("\nResolve each conflict: merge <file>.harness-new into <file> and delete the .harness-new file.")
     print("\nNext: review the switch and commit it, for example git commit -m \"chore: switch the agentic harness to "
           "thin mode\".\n%s\nEveryone working here installs the plugin (README, \"Thin mode\"), and after a fresh "
           "clone runs git config core.hooksPath %s once." % (LABEL, THIN_HOOKS_PATH))
-    return 0
+    return 1 if conflicts else 0
 
 
 def to_full(target, args):

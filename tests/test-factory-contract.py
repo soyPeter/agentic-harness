@@ -6,6 +6,7 @@ these fields, and `contract --json` must declare at least them; a field taken ou
 declaration, fails here. The factory runtime isn't in this repository: these tests run the harness as the factory
 would, through its commands, its hooks and its event log.
 """
+import base64
 import json
 import os
 import shlex
@@ -319,7 +320,7 @@ if (api === 'v1') {
 # The commands only the user, CI, the factory or an Orca precheck runs, with the arguments they need.
 USER_ONLY = ("run --only 1.1", "linear import DIS-1 --task 9.1", "linear receipt 7.1", "intake request.json",
              "delivery-record 7.1 report.json", "snapshot", "orca --pr", "orca-nightly", "ci-judge --range a..b",
-             "ci-protect", "pin 0.31.0")
+             "ci-protect", "pin 0.31.0", "sandbox-approve")
 # Every way an agent could start the engine with one of them: {c} is the command.
 SPELLINGS = (
     "python3 scripts/harness/lib/harness.py {c}",
@@ -358,6 +359,40 @@ SPELLINGS = (
     "git -c alias.x='!python3 scripts/harness/lib/harness.py {c}' x",
     "awk 'BEGIN{{system(\"python3 scripts/harness/lib/harness.py {c}\")}}'",
     "python3 <(cat scripts/harness/lib/harness.py) {c}",
+    "python3 scripts/harness/lib/harness.py {c}>/dev/null",
+    "cd scripts/harness/lib && python3<harness.py - {c}",
+    "busybox env python3 scripts/harness/lib/harness.py {c}",
+    "X='python3 scripts/harness/lib/harness.py {c}'; sh -c \"$X\"",
+    "bash -lc 'python3 scripts/harness/lib/harness.py {c}'",
+    "timeout 5 bash -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "timeout -s KILL 5 python3 scripts/harness/lib/harness.py {c}",
+    "nice -n 5 sh -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "stdbuf -oL bash -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "caffeinate -i sh -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "sudo -u nobody -E bash -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "env -i PATH=/usr/bin sh -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "script -q /dev/null sh -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "flock /tmp/harness-test.lock -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "watch -n 1 python3 scripts/harness/lib/harness.py {c}",
+    "taskset 3 sh -c 'python3 scripts/harness/lib/harness.py {c}'",
+    "trap 'python3 scripts/harness/lib/harness.py {c}' EXIT",
+)
+# A shell or eval whose program the hooks can't read: a command substitution (here, base64 of the engine command), a
+# read variable, or a variable assigned from a substitution. {b} is the base64 of the engine command.
+HIDDEN_PROGRAMS = (
+    "sh -c \"$(echo {b} | base64 -d)\"",
+    "bash -c \"$(echo {b} | base64 --decode)\"",
+    "bash -lc \"`echo {b} | base64 -d`\"",
+    "eval \"$(echo {b} | base64 -d)\"",
+    "eval $(echo {b} | base64 -d)",
+    "X=$(echo {b} | base64 -d); sh -c \"$X\"",
+    "read X < cmd.txt; eval \"$X\"",
+    "sh -c \"$UNSET_HARNESS_TEST_VARIABLE\"",
+    "$(echo {b} | base64 -d)",
+    "`echo {b} | base64 -d`",
+    "X=$(echo {b} | base64 -d); $X",
+    "X=$(echo {b} | base64 -d); timeout 5 $X",
+    "trap \"$(echo {b} | base64 -d)\" EXIT",
 )
 # Running the engine through code the hooks don't read, or from a copy, whatever the command.
 CODE_AND_COPIES = (
@@ -379,8 +414,10 @@ STDIN_PROGRAMS = ("echo 'print(1)' | python3", "echo 'print(1)' | python3 -", "p
                   "ls *.sh | xargs -n1 bash", "git ls-files | xargs sh -c 'echo $0'", "timeout 9 python3 - < tool.py",
                   "echo ls | sh", "bash -s < cmds.txt", "awk '{system($0)}' cmds.txt", "git config alias.x '!ls'",
                   "git -c core.sshCommand=x fetch origin", "python3 <(cat tool.py)", "source <(cat tool.sh)",
-                  "env -S 'python3 - < tool.py'")
+                  "env -S 'python3 - < tool.py'", "sh<cmds.txt", "sh< cmds.txt", "bash<cmds.txt",
+                  "python3<tool.py", "env sh<cmds.txt", "(sh)<cmds.txt", "busybox sh<cmds.txt", "node<tool.js")
 LITERAL_PROGRAMS = ("python3 - <<'EOF'\nprint(1)\nEOF", "python3 - <<< 'print(1)'", "python3 tools/x.py < input.txt",
+                    "python3 tools/x.py<input.txt", "python3 tools/x.py>log", "sort<input.txt",
                     "cat data.csv | python3 tools/x.py", "python3 --version", "node --version",
                     "git ls-files '*.py' | xargs python3 -m pyflakes", "bash <<'EOF'\necho hi\nEOF",
                     "awk '{print $1}' data.txt", "git -c user.name=x log -1", "git config user.name x",
@@ -396,6 +433,21 @@ ALLOWED = ("python3 scripts/harness/lib/harness.py next 1.1 --json", "python3 -B
            "find tests -name '*.py' -exec grep -l intake {} \\;", "git ls-files '*.py' | xargs python3 -m pyflakes",
            "python3 - <<'EOF'\nprint(1)\nEOF",
            "npm run build", "make run", "docker run --rm alpine true")
+# Commands agents run every day, which no gate may refuse.
+EVERYDAY = ("for f in src/*.py; do wc -l \"$f\"; done", "while read -r f; do echo \"$f\"; done < files.txt",
+            "cd \"$(git rev-parse --show-toplevel)\" && make test",
+            "git commit -m \"$(cat <<'EOF'\nfeat: search\n\nBody.\nEOF\n)\"",
+            "git -c user.name=x commit -m x", "make test", "pytest -q tests", "npm test", "npm run lint",
+            "sed -i.bak 's/a/b/' src/app.py", "echo done | tee -a logs/run.log", "D=build; rm -rf \"$D\"",
+            "pushd src && make && popd", "sh -c 'echo $1' _ x", "bash -c \"cd $HOME && ls\"",
+            "D=src; bash -c \"cd $D && make\"", "bash -lc 'make test'", "eval \"echo hi\"",
+            "f() { echo hi; }; f", "build() { make -C src; }; build", "S=status; git $S",
+            "git log -1 --format=%H", "set -euo pipefail; make test",
+            "timeout 60 pytest", "nice make", "timeout 60 pytest -q tests", "nice -n 10 make test", "time make test",
+            "env -u PYTHONPATH pytest -q", "caffeinate -i make test", "stdbuf -oL make test 2>&1 | tee build.log",
+            "nohup make serve > serve.log 2>&1 &", "\"$(git rev-parse --show-toplevel)\"/tools/build.sh",
+            "$HOME/.local/bin/tool --version", "for t in ruff mypy; do $t src; done", "trap 'echo done' EXIT",
+            "trap - EXIT", "timeout 60 git fetch origin", "brew install node python3")
 
 
 class UserOnlyCommands(unittest.TestCase):
@@ -420,6 +472,15 @@ class UserOnlyCommands(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(self.p.bash(command, "implementer").returncode, 2)
 
+    def test_a_shell_or_eval_program_the_hooks_cant_resolve_is_refused(self):
+        for spelling in HIDDEN_PROGRAMS:
+            for command in USER_ONLY:
+                encoded = base64.b64encode(("python3 scripts/harness/lib/harness.py " + command).encode()).decode()
+                with self.subTest(command=spelling.format(b=encoded)):
+                    answer = self.p.bash(spelling.format(b=encoded), "implementer")
+
+                    self.assertEqual(answer.returncode, 2, answer.stderr)
+
     def test_a_program_from_stdin_is_refused_and_a_literal_one_allowed(self):
         for command in STDIN_PROGRAMS:
             with self.subTest(command=command):
@@ -431,7 +492,7 @@ class UserOnlyCommands(unittest.TestCase):
                 self.assertEqual(answer.returncode, 0, answer.stderr)
 
     def test_the_agents_own_commands_and_reads_of_the_engine_are_allowed(self):
-        for command in ALLOWED:
+        for command in ALLOWED + EVERYDAY:
             with self.subTest(command=command):
                 answer = self.p.bash(command, "implementer")
 
@@ -504,7 +565,23 @@ class GitDirectory(unittest.TestCase):
                 (self.p, "ls .git/harness/costs/* | xargs cp /dev/null"),
                 (self.p, 'find .git/harness -type f | while read f; do : > "$f"; done'),
                 (self.p, 'D=$(git rev-parse --git-common-dir); rm -rf "$D/harness"'),
-                (self.p, 'rm -rf "$UNSET_HARNESS_TEST_VARIABLE/harness"')):
+                (self.p, 'rm -rf "$UNSET_HARNESS_TEST_VARIABLE/harness"'),
+                (self.p, "f() { rm -rf .git/harness; }; f"), (self.p, "function f { rm -rf .git/harness; }; f"),
+                (self.p, "f(){ rm -f .git/harness/events.jsonl;}; f"), (self.p, "f () { rm -rf .git/harness; }; f"),
+                (self.p, "function f() ( rm -rf .git/harness ); f"), (self.p, "f()(rm -rf .git/harness); f"),
+                (self.p, 'f() { rm -rf "$1"; }; f .git/harness'), (self.p, 'f() { rm -rf "$@"; }; f x .git/harness'),
+                (self.p, 'f() { echo "{}" > "$1/harness/events.jsonl"; }; f .git'),
+                (self.p, 'f() { "$@"; }; f rm -rf .git/harness'), (self.p, "f() if true; then :; fi\nf"),
+                (self.p, "timeout 5 rm -rf .git/harness"), (self.p, "nice -n 5 rm -rf .git/harness"),
+                (self.p, "sudo -u nobody rm -rf .git/harness"), (self.p, "caffeinate -i rm -rf .git/harness"),
+                (self.p, "stdbuf -o0 rm -rf .git/harness"), (self.p, "timeout 5 bash -c 'rm -rf .git/harness'"),
+                (self.p, "env -u X timeout 5 rm -rf .git/harness"), (self.p, "command -p rm -rf .git/harness"),
+                (self.p, "xvfb-run -a rm -rf .git/harness"), (self.p, "flock /tmp/l rm -rf .git/harness"),
+                (self.p, "script -q /dev/null rm -rf .git/harness"), (self.p, "watch -n 1 rm -rf .git/harness"),
+                (self.p, "taskset 3 rm -rf .git/harness"), (self.p, "trap 'rm -rf .git/harness' EXIT"),
+                (self.p, "for c in true 'rm -rf .git/harness'; do $c; done"), (self.p, "X=; $X rm -rf .git/harness"),
+                (self.p, "T=timeout; $T 5 rm -rf .git/harness"), (self.p, '$(printf "rm -rf .git/harness")'),
+                (self.p, "/tmp/timeout 5 rm -rf .git/harness")):
             with self.subTest(command=command):
                 self.assertEqual(project.bash(command, "implementer").returncode, 2)
 
@@ -521,6 +598,11 @@ class GitDirectory(unittest.TestCase):
                                  (self.p, 'cd "$(mktemp -d)" && touch x'), (self.p, 'T=$(mktemp); echo x > "$T"'),
                                  (self.p, 'for f in src/*.tmp; do rm -f "$f"; done'),
                                  (self.p, 'OUT=build/out.txt; echo x > "$OUT"'),
+                                 (self.p, 'f() { make -C "$1"; }; f src'),
+                                 (self.p, "clean() { rm -rf build; }; clean"),
+                                 (self.p, "timeout 5 rm -rf build"), (self.p, "nice -n 5 rm -f build/x.o"),
+                                 (self.p, 'T=$(mktemp); trap \'rm -f "$T"\' EXIT; echo x > "$T"'),
+                                 (self.p, 'T=$(mktemp); trap "rm -f $T" EXIT; echo x > "$T"'),
                                  (self.p, "find .git -name '*.lock' -print"),
                                  (self.lane, "tail -3 %s" % shlex.quote(str(self.common / "harness/events.jsonl")))):
             with self.subTest(command=command):

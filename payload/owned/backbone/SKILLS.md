@@ -16,6 +16,7 @@ Harness-owned guide. Skills live in `.claude/skills/<name>/SKILL.md`, which Clau
   - writes the pack's routes and guardrails into `backbone/routing.conf` and `backbone/guardrails.conf`, as blocks marked with the ADR;
   - sets related `harness.conf` values, such as the build and test commands for the chosen build tool.
 - **Project skills** (yours): anything the catalog doesn't cover, such as a domain skill or a stack without a pack. List them in `backbone/9-AGENT-SKILLS.md`, and don't reuse a harness skill's name.
+- **Third-party skills** (a vendor's or an SDK's): reference until the user admits a reviewed copy in `backbone/admissions.conf` (ADR-006; `backbone/HOOKS.md`, "Third-party skills"). An admitted skill loads and is routed like a project skill while its bytes are the reviewed ones; changed or revoked, it is reference only.
 
 ## Format
 
