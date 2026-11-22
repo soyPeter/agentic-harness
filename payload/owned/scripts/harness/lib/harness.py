@@ -13482,6 +13482,46 @@ def read_hook_input():
     return data if isinstance(data, dict) else {}
 
 
+OUT_OF_TIME = ("Harness hook ran out of time (%ds; slow git or filesystem). The call is refused to stay safe; retry "
+               "it.\n")
+
+
+def answer_for_child(budget):
+    """Run the rest of this process in a child, and answer for it: with its exit code, or with a refusal when it gives
+    none in time. The child's own alarm waits for the running bytecode to end, and on Python 3.10 and older a regular
+    expression's whole search is one: a search that outlasts the CLI's timeout would let the call through. Returns in
+    the child only."""
+    try:
+        child = os.fork()
+    except OSError:
+        sys.stderr.write("Harness hook could not start a process to check this call, so it is refused; retry it.\n")
+        os._exit(2)
+    if not child:
+        try:
+            import resource
+            resource.setrlimit(resource.RLIMIT_CPU, (budget + 5, budget + 5))   # should the CLI kill this process
+        except (ImportError, OSError, ValueError):
+            pass
+        return
+
+    def refused(_signum=None, _frame=None):
+        try:
+            os.kill(child, signal.SIGKILL)
+        except ProcessLookupError:   # it has just ended
+            pass
+        sys.stderr.write(OUT_OF_TIME % budget)
+        os._exit(2)
+
+    signal.signal(signal.SIGALRM, refused)
+    signal.alarm(budget + 1)
+    _, status = os.waitpid(child, 0)
+    signal.alarm(0)
+    if os.WIFEXITED(status):
+        os._exit(os.WEXITSTATUS(status))
+    sys.stderr.write(OUT_OF_TIME % budget)   # killed, so it checked nothing
+    os._exit(2)
+
+
 def hook_budget(name):
     """Fail closed if a gate hook runs out of time, instead of being killed (which would let the call through)."""
     global GIT_TIMEOUT
@@ -13490,6 +13530,8 @@ def hook_budget(name):
     GIT_TIMEOUT = max(1, budget - 5)
     if not hasattr(signal, "SIGALRM"):
         return
+    if budget and name in FAIL_CLOSED_HOOKS:
+        answer_for_child(budget)
 
     def expired(_signum, _frame):
         if VERDICT:   # the answer was given; only the capture after it ran out of time
@@ -13497,8 +13539,7 @@ def hook_budget(name):
                 os.write(1, b"{}\n")
             os._exit(VERDICT[-1])
         if name in FAIL_CLOSED_HOOKS:
-            sys.stderr.write("Harness hook ran out of time (%ds; slow git or filesystem). The call is refused to stay "
-                             "safe; retry it.\n" % budget)
+            sys.stderr.write(OUT_OF_TIME % budget)
             os._exit(2)
         os._exit(0)
 

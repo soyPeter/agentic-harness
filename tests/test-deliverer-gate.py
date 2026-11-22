@@ -140,15 +140,15 @@ class GateProject(unittest.TestCase):
     def pr_has(self, *names):
         self.labels_file.write_text(json.dumps({"labels": [{"name": name} for name in names]}))
 
-    def decision(self, command, agent="deliverer"):
+    def decision(self, command, agent="deliverer", timeout=None, **settings):
         """(exit code, message) of the pre-tool-use hook for agent running command with Bash."""
         hook_input = {"session_id": "s", "agent_id": "a1", "agent_type": agent, "tool_name": "Bash",
                       "tool_input": {"command": command}}
         env = dict(self.env, CLAUDE_PROJECT_DIR=str(self.project), FAKE_GH_LABELS=str(self.labels_file),
-                   PATH=str(self.bin) + os.pathsep + os.environ["PATH"])
+                   PATH=str(self.bin) + os.pathsep + os.environ["PATH"], **settings)
         result = subprocess.run(["python3", "-B", str(self.project / "scripts/harness/lib/harness.py"), "hook",
                                  "pre-tool-use"], cwd=self.project, input=json.dumps(hook_input), capture_output=True,
-                                text=True, env=env)
+                                text=True, env=env, timeout=timeout)
         return result.returncode, result.stderr
 
 
@@ -989,6 +989,23 @@ if given is not None:
 
 else:
     print("skipped the property checks: hypothesis is not installed (pip install -r tests/requirements.txt)")
+
+
+class LargeCommands(GateProject):
+    """Claude Code and Codex let a call through when its hook runs past 30 s: the deliverer's gate answers a command of
+    any size well inside that, with the answer it gives the short one."""
+
+    def test_a_gate_stuck_in_one_search_still_refuses_in_time(self):
+        # Every > starts a search to the end of the command. On Python 3.10 such a search holds off signals.
+        rules = self.project / "backbone/guardrails.conf"
+        kept = rules.read_text()
+        self.addCleanup(rules.write_text, kept)
+        rules.write_text(kept + "block | @bash | >[^z]*zz | Never zz here.\n")
+
+        code, message = self.decision("echo '%s'" % (">" * 900000), timeout=20, HARNESS_HOOK_BUDGET="5")
+
+        self.assertEqual(code, 2, message)
+        self.assertIn("ran out of time", message)
 
 
 if __name__ == "__main__":
