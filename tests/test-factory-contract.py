@@ -218,7 +218,9 @@ class Outward(unittest.TestCase):
                 before = len(self.p.events("outward"))
                 allowed = self.p.bash(command, "deliverer")
                 after_pre = self.outward_since(before)
-                self.call(command, "deliverer")
+                self.p.hook("post-tool-use", {"session_id": "s1", "agent_id": "a1", "agent_type": "deliverer",
+                                             "tool_name": "Bash", "hook_event_name": "PostToolUse",
+                                             "tool_input": {"command": command}}, check=True)
                 found = self.outward_since(before)
 
                 self.assertEqual(allowed.returncode, 0, allowed.stderr)

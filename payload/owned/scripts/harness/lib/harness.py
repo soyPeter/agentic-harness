@@ -42,6 +42,7 @@ Usage:
   harness.py ci-protect [--branch main] [--with-judge] [--dry-run] (require the CI checks; needs gh)
   harness.py ci-protect --attest [--dry-run] [--recorded-fallback] [--delete-repo-copies]
                                                                   (the harness-attest environment: default branch only)
+  harness.py write-reconcile [KEY --observed|--allow-retry <evidence reference>] (user-only)
   harness.py doctor
 """
 import fnmatch
@@ -65,6 +66,7 @@ from stat import S_ISREG
 sys.dont_write_bytecode = True   # no __pycache__ in the project
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import decisions  # noqa: E402  (sibling module)
+import write_journal
 import sandbox  # noqa: E402  (sibling module)
 
 # The engine is the folder holding scripts/harness/: the project itself in a full install, or a pinned release outside
@@ -1831,14 +1833,14 @@ def code_findings(code, label):
 
 # The commands only the user, CI, an agent factory or an Orca automation's precheck runs. Their dry runs (where they
 # have one) change nothing.
-USER_COMMANDS = ("run", "orca", "orca-nightly", "snapshot", "linear", "intake", "delivery-record", "ci-judge",
+USER_COMMANDS = ("write-reconcile", "run", "orca", "orca-nightly", "snapshot", "linear", "intake", "delivery-record", "ci-judge",
                  "ci-protect")
 FIND_EXEC = ("-exec", "-execdir", "-ok", "-okdir")
 PLANNING_COMMANDS = ("orca", "orca-nightly", "linear")
-ENGINE_MODULES = ("harness", "launcher", "thin")
-ENGINE_NAME = re.compile(r"\b(?:harness|launcher|thin)\.py\b")
-ENGINE_IMPORT = re.compile(r"\brunpy\b|\b(?:import|from)\s+(?:harness|launcher|thin)\b|"
-                           r"\b(?:import_module|__import__)\s*\(\s*['\"](?:harness|launcher|thin)\b")
+ENGINE_MODULES = ("harness", "launcher", "thin", "write_journal")
+ENGINE_NAME = re.compile(r"\b(?:harness|launcher|thin|write_journal)\.py\b")
+ENGINE_IMPORT = re.compile(r"\brunpy\b|\b(?:import|from)\s+(?:harness|launcher|thin|write_journal)\b|"
+                           r"\b(?:import_module|__import__)\s*\(\s*['\"](?:harness|launcher|thin|write_journal)\b")
 CODE_RUNS = re.compile(r"\bexec(?:file)?\s*\(|\bcompile\s*\(|\bimportlib\b|\bsubprocess\b|\bchild_process\b|\bsystem\s*\(|"
                        r"\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\b(?:spawn|exec)Sync\b")
 USER_COMMAND_REFUSAL = ("harness.py %s is for the user, CI, an agent factory or an Orca automation's precheck, not "
@@ -2551,6 +2553,8 @@ def content_risks(text, changed=None):
 # Failure classes: why a task stopped, each with the playbook that recovers from it. An escalation is classified from
 # its kind and reason (or --class); a class that repeats gets a draft proposal in backbone/proposals/ for the user.
 FAILURE_CLASSES = {
+    "indeterminate_write": ("reconcile or park", "an external write has no observed result; never retry automatically",
+                            "operation-specific reconciliation evidence"),
     "tool_timeout": ("retry with backoff", "a tool or worker timed out or died: retry once after a pause, then "
                      "escalate", "a timeout, a tool contract or a sandbox allowlist entry"),
     "invalid_args": ("repair the call", "a tool or command was called wrongly: fix the arguments from its usage "
@@ -2659,10 +2663,15 @@ def escalate(task, kind, reason, needed=None, cls=None, refresh=True):
         snapshot_refresh()
     issue = None
     if conf()["HARNESS_ESCALATE_GH"] == "on" and shutil.which("gh"):
-        result = subprocess.run(["gh", "issue", "create", "--title", "Harness escalation: task %s: %s" % (task, kind),
-                                 "--body", entry.strip(), "--label", "harness-escalation"],
-                                cwd=str(ROOT), capture_output=True, text=True)
-        issue = result.stdout.strip() if result.returncode == 0 else None
+        def create_issue():
+            result = subprocess.run(["gh", "issue", "create", "--title", "Harness escalation: task %s: %s" % (task, kind),
+                                     "--body", entry.strip(), "--label", "harness-escalation"],
+                                    cwd=str(ROOT), capture_output=True, text=True)
+            if result.returncode != 0 or not result.stdout.strip():
+                raise HarnessError("indeterminate_write: escalation issue reply unavailable; reconcile or park")
+            return result.stdout.strip()
+        issue = journaled_write(task, "issue-create", write_journal.digest(git("remote", "get-url", "origin").strip()),
+                                write_journal.digest([kind, reason.strip(), needed]), create_issue)
         if issue:
             log_event("outward", action="issue-create", via="harness", task=task, url=issue)
     notify_coordinator("escalation", "Task %s: %s" % (task, kind), entry.strip(), task)
@@ -3070,8 +3079,11 @@ def light_drift(task):
             "line, then have the architect and the griller review the spec." % (task, "; ".join(why)))
 
 
-def start_problems(task):
+def start_problems(task, tasks_text=None):
     """Why task cannot be [WIP] (or done): spec, grill and approval. None when it may start."""
+    pending = unmet_dependencies(task, tasks_text)
+    if pending:
+        return "Task %s cannot start: it waits for %s (not [x]). Finish them first." % (task, ", ".join(pending))
     spec = spec_rel(task)
     if task in blocked_tasks(read(TASKS)):
         return ("Task %s is BLOCKED by an escalation; the user resolves it in backbone/escalations.md and "
@@ -3114,7 +3126,7 @@ def start_gate(before, after):
     """Starting a task requires a valid spec, a current griller pass and the user's approval."""
     if not gate_on("HARNESS_SPEC_GATE"):
         return None
-    problems = [p for p in (start_problems(task) for task in started_tasks(before, after)) if p]
+    problems = [p for p in (start_problems(task, after) for task in started_tasks(before, after)) if p]
     return "\n".join("  - " + p for p in problems) if problems else None
 
 
@@ -3340,9 +3352,15 @@ def verify_changes(before, after, changed, done_fingerprint, allow_user_changes=
     if marked and before and not allow_user_changes:
         problems.append("the change marks task(s) %s (light), which skips the architect and the griller. Only the "
                         "user does that, and commits it with HARNESS_VERIFY=off git commit ..." % ", ".join(sorted(marked)))
+    for message in dependency_warnings(show(after, tasks_rel) or ""):
+        sys.stderr.write("verify: warning: %s\n" % message)
+    if before and not allow_user_changes:
+        problem = dependency_guard(show(before, tasks_rel) or "", show(after, tasks_rel) or "")
+        if problem:
+            problems.append(problem)
     if gate_on("HARNESS_SPEC_GATE"):
         for task in sorted((new_wip | new_done) - old_wip - old_done):
-            problem = start_problems(task)
+            problem = start_problems(task, show(after, tasks_rel) or "")
             if problem:
                 problems.append(problem)
     if values["HARNESS_JUDGE_GATE"] != "off":
@@ -3837,7 +3855,7 @@ def plugin_mismatch():
 
 def health():
     """List of (level, message) for misconfigurations; level is 'error' or 'warn'."""
-    issues = []
+    issues = [("warn", message) for message in dependency_warnings()]
     thin = thin_mode()
     hooks_path = git("config", "--get", "core.hooksPath").strip()
     if thin:
@@ -4054,6 +4072,8 @@ def doctor():
 
 
 def spec_check(task):
+    for message in dependency_warnings():
+        print("  warn      " + message)
     problems = validate_spec(task)
     history = verdict_history(task, "grill")
     last = history[-1] if history else None
@@ -4413,6 +4433,81 @@ def events_file():
 HOOK_CONTEXT = {}   # who the current hook call is for: session and agent, set by main()
 
 
+def write_journal_store():
+    return write_journal.Journal(events_file().with_name("writes.jsonl"))
+
+
+def journaled_write(task, operation, target, intent, call):
+    try:
+        return write_journal_store().execute(task, operation, target, intent, call)
+    except write_journal.IndeterminateWrite as exc:
+        raise HarnessError(str(exc))
+
+
+def write_reconcile_command(argv):
+    store = write_journal_store()
+    try:
+        if not argv:
+            print(json.dumps(store.pending(), indent=2))
+            return 0
+        if len(argv) != 3 or argv[1] not in ("--observed", "--allow-retry") or not argv[2].strip():
+            print("usage: write-reconcile [KEY --observed|--allow-retry <evidence reference>] (user-only)")
+            return 2
+        store.resolve(argv[0], argv[2], retry=argv[1] == "--allow-retry")
+        print("write-reconcile: recorded the user's reconciliation for " + argv[0])
+        return 0
+    except write_journal.IndeterminateWrite as exc:
+        print(str(exc))
+        return 1
+
+
+def shell_write_intent(data):
+    command = (data.get("tool_input") or {}).get("command") or ""
+    writes = [(action, words) for action, words in outward_actions(command)
+              if action in ("pr-create", "pr-edit", "issue-create")]
+    if not writes:
+        return None
+    files = []
+    for _, words in writes:
+        for index, word in enumerate(words):
+            if word == "--body-file" or word.startswith("--body-file="):
+                name = words[index + 1] if word == "--body-file" and index + 1 < len(words) else word.split("=", 1)[-1]
+                path = Path(data.get("cwd") or ROOT) / name
+                files.append(write_journal.digest(read(path)))
+    task = data.get("harness_task") or (wip_task_ids() or ["*"])[0]
+    return task, "+".join(action for action, _ in writes), str(Path(data.get("cwd") or ROOT).resolve()), \
+        write_journal.digest([command, files, git("remote", "get-url", "origin").strip(),
+                              git("rev-parse", "--abbrev-ref", "HEAD").strip(),
+                              git("rev-parse", "HEAD").strip()])
+
+
+def shell_write_begin(data):
+    intent = shell_write_intent(data)
+    if intent:
+        try:
+            _, previous = write_journal_store().begin(*intent)
+            if previous:
+                deny("This outward write was already observed; inspect its result rather than repeat it.")
+        except write_journal.IndeterminateWrite as exc:
+            deny(str(exc))
+
+
+def shell_write_observe(data):
+    intent = shell_write_intent(data)
+    command = (data.get("tool_input") or {}).get("command") or ""
+    writes = outward_actions(command)
+    try:
+        direct = len(writes) == 1 and shlex.split(command) == writes[0][1] and command.strip().startswith("gh ")
+    except ValueError:
+        direct = False
+    if intent and direct and tool_result(data) == "succeeded":
+        key = write_journal.digest(list(intent))
+        try:
+            write_journal_store().observe(key, None)
+        except write_journal.IndeterminateWrite as exc:
+            return str(exc)
+
+
 def log_event(kind, **fields):
     """Append one event to .git/harness/events.jsonl (never fails the caller). Events carry the task in progress and,
     inside a hook, the session and agent, so harness.py trace can rebuild a task's history."""
@@ -4583,6 +4678,7 @@ def hook_pre_tool_use(data):
         refusal = external_refusal(command) if conf()["HARNESS_DELIVER"] == "external" else None
         if refusal:
             deny("Harness blocked this command: %s" % refusal)
+        shell_write_begin(data)
         if not autonomous():
             command_started(data)
         return
@@ -4623,7 +4719,7 @@ def hook_pre_tool_use(data):
         deny("Harness blocked this change to %s: escalations are written by harness.py escalate and resolved by "
              "the user." % path)
     if path == "backbone/3-TASKS.md":
-        checks = (wip_collision, start_gate, judge_gate, blocked_guard, light_guard)
+        checks = (wip_collision, start_gate, judge_gate, blocked_guard, light_guard, dependency_guard)
     elif path == "backbone/harness.conf":
         checks = (user_only_change,)
     elif re.match(r"^backbone/specs/[^/]+\.md$", path):
@@ -4847,6 +4943,9 @@ def post_tool_notes(data):
                       **{"class": contract["class"]})
     elif tool == "Bash":
         command = tool_input.get("command") or ""
+        problem = shell_write_observe(data)
+        if problem:
+            notes.append(problem)
         log_outward(command, data.get("harness_role") or "session", tool_result(data))
         # Agents without a Read or Skill tool (Codex) load a skill by printing its SKILL.md.
         for skill in shell_skills(command, data.get("cwd")):
@@ -6036,6 +6135,13 @@ def next_step(task, fingerprint=code_fingerprint):
     """What task needs next: {step, role (who does it, or null), command (what to run), ...}."""
     s = task_status(task, fingerprint)
     step = {"task": task, "title": s["title"], "state": s["state"], "change_class": s["change_class"]}
+    try:
+        pending = write_journal_store().pending()
+    except write_journal.IndeterminateWrite as exc:
+        return dict(step, step="blocked", role=None, needed=str(exc), failure_class="indeterminate_write")
+    if pending:
+        return dict(step, step="blocked", role=None, failure_class="indeterminate_write",
+                    attempts=[row["key"] for row in pending], needed="reconcile or park; user runs write-reconcile")
     if s["state"] == "missing":
         return dict(step, step="unknown", role=None, reason="no such task in backbone/3-TASKS.md")
     if s["state"] == "blocked":
@@ -6043,6 +6149,10 @@ def next_step(task, fingerprint=code_fingerprint):
     if s["state"] == "done":
         return delivery_step(step)
     if s["state"] == "pending":
+        pending = unmet_dependencies(task)
+        if pending:
+            return dict(step, step="blocked", role=None, dependencies=pending,
+                        needed="finish dependencies: %s" % ", ".join(pending))
         if not s["spec"]:
             return dict(step, step="define", role="analyst", reason="no spec yet")
         if s["spec_problems"]:
@@ -6334,7 +6444,7 @@ def contract_command(argv):
 
 
 OUTWARD_GH = {("pr", "create"): "pr-create", ("pr", "new"): "pr-create", ("pr", "edit"): "pr-edit",
-              ("label", "create"): "label-create"}
+              ("label", "create"): "label-create", ("issue", "create"): "issue-create"}
 
 
 def api_write(args):
@@ -6598,9 +6708,9 @@ def orca_nightly_command(argv):
 AFTER_NOTE = re.compile(r"\(after(?::\s*|\s+)([^)]+)\)", re.I)   # "(after: 1.1, 1.2)" or "(after 1.1)"
 
 
-def task_dependencies():
+def task_dependencies(text=None):
     """{task: [tasks it waits for]} from "(after: 1.1, 1.2)" or "(after 1.1)" on its line in 3-TASKS.md."""
-    lines = outline(read(TASKS)).splitlines()
+    lines = outline(read(TASKS) if text is None else text).splitlines()
     deps = {}
     for i, line in enumerate(lines):
         m = AFTER_NOTE.search(line)
@@ -6608,6 +6718,46 @@ def task_dependencies():
             deps[task_id_at(lines, i)] = [d.rstrip(".") for d in re.split(r"[,\s]+", m.group(1))
                                           if re.match(r"^\d+(\.\d+[a-z]?)*\.?$", d)]
     return deps
+
+
+def unmet_dependencies(task, text=None):
+    text = read(TASKS) if text is None else text
+    return [dep for dep in task_dependencies(text).get(task, []) if task_state_in(text, dep) != "done"]
+
+
+def dependency_guard(before, after):
+    old, new = task_dependencies(before), task_dependencies(after)
+    changed = [task for task in old if old[task] != new.get(task, [])]
+    if changed:
+        return "Only the user may change existing (after: ...) dependencies: %s" % ", ".join(changed)
+
+
+def dependency_warnings(text=None):
+    text = read(TASKS) if text is None else text
+    deps = task_dependencies(text)
+    warnings = []
+    for task, references in deps.items():
+        for dep in references:
+            if task_state_in(text, dep) == "missing":
+                warnings.append("Task %s depends on missing task %s" % (task, dep))
+        pending = unmet_dependencies(task, text)
+        if pending and task_state_in(text, task) in ("wip", "done"):
+            warnings.append("Task %s started before dependencies: %s" % (task, ", ".join(pending)))
+    visited, active = set(), []
+    def visit(task):
+        if task in active:
+            warnings.append("Dependency cycle: %s" % " -> ".join(active[active.index(task):] + [task]))
+            return
+        if task in visited:
+            return
+        active.append(task)
+        for dep in deps.get(task, []):
+            visit(dep)
+        active.pop()
+        visited.add(task)
+    for task in deps:
+        visit(task)
+    return warnings
 
 
 def orca_command(argv):
@@ -6647,7 +6797,7 @@ def orca_command(argv):
     value = lambda flag: argv[argv.index(flag) + 1] if flag in argv and argv.index(flag) + 1 < len(argv) else None
     agents = dict(pair.split("=", 1) for pair in (value("--agents") or conf()["HARNESS_ORCA_AGENTS"]).replace(
         ",", " ").split() if "=" in pair)
-    ready = [t for t, _, _ in ready_tasks()]
+    ready = [t for t, _, _ in ready_tasks(include_waiting=True)]
     tasks = [t for t in (value("--tasks") or "").split(",") if t] or ready
     tasks = [t for t in tasks if t in ready]
     limit = int(value("--parallel")) if (value("--parallel") or "").isdigit() else 2
@@ -6787,15 +6937,18 @@ def retry_brief(task, attempt, attempts, cause, step, started_at):
     return "\n".join(lines)
 
 
-def ready_tasks(text=None):
+def ready_tasks(text=None, include_waiting=False):
     """[(id, title, state)] the runner may work on: a [WIP] task first, then pending ones, never BLOCKED."""
-    lines = outline(read(TASKS) if text is None else text).splitlines()
+    text = read(TASKS) if text is None else text
+    lines = outline(text).splitlines()
     found = []
     for i, line in enumerate(lines):
         if BLOCKED_NOTE.search(line) or not (WIP_LINE.match(line) or PENDING_LINE.match(line)):
             continue
         task = task_id_at(lines, i)
         if not TASK_REF.search(line):
+            continue
+        if not include_waiting and not WIP_LINE.match(line) and unmet_dependencies(task, text):
             continue
         title = re.sub(r"^\s*[-*]\s+\[[^\]]*\]\s*\**Task\s+[A-Za-z0-9._-]*[A-Za-z0-9]:?\s*", "", line)
         title = title.split("**")[0].strip()
@@ -6950,6 +7103,10 @@ def run_worktrees(queue, open_prs):
         sys.stdout.write(child.stdout)
         m = re.search(r"^run: (\S+)\s+task %s$" % re.escape(task), child.stdout, re.M)
         outcome = m.group(1) if m else "error"
+        if next_step(task).get("failure_class") == "indeterminate_write":
+            print("run: task %s: indeterminate_write; retained worktree %s for reconciliation" % (task, tree))
+            summary.append((task, "indeterminate"))
+            break
         if outcome == "agent-failed":
             subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=str(ROOT), capture_output=True)
             git("branch", "-D", branch)
@@ -6974,13 +7131,23 @@ def run_worktrees(queue, open_prs):
                                          text=True)
                 if receipt.returncode == 0:
                     body += "\n\n```\n%s\n```" % receipt.stdout.strip()
-                pr = subprocess.run(["gh", "pr", "create", "--head", branch, "--base", base_branch, "--title",
-                                     "Task %s: %s" % (task, title), "--body", body],
-                                    cwd=str(tree), capture_output=True, text=True)
-                print("run: task %s: %s" % (task, pr.stdout.strip() or pr.stderr.strip()))
-                log_event("run-pr", task=task, branch=branch, url=pr.stdout.strip())
-                if pr.returncode == 0:
-                    log_event("outward", action="pr-create", via="harness", task=task, url=pr.stdout.strip())
+                def create_pr():
+                    pr = subprocess.run(["gh", "pr", "create", "--head", branch, "--base", base_branch, "--title",
+                                         "Task %s: %s" % (task, title), "--body", body],
+                                        cwd=str(tree), capture_output=True, text=True)
+                    if pr.returncode != 0 or not pr.stdout.strip():
+                        raise HarnessError("indeterminate_write: PR reply unavailable; reconcile or park")
+                    return pr.stdout.strip()
+                try:
+                    url = journaled_write(task, "pr-create", write_journal.digest(git("remote", "get-url", "origin").strip()),
+                                          write_journal.digest([branch, base_branch, title, body]), create_pr)
+                    print("run: task %s: %s" % (task, url))
+                    log_event("run-pr", task=task, branch=branch, url=url)
+                    log_event("outward", action="pr-create", via="harness", task=task, url=url)
+                except HarnessError as exc:
+                    print("run: task %s: %s" % (task, exc))
+                    summary.append((task, "indeterminate"))
+                    continue
             else:
                 print("run: task %s: branch %s kept locally (push failed or gh missing)" % (task, branch))
         subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=str(ROOT), capture_output=True)
@@ -7224,6 +7391,10 @@ def run_command(argv):
     if "--worktree" in argv and not dry_run:
         return run_worktrees(queue, "--pr" in argv)
     if dry_run:
+        for task, pending in task_dependencies().items():
+            unmet = unmet_dependencies(task)
+            if unmet and task_state(task) == "pending" and (not only or only == task):
+                print("run: task %s waits for %s" % (task, ", ".join(unmet)))
         for task, title, state in queue:
             print("run: would %s task %s: %s" % ("resume" if state == "wip" else "start", task, title))
         return 0
@@ -7257,6 +7428,11 @@ def run_command(argv):
             break
         outcome = None
         for attempt in range(1, attempts + 1):
+            recovery = next_step(task)
+            if recovery.get("failure_class") == "indeterminate_write":
+                print("run: task %s: indeterminate_write; reconcile or park, no session started" % task)
+                outcome = "blocked"
+                break
             if halt_file().exists():
                 print("run: halted by %s" % halt_file())
                 log_event("run-halt")
@@ -7332,6 +7508,12 @@ def run_command(argv):
                          % refusal, "the user raises the cap (the task's or the day's), or drops the task",
                          "permission_denied")
                 outcome = "cap-hit"
+                break
+            recovery = next_step(task)
+            if recovery.get("failure_class") == "indeterminate_write":
+                log_event("run-recovery", task=task, failure_class="indeterminate_write", outcome="parked")
+                print("run: task %s: indeterminate_write; reconcile or park, no retry" % task)
+                outcome = "blocked"
                 break
             failure = agent_start_failure(log_path, code)
             if failure:
@@ -8429,11 +8611,13 @@ def linear_receipt(task, status, base, dry_run, matrix=None):
     try:
         issue = linear.fetch_issue(m.group(1))
         state = linear.target_state(issue, status) if status else None
-        url = linear.post_comment(issue["id"], body)
+        url = journaled_write(task, "linear-comment", issue["id"], write_journal.digest(body),
+                              lambda: linear.post_comment(issue["id"], body))
         log_event("outward", action="linear-comment", via="harness", task=task, issue=m.group(1), url=url)
         print("linear: posted the receipt on %s %s" % (m.group(1), url))
         if state:
-            moved = linear.move_issue(issue, state)
+            moved = journaled_write(task, "linear-state", issue["id"], write_journal.digest(state["id"]),
+                                    lambda: linear.move_issue(issue, state))
             log_event("outward", action="linear-state", via="harness", task=task, issue=m.group(1), state=moved)
             print("linear: moved %s to '%s'" % (m.group(1), moved))
     except linear.LinearError as exc:
@@ -9400,6 +9584,8 @@ def main(argv):
         return git_commit_msg(argv[3])
     if len(argv) == 3 and argv[1] == "spec-check":
         return spec_check(argv[2])
+    if argv[1:2] == ["write-reconcile"]:
+        return write_reconcile_command(argv[2:])
     if argv[1:] == ["doctor"]:
         return doctor()
     if argv[1:2] == ["scan"]:

@@ -147,6 +147,8 @@ class GateProject(unittest.TestCase):
         result = subprocess.run(["python3", "-B", str(self.project / "scripts/harness/lib/harness.py"), "hook",
                                  "pre-tool-use"], cwd=self.project, input=json.dumps(hook_input), capture_output=True,
                                 text=True, env=env)
+        # Policy probes never dispatch a tool; each example starts with no reserved write.
+        (self.project / ".git/harness/writes.jsonl").unlink(missing_ok=True)
         return result.returncode, result.stderr
 
 

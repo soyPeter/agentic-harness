@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Enforce task dependencies in shared start/selection paths and protect existing dependency notes. Report missing references, cycles and early starts as warnings for this release.
+- Persist outward-write attempts before dispatch. Park unresolved PR, escalation and Linear writes across restarts; require user reconciliation before retrying.
+
 ## 0.31.0 (2026-11-15)
 
 This release includes the harness-side prerequisites for factory integration: contract v1, provenance intake,

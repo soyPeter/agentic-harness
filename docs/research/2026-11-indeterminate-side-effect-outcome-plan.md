@@ -90,3 +90,10 @@ Out of scope: Temporal or any new workflow runtime, changing verdict values, clo
 ## Decisions needed (human)
 
 Resolved on 2026-11-10. See [Decisions (2026-11-10)](#decisions-2026-11-10).
+
+## Implementation update (2026-11-15)
+
+The runtime audit confirmed the gap and the working tree now contains the safety fix. See
+[runtime gap audit](2026-11-runtime-gap-audit.md) for reproduction evidence, scope and validation.
+This does not change the product ADR status or mark the existing gated backlog tasks complete.
+Recovery uses explicit human reconciliation or parking; automatic operation-specific reconciliation remains deferred.

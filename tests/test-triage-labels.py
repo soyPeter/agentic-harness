@@ -228,6 +228,8 @@ class SuggestedLabels(JudgedTask):
                     "session_id": "s", "agent_id": "a1", "agent_type": "deliverer", "tool_name": "Bash",
                     "tool_input": {"command": "gh pr create --title t --body b --label " + ",".join(labels)}}))
 
+                # This probes permission only; no external write is dispatched.
+                (self.project / ".git/harness/writes.jsonl").unlink(missing_ok=True)
                 self.assertEqual(gate.returncode, 0, gate.stderr)
 
     def test_the_text_receipt_lists_the_labels_as_advisory(self):

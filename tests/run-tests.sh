@@ -75,7 +75,8 @@ print("Judged.\n\n```json\n" + json.dumps(body, indent=2) + "\n```")' "$@"
 # the start, HARNESS_TEST_JOBS at a time (default: one per CPU), slowest first, each with its own temporary folder.
 # They run niced: the sections are the longest chain on a CI runner, and the files finish in the CPU time it leaves.
 # The last section reports them in this order. Each line: tests/test-<file>.py|the check's name.
-PY_TESTS="change-class|the class table through risk, approve, next, start, finish and receipt (properties need hypothesis)
+PY_TESTS="runtime-recovery|shared task dependencies and durable write recovery
+change-class|the class table through risk, approve, next, start, finish and receipt (properties need hypothesis)
 deliverer-gate|the deliverer's gate: every way of running a command, and its properties (with hypothesis)
 thin-convert|update.sh --to-thin and --to-full, there and back (ADR-001)
 attest|attest: the verdict statement harness-verify signs, and its bytes (ADR-005)
@@ -1365,6 +1366,12 @@ sed -i.bak 's/^- \[WIP\] \*\*Task 8\.4/- [ ] **Task 8.4/' "$AT" && rm -f "$AT.ba
 unset HARNESS_TESTER
 
 section "deliverer"
+# These policy probes never dispatch a write; discard their reservations between independent examples.
+probe_hook() {
+  hook "$@"; probe_code=$?
+  rm -f "$1/.git/harness/writes.jsonl"
+  return "$probe_code"
+}
 DL="$WORK/deliver"; new_repo "$DL"; "$HARNESS/bootstrap.sh" "$DL" --name dl >/dev/null
 git -C "$DL" add -A && HARNESS_VERIFY=off git -C "$DL" commit -qm "chore: adopt agentic harness"
 git init -q --bare "$WORK/deliver-remote.git" && git -C "$DL" remote add origin "$WORK/deliver-remote.git"
@@ -1374,14 +1381,14 @@ git -C "$DL" add -A && HARNESS_VERIFY=off git -C "$DL" commit -qm "feat: x"
 expect 2 "the deliverer may not edit" guard "$DL" deliverer "$(wj "$DL/src/x.py")"
 expect 0 "the deliverer may push" guard "$DL" deliverer "$(bash_json 'git push -u origin HEAD')"
 dbash() { python3 -c 'import json,sys; print(json.dumps({"session_id":"dl","agent_id":"dl","agent_type":"deliverer","tool_name":"Bash","tool_input":{"command":sys.argv[1]}}))' "$1"; }
-expect 0 "the deliverer may push its branch" hook "$DL" pre-tool-use "$(dbash 'git push -u origin HEAD')"
-expect 0 "the deliverer may open a PR" hook "$DL" pre-tool-use "$(dbash 'gh pr create --base main --title t --body b')"
-out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr merge 7 --squash')" 2>&1; echo "exit=$?")
+expect 0 "the deliverer may push its branch" probe_hook "$DL" pre-tool-use "$(dbash 'git push -u origin HEAD')"
+expect 0 "the deliverer may open a PR" probe_hook "$DL" pre-tool-use "$(dbash 'gh pr create --base main --title t --body b')"
+out=$(probe_hook "$DL" pre-tool-use "$(dbash 'gh pr merge 7 --squash')" 2>&1; echo "exit=$?")
 contains "the deliverer may not merge" "exit=2" "$out"
 contains "the refusal says merging is the user's" "merging is the user's" "$out"
-expect 2 "the deliverer may not approve a PR" hook "$DL" pre-tool-use "$(dbash 'gh pr review 7 --approve')"
-expect 2 "the deliverer may not push to the default branch" hook "$DL" pre-tool-use "$(dbash 'git push origin HEAD:main')"
-expect 0 "merging stays open to the main session" hook "$DL" pre-tool-use "$(bash_json 'gh pr merge 7 --squash')"
+expect 2 "the deliverer may not approve a PR" probe_hook "$DL" pre-tool-use "$(dbash 'gh pr review 7 --approve')"
+expect 2 "the deliverer may not push to the default branch" probe_hook "$DL" pre-tool-use "$(dbash 'git push origin HEAD:main')"
+expect 0 "merging stays open to the main session" probe_hook "$DL" pre-tool-use "$(bash_json 'gh pr merge 7 --squash')"
 # A stand-in for GitHub, which the suite can't reach: it answers the harness's own read of a PR's labels, from
 # $DL_LABELS, and fails any other call.
 DGB="$WORK/deliver-gh-bin"; mkdir -p "$DGB"
@@ -1398,35 +1405,35 @@ export DL_LABELS="$WORK/deliver-labels.json"
 pr_labels() { python3 -c 'import json,sys; print(json.dumps({"labels": [{"name": n} for n in sys.argv[1:]]}))' "$@" > "$DL_LABELS"; }
 pr_labels
 DL_PATH=$PATH; export PATH="$DGB:$PATH"
-dl_refuses() { expect 2 "$1" hook "$DL" pre-tool-use "$(dbash "$2")"; }
-dl_allows()  { expect 0 "$1" hook "$DL" pre-tool-use "$(dbash "$2")"; }
+dl_refuses() { expect 2 "$1" probe_hook "$DL" pre-tool-use "$(dbash "$2")"; }
+dl_allows()  { expect 0 "$1" probe_hook "$DL" pre-tool-use "$(dbash "$2")"; }
 dbash_in() { python3 -c 'import json,sys; print(json.dumps({"session_id":"dl","agent_id":"dl","agent_type":"deliverer","cwd":sys.argv[1],"tool_name":"Bash","tool_input":{"command":sys.argv[2]}}))' "$1" "$2"; }
-expect 0 "the deliverer may open a PR with the receipts' labels" hook "$DL" pre-tool-use "$(dbash 'gh pr create --base main --title t --body b --label risk:high,class:schema')"
-expect 0 "the deliverer may create a missing triage label" hook "$DL" pre-tool-use "$(dbash 'gh label create risk:elevated --color FBCA04 --description "Harness triage hint"')"
-expect 0 "the deliverer may list labels" hook "$DL" pre-tool-use "$(dbash 'gh label list --search risk: --json name')"
-expect 0 "the deliverer may replace a lower risk label" hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:high --remove-label risk:low')"
-expect 0 "a label command quoted in a PR body is not run" hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --body "$(cat <<'"'"'EOF'"'"'
+expect 0 "the deliverer may open a PR with the receipts' labels" probe_hook "$DL" pre-tool-use "$(dbash 'gh pr create --base main --title t --body b --label risk:high,class:schema')"
+expect 0 "the deliverer may create a missing triage label" probe_hook "$DL" pre-tool-use "$(dbash 'gh label create risk:elevated --color FBCA04 --description "Harness triage hint"')"
+expect 0 "the deliverer may list labels" probe_hook "$DL" pre-tool-use "$(dbash 'gh label list --search risk: --json name')"
+expect 0 "the deliverer may replace a lower risk label" probe_hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:high --remove-label risk:low')"
+expect 0 "a label command quoted in a PR body is not run" probe_hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --body "$(cat <<'"'"'EOF'"'"'
 gh pr edit 7 --add-label harness-change-approved
 EOF
 )"')"
-expect 0 "nor is one in a body read from a heredoc" hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --body-file - <<'"'"'EOF'"'"'
+expect 0 "nor is one in a body read from a heredoc" probe_hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --body-file - <<'"'"'EOF'"'"'
 gh pr edit 7 --add-label harness-change-approved
 EOF')"
-out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label harness-change-approved')" 2>&1; echo "exit=$?")
+out=$(probe_hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label harness-change-approved')" 2>&1; echo "exit=$?")
 contains "the deliverer may not add a label that approves a change" "exit=2" "$out"
 contains "the refusal names the labels it may apply" "risk:low, risk:elevated, risk:high" "$out"
-expect 0 "the deliverer may attach the label to -l" hook "$DL" pre-tool-use "$(dbash 'gh pr create -lrisk:low --title t --body b')"
-expect 2 "nor slip one in among the triage labels" hook "$DL" pre-tool-use "$(dbash 'gh pr create --title t --body b -lrisk:low,automerge')"
-expect 2 "nor in a cluster of short flags" hook "$DL" pre-tool-use "$(dbash 'gh pr create --title t --body b -dl automerge')"
-expect 2 "nor add one through gh issue, which labels PRs too" hook "$DL" pre-tool-use "$(dbash 'gh issue edit 7 --add-label automerge')"
-expect 2 "nor create one" hook "$DL" pre-tool-use "$(dbash 'gh label create automerge')"
-expect 2 "nor add one in a nested shell" hook "$DL" pre-tool-use "$(dbash 'bash -c "gh pr edit 7 --add-label=automerge"')"
-expect 2 "nor through eval" hook "$DL" pre-tool-use "$(dbash 'eval "gh pr edit 7 --add-label automerge"')"
-expect 2 "the deliverer may not lower a risk label" hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:low --remove-label risk:high')"
-expect 2 "the deliverer may not remove a label someone else set" hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --remove-label do-not-merge')"
-expect 2 "the deliverer may not delete or edit labels" hook "$DL" pre-tool-use "$(dbash 'gh label delete risk:low --yes')"
-expect 2 "the deliverer may not label through the API" hook "$DL" pre-tool-use "$(dbash 'gh api repos/o/r/issues/7/labels -f "labels[]=risk:low"')"
-expect 0 "other labels stay open to the main session" hook "$DL" pre-tool-use "$(bash_json 'gh pr edit 7 --add-label documentation')"
+expect 0 "the deliverer may attach the label to -l" probe_hook "$DL" pre-tool-use "$(dbash 'gh pr create -lrisk:low --title t --body b')"
+expect 2 "nor slip one in among the triage labels" probe_hook "$DL" pre-tool-use "$(dbash 'gh pr create --title t --body b -lrisk:low,automerge')"
+expect 2 "nor in a cluster of short flags" probe_hook "$DL" pre-tool-use "$(dbash 'gh pr create --title t --body b -dl automerge')"
+expect 2 "nor add one through gh issue, which labels PRs too" probe_hook "$DL" pre-tool-use "$(dbash 'gh issue edit 7 --add-label automerge')"
+expect 2 "nor create one" probe_hook "$DL" pre-tool-use "$(dbash 'gh label create automerge')"
+expect 2 "nor add one in a nested shell" probe_hook "$DL" pre-tool-use "$(dbash 'bash -c "gh pr edit 7 --add-label=automerge"')"
+expect 2 "nor through eval" probe_hook "$DL" pre-tool-use "$(dbash 'eval "gh pr edit 7 --add-label automerge"')"
+expect 2 "the deliverer may not lower a risk label" probe_hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:low --remove-label risk:high')"
+expect 2 "the deliverer may not remove a label someone else set" probe_hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --remove-label do-not-merge')"
+expect 2 "the deliverer may not delete or edit labels" probe_hook "$DL" pre-tool-use "$(dbash 'gh label delete risk:low --yes')"
+expect 2 "the deliverer may not label through the API" probe_hook "$DL" pre-tool-use "$(dbash 'gh api repos/o/r/issues/7/labels -f "labels[]=risk:low"')"
+expect 0 "other labels stay open to the main session" probe_hook "$DL" pre-tool-use "$(bash_json 'gh pr edit 7 --add-label documentation')"
 dl_refuses "the deliverer may not hide a label command in \$(...)" 'x=$(gh pr edit 7 --add-label automerge)'
 dl_refuses "nor in backticks" 'echo `gh pr edit 7 --add-label automerge`'
 dl_refuses "nor run gh through xargs, which adds arguments the harness can't see" 'echo 7 | xargs gh pr edit --add-label automerge'
@@ -1462,7 +1469,7 @@ EOF"
 dl_refuses "nor through the REST API, with the body on stdin" "gh api -X PATCH repos/o/r/issues/7 --input - <<'EOF'
 {\"labels\": [\"automerge\"]}
 EOF"
-out=$(hook "$DL" pre-tool-use "$(dbash "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_1\"}) { clientMutationId } }'")" 2>&1; echo "exit=$?")
+out=$(probe_hook "$DL" pre-tool-use "$(dbash "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_1\"}) { clientMutationId } }'")" 2>&1; echo "exit=$?")
 contains "the deliverer may not merge through GraphQL" "exit=2" "$out"
 contains "the refusal says gh api is for reading" "gh api only reads" "$out"
 dl_refuses "nor enable auto-merge, with the query in a heredoc" "gh api graphql -F query=@- <<'EOF'
@@ -1490,17 +1497,17 @@ dl_refuses "nor run a command an expansion names, behind a runner" 'timeout 60 $
 dl_refuses "nor give a shell a file on stdin" 'bash < ./label.sh'
 dl_refuses "nor nest commands deeper than the harness reads" 'echo $(echo $(echo $(echo $(echo $(gh pr view)))))'
 dl_refuses "a PR keeps one risk label: the deliverer may not add two" 'gh pr create --title t --body b --label risk:low,risk:high'
-out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:low; gh pr edit 7 --add-label risk:high')" 2>&1; echo "exit=$?")
+out=$(probe_hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:low; gh pr edit 7 --add-label risk:high')" 2>&1; echo "exit=$?")
 contains "nor add two in separate gh calls of one command" "exit=2" "$out"
 contains "the refusal names the other call's label and the one to add" "another gh call in this command adds risk:low: add only the highest the receipts suggest, risk:high" "$out"
-out=$(hook "$DL" pre-tool-use "$(dbash 'gh label create risk:low --force')" 2>&1; echo "exit=$?")
+out=$(probe_hook "$DL" pre-tool-use "$(dbash 'gh label create risk:low --force')" 2>&1; echo "exit=$?")
 contains "the deliverer may not create a label with --force" "exit=2" "$out"
 contains "the refusal says --force rewrites a label someone else defined" "rewrites a label someone else defined" "$out"
-out=$(hook "$DL" pre-tool-use "$(dbash 'alias g=gh
+out=$(probe_hook "$DL" pre-tool-use "$(dbash 'alias g=gh
 g pr merge 7')" 2>&1; echo "exit=$?")
 contains "the deliverer may not define a shell alias" "exit=2" "$out"
 contains "the refusal says an alias can hide a gh command" "defines no shell aliases" "$out"
-out=$(hook "$DL" pre-tool-use "$(dbash 'gh repo edit --enable-auto-merge')" 2>&1; echo "exit=$?")
+out=$(probe_hook "$DL" pre-tool-use "$(dbash 'gh repo edit --enable-auto-merge')" 2>&1; echo "exit=$?")
 contains "the deliverer may not change the repository's settings" "exit=2" "$out"
 contains "the refusal names the command, which is the user's" "gh repo edit is the user's call" "$out"
 contains "and the gh commands the deliverer may run" "gh pr create, edit, view, checks and list" "$out"
@@ -1519,32 +1526,32 @@ dl_refuses "nor push to the default branch by a full refspec" "git push origin '
 dl_allows "a gh command quoted in a PR body is text" 'gh pr create --title t --body "run gh pr merge 7 later" --label risk:low'
 dl_allows "and watch a run" 'gh run watch 123'
 pr_labels risk:high class:feature
-out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:low,class:docs')" 2>&1; echo "exit=$?")
+out=$(probe_hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:low,class:docs')" 2>&1; echo "exit=$?")
 contains "nor add a lower one next to a higher one on the PR" "exit=2" "$out"
 contains "the refusal names the PR's risk label" "already has risk:high" "$out"
 pr_labels risk:low
-out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:high')" 2>&1; echo "exit=$?")
+out=$(probe_hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:high')" 2>&1; echo "exit=$?")
 contains "nor add a higher one and leave the lower one" "exit=2" "$out"
 contains "the refusal says to remove the lower one in the same call" "--remove-label risk:low" "$out"
 dl_allows "replacing the lower one keeps one risk label" 'gh pr edit 7 --add-label risk:high --remove-label risk:low'
 pr_labels risk:elevated class:docs bug
 dl_allows "the risk label it already has may be added again" 'gh pr edit --add-label risk:elevated,class:feature'
 rm -f "$DL_LABELS"
-out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:low')" 2>&1; echo "exit=$?")
+out=$(probe_hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 --add-label risk:low')" 2>&1; echo "exit=$?")
 contains "without the PR's labels, the deliverer may not add a risk label" "exit=2" "$out"
 contains "the refusal says gh couldn't read them" "gh pr view failed" "$out"
 printf 'not json' > "$DL_LABELS"
 dl_refuses "nor when gh's answer isn't the PR's labels" 'gh pr edit 7 --add-label risk:low'
 pr_labels
-expect 2 "nor when gh can't start" hook "$DL" pre-tool-use "$(dbash_in "$WORK/no-such-folder" 'gh pr edit 7 --add-label risk:low')"
-out=$(hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 -R o/r --add-label risk:low')" 2>&1; echo "exit=$?")
+expect 2 "nor when gh can't start" probe_hook "$DL" pre-tool-use "$(dbash_in "$WORK/no-such-folder" 'gh pr edit 7 --add-label risk:low')"
+out=$(probe_hook "$DL" pre-tool-use "$(dbash 'gh pr edit 7 -R o/r --add-label risk:low')" 2>&1; echo "exit=$?")
 contains "the deliverer's gh calls act on this repository only: another repository's PR is refused" "acts on this repository" "$out"
 contains "and the refusal is exit 2" "exit=2" "$out"
-out=$(hook "$DL" pre-tool-use "$(dbash 'gh issue edit 7 --add-label risk:low')" 2>&1; echo "exit=$?")
+out=$(probe_hook "$DL" pre-tool-use "$(dbash 'gh issue edit 7 --add-label risk:low')" 2>&1; echo "exit=$?")
 contains "the deliverer labels its PR through gh pr only" "gh issue edit is the user's call" "$out"
 export PATH=$DL_PATH
 git -C "$DL" checkout -q main
-expect 2 "the deliverer may not push while on the default branch" hook "$DL" pre-tool-use "$(dbash 'git push -u origin HEAD')"
+expect 2 "the deliverer may not push while on the default branch" probe_hook "$DL" pre-tool-use "$(dbash 'git push -u origin HEAD')"
 git -C "$DL" checkout -q feat/x
 # dlreport <delivery> <checks> <findings json>: the deliverer's final message
 dlreport() { python3 -c 'import json,sys; print(json.dumps({"agent_type":"deliverer","last_assistant_message":"```json\n"+json.dumps({"delivery":sys.argv[1],"branch":"feat/x","base":"main","pr":"https://example.test/pr/1","checks":sys.argv[2],"findings":json.loads(sys.argv[3]),"summary":"s"})+"\n```"}))' "$1" "$2" "$3"; }
@@ -1720,12 +1727,12 @@ printf -- '- [ ] **Task 9.3: After** (spec: backbone/specs/9.3.md) (after: 9.2)\
 DP="$WORK/deps"; new_repo "$DP"; "$HARNESS/bootstrap.sh" "$DP" --name deps >/dev/null
 printf -- '- [ ] **Task 6.1c: C** (spec: backbone/specs/6.1c.md) (after 6.1a)\n- [ ] **Task 6.1d: D** (spec: backbone/specs/6.1d.md) (after: 6.1a, 6.1c)\n- [ ] **Task 6.2: E** (spec: backbone/specs/6.2.md) (afterwards, see the notes)\n' >> "$DP/backbone/3-TASKS.md"
 deps=$(HARNESS_AUTONOMY=autonomous HARNESS_TEST_CMD=true HARNESS_ORCA_BIN=/usr/bin/true python3 "$DP/scripts/harness/lib/harness.py" orca --dry-run --tasks 6.1c,6.1d,6.2 2>&1)
-contains "dependencies: '(after 6.1a)' without a colon counts" "task 6.1c (next: define by the analyst), after 6.1a is done" "$deps"
-contains "dependencies: a list after 'after:'" "task 6.1d (next: define by the analyst), after 6.1a, 6.1c is done" "$deps"
+contains "dependencies: '(after 6.1a)' without a colon counts" "task 6.1c (next: blocked), after 6.1a is done" "$deps"
+contains "dependencies: a list after 'after:'" "task 6.1d (next: blocked), after 6.1a, 6.1c is done" "$deps"
 contains "dependencies: 'afterwards' in a note isn't one" "task 6.2 (next: define by the analyst), agents" "$deps"
 $OH approve 9.2 >/dev/null; $OH approve 9.3 >/dev/null
 git -C "$O" add -A && HARNESS_VERIFY=off git -C "$O" commit -qm "chore: tasks 9.2 and 9.3"
-contains "orca --dry-run shows a task waiting for its dependency" "would drive task 9.3 (next: start), after 9.2 is done" "$(HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --dry-run --tasks 9.3,9.2 2>&1)"
+contains "orca --dry-run shows a task waiting for its dependency" "would drive task 9.3 (next: blocked), after 9.2 is done" "$(HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --dry-run --tasks 9.3,9.2 2>&1)"
 out=$(HARNESS_ORCA_LAUNCH_WAIT=0 HARNESS_ORCA_BIN="$WORK/fake-orca.py" $OH orca --tasks 9.3,9.2 --parallel 2 --merge --wait-ms 10 2>&1; echo "exit=$?")
 contains "orca --merge: the first task is done and merged" "task 9.2: done; merged into" "$out"
 contains "orca: the dependent task ran after it, and was merged too" "task 9.3: done; merged into" "$out"

@@ -369,6 +369,10 @@ class Coordinator(object):
             if name == "deliver" and not step.get("role"):
                 info["outcome"] = "waiting for %s" % step.get("needed")
                 return False
+            if name == "blocked" and step.get("dependencies") and not info.get("synced"):
+                info["synced"] = True
+                self.sync(task)
+                continue
             if name in END_STEPS:
                 info["outcome"] = name
                 if step.get("pr"):
@@ -575,6 +579,12 @@ class Coordinator(object):
                 self.event("orca-worker", task=task, role=entry["role"], worker=entry["kind"], agent=entry.get("agent"),
                            outcome="failed-before-reporting", seconds=int(time.time() - entry.get("started", time.time())))
                 self.log("orca: task %s: the %s worker failed before reporting: %s" % (task, entry["role"], why))
+                recovery = self.next_step(task)
+                if recovery.get("failure_class") == "indeterminate_write":
+                    self.event("orca-recovery", task=task, failure_class="indeterminate_write", outcome="parked")
+                    self.log("orca: task %s: indeterminate write; reconcile or park, no worker retry" % task)
+                    self.tasks[task]["outcome"] = "parked (indeterminate_write)"
+                    continue
                 # Playbook for tool_timeout: a worker that died gets one more try after a pause, then is escalated.
                 retries = self.tasks[task].setdefault("retries", {})
                 if entry["kind"] == "step" and retries.get(entry["role"], 0) < self.opts.get("retries", 1):
