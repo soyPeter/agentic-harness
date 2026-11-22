@@ -10,6 +10,7 @@
     "plugin/opencode.js",
     "plugin/pre-commit",
     "tools/thin.py",
+    "tools/installer.py",
     "payload/seed",
     "payload/owned/backbone",
     "payload/owned/.github/workflows/harness-verify.yml",

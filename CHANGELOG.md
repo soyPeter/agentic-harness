@@ -1,16 +1,26 @@
 # Changelog
 
-## 0.31.0 (2026-11-15)
+## 0.31.0 (2026-11-22)
 
 This release includes the harness-side prerequisites for factory integration: contract v1, provenance intake,
-per-task budget accounting, external delivery with signed records, and the generic no-merge profile. It also includes
-the unreleased verification, traceability and hook changes detailed below. Factory deployment remains separate:
-use a reviewed project pin and aligned plugins, qualify the trusted adapter, and keep delivery credentials and the
-signing key outside agent environments. Existing projects upgrade through their reviewed pin changes.
+per-task budget accounting, external delivery with signed records, and the generic no-merge profile. It closes a
+security gap: agents can no longer switch the harness off through the agent CLIs' user configuration. It also adds
+the admission of reviewed third-party skill bundles (ADR-006), evidence and approval that go stale when the spec
+changes (ADR-007), KMS and keyless signing with predicate v1 (ADR-005), the sandbox's Change-Class gate, DNS
+allowlist, denial log and thin-install support with `run` able to start it (ADR-003), replay of refused hook calls
+(ADR-002 (c)), and the verification, traceability and hook changes detailed below. Factory deployment remains
+separate: use a reviewed project pin and aligned plugins, qualify the trusted adapter, and keep delivery credentials
+and the signing key outside agent environments. Existing projects upgrade through their reviewed pin changes; read
+the entries' **Upgrading** notes first. In short: Codex asks you to trust the project's changed hooks again, and the
+first session start or `doctor` accepts the current user configuration, so check it first if agents ran unattended;
+autonomous mode now needs the sandbox for schema work (`HARNESS_SANDBOX_REQUIRE`); rebuild the sandbox; with KMS or
+keyless signing the signing job is `attest-oidc`, not `attest`; and a deploy gate that checks the predicate type by
+hand moves to `verdicts/v1`.
 
 - **Thin-install checks survive a release bump.** Fixed-version upgrade fixtures now use their own matching plugin
   checkout. Separate checks cover the current release's default version, both when its tag exists and when it is
-  unavailable; changing `VERSION` no longer breaks unrelated thin-install tests.
+  unavailable; changing `VERSION` no longer breaks unrelated thin-install tests. The sandbox checks ADR-003 added to
+  them run from that checkout too.
 
 - **Agents can no longer switch the harness off through the CLIs' user configuration (security fix).** Before,
   the hooks protected the project's `.claude/settings.json`, `.codex/` and `.opencode/`, but not the CLIs' user- and
@@ -73,7 +83,7 @@ signing key outside agent environments. Existing projects upgrade through their 
   New regression tests pin the subshell forms that ADR-006's tokenizer (#93) fixed: `( gh repo view ... )`,
   `(gh pr ls)` and `-R x/y)`, which the deliverer gate's shell property had found at random. A false refusal, not a
   bypass.
-- **Third-party skills are reference until the user admits a reviewed copy (ADR-006, Proposed).** The user records a
+- **Third-party skills are reference until the user admits a reviewed copy (ADR-006, Accepted).** The user records a
   vendor's or an SDK's skill bundle in `backbone/admissions.conf` (new, user-only like `tools.conf`): its path, an
   Accepted ADR that names it, source, revision, digest, purpose, compatible versions, dependencies, data destinations
   and license. `harness.py admission digest <path>` prints the digest of the files git sees under the path (tracked,
@@ -171,7 +181,7 @@ signing key outside agent environments. Existing projects upgrade through their 
   the command sets it (`P=push; git $P`, `set -- push; git "$@"`, a loop's list) and refused when it can't be
   resolved (`git $(echo push)`). These checks stay defence in depth: credentials, CI's verify and human review are
   the boundaries.
-- **A spec change makes the evidence and approval given on the earlier text stale (ADR-007, Proposed; first slice).**
+- **A spec change makes the evidence and approval given on the earlier text stale (ADR-007, Accepted; first slice).**
   Judge, review and tester records now carry the spec fingerprint (the grill's: the spec except its `Approved-by:` lines,
   and every ADR it references) next to the code fingerprint. A pass counts only on the code and the spec it judged, so
   any change to the spec but its `Approved-by:` lines (a criterion, a constraint, an assumption, the Change-Class, or
