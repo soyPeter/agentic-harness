@@ -207,10 +207,10 @@ the user's approval of the changed spec ([ADR-007](docs/adr/ADR-007-evidence-clo
 | [ADR-006](docs/adr/ADR-006-external-agent-resource-admission.md) (Accepted) | Admit third-party agent setup resources explicitly |
 | [ADR-007](docs/adr/ADR-007-evidence-closed-loop.md) (Accepted) | The evidence-driven closed loop: triage, requirement-change impact, incident attribution |
 | [ADR-008](docs/adr/ADR-008-harness-inside-agent-factory.md) (Accepted) | The harness as the gate inside the agent software factory: who owns what, the contract, and the follow-ups |
-| [ADR-009 to ADR-017](docs/adr/) (Proposed) | The open plans recorded as ADRs, each pointing at its research doc in [docs/research](docs/research/): delegation-contract qualification (009), design-challenge onboarding (010), indeterminate side-effect outcomes (011), model-change instruction review (012), Orca self-rollout (013), reviewer-first PR bodies (014), refactor test-change risk (015), the parked structural skeleton spec (016) and the task dependency gate (017) |
+| [ADR-009 to ADR-012, ADR-014 to ADR-017](docs/adr/) (Proposed) | The open plans recorded as ADRs, each pointing at its research doc in [docs/research](docs/research/): delegation-contract qualification (009), design-challenge onboarding (010), indeterminate side-effect outcomes (011), model-change instruction review (012), reviewer-first PR bodies (014), refactor test-change risk (015), the parked structural skeleton spec (016) and the task dependency gate (017) |
 | [Agent-SDLC landscape](docs/research/2026-11-agent-sdlc-landscape.md) | Research: compliance and traceability tools, agent sandboxes; where ADR-003 to ADR-005 came from |
 | [Factory integration readiness](docs/research/2026-11-factory-integration-readiness.md) | Audit: the factory prerequisites now in main, and what a live pilot still needs (release, reviewed pin, factory-side evidence) |
-| [Orca self-rollout plan](docs/research/2026-11-orca-self-rollout-plan.md) (Accepted) | Run the open plans and ADR follow-ups on this repository through Orca; recorded as [ADR-013](docs/adr/ADR-013-orca-self-rollout.md) |
+| [Orca self-rollout plan](docs/research/2026-11-orca-self-rollout-plan.md) (Accepted) | Run the open plans and ADR follow-ups on this repository through Orca; recorded as [ADR-013](docs/adr/ADR-013-orca-self-rollout.md) (Accepted) |
 | [CHANGELOG.md](CHANGELOG.md) | What each release changed |
 
 ## Stack-neutral by design

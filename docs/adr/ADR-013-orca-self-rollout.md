@@ -1,10 +1,10 @@
 # ADR-013: Roll out harness changes through pinned gates and human-merged waves
 
 ## Status
-Proposed
+Accepted
 
 ## Date
-2026-11-13
+2026-11-13, accepted 2026-11-23
 
 ## Context
 The [Orca self-rollout plan](../research/2026-11-orca-self-rollout-plan.md) records Pedro's acceptance of
