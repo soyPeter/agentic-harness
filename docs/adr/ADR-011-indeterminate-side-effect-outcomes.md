@@ -41,6 +41,18 @@ represent an unobserved result as `indeterminate`. Reconcile through safe reads 
   body hash against observable comments; for Linear moves, confirm the intended issue's target state.
 - A Linear move to the same state may be safely repeatable if WP0 confirms it. Preserve the prohibition on closing
   tickets. PR lookup/update may already provide adequate reconciliation and can be excluded after qualification.
+- An agent's shell write counts as observed only when the agent CLI reports that this one call succeeded and
+  nothing ran after it in the same command (its redirections, a heredoc it reads and command substitutions in its
+  words don't count). An agent CLI that reports no result for shell calls (Codex; OpenCode's version 1 plugin API)
+  leaves each such write `indeterminate`: the harness has no observation, so the write parks like a lost reply. It is
+  not treated as unobservable by design, because recording it as done would be the guessed effect this ADR rules out.
+- The attempt is recorded before the agent CLI's permission check. When the CLI reports that it refused that call
+  before running it (Claude Code's `PermissionDenied`, in auto mode), that call's own attempt is withdrawn. A denial
+  at an interactive permission prompt reaches no hook, so its attempt stays parked until the user releases it.
+- An edit that was observed (`gh pr edit` sets fields) may run again under the same key; a create may not.
+- Only the agent CLI runs the hooks and only the user reconciles: agents may not run `harness.py hook`, load the
+  journal's or the engine's modules from inline code, or copy them. A script an agent writes and runs stays beyond
+  the shell checks, as for the harness's other records.
 - Worker failure on a read-only judge/grill step retains its existing retry policy. Do not change verdict values or
   mistake a missing verdict for success.
 
@@ -58,6 +70,8 @@ evidence, not a claim that the remote service guarantees exactly-once execution.
   Fixtures interrupt each unsafe path after effect and before recording, then prove that retry cannot duplicate it.
   Include failed attempt persistence (no external call), failed result persistence (pending attempt retained), an
   existing PR with stale edited fields (not observed), and a matching postcondition (durably observed before resume).
+- With Codex or OpenCode's version 1 plugin API, every in-scope shell write parks until the user reconciles it, until
+  WP2's read-based reconciliation exists.
 - False indeterminate results can delay delivery. Reconciliation and explicit user decisions trade speed for avoiding
   guessed effects. Secrets and raw credentials do not belong in journal entries.
 - Rollback requires explicit reconciliation or user release of outstanding attempts; removing the feature must not

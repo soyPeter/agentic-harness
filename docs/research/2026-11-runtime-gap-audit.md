@@ -84,32 +84,36 @@ Validation results:
 
 No live factory qualification is claimed.
 
-## Check while merging v0.31.0 (2026-11-22)
+## Check while merging v0.31.0 (2026-11-22), and fixes (2026-11-23)
 
-A Codex review on 15 November raised two problems. This note said both were covered. Checked again through the hooks
-and the runner, on the saved work (`d427a0f`) and on the merge with `main` at `9056f88`:
+A Codex review on 15 November raised two problems. This note said both were covered. Checked again on 22 November
+through the hooks and the runner, on the saved work (`d427a0f`) and on the merge with `main` at `9056f88`:
 
-- **Importing `write_journal` directly: partly covered.** `import write_journal`, `from write_journal import ...`,
-  `import_module("write_journal")` and code that executes the module's file are refused, in `python3 -c` and in a
-  heredoc. `import os, write_journal`, a computed module name, `pkgutil.resolve_name`, and copying or linking
-  `write_journal.py` are allowed. Run end to end, the comma form cleared a pending attempt and the same write was then
-  allowed. `main`'s guard has the same comma-form gap for `harness` and `launcher`, but refuses copies of `harness.py`.
+- **Importing `write_journal` directly: partly covered on 22 November, fixed on 23 November.** The plain import was
+  refused, but other spellings were allowed and could clear a pending attempt. Now code that names the journal's
+  module is refused, imports of the engine are refused also in an import list, from `scripts.harness.lib` or by a
+  module name in a string, the module can't be copied or linked, and agents can't run `harness.py hook` (a hook's
+  answer could otherwise be written by hand). A script an agent writes and runs stays beyond the shell checks, as
+  `HOOKS.md` says for every harness record.
 - **A parked worktree: covered for an indeterminate write.** `run --worktree` keeps the worktree with its uncommitted
   files when the session leaves an unresolved attempt, when a later run follows `write-reconcile --allow-retry`, and
   when the runner's own pull request loses its reply. Not covered, and the same on `main`: a task parked by an
   *escalation* in `run --worktree` without `--pr` loses its uncommitted files, because the worktree is removed by force.
 
-Also found, in the work as it was saved:
+Found in the work as it was saved, fixed on 23 November:
 
-- **The deliverer's documented pull request call parks the repository after it succeeds.** Its instructions pass the
-  body as `--body "$(cat <<'EOF' ... EOF)"`. The journal doesn't count that as a sole call, so the successful result
-  isn't observed: the next write is refused and `next` answers `blocked` until the user reconciles it. The existing
-  deliverer tests now delete the journal between probes, so they don't show it.
-- **Codex reports no result for a shell call**, and neither does OpenCode's version 1 plugin API, so every `gh pr
-  create`, `gh pr edit` and `gh issue create` from them parks. So does a call the user declines at the permission
-  prompt: the attempt is recorded before the prompt.
-- **With `HARNESS_ESCALATE_GH=on` (default off), any failing `gh issue create`** (no login, no such label) parks the
-  repository too, and the escalation command exits with an error after writing the BLOCKED note.
+- **The deliverer's documented pull request call parked the repository after it succeeded.** A sole gh call is now
+  observed with its redirections, a heredoc it reads and command substitutions in its words
+  (`--body "$(cat <<'EOF' ... EOF)"`). The deliverer tests no longer delete the journal between calls: each allowed
+  call runs with a successful result, and the property checks report the call as refused before it ran. That showed
+  one more case, now fixed: an observed edit repeated at the same commit was refused as a duplicate.
+- **Codex and OpenCode's version 1 plugin API report no result for a shell call.** ADR-011 settles it: no
+  observation means `indeterminate`, so each such write parks, and post-tool-use now tells the agent why. ADR-011
+  says so explicitly. A call that Claude Code's auto mode refuses after pre-tool-use is withdrawn (`PermissionDenied`);
+  a denial at an interactive prompt reaches no hook and stays parked.
+
+Not changed: with `HARNESS_ESCALATE_GH=on` (default off), any failing `gh issue create` (no login, no such label)
+parks the repository, and the escalation command exits with an error after writing the BLOCKED note.
 
 The merge also needed changes where `main` had gained redirection-free gh words (#100), eval replay (#92) and the
 approval check at finish (ADR-007); the tests for them are in `tests/test-runtime-recovery.py`.
