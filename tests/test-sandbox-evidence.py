@@ -806,8 +806,6 @@ class Start(Project):
 
                 self.assertEqual(hook.returncode, 2, hook.stdout + hook.stderr)
 
-    @unittest.skip("waits for PR #96 (generic wrapper unwrapping in the shell checks): behind timeout, stdbuf or "
-                   "caffeinate, an interpreter running the engine from a variable isn't read as one")
     def test_agents_cannot_approve_the_sandbox_behind_a_wrapper(self):
         for command in ("timeout 5 python3 $H sandbox-approve", "stdbuf -oL python3 -B \"$H\" sandbox-approve",
                         "H=scripts/harness/lib/harness.py; caffeinate -i python3 $H sandbox-approve"):
