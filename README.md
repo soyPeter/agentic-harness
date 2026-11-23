@@ -33,8 +33,15 @@ only).
   protection (`harness.py ci-protect` or `enroll.sh --protect`).
 - **What fails becomes the next task.** Red CI becomes a fix task on the same pull request, escalations wait for a
   person, a failure class seen twice opens a proposal, and the report points at missing rules or skills. Tracing a
-  production incident back to its pull request and spec is proposed in
-  [ADR-007](docs/adr/ADR-007-evidence-closed-loop.md), not built.
+  production incident back to its pull request and spec is accepted in
+  [ADR-007](docs/adr/ADR-007-evidence-closed-loop.md), but not built.
+
+[ADR-008](docs/adr/ADR-008-harness-inside-agent-factory.md) (Accepted) places this pipeline inside each lane of an
+always-on agent software factory: the factory owns the doors, sender checks, identity, keys and lanes; the harness owns
+everything inside a lane and stays the system of record for task state. The harness side of that contract ships in
+0.31.0 (contract v1, provenance intake, per-task budgets, external delivery, the `no-merge` profile); the factory's
+own adapter is unverified, and the [readiness audit](docs/research/2026-11-factory-integration-readiness.md) lists what
+a live pilot still needs.
 
 ## One task, request by request
 
@@ -55,7 +62,7 @@ only).
   says what each MCP or other tool does (read, write with its path field, exec, network, agent, and whether it needs
   the user); a write tool's paths get the same gates as Write and Edit. In supervised mode a tool with no contract runs
   with a warning; in autonomous mode it is refused.
-- **Third-party skills** ([ADR-006](docs/adr/ADR-006-external-agent-resource-admission.md), Proposed): a vendor's
+- **Third-party skills** ([ADR-006](docs/adr/ADR-006-external-agent-resource-admission.md), Accepted): a vendor's
   setup prompt, skill or plugin is reference until the user admits a reviewed copy in `backbone/admissions.conf`, with
   its decision, source, revision, digest, purpose, compatibility, dependencies, data destinations and license. Changed
   bytes lose the admission until the user reviews them again, a revoked bundle stays blocked (a rollback can't bring
@@ -104,26 +111,26 @@ only).
 
 ## What the harness can prove
 
-![The evidence chain from spec to receipt, where it is checked again, and the proposed ADRs that extend it](docs/sdlc/4-evidence.svg)
+![The evidence chain from spec to receipt, its independent checks, and shipped evidence extensions under accepted ADRs](docs/sdlc/4-evidence.svg)
 
 The receipt is built from evidence, not from what the agents said. Two fingerprints tie each verdict to what it judged
 (the spec and its ADRs for the grill pass; the code tree and that same spec fingerprint for the judge, review and tester
 records), so a later edit makes the pass stale. Any change to the spec other than its `Approved-by:` lines, or to an
 ADR it references, sends the task back to the griller and the judge even when the code is the same, and finishing needs
-the user's approval of the changed spec ([ADR-007](docs/adr/ADR-007-evidence-closed-loop.md), Proposed).
+the user's approval of the changed spec ([ADR-007](docs/adr/ADR-007-evidence-closed-loop.md), Accepted).
 
 - **Change receipt**: `harness.py receipt <id>` states what the harness can prove about a judged task: what changed,
   each acceptance criterion with its tests, what is *not* verified, the decisions and risks, and what still needs the
   user. It is built from the spec, the verdicts and the diff, and goes into the pull requests the runner and the Orca
   coordinator open. It shows the sandbox the judge pass was recorded in (backend, isolation class, base image digest,
-  allowlist hash, region, control plane, credential mode; [ADR-003](docs/adr/ADR-003-sandbox-backends.md), Proposed),
+  allowlist hash, region, control plane, credential mode; [ADR-003](docs/adr/ADR-003-sandbox-backends.md), Accepted),
   so a run that wasn't isolated shows it, and whether that met the sandbox the task's Change-Class needs. It also
   suggests pull request labels for triage: one `risk:*` label and
   `class:<class>`. The deliverer applies them; a label never approves or merges.
 - **Verify**: the pre-commit hook re-checks the gates on the staged state, the pre-push hook (full installs) the
   commits being pushed, and CI the pull request's commits (`harness.py verify --range`) with the **base branch's**
   verifier, so a pull request can't weaken the check that gates it, and a change made any other way is still caught.
-- **Traceability export** ([ADR-004](docs/adr/ADR-004-traceability-export.md), Proposed): `harness.py trace export
+- **Traceability export** ([ADR-004](docs/adr/ADR-004-traceability-export.md), Accepted): `harness.py trace export
   --format reqif|reqifz|needs|html [--out DIR] [--task ID]` writes the chain requirement → acceptance criterion → test
   file → judge verdict → commit as ReqIF 1.2 (results and verdicts as enumerations), a ReqIF archive with each task's
   receipt, a Sphinx-Needs `needs.json` (format 1) or a self-contained HTML matrix. It is derived from `backbone/` and
@@ -181,8 +188,8 @@ the user's approval of the changed spec ([ADR-007](docs/adr/ADR-007-evidence-clo
   `backbone/evals/`, which agents can't change, and commits them. `harness.py eval replay [DIR] [--engine <harness.py>]
   [--json]` runs the committed state-free ones through `hook pre-tool-use` in a throwaway checkout and exits 1 on a
   refusal now allowed (a hole),
-  an allowed call now blocked (a false block) or a refusal that gives another reason. Judge failures and escalations
-  are exported as eval prompts and not replayed; model-based replay is
+  an allowed call now blocked (a false block), a refusal that gives another reason or an error. Judge failures and
+  escalations are exported as eval prompts and not replayed; model-based replay is
   [ADR-007](docs/adr/ADR-007-evidence-closed-loop.md)'s.
 
 ## Documentation
@@ -194,14 +201,16 @@ the user's approval of the changed spec ([ADR-007](docs/adr/ADR-007-evidence-clo
 | `payload/owned/backbone/8-WORKFLOW.md`, `payload/owned/AGENTS.md` | The orchestration loop, the Definition of Done and the rules every agent follows |
 | [ADR-001](docs/adr/ADR-001-thin-mode-plugin.md) (Accepted) | Thin mode: the engine as an agent plugin, the project keeps its state and a version pin |
 | [ADR-002](docs/adr/ADR-002-change-class-ladder.md) (Accepted) | The Change-Class ladder, and PR merge stays human |
-| [ADR-003](docs/adr/ADR-003-sandbox-backends.md) (Proposed) | Sandbox backends and the sandbox evidence in the receipt |
-| [ADR-004](docs/adr/ADR-004-traceability-export.md) (Proposed) | Traceability export: ReqIF, `needs.json` and an HTML matrix |
-| [ADR-005](docs/adr/ADR-005-verdict-attestations.md) (Proposed) | Signed verdict attestations in CI |
-| [ADR-006](docs/adr/ADR-006-external-agent-resource-admission.md) (Proposed) | Admit third-party agent setup resources explicitly |
-| [ADR-007](docs/adr/ADR-007-evidence-closed-loop.md) (Proposed) | The evidence-driven closed loop: triage, requirement-change impact, incident attribution |
+| [ADR-003](docs/adr/ADR-003-sandbox-backends.md) (Accepted) | Sandbox backends and the sandbox evidence in the receipt |
+| [ADR-004](docs/adr/ADR-004-traceability-export.md) (Accepted) | Traceability export: ReqIF, `needs.json` and an HTML matrix |
+| [ADR-005](docs/adr/ADR-005-verdict-attestations.md) (Accepted) | Signed verdict attestations in CI |
+| [ADR-006](docs/adr/ADR-006-external-agent-resource-admission.md) (Accepted) | Admit third-party agent setup resources explicitly |
+| [ADR-007](docs/adr/ADR-007-evidence-closed-loop.md) (Accepted) | The evidence-driven closed loop: triage, requirement-change impact, incident attribution |
+| [ADR-008](docs/adr/ADR-008-harness-inside-agent-factory.md) (Accepted) | The harness as the gate inside the agent software factory: who owns what, the contract, and the follow-ups |
+| [ADR-009 to ADR-017](docs/adr/) (Proposed) | The open plans recorded as ADRs, each pointing at its research doc in [docs/research](docs/research/): delegation-contract qualification (009), design-challenge onboarding (010), indeterminate side-effect outcomes (011), model-change instruction review (012), Orca self-rollout (013), reviewer-first PR bodies (014), refactor test-change risk (015), the parked structural skeleton spec (016) and the task dependency gate (017) |
 | [Agent-SDLC landscape](docs/research/2026-11-agent-sdlc-landscape.md) | Research: compliance and traceability tools, agent sandboxes; where ADR-003 to ADR-005 came from |
-| [Orca self-rollout plan](docs/research/2026-11-orca-self-rollout-plan.md) (Accepted) | Run the open plans and ADR follow-ups on this repository through Orca |
-| Proposed plans in [docs/research](docs/research/) | Not accepted or implemented: [design challenge and onboarding](docs/research/2026-11-design-challenge-agent-onboarding-plan.md), [delegation contracts](docs/research/2026-11-delegation-contracts-qualification-plan.md), [task dependency gate](docs/research/2026-11-task-dependency-gate-plan.md), [reviewer-first PR bodies](docs/research/2026-11-pr-body-reviewer-opener-plan.md), [indeterminate side-effect outcome](docs/research/2026-11-indeterminate-side-effect-outcome-plan.md), [model-change instruction review](docs/research/2026-11-model-change-instruction-review-plan.md), [structural skeleton in the spec](docs/research/2026-11-structural-skeleton-spec-plan.md) (parked) |
+| [Factory integration readiness](docs/research/2026-11-factory-integration-readiness.md) | Audit: the factory prerequisites now in main, and what a live pilot still needs (release, reviewed pin, factory-side evidence) |
+| [Orca self-rollout plan](docs/research/2026-11-orca-self-rollout-plan.md) (Accepted) | Run the open plans and ADR follow-ups on this repository through Orca; recorded as [ADR-013](docs/adr/ADR-013-orca-self-rollout.md) |
 | [CHANGELOG.md](CHANGELOG.md) | What each release changed |
 
 ## Stack-neutral by design
@@ -471,7 +480,7 @@ A profile is an organisation policy on top of the gates. Set it in `backbone/har
 | `backbone/.verdicts/` | hooks | Griller and judge verdicts per task, with fingerprints (audit trail) |
 | `backbone/.harness-lock.json` | harness | Installed version and file hashes |
 | `scripts/harness/` | harness | Runtime (`lib/harness.py`), git hooks, core rules and routes, `doctor.sh` |
-| `.github/workflows/harness-verify.yml` | harness | CI: `verify --range` with the base branch's verifier on every pull request; on a push to the default branch, the verdict attestation, signed when `HARNESS_ATTEST_KEY` is set |
+| `.github/workflows/harness-verify.yml` | harness | CI: `verify --range` with the base branch's verifier on every pull request, and the traceability matrix when it passes; on a push to the default branch, once signing is set up (the `HARNESS_ATTEST_KEY` secret, or a KMS or keyless mode in `HARNESS_ATTEST_SIGNING`), the signed verdict attestation and a signed `.reqifz` export |
 | `.github/workflows/harness-judge.yml` | project | CI: an independent judge session re-judges tasks a pull request finishes (needs `ANTHROPIC_API_KEY`; add your toolchain) |
 | `.devcontainer/harness-agent/` | harness | Sandbox for unattended runs: an outbound allowlist enforced from a second container (the agent's has no NET_ADMIN or NET_RAW), DNS for allowlisted names only, a log of what it denied, a base image pinned by digest, a trusted workspace, no prompts. Checked in a real container by `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`); the earlier one-container version ran a real task end to end |
 | `.claude/settings.json` | shared | Merged: harness hook entries plus a few read-only permissions |
