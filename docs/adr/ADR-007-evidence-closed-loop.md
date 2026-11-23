@@ -342,8 +342,9 @@ readable by the older engine, which ignores `spec`.
 - **Assumption sources and task dependencies in the fingerprint**: dependency scope and legacy migration are left to
   the workflow maintainer and an independent reviewer. `(after: ...)` edges belong to the task dependency gate plan.
 - **The judge's spec fingerprint in `trace export` and the attest statement**: ADR-004 and ADR-005 follow-ups were in
-  progress elsewhere (since merged, in PR #88 and PR #94), and the attest predicate is versioned (ADR-005 follow-up 6). Verify already refuses a range whose
-  judge pass is on an earlier spec, so an attested task's receipt is on its current spec.
+  progress elsewhere (since merged, in PR #88 and PR #94), and the attest predicate is versioned (ADR-005 follow-up 6).
+  Verify already refuses a range whose judge pass is on an earlier spec, so an attested task's receipt is on its
+  current spec.
 - **NOT VERIFIED without a test command**, and **states after delivery** (merged, deployed, enabled, observed):
   small next candidates. The first is local. The second needs forge and deploy adapters (ADR-008).
 - **Isolation before parallelism** (P3): no demonstrated bottleneck. Orca keeps its current worktrees and two workers.
