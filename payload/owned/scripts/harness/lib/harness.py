@@ -184,7 +184,7 @@ SHELL_PROTECTED = (r"^backbone(/|$)", r"^scripts/harness(/|$)", r"^\.claude(/|$)
 # Thin mode (ADR-001): the launcher names the engine cache and the plugin it runs from. They decide the project's gates
 # but lie outside it, beyond the reach of the repository-relative protections.
 INSTALL_DIRS = (("HARNESS_ENGINES", "the harness engine cache"), ("HARNESS_PLUGIN_ROOT", "the harness plugin"))
-INSTALL_SCRIPTS = ("harness.py", "launcher.py", "thin.py")
+INSTALL_SCRIPTS = ("harness.py", "launcher.py", "thin.py", "write_journal.py")
 # In the sandbox, where thin-engine.py links a thin project's pinned engine as the Claude Code plugin.
 SANDBOX_PLUGIN = "~/.agentic-harness/plugins/agentic-harness"
 # devcontainer up runs parts of the sandbox's definition on the host, so only the user changes or approves it.
@@ -3221,10 +3221,17 @@ FIND_EXEC = ("-exec", "-execdir", "-ok", "-okdir")
 PLANNING_COMMANDS = ("orca", "orca-nightly", "linear")
 ENGINE_MODULES = ("harness", "launcher", "thin", "write_journal")
 ENGINE_NAME = re.compile(r"\b(?:harness|launcher|thin|write_journal)\.py\b")
-ENGINE_IMPORT = re.compile(r"\brunpy\b|\b(?:import|from)\s+(?:harness|launcher|thin|write_journal)\b|"
-                           r"\b(?:import_module|__import__)\s*\(\s*['\"](?:harness|launcher|thin|write_journal)\b")
+# Python finds the engine's modules by name, also in an import list, from scripts.harness.lib (a namespace package from
+# the project's root) or by a string; the journal's module is named in no other code.
+ENGINE_MODULE = r"(?:[\w.]*\blib\.)?(?:harness|launcher|thin)\b"
+ENGINE_IMPORT = re.compile(r"\brunpy\b|\bwrite_journal\b|"
+                           r"\bimport\s+\(?\s*(?:[\w.]+(?:\s+as\s+\w+)?\s*,\s*)*" + ENGINE_MODULE + r"|"
+                           r"\bfrom\s+" + ENGINE_MODULE + r"|"
+                           r"\b(?:import_module|__import__|resolve_name)\s*\(\s*['\"]" + ENGINE_MODULE)
 CODE_RUNS = re.compile(r"\bexec(?:file)?\s*\(|\bcompile\s*\(|\bimportlib\b|\bsubprocess\b|\bchild_process\b|\bsystem\s*\(|"
                        r"\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\b(?:spawn|exec)Sync\b")
+HOOK_REFUSAL = ("harness.py hook is run by the agent CLI around each tool call, never by agents: a hook's answer must "
+                "come from a call that really ran.")
 USER_COMMAND_REFUSAL = ("harness.py %s is for the user, CI, an agent factory or an Orca automation's precheck, not "
                         "agents, however the engine is started: write-reconcile, run, orca, orca-nightly, snapshot, "
                         "linear, intake, delivery-record, ci-judge, ci-protect, sandbox-approve, accept-agent-config "
@@ -3359,8 +3366,10 @@ def engine_findings(prog, words, written):
     if command == "pin":
         return ["pin moves the engine release this project pins, and with it every gate; only the user does that, in "
                 "their own terminal."]
-    if EXPANSION.search(words[script]) and any(w in USER_COMMANDS for w in words[script + 1:]):
+    if EXPANSION.search(words[script]) and any(w in USER_COMMANDS + ("hook",) for w in words[script + 1:]):
         return [USER_COMMAND_REFUSAL % "<expansion>"]
+    if command == "hook":
+        return [HOOK_REFUSAL]
     if EXPANSION.search(command):
         return ["It runs the harness engine with a command from an expansion ($... or `...`), which the hooks can't "
                 "read; write the command out."]

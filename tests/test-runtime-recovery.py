@@ -2,6 +2,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -458,6 +459,64 @@ class ObservedResults(unittest.TestCase):
         self.p.hook('permission-denied', dict(data, tool_use_id='toolu_other', hook_event_name='PermissionDenied',
                                               reason='[fixture]'), check=True)
         self.assertEqual(len(self.pending()), 1)
+
+
+class JournalAuthority(unittest.TestCase):
+    """Only the agent CLI answers a hook and only the user reconciles: agents can't do either from the shell."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.p = Project('journal authority ')
+        cls.p.hook('pre-tool-use', {'session_id': 's', 'tool_name': 'Bash', 'tool_use_id': 'toolu_lost',
+                                    'tool_input': {'command': 'gh pr create --title t --body b'}}, check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.p.cleanup()
+
+    def test_agents_cannot_answer_a_hook_themselves(self):
+        success = json.dumps({'session_id': 's', 'tool_name': 'Bash', 'tool_use_id': 'toolu_lost',
+                              'hook_event_name': 'PostToolUse', 'tool_response': {'exit_code': 0},
+                              'tool_input': {'command': 'gh pr create --title t --body b'}})
+        self.p.write('answer.json', success)
+        for command in ("python3 scripts/harness/lib/harness.py hook post-tool-use <<'EOF'\n%s\nEOF" % success,
+                        'python3 -B scripts/harness/lib/harness.py hook post-tool-use < answer.json',
+                        'cat answer.json | python3 scripts/harness/lib/harness.py hook post-tool-use',
+                        'python3 scripts/harness/lib/harness.py hook permission-denied < answer.json',
+                        'H=scripts/harness/lib/harness.py; python3 $H hook post-tool-use < answer.json',
+                        'env python3 scripts/harness/lib/harness.py hook pre-tool-use < answer.json'):
+            with self.subTest(command=command):
+                self.assertEqual(self.p.bash(command).returncode, 2)
+
+    def test_code_that_loads_the_journal_or_the_engine_is_refused_however_it_is_spelled(self):
+        lib = 'scripts/harness/lib'
+        for code in ('import os, write_journal', 'import os,write_journal as w', 'import json, sys, harness',
+                     'from lib import write_journal', 'import scripts.harness.lib.write_journal as w',
+                     'import scripts.harness.lib.harness', 'from scripts.harness.lib import (sandbox,\n    harness)',
+                     'import importlib; importlib.import_module("scripts.harness.lib.write_journal")',
+                     '__import__("lib.harness")', 'import pkgutil; pkgutil.resolve_name("write_journal")',
+                     "import sys; sys.path.insert(0, '%s'); import os, write_journal; "
+                     "[write_journal.Journal('.git/harness/writes.jsonl').resolve(r['key'], 'x') "
+                     "for r in write_journal.Journal('.git/harness/writes.jsonl').pending()]" % lib):
+            for command in ('python3 -c ' + shlex.quote(code), "python3 - <<'PY'\n%s\nPY" % code):
+                with self.subTest(command=command):
+                    self.assertEqual(self.p.bash(command).returncode, 2)
+        self.assertEqual(len(json.loads(self.p.harness('write-reconcile').stdout)), 1)
+
+    def test_the_journal_module_is_not_copied_linked_or_rewritten_elsewhere(self):
+        module = 'scripts/harness/lib/write_journal.py'
+        for command in ('cp %s /tmp/wj.py' % module, 'ln -s "$PWD/%s" /tmp/wj.py' % module,
+                        'cat %s > /tmp/wj.py' % module, 'install %s /tmp/wj.py' % module):
+            with self.subTest(command=command):
+                self.assertEqual(self.p.bash(command).returncode, 2)
+
+    def test_reading_the_journal_module_and_naming_harness_in_prose_stay_allowed(self):
+        for command in ('sed -n 1,20p scripts/harness/lib/write_journal.py',
+                        'grep -n resolve scripts/harness/lib/write_journal.py',
+                        "python3 -c 'print(\"we import data, then harness it\")'",
+                        "python3 -c 'import json, os; print(json.dumps(os.listdir(\".\")))'"):
+            with self.subTest(command=command):
+                self.assertEqual(self.p.bash(command).returncode, 0)
 
 
 class EvalReplay(unittest.TestCase):
