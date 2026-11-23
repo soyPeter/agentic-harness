@@ -32,7 +32,7 @@ python3 scripts/harness/lib/harness.py linear receipt 4.1 --status "In Review"  
   `(light)` when you pass `--light`. The analyst then writes the requirements. `--from issue.json` imports an issue
   saved from the Linear MCP server's `get_issue` instead of calling the API.
 - `receipt` posts `harness.py receipt <task>` as a comment on the ticket. It refuses a task without a judge pass on
-  the current code. `--status` moves the ticket, but never to a completed or canceled state: closing is the human's
+  the current code and spec. `--status` moves the ticket, but never to a completed or canceled state: closing is the human's
   call.
 
 For agents working with the Linear MCP server directly, paste `tools.conf.linear` into `backbone/tools.conf`. Reads
