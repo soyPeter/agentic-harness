@@ -27,7 +27,7 @@ These are the harness's own decisions. A spec that needs one of them on its `ADR
 | [ADR-010](../docs/adr/ADR-010-design-challenge-agent-onboarding.md) | Design comprehension and agent onboarding | Proposed | 2026-11-13 |
 | [ADR-011](../docs/adr/ADR-011-indeterminate-side-effect-outcomes.md) | Indeterminate external writes | Proposed | 2026-11-13 |
 | [ADR-012](../docs/adr/ADR-012-model-change-instruction-review.md) | Model-change instruction review | Proposed | 2026-11-13 |
-| [ADR-013](../docs/adr/ADR-013-orca-self-rollout.md) | Pinned self-rollout in human-merged waves | Proposed | 2026-11-13 |
+| [ADR-013](../docs/adr/ADR-013-orca-self-rollout.md) | Pinned self-rollout in human-merged waves | Accepted | 2026-11-13, accepted 2026-11-23 |
 | [ADR-014](../docs/adr/ADR-014-pr-body-reviewer-opener.md) | Reviewer-first PR bodies | Proposed | 2026-11-13 |
 | [ADR-015](../docs/adr/ADR-015-refactor-test-change-risk.md) | Refactor test-change risk | Proposed | 2026-11-13 |
 | [ADR-016](../docs/adr/ADR-016-structural-skeleton-spec.md) | Park structural spec skeletons pending evidence | Proposed | 2026-11-13 |

@@ -26,8 +26,8 @@ does not implement the shared dependency gate or lost-write reconciliation.
 
 Update of 2026-11-23: ADR-003 follow-ups 1, 4, 5, 8 and 9 (PR #89) and ADR-005 follow-ups 1, 2, 3, 5 and 6
 (PR #94) are in main and were released in 0.31.0. Build tasks 2.6, 3.7, 3.8, 3.10, 3.11, 4.5 and 4.11 are retired
-from the future queue below, as 2.5 and 3.9 were, not marked `[x]`. What Task 1.6 can still triage is what those
-ADRs' follow-up sections list as deferred or not run end to end.
+from the future queue below, as 2.5 and 3.9 were, not marked `[x]`. ADR-004's follow-ups (PR #88) are in main too.
+Task 1.6 is narrowed to what is still deferred, partly done or not run end to end.
 
 ## M1: Wave 1 audits
 
@@ -36,11 +36,15 @@ ADRs' follow-up sections list as deferred or not run end to end.
 - [ ] **Task 1.3: Indeterminate outcome WP0 audit** (spec: backbone/specs/1.3.md) (plan: docs/research/2026-11-indeterminate-side-effect-outcome-plan.md)
 - [ ] **Task 1.4: Delegation contracts P0 reuse map** (spec: backbone/specs/1.4.md) (plan: docs/research/2026-11-delegation-contracts-qualification-plan.md)
 - [ ] **Task 1.5: Design challenge D0 reuse map** (spec: backbone/specs/1.5.md) (plan: docs/research/2026-11-design-challenge-agent-onboarding-plan.md)
-- [ ] **Task 1.6: ADR-003, ADR-004 and ADR-005 follow-up triage** (spec: backbone/specs/1.6.md) (plan: docs/adr/ADR-003-sandbox-backends.md) (plan: docs/adr/ADR-004-traceability-export.md) (plan: docs/adr/ADR-005-verdict-attestations.md)
+- [ ] **Task 1.6: Unshipped ADR-003, ADR-004 and ADR-005 follow-up triage** (spec: backbone/specs/1.6.md) (plan: docs/adr/ADR-003-sandbox-backends.md) (plan: docs/adr/ADR-004-traceability-export.md) (plan: docs/adr/ADR-005-verdict-attestations.md)
 - [ ] **Task 1.7: Model change WP1 baseline on fixture tasks** (spec: backbone/specs/1.7.md) (plan: docs/research/2026-11-model-change-instruction-review-plan.md)
 - [ ] **Task 1.8: Factory integration qualification and live-pilot readiness** (spec: backbone/specs/1.8.md) (plan: docs/research/2026-11-factory-integration-readiness.md)
 
-Task 1.6 triages the local-code follow-ups only. It does not build them. Task 1.7 runs on the fixture tasks in `tests/coefficiency` and `tests/colsum` and spends model tokens.
+Task 1.6 triages only these follow-ups: ADR-003 2, 3, 6 and 7 (deferred; 2 has its own plan,
+`docs/research/2026-11-brokered-credentials-egress-proxy-plan.md`); ADR-004 4's remainder, the archive as an
+attestation subject; ADR-005 2 and 3 (implemented, not run end to end) and 4 (deferred). For each, it says whether the
+work is local code or needs outside services. It does not build them.
+Task 1.7 runs on the fixture tasks in `tests/coefficiency` and `tests/colsum` and spends model tokens.
 Task 1.8 has a scoped local evidence note; the live pilot remains blocked by its entry conditions. It is not
 authorization to cut a release, move the pin, start the real runner or change deployment credentials.
 
