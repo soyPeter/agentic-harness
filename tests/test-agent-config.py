@@ -288,6 +288,20 @@ class WritesToAgentConfiguration(Fixture):
             with self.subTest(command=command):
                 self.assertAllowed(self.bash(command), command)
 
+    def test_a_command_behind_a_program_the_hooks_dont_know_is_read_too(self):
+        script = self.project / "run"
+        script.write_text('#!/bin/sh\nexec "$@"\n')
+        script.chmod(0o755)
+        self.addCleanup(script.unlink)
+        run, home = shlex.quote(str(script)), shlex.quote(str(self.home))
+        for command in ("%s cp -R evil/.agentic-harness ~/" % run, "%s cp -R evil/.claude ~/" % run,
+                        "%s rm -r -f %s" % (run, home), "%s rm -rf %s/" % (run, home), "%s mv ~ x" % run):
+            with self.subTest(command=command):
+                self.assertRefused(self.bash(command), command)
+        for command in ("%s cp a.txt ~/" % run, "%s ls ~" % run, "%s make build" % run):
+            with self.subTest(command=command):
+                self.assertAllowed(self.bash(command), command)
+
     def test_the_rest_of_the_home_folder_is_left_alone(self):
         for path in (self.home / "notes.txt", self.home / ".claude/projects/x/memory/note.md",
                      self.home / ".claude/todos/x.json", self.home / ".config/other/x.json"):

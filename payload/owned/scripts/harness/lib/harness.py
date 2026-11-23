@@ -3422,8 +3422,9 @@ def engine_findings(prog, words, written):
 
 
 def names_protected(words, cwd, env):
-    """Whether words name a harness-protected path, the git directory, the harness's install or the engine, or a path
-    the hooks can't resolve: what an unknown runner's command is checked for (brew install node names none)."""
+    """Whether words name a harness-protected path, the git directory, the harness's install or the engine, a folder
+    that holds the agent CLIs' configuration or the sandbox records, or a path the hooks can't resolve: what an unknown
+    runner's command is checked for (brew install node names none)."""
     for word in words:
         if (PROTECTED_MENTION.search(word) or GIT_DIR_HINT.search(word) or ENGINE_NAME.search(word)
                 or ENGINE_IMPORT.search(word) or engine_script(word) or word in ENGINE_MODULES + ("runpy",)):
@@ -3431,7 +3432,8 @@ def names_protected(words, cwd, env):
         if word.startswith("-"):
             continue
         fulls, unresolved = shell_path(word, cwd, env)
-        if unresolved or any(protected_path(full, cwd) or install_path(full, cwd) for full in fulls):
+        if unresolved or any(protected_path(full, cwd) or install_path(full, cwd, whole=True)
+                             or agent_config_path(full, cwd, whole=True) for full in fulls):
             return True
     return False
 
