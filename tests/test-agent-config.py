@@ -159,6 +159,10 @@ class WritesToAgentConfiguration(Fixture):
             """claude mcp add -s user evil -- python3 evil.py""",
             """codex mcp add evil -- python3 evil.py""",
             """codex features disable hooks""",
+            """echo x >| ~/.claude/settings.json""",
+            """echo x 1<> ~/.claude/settings.json""",
+            """echo x >| ~/.agentic-harness/machine.json""",
+            """echo x 1<>~/.agentic-harness/machine.json""",
         ]
         for command in commands:
             with self.subTest(command=command):

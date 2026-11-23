@@ -2698,8 +2698,7 @@ def config_operands(segment, words, assignments=(), env=None):
     """[(path, whole)] a shell segment may change: its redirection targets, and every word of a program that doesn't
     only read (cp and the like: their target, and what lands in a target folder). whole is INTO for a folder that
     receives names the hooks can't read (an archive's, a folder's contents)."""
-    found = [(p.strip("'\""), False) for p in
-             re.findall(r"(?:^|[^<>&0-9])(?:[0-9]?>>?|&>>?)\s*('[^']*'|\"[^\"]*\"|[^\s;|&<>]+)", segment)]
+    found = [(p.strip("'\""), False) for p in redirection_targets(segment)]
     prog, args = program(words), words[1:]
     operands = [w for w in args if not w.startswith("-")]
     if (prog in CONFIG_READERS or (prog == "find" and not set(args) & set(FIND_WRITES))
@@ -2848,10 +2847,15 @@ def nested_session_findings(words, assignments, env):
 WRITE_TARGET = re.compile(r"(?:^|\s)([0-9]*(?:>>|>\||>&|<>|>)|&>>?)\s*('[^']*'|\"[^\"]*\"|[^\s;|&<>]+)")
 
 
+def redirection_targets(segment):
+    """The files segment's redirections open for writing, as written (quotes kept)."""
+    return [target for op, target in WRITE_TARGET.findall(operators_apart(segment))
+            if not (op.endswith(">&") and re.fullmatch(r"[0-9]*-?", target))]
+
+
 def written_paths(segment, words):
     """Paths a segment writes, moves or deletes: redirection targets and mutating programs' operands."""
-    paths = [target for op, target in WRITE_TARGET.findall(operators_apart(segment))
-             if not (op.endswith(">&") and re.fullmatch(r"[0-9]*-?", target))]
+    paths = redirection_targets(segment)
     prog, args = program(words), [w for w in words[1:] if not w.startswith("-")]
     if prog in MUTATORS:
         paths += args
