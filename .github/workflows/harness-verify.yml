@@ -161,7 +161,7 @@ jobs:
           printf '\n# ordinary human comment\n' >> payload/owned/scripts/harness/lib/harness.py
           git add README.md payload/owned/scripts/harness/lib/harness.py
           git commit -m "docs: ordinary human note"
-          engine="$HOME/.agentic-harness/engines/0.30.0/payload/owned/scripts/harness/lib/harness.py"
+          engine="$HOME/.agentic-harness/engines/0.31.0/payload/owned/scripts/harness/lib/harness.py"
           test -f "$engine"
           human=$(python3 "$engine" verify --range HEAD~1..HEAD)
           printf '%s\n' "$human"
