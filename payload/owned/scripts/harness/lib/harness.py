@@ -2665,6 +2665,16 @@ COPIERS = {
 INTO = "into"   # a destination that receives content whose names the hooks can't read
 
 
+def relative_copy_targets(prog, target, source):
+    """[(path, whole)] a relative copy (rsync -R, cp --parents) of source writes: source's path below target and
+    every folder on the way, or target itself when that path is empty. rsync's path starts after the last /./."""
+    path = (source.rpartition("/./")[2] if prog == "rsync" else source).strip("/")
+    if path in ("", "."):
+        return [(target, INTO)]
+    parts = path.split("/")
+    return [(os.path.join(target, *parts[:depth]), False) for depth in range(1, len(parts) + 1)]
+
+
 def copy_targets(prog, args):
     """[(path, whole)] a copy, move or link writes: its target, what lands in it, the sources a move or link takes
     away, the target as a whole when a folder's contents land in it (cp -T, rsync src/, ditto), and every folder
@@ -2674,6 +2684,7 @@ def copy_targets(prog, args):
     for table in COPIERS[prog]:
         options, operands, maybe = parse_options(args, **table)
         given = {name for name, _ in options}
+        relative = given & ({"-R", "--relative"} if prog == "rsync" else {"--parents"} if prog == "cp" else set())
         targets = [(t, operands) for t in option_values(options, "-t", "--target-directory")]
         if not targets:
             for at in range(len(operands) - 1, 0, -1):
@@ -2681,9 +2692,13 @@ def copy_targets(prog, args):
                 if at not in maybe:
                     break
         for target, sources in targets:
-            found += [(target, False)] + [(os.path.join(target, os.path.basename(s.rstrip("/"))), False)
-                                          for s in sources]
-            contents = any(s.endswith("/") or os.path.basename(s.rstrip("/")) in ("", ".", "..") for s in sources)
+            found.append((target, False))
+            if relative:
+                found += [entry for s in sources for entry in relative_copy_targets(prog, target, s)]
+            else:
+                found += [(os.path.join(target, os.path.basename(s.rstrip("/"))), False) for s in sources]
+            contents = not relative and any(s.endswith("/") or os.path.basename(s.rstrip("/")) in ("", ".", "..")
+                                            for s in sources)
             if prog == "ditto" or (prog in ("cp", "rsync", "scp") and contents) or (
                     prog == "cp" and given & {"-T", "--no-target-directory"}):
                 found.append((target, INTO))

@@ -792,6 +792,10 @@ class Start(Project):
                                                                         "harness-agent/Dockerfile', 'a').write('x')\""}},
             "approve": {"tool_name": "Bash", "tool_input": {
                 "command": "python3 scripts/harness/lib/harness.py sandbox-approve"}},
+            "a relative copy": {"tool_name": "Bash", "tool_input": {
+                "command": "rsync -R evil/./.agentic-harness/sandbox-approvals.json ~/"}},
+            "a relative copy of a run": {"tool_name": "Bash", "tool_input": {
+                "command": "cd evil && rsync -R .agentic-harness/sandbox-runs/run-x/devcontainer.json ~/"}},
         }
         for name, call in writes.items():
             with self.subTest(write=name):

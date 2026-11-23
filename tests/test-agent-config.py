@@ -247,12 +247,14 @@ class WritesToAgentConfiguration(Fixture):
                         "unzip -o evil.zip -d ~", "cd && unzip evil.zip", "unzip evil.zip -d ~/.config",
                         "ditto -x -k evil.zip ~", "ditto evil ~", "7z x evil.7z -o%s" % shlex.quote(str(self.home)),
                         "rsync -a evil/ ~/", "rsync -a evil/ ~", "cp -R evil/. ~", "cp -R evil/ ~",
-                        "cd ~ && cpio -id < evil.cpio"):
+                        "cd ~ && cpio -id < evil.cpio", "cd evil && rsync -R .claude/settings.json ~/",
+                        "rsync -R evil/./.claude/settings.json ~/", "rsync --relative evil/./.codex/config.toml ~/",
+                        "cd evil && cp --parents .claude/settings.json ~/", "rsync -aR evil/./.claude ~/"):
             with self.subTest(command=command):
                 self.assertRefused(self.bash(command), command)
         for command in ("tar -czf backup.tgz -C ~ notes", "tar -tf evil.tar", "tar -xf a.tar -C ~/notes",
                         "tar -xf a.tar", "unzip a.zip -d ~/notes", "unzip -l a.zip", "rsync -a src ~/notes/",
-                        "cp -R src ~/"):
+                        "cp -R src ~/", "rsync -R src/f ~/", "rsync -aR src/ ~/notes/"):
             with self.subTest(command=command):
                 self.assertAllowed(self.bash(command), command)
 
