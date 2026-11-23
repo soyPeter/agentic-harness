@@ -2336,8 +2336,9 @@ def thin_paths():
 
 
 def install_path(path_str, cwd, whole=False):
-    """Which harness install (engine cache, plugin or installed role agents) path_str is in, or contains, else None.
-    whole: the operation takes path_str as a whole (deletes, moves or replaces it), so holding a record counts."""
+    """Which harness install (engine cache, plugin or installed role agents) or sandbox record path_str is or is in,
+    else None. A folder that only holds one counts when whole is set: the operation takes path_str as a whole (delete,
+    move, chmod, a folder's contents copied or extracted into it)."""
     if not path_str or path_str.startswith("-"):
         return None
     path = os.path.expandvars(os.path.expanduser(path_str))
@@ -2351,12 +2352,12 @@ def install_path(path_str, cwd, whole=False):
         base = os.path.realpath(base)
         if root == base or root.startswith(base + os.sep):
             continue   # a project inside the install (the harness developed in thin mode) keeps its own gates
-        if full == base or full.startswith(base + os.sep) or base.startswith(full.rstrip(os.sep) + os.sep):
+        if full == base or full.startswith(base + os.sep) or (whole and base.startswith(full.rstrip(os.sep) + os.sep)):
             reads_state("it names this machine's harness install folders")
             return label
     for _, agent in user_agent_files():
         agent = os.path.realpath(str(agent))
-        if full == agent or agent.startswith(full.rstrip(os.sep) + os.sep):
+        if full == agent or (whole and agent.startswith(full.rstrip(os.sep) + os.sep)):
             reads_state("it names this machine's harness install folders")
             return "the harness's role agents"
     for private in (sandbox.approvals_file(), sandbox.private_runs()):

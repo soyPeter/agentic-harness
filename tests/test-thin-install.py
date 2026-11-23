@@ -258,6 +258,28 @@ class ThinInstall(unittest.TestCase):
                          "init --thin", agent_id="implementer-1", agent_type="implementer")
         self.assert_hook(0, "Bash", {"command": "echo hello > '%s'" % (self.work / "scratch.txt")})
 
+    def test_a_thin_project_may_copy_into_the_home_folder(self):
+        home = self.work / "home"
+        env = {k: v for k, v in self.env.items() if k not in ("CODEX_HOME", "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME")}
+        self.env = dict(env, HOME=str(home), HARNESS_ENGINES=str(home / ".agentic-harness/engines"))
+        self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
+        work, quoted_home = shlex.quote(str(self.work)), shlex.quote(str(home))
+        for command in ("cp a.txt ~/", "cp -R src ~/", "rsync -T /tmp/t src ~", "echo x > ~/notes.txt"):
+            with self.subTest(command=command):
+                self.assert_hook(0, "Bash", {"command": command})
+        cached = home / ".agentic-harness/engines/0.30.0/payload/owned/scripts/harness/guardrails.core.conf"
+        for tool, tool_input in (
+                ("Bash", {"command": "rm -rf ~/.agentic-harness"}),
+                ("Bash", {"command": "rm -rf ~/.agentic-harness/engines"}),
+                ("Bash", {"command": "mv ~/.agentic-harness/engines x"}),
+                ("Bash", {"command": "cp -R evil/home %s/" % work}),
+                ("Bash", {"command": "rm -rf %s" % quoted_home}),
+                ("Bash", {"command": "cp -R evil/engines ~/.agentic-harness/"}),
+                ("Write", {"file_path": str(cached), "content": ""}),
+                ("Bash", {"command": "%s rm -rf %s" % (shlex.quote(str(self.work / "run")), quoted_home)})):
+            with self.subTest(tool=tool, tool_input=tool_input):
+                self.assert_hook(2, tool, tool_input)
+
     def test_agents_cannot_move_the_pin(self):
         self.run_at(self.project, "python3", "-B", str(self.launcher), "init", "--thin")
         engine = self.work / "cache/0.30.0/payload/owned/scripts/harness/lib/harness.py"
