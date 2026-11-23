@@ -538,9 +538,9 @@ It refuses a task without a judge pass on the current code and spec, and names b
 
 ## Profiles (`HARNESS_PROFILE`)
 
-`triple`: only a human merges. `harness.py orca` refuses `--merge` and `--trust`, `orca-nightly` refuses to start, and `enroll` refuses `--automation` and `--protect`. The shell gate refuses `gh pr merge` and GitHub's merge API, and the tool gate refuses any MCP tool whose name contains `merge`. `HARNESS_PROFILE=triple` or `TRIPLE_MODE=1` in the environment adds the profile; clearing the variable doesn't lift a profile set in `harness.conf`.
+`triple`: only a human merges. `harness.py orca` refuses `--merge` and `--trust` (use `--pr`, which opens pull requests and never merges), `orca-nightly` refuses to start, and `enroll` refuses `--automation` and `--protect`. The shell gate refuses `gh pr merge` and GitHub's merge API, and the tool gate refuses any MCP tool whose name contains `merge`. `HARNESS_PROFILE=triple` or `TRIPLE_MODE=1` in the environment adds the profile; clearing the variable doesn't lift a profile set in `harness.conf`.
 
-`no-merge`: the same merge refusals, for any organisation (an agent factory's lanes, ADR-008 of the agentic-harness repository), without Triple's catalog pack. `enroll` refuses `--automation`, whose scheduled run merges unattended, and allows `--protect`, which requires the harness checks. `HARNESS_PROFILE=no-merge` in the environment adds it, and clearing the variable doesn't lift it either. Either profile only adds refusals in the lane; the boundary is still GitHub's: restrict who may merge to the default branch.
+`no-merge`: the same merge refusals, for any organisation (an agent factory's lanes, ADR-008 of the agentic-harness repository), without Triple's catalog pack. `enroll` refuses `--automation`, whose scheduled run merges unattended, and allows `--protect`, which requires the harness checks. `HARNESS_PROFILE=no-merge` in the environment adds it, and clearing the variable doesn't lift it either. Either profile only adds refusals in the lane; the boundary is still GitHub's: restrict who may merge to the default branch. Doctor reports a `HARNESS_PROFILE` other than empty, `triple` or `no-merge` as an error.
 
 ## CI judge and branch protection
 
