@@ -2672,13 +2672,18 @@ RECURSIVE_COPIES = {"cp": {"-R", "-r", "-a", "--recursive", "--archive"}, "rsync
 
 def relative_copy_targets(prog, target, source, whole):
     """[(path, whole)] a relative copy (rsync -R, cp --parents) of source writes: source's path below target and
-    every folder on the way, or target itself when that path is empty. rsync's path starts after the last /./."""
-    path = (source.rpartition("/./")[2] if prog == "rsync" else source).strip("/")
-    if path in ("", "."):
-        return [(target, INTO)]
-    parts = path.split("/")
-    return [(os.path.join(target, *parts[:depth]), False) for depth in range(1, len(parts))] + [
-        (os.path.join(target, path), whole)]
+    every folder on the way, or target itself when that path is empty. rsync builds differ on where the path starts
+    (the whole source, or after one of its /./), so every start counts."""
+    pieces = source.split("/./") if prog == "rsync" else [source]
+    found = []
+    for path in ("/".join(pieces[start:]).strip("/") for start in range(len(pieces))):
+        if path in ("", "."):
+            found.append((target, INTO))
+            continue
+        parts = path.split("/")
+        found += [(os.path.join(target, *parts[:depth]), False) for depth in range(1, len(parts))]
+        found.append((os.path.join(target, path), whole))
+    return list(dict.fromkeys(found))
 
 
 def copy_targets(prog, args):

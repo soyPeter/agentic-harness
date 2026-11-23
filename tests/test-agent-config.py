@@ -254,7 +254,8 @@ class WritesToAgentConfiguration(Fixture):
                         "rsync -R evil/./.claude/settings.json ~/", "rsync --relative evil/./.codex/config.toml ~/",
                         "cd evil && cp --parents .claude/settings.json ~/", "rsync -aR evil/./.claude ~/",
                         "cp -R evil/home %s/" % work, "cp -R evil/home ~/..", "rsync -a evil/home %s/" % work,
-                        "scp -r evil/home %s/" % work, "cp -R evil/.config ~/", "rsync -aR evil/./home %s/" % work):
+                        "scp -r evil/home %s/" % work, "cp -R evil/.config ~/", "rsync -aR evil/./home %s/" % work,
+                        "rsync -R evil/./.claude/./settings.json ~/", "rsync -R evil/./.codex/./x/../config.toml ~/"):
             with self.subTest(command=command):
                 self.assertRefused(self.bash(command), command)
         for command in ("tar -czf backup.tgz -C ~ notes", "tar -tf evil.tar", "tar -xf a.tar -C ~/notes",
