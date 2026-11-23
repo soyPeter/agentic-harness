@@ -36,7 +36,7 @@ class Journal:
                         for line in handle:
                             row = json.loads(line)
                             if not isinstance(row, dict) or not row.get("key") or row.get("state") not in (
-                                    "attempted", "observed", "retry-authorized"):
+                                    "attempted", "observed", "retry-authorized", "withdrawn"):
                                 raise ValueError("invalid write journal record")
                             rows.append(row)
                 return action(rows)
@@ -79,7 +79,7 @@ class Journal:
         return self.transaction(lambda rows: [row for row in self.latest(rows).values()
                                                if row["state"] == "attempted"])
 
-    def begin(self, task, operation, target, intent, repeatable=False):
+    def begin(self, task, operation, target, intent, call=None, repeatable=False):
         """Records an attempt before the write. A write already observed returns its row instead, unless it is
         repeatable: then it is recorded again under the same key."""
         key = digest([task, operation, target, intent])
@@ -92,10 +92,21 @@ class Journal:
             previous = latest.get(key)
             if previous and previous["state"] == "observed" and not repeatable:
                 return key, previous
-            self.append(dict(key=key, state="attempted", task=task, operation=operation,
-                             target=target, intent=intent))
+            row = dict(key=key, state="attempted", task=task, operation=operation, target=target, intent=intent)
+            self.append(dict(row, call=call) if call else row)
             return key, None
         return self.transaction(start)
+
+    def withdraw(self, key, call):
+        """The tool call that recorded this attempt was refused before it ran: True when the attempt is withdrawn.
+        An attempt recorded by another call, or with no call, stays pending."""
+        def finish(rows):
+            previous = self.latest(rows).get(key)
+            if not previous or previous["state"] != "attempted" or not call or previous.get("call") != call:
+                return False
+            self.append(dict(previous, state="withdrawn"))
+            return True
+        return self.transaction(finish)
 
     def observe(self, key, result):
         def finish(rows):

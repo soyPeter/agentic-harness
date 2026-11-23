@@ -143,14 +143,16 @@ class GateProject(unittest.TestCase):
     def decision(self, command, agent="deliverer"):
         """(exit code, message) of the pre-tool-use hook for agent running command with Bash."""
         hook_input = {"session_id": "s", "agent_id": "a1", "agent_type": agent, "tool_name": "Bash",
-                      "tool_input": {"command": command}}
+                      "tool_use_id": "toolu_probe", "tool_input": {"command": command}}
         env = dict(self.env, CLAUDE_PROJECT_DIR=str(self.project), FAKE_GH_LABELS=str(self.labels_file),
                    PATH=str(self.bin) + os.pathsep + os.environ["PATH"])
-        result = subprocess.run(["python3", "-B", str(self.project / "scripts/harness/lib/harness.py"), "hook",
-                                 "pre-tool-use"], cwd=self.project, input=json.dumps(hook_input), capture_output=True,
-                                text=True, env=env)
-        # Policy probes never dispatch a tool; each example starts with no reserved write.
-        (self.project / ".git/harness/writes.jsonl").unlink(missing_ok=True)
+        hook = lambda event, data: subprocess.run(
+            ["python3", "-B", str(self.project / "scripts/harness/lib/harness.py"), "hook", event], cwd=self.project,
+            input=json.dumps(data), capture_output=True, text=True, env=env)
+        result = hook("pre-tool-use", hook_input)
+        if result.returncode == 0:
+            # Only the decision is probed: the call never runs, as when auto mode denies it after the hooks allowed it.
+            hook("permission-denied", dict(hook_input, hook_event_name="PermissionDenied", reason="probe"))
         return result.returncode, result.stderr
 
 

@@ -430,6 +430,35 @@ class ObservedResults(unittest.TestCase):
                 self.assertEqual(repeat.returncode, again, repeat.stderr)
                 self.assertEqual(self.pending(), [])
 
+    def test_an_agent_cli_that_reports_no_result_parks_the_write_and_says_so(self):
+        for source, post in (('codex', {'tool_response': 'https://github.com/o/r/pull/7\\n'}),
+                             ('opencode', {})):
+            with self.subTest(source=source):
+                p = Project('no result ')
+                self.addCleanup(p.cleanup)
+                self.p = p
+                _, done = self.call('gh pr create --title t --body b', source, post)
+                self.assertEqual(len(self.pending()), 1)
+                self.assertIn('indeterminate_write', done.stdout + done.stderr)
+                self.assertIn('reports no result', done.stdout + done.stderr)
+
+    def test_a_write_auto_mode_denied_is_withdrawn(self):
+        data = {'session_id': 's', 'tool_name': 'Bash', 'tool_use_id': 'toolu_denied',
+                'tool_input': {'command': 'gh pr create --title t --body b'}}
+        self.p.hook('pre-tool-use', data, check=True)
+        self.p.hook('permission-denied', dict(data, hook_event_name='PermissionDenied', reason='[fixture]'),
+                    check=True)
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.p.hook('pre-tool-use', data).returncode, 0)
+
+    def test_a_denial_of_another_call_withdraws_nothing(self):
+        data = {'session_id': 's', 'tool_name': 'Bash', 'tool_use_id': 'toolu_ran',
+                'tool_input': {'command': 'gh pr create --title t --body b'}}
+        self.p.hook('pre-tool-use', data, check=True)
+        self.p.hook('permission-denied', dict(data, tool_use_id='toolu_other', hook_event_name='PermissionDenied',
+                                              reason='[fixture]'), check=True)
+        self.assertEqual(len(self.pending()), 1)
+
 
 class EvalReplay(unittest.TestCase):
     """eval replay runs the captured calls in one throwaway checkout, where nothing is ever written to GitHub."""

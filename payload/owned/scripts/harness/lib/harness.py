@@ -7423,7 +7423,7 @@ def shell_write_begin(data):
         try:
             # gh pr edit sets fields, so an edit that ran may run again; a second create would be a duplicate.
             edits_only = all(action == "pr-edit" for action in intent[1].split("+"))
-            _, previous = write_journal_store().begin(*intent, repeatable=edits_only)
+            _, previous = write_journal_store().begin(*intent, call=data.get("tool_use_id"), repeatable=edits_only)
             if previous:
                 reads_state(state)
                 deny("This outward write was already observed; inspect its result rather than repeat it.")
@@ -7446,19 +7446,45 @@ def sole_gh_call(command, action):
     return words[:1] == ["gh"] and OUTWARD_GH.get(gh_parts(words)[:2]) == action
 
 
+UNOBSERVED_WHY = {"failed": "it failed, and a failed reply can follow a write that happened",
+                  "unknown": "the agent CLI reports no result for shell calls (Codex, OpenCode's version 1 plugin API)",
+                  "compound": "other commands ran with it, so the exit status isn't this write's"}
+
+
 def shell_write_observe(data):
-    """Records the result of a shell write that ran; without one, the attempt stays pending."""
+    """Records the result of a shell write that ran, or why the harness has none (the attempt then stays pending)."""
     intent = shell_write_intent(data)
     if not intent:
         return None
     command = (data.get("tool_input") or {}).get("command") or ""
     writes = outward_actions(command)
-    if len(writes) == 1 and sole_gh_call(command, writes[0][0]) and tool_result(data) == "succeeded":
+    result = tool_result(data)
+    sole = len(writes) == 1 and sole_gh_call(command, writes[0][0])
+    if sole and result == "succeeded":
         try:
             write_journal_store().observe(write_journal.digest(list(intent)), None)
+            return None
         except write_journal.IndeterminateWrite as exc:
             return str(exc)
-    return None
+    why = UNOBSERVED_WHY["compound" if not sole else result]
+    log_event("write-unobserved", operation=intent[1], why=why)
+    return ("indeterminate_write: the harness has no result for this write: %s. It may have happened, so this "
+            "repository is parked: don't repeat, rephrase or retry it. Stop and tell the user, who checks the target "
+            "and runs harness.py write-reconcile." % why)
+
+
+def hook_permission_denied(data):
+    """Claude Code's PermissionDenied: auto mode refused the call after pre-tool-use recorded its write, so the write
+    never ran. Only that call's own attempt is withdrawn; a manual denial at the prompt fires no hook and stays parked."""
+    intent = shell_write_intent(data) if data.get("tool_name") == "Bash" else None
+    call = data.get("tool_use_id")
+    if not (intent and isinstance(call, str) and call):
+        return
+    try:
+        if write_journal_store().withdraw(write_journal.digest(list(intent)), call):
+            log_event("write-withdrawn", operation=intent[1], reason=str(data.get("reason") or "")[:200])
+    except write_journal.IndeterminateWrite:
+        pass
 
 
 def log_event(kind, **fields):
@@ -13668,6 +13694,7 @@ HOOKS = {
     "subagent-start": hook_subagent_start,
     "pre-tool-use": hook_pre_tool_use,
     "post-tool-use": hook_post_tool_use,
+    "permission-denied": hook_permission_denied,
     "config-change": hook_config_change,
     "stop": hook_stop,
     "grill-stop": lambda data: record_verdict(data, "grill"),
