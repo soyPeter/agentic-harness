@@ -12,8 +12,9 @@ payload/seed/      project files a fresh install writes once
 catalog/           stack packs; none are adopted here
 tools/             installer, enroll, thin-mode switch
 tests/             self-test (tests/run-tests.sh)
-docs/adr/          product ADRs (thin mode, change class, sandbox, trace, attest)
-docs/research/     plans the wave 1 audits read
+docs/              guides (install, enforcement, catalog, development) and the SDLC diagrams
+docs/adr/          product ADRs, indexed with their status in docs/adr/README.md
+docs/research/     plans the wave 1 audits read, indexed in docs/research/README.md
 .github/workflows/ self-test.yml (product CI) and harness-verify.yml (the pin's check)
 ```
 
