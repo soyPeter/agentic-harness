@@ -5,6 +5,12 @@
 - Enforce task dependencies in shared start/selection paths and protect existing dependency notes. Report missing references, cycles and early starts as warnings for this release.
 - Persist outward-write attempts before dispatch. Park unresolved PR, escalation and Linear writes across restarts; require user reconciliation before retrying. A write the agent CLI reports no result for (Codex, OpenCode's version 1 plugin API) parks too; one Claude Code's auto mode refuses is withdrawn.
 - Agents can no longer run `harness.py hook` themselves, and code that imports the engine is also refused in an import list, from `scripts.harness.lib` or by a module-name string.
+- **The documentation matches main again (docs only).** The README, the ADRs' implementation notes and follow-up
+  status, `backbone/HOOKS.md`, the SDLC page and its evidence diagram, the Orca skill and the `triple` pack's README
+  were checked against the code after 0.31.0. ADR-003 to ADR-007 are listed as Accepted, as their headers have said
+  since 11 and 13 November; ADR-006's and ADR-007's notes no longer say their status stays Proposed; ADR-004's and
+  ADR-005's follow-up notes say PRs #88 and #94 merged them; HOOKS.md lists every user-only setting; the Orca skill
+  covers thin installs; and `backbone/3-TASKS.md` no longer queues follow-ups that 0.31.0 shipped. No behaviour changed.
 
 ## 0.31.0 (2026-11-22)
 

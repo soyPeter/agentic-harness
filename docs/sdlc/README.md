@@ -52,8 +52,9 @@ delivery, then feedback, KB drafts and cleanup signals. ADR-008 retains the cont
 
 ![The factory: signals, define, build, judge and deliver, merge and observe, with people setting the rules above](1-factory.svg)
 
-- **People set the rules.** Only the user accepts an ADR, writes the tool contracts in `tools.conf`, or changes the
-  user-only keys of `harness.conf` (gate switches, risk rules, autonomy mode, profile). Skill routes in
+- **People set the rules.** Only the user accepts an ADR, writes the tool contracts in `tools.conf`, admits or revokes
+  third-party skills in `admissions.conf`, or changes the user-only keys of `harness.conf` (gate switches, risk rules,
+  autonomy mode, profile). Skill routes in
   `routing.conf` and rules in `guardrails.conf` come from the packs an accepted ADR adopts and the rules agreed at
   setup.
 - **Signals.** Work comes from a person, a Linear ticket (`harness.py linear import`) or the task list. The harness's
@@ -119,7 +120,8 @@ isolation or guarantee that signing is configured.
 - [README](../../README.md), and in `payload/owned/`: `AGENTS.md`, `backbone/8-WORKFLOW.md`, `backbone/HOOKS.md`
 - [ADR-001](../adr/ADR-001-thin-mode-plugin.md) and [ADR-002](../adr/ADR-002-change-class-ladder.md) are accepted.
   [ADR-003](../adr/ADR-003-sandbox-backends.md), [ADR-004](../adr/ADR-004-traceability-export.md) and
-  [ADR-005](../adr/ADR-005-verdict-attestations.md) are Accepted with first slices shipped and follow-ups pending.
+  [ADR-005](../adr/ADR-005-verdict-attestations.md) are Accepted and shipped; each one's "Follow-up status" says which
+  follow-ups are done and which are deferred or not run end to end.
 - [ADR-008](../adr/ADR-008-harness-inside-agent-factory.md), Accepted: factory/harness ownership and integration contract.
 - [Factory image supplied 13 November 2026](sources/agent-software-factory-2026-11-13.png), preserved from
   `~/Downloads/Agent-software-factory.png`; SHA-256

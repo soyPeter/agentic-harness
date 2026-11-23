@@ -235,8 +235,8 @@ Acceptance-case completeness and policy rollout criteria still need human agreem
   - This proposal is not a code audit or an approval of any currently open PR.
 
 ## Implementation notes (2026-11-11)
-This section records work done under the ADR while it stays Proposed. It does not accept the ADR. Acceptance is the
-maintainer's decision.
+This section records work done under the ADR while it was still Proposed. The maintainer accepted the ADR on 13 Nov
+2026, and PR #91 merged this slice into main on 17 Nov 2026 (released in 0.31.0).
 
 **Authority.** The [delegation plan](../research/2026-11-delegation-contracts-qualification-plan.md) records the
 decision of 10 Nov 2026: run only the audits (P0 and the P0-V reuse map), and build nothing unless they show real gaps.
@@ -330,8 +330,10 @@ keeps report-only for new semantic signals). Rollback is a revert of its commits
 readable by the older engine, which ignores `spec`.
 
 ### What was not built, and why
-- **Signal intake and triage** (provenance, deduplication key): another agent is building it as ADR-008 follow-up 2.
-- **Replay and shadow evaluation, and evaluator reporting**: another agent is building `eval replay` (ADR-002 (c)).
+- **Signal intake and triage** (provenance, deduplication key): another agent was building it as ADR-008 follow-up 2;
+  `harness.py intake` has since merged (PR #90).
+- **Replay and shadow evaluation, and evaluator reporting**: another agent was building `eval replay` (ADR-002 (c));
+  it has since merged (PR #92), for the deterministic gates only.
 - **OBSERVE, attribution and one learning action per finding** (P2): they depend on intake and replay, and on human
   decisions about client scope, attribution and data handling (Unresolved boundaries).
 - **Renewing a user's approval when a referenced ADR changes**: the grill and judge passes go stale today, but the
@@ -339,9 +341,10 @@ readable by the older engine, which ignores `spec`.
   approved spec) is a workflow decision for the maintainer.
 - **Assumption sources and task dependencies in the fingerprint**: dependency scope and legacy migration are left to
   the workflow maintainer and an independent reviewer. `(after: ...)` edges belong to the task dependency gate plan.
-- **The judge's spec fingerprint in `trace export` and the attest statement**: ADR-004 and ADR-005 follow-ups are in
-  progress elsewhere, and the attest predicate is versioned (ADR-005 follow-up 6). Verify already refuses a range whose
-  judge pass is on an earlier spec, so an attested task's receipt is on its current spec.
+- **The judge's spec fingerprint in `trace export` and the attest statement**: ADR-004 and ADR-005 follow-ups were in
+  progress elsewhere (since merged, in PR #88 and PR #94), and the attest predicate is versioned (ADR-005 follow-up 6).
+  Verify already refuses a range whose judge pass is on an earlier spec, so an attested task's receipt is on its
+  current spec.
 - **NOT VERIFIED without a test command**, and **states after delivery** (merged, deployed, enabled, observed):
   small next candidates. The first is local. The second needs forge and deploy adapters (ADR-008).
 - **Isolation before parallelism** (P3): no demonstrated bottleneck. Orca keeps its current worktrees and two workers.

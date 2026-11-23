@@ -15,7 +15,10 @@ hooks and CI, so they hold whichever agent works. Your job as a coordinator is t
 test -f scripts/harness/lib/harness.py && python3 scripts/harness/lib/harness.py doctor
 ```
 
-No file: this skill doesn't apply. Doctor errors: report them to the user and stop.
+No file: check for a thin install (`"mode": "thin"` in `backbone/.harness-lock.json`), which has no `scripts/harness/`.
+There, run every command below through a launcher instead of `scripts/harness/lib/harness.py`: the agentic-harness
+plugin's `plugin/launcher.py`, or the pinned release's copy in `~/.agentic-harness/engines/<version>/plugin/`. Neither
+a full install nor a thin pin: this skill doesn't apply. Doctor errors: report them to the user and stop.
 
 ## 2. Prefer the built-in coordinator, started by the user
 
@@ -29,7 +32,8 @@ python3 scripts/harness/lib/harness.py orca-digest       # the last finished run
 ```
 
 Then ask the user to start it, in an Orca terminal of its own (a terminal coordinates one Run at a time):
-`python3 scripts/harness/lib/harness.py orca --merge --trust`, or `harness.py orca-nightly`, which opens one. Scheduled
+`python3 scripts/harness/lib/harness.py orca --merge --trust`, or `harness.py orca-nightly`, which opens one. Under the
+`triple` or `no-merge` profile, which refuse `--merge`, `--trust` and `orca-nightly`, it is `orca --pr`. Scheduled
 runs come from `enroll.sh --orca --automation <schedule>`: Orca's precheck starts them, not an agent. The coordinator
 needs `HARNESS_AUTONOMY="autonomous"` in `backbone/harness.conf`, which only the user sets.
 

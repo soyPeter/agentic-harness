@@ -193,8 +193,8 @@ the user's approval of the changed spec ([ADR-007](docs/adr/ADR-007-evidence-clo
   `backbone/evals/`, which agents can't change, and commits them. `harness.py eval replay [DIR] [--engine <harness.py>]
   [--json]` runs the committed state-free ones through `hook pre-tool-use` in a throwaway checkout and exits 1 on a
   refusal now allowed (a hole),
-  an allowed call now blocked (a false block) or a refusal that gives another reason. Judge failures and escalations
-  are exported as eval prompts and not replayed; model-based replay is
+  an allowed call now blocked (a false block), a refusal that gives another reason or an error. Judge failures and
+  escalations are exported as eval prompts and not replayed; model-based replay is
   [ADR-007](docs/adr/ADR-007-evidence-closed-loop.md)'s.
 
 ## Documentation
@@ -485,7 +485,7 @@ A profile is an organisation policy on top of the gates. Set it in `backbone/har
 | `backbone/.verdicts/` | hooks | Griller and judge verdicts per task, with fingerprints (audit trail) |
 | `backbone/.harness-lock.json` | harness | Installed version and file hashes |
 | `scripts/harness/` | harness | Runtime (`lib/harness.py`), git hooks, core rules and routes, `doctor.sh` |
-| `.github/workflows/harness-verify.yml` | harness | CI: `verify --range` with the base branch's verifier on every pull request; on a push to the default branch, the verdict attestation, signed when `HARNESS_ATTEST_KEY` is set |
+| `.github/workflows/harness-verify.yml` | harness | CI: `verify --range` with the base branch's verifier on every pull request, and the traceability matrix when it passes; on a push to the default branch, once signing is set up (the `HARNESS_ATTEST_KEY` secret, or a KMS or keyless mode in `HARNESS_ATTEST_SIGNING`), the signed verdict attestation and a signed `.reqifz` export |
 | `.github/workflows/harness-judge.yml` | project | CI: an independent judge session re-judges tasks a pull request finishes (needs `ANTHROPIC_API_KEY`; add your toolchain) |
 | `.devcontainer/harness-agent/` | harness | Sandbox for unattended runs: an outbound allowlist enforced from a second container (the agent's has no NET_ADMIN or NET_RAW), DNS for allowlisted names only, a log of what it denied, a base image pinned by digest, a trusted workspace, no prompts. Checked in a real container by `tests/test-sandbox-egress.py` (`HARNESS_E2E=1`); the earlier one-container version ran a real task end to end |
 | `.claude/settings.json` | shared | Merged: harness hook entries plus a few read-only permissions |

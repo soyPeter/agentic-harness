@@ -60,6 +60,7 @@ The deliverer already never merges; this ADR locks that as policy, not only as c
 - Follow-ups (not this change): (a) enforce Change-Class in `risk_reasons` / `approve` / light lane;
   (b) emit suggested `risk:*` labels from `receipt` for human PR triage; (c) eval/replay fixtures
   from `report` lift/candidates.
+- Follow-up status (2026-11-23): (a) and (b) are built and were released in 0.31.0; (c) is the amendment below.
 - Seeded project ADR-001 ("Adopt the agentic harness") is unrelated numbering: product ADRs live
   under `docs/adr/` in this repository.
 
@@ -69,7 +70,7 @@ Added on 2026-11-11. Status stays Accepted; the decision above is unchanged.
 **How (c) was decided.** The report's candidates were plain strings, and a refusal logged only its reason, so no past
 refusal could be replayed. Follow-up (c) was cut down to the deterministic gates: their answer depends only on the
 hook input and the rules, so a fixture can be replayed exactly, with no model calls. The rest of policy replay and
-shadow evaluation stays with [ADR-007](ADR-007-evidence-closed-loop.md) (Proposed), which asks for resettable
+shadow evaluation stays with [ADR-007](ADR-007-evidence-closed-loop.md) (Accepted), which asks for resettable
 fixtures, a pinned harness and an evaluator whose expected outcomes are independent of the builder. In v1 the fixtures
 are the user's: agents only draft them.
 
