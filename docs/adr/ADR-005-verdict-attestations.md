@@ -341,9 +341,13 @@ A further re-review found two more:
 
 ## Follow-up status
 Recorded 2026-11-11. Follow-ups 1, 5 and 6 are done; 2 and 3 are configured and implemented in the workflow but not run
-end to end; 4 is deferred. Everything below was built and tested locally only (no CI run, no push): with real git,
+end to end; 4 is deferred. When this was recorded, everything below had been built and tested locally only (no CI
+run, no push): with real git,
 real cosign 3.1.4 where cosign is involved, and stand-ins for GitHub's API (a fake `gh`) and for its OIDC token
-endpoint and a Vault login (a local HTTP server). No cloud KMS, Vault or Sigstore service was reached.
+endpoint and a Vault login (a local HTTP server). No cloud KMS, Vault or Sigstore service was reached. PR #94 merged
+these follow-ups into main on 17 Nov 2026, and they were released in 0.31.0. This repository's own
+`harness-verify.yml` (its thin-install copy) runs on pull requests only and has no attest job, so the merge ran none
+of the paths marked "not tested" below.
 
 1. **Done: the merged pull request's label.** A new step, `Read the merged pull request's approval`, asks GitHub for
    the pull requests of the pushed commit (`GET repos/<r>/commits/<sha>/pulls`, with the job's token and

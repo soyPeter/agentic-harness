@@ -236,7 +236,8 @@ They cannot claim:
   4. Signed exports, once verdicts are signed.
 
 ## Follow-up status
-2026-11-11, built and tested locally only (no CI run, nothing pushed):
+2026-11-11, built and tested locally before the merge (no CI run, nothing pushed then). PR #88 merged these
+follow-ups into main the same day, and they were released in 0.31.0:
 
 1. **Done.** `harness-verify`'s pull request job runs `Write the traceability matrix` after `verify --range` passes,
    with the engine the take step took from the base branch (`$ENGINE_SCRIPT`), not the checkout's, and `Upload the
@@ -266,4 +267,6 @@ They cannot claim:
    locally with a key made for the test: the signature verifies, a changed byte fails, and a fresh clone regenerates
    the same archive. Not done: the pull request's matrix isn't signed (a pull request job holds no key, by ADR-005),
    and an in-toto statement naming the archive as a subject, which would tie it to the commit inside the signature,
-   is left to ADR-005's predicate `v1`.
+   is left to ADR-005's predicate `v1`. Predicate `v1` (PR #94) didn't add it: the statement's subjects are still the
+   commit and its code tree. Since PR #94 the export is signed by the same signer as the statement, so with keyless
+   signing (ADR-005 follow-up 3) its signature goes to Sigstore's public log too.

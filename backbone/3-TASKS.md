@@ -24,6 +24,11 @@ from the future queue below, not marked `[x]`: this backlog has no judge/approva
 checks their current coverage and deployment/signing limits. The other original audits remain necessary; PR #90
 does not implement the shared dependency gate or lost-write reconciliation.
 
+Update of 2026-11-23: ADR-003 follow-ups 1, 4, 5, 8 and 9 (PR #89) and ADR-005 follow-ups 1, 2, 3, 5 and 6
+(PR #94) are in main and were released in 0.31.0. Build tasks 2.6, 3.7, 3.8, 3.10, 3.11, 4.5 and 4.11 are retired
+from the future queue below, as 2.5 and 3.9 were, not marked `[x]`. What Task 1.6 can still triage is what those
+ADRs' follow-up sections list as deferred or not run end to end.
+
 ## M1: Wave 1 audits
 
 - [ ] **Task 1.1: Dependency gate WP0 audit** (spec: backbone/specs/1.1.md) (plan: docs/research/2026-11-task-dependency-gate-plan.md)
@@ -50,9 +55,8 @@ Wave 2. Small changes. 2.1 and 2.3 both touch next, run and delivery, so 2.3 wai
 - [ ] **Task 2.2: PR body WP2 template** (spec: backbone/specs/2.2.md) (after: 1.2) (plan: docs/research/2026-11-pr-body-reviewer-opener-plan.md)
 - [ ] **Task 2.3: Indeterminate outcome WP1 journal and outcome** (spec: backbone/specs/2.3.md) (after: 1.3, 2.1) (plan: docs/research/2026-11-indeterminate-side-effect-outcome-plan.md)
 - [ ] **Task 2.4: Model change WP2 checklist** (spec: backbone/specs/2.4.md) (after: 1.7) (plan: docs/research/2026-11-model-change-instruction-review-plan.md)
-- [ ] **Task 2.6: ADR-005 follow-up 1 read the merged PR harness-change-approved label** (spec: backbone/specs/2.6.md) (after: 1.6) (plan: docs/adr/ADR-005-verdict-attestations.md)
 
-Wave 3. Follow-on work packages. ADR-003 follow-ups 1, 4 and 8 are one task each.
+Wave 3. Follow-on work packages.
 
 - [ ] **Task 3.1: Dependency gate WP2 selection** (spec: backbone/specs/3.1.md) (after: 2.1) (plan: docs/research/2026-11-task-dependency-gate-plan.md)
 - [ ] **Task 3.2: Dependency gate WP3 validation** (spec: backbone/specs/3.2.md) (after: 2.1) (plan: docs/research/2026-11-task-dependency-gate-plan.md)
@@ -60,12 +64,8 @@ Wave 3. Follow-on work packages. ADR-003 follow-ups 1, 4 and 8 are one task each
 - [ ] **Task 3.4: Indeterminate outcome WP3 coordinator** (spec: backbone/specs/3.4.md) (after: 2.3) (plan: docs/research/2026-11-indeterminate-side-effect-outcome-plan.md)
 - [ ] **Task 3.5: Model change WP3 lint report** (spec: backbone/specs/3.5.md) (after: 2.4) (plan: docs/research/2026-11-model-change-instruction-review-plan.md)
 - [ ] **Task 3.6: PR body WP3 docs** (spec: backbone/specs/3.6.md) (after: 2.2) (plan: docs/research/2026-11-pr-body-reviewer-opener-plan.md)
-- [ ] **Task 3.7: ADR-003 follow-up 1 DNS allowlist** (spec: backbone/specs/3.7.md) (after: 1.6) (plan: docs/adr/ADR-003-sandbox-backends.md)
-- [ ] **Task 3.10: ADR-003 follow-up 4 gate on sandbox evidence** (spec: backbone/specs/3.10.md) (after: 1.6) (plan: docs/adr/ADR-003-sandbox-backends.md)
-- [ ] **Task 3.11: ADR-003 follow-up 8 egress denials in the receipt** (spec: backbone/specs/3.11.md) (after: 1.6) (plan: docs/adr/ADR-003-sandbox-backends.md)
-- [ ] **Task 3.8: ADR-005 follow-up 5 cosign check and predicate policy helper** (spec: backbone/specs/3.8.md) (after: 1.6) (plan: docs/adr/ADR-005-verdict-attestations.md)
 
-Wave 4. Docs and qualification, only where an audit found a real gap. Delegation and design-challenge lines stay commented until that audit says there is a gap. ADR-006 is decided with the design-challenge work.
+Wave 4. Docs and qualification, only where an audit found a real gap. Delegation and design-challenge lines stay commented until that audit says there is a gap. ADR-006 was accepted on 13 Nov and built in PR #93.
 
 - [ ] **Task 4.1: Dependency gate WP4 docs** (spec: backbone/specs/4.1.md) (after: 3.1, 3.2) (plan: docs/research/2026-11-task-dependency-gate-plan.md)
 - [ ] **Task 4.2: Indeterminate outcome WP4 docs** (spec: backbone/specs/4.2.md) (after: 3.3, 3.4) (plan: docs/research/2026-11-indeterminate-side-effect-outcome-plan.md)
@@ -75,9 +75,7 @@ Wave 4. Docs and qualification, only where an audit found a real gap. Delegation
 - [ ] **Task 4.4: Design challenge D1 report** (spec: backbone/specs/4.4.md) (after: 1.5) (plan: docs/research/2026-11-design-challenge-agent-onboarding-plan.md)
 - [ ] **Task 4.8: Design challenge D2 report** (spec: backbone/specs/4.8.md) (after: 4.4) (plan: docs/research/2026-11-design-challenge-agent-onboarding-plan.md)
 - [ ] **Task 4.9: Design challenge D3 report** (spec: backbone/specs/4.9.md) (after: 4.8) (plan: docs/research/2026-11-design-challenge-agent-onboarding-plan.md)
-- [ ] **Task 4.5: ADR-003 follow-up 5 run starts the sandbox** (spec: backbone/specs/4.5.md) (after: 1.6) (plan: docs/adr/ADR-003-sandbox-backends.md)
 - [ ] **Task 4.10: ADR-003 follow-up 6 Orca workers inside a sandbox** (spec: backbone/specs/4.10.md) (after: 1.6) (plan: docs/adr/ADR-003-sandbox-backends.md)
-- [ ] **Task 4.11: ADR-003 follow-up 9 sandbox for thin installs** (spec: backbone/specs/4.11.md) (after: 1.6) (plan: docs/adr/ADR-003-sandbox-backends.md)
 -->
 
 ## Status markers
