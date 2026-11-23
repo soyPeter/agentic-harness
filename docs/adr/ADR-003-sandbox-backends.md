@@ -247,7 +247,8 @@ Still open after v1:
   - `run` starts sessions where it runs, with the same command, budgets, retries and logs.
   - `orca` starts its workers through Orca.
   - `verify` and `harness-verify` don't involve any backend.
-  - Thin installs still come without the sandbox, so their judge passes record `none`.
+  - Thin installs still come without the sandbox, so their judge passes record `none`. Follow-up 9 (below) has
+    since given them the sandbox.
 - **Follow-up work**, each as its own change:
   1. DNS: resolve only allowlisted names from the egress container, and drop port 53 everywhere else.
   2. Credentials brokered at egress, so the agent's API key stays outside its container (`credential_mode: brokered`).
@@ -261,6 +262,9 @@ Still open after v1:
   9. The sandbox for thin installs.
 
 ## Follow-up status
+Follow-ups 1, 4, 5, 8 and 9 were merged into main in PR #89 on 22 Nov 2026 and released in 0.31.0; the date after
+each one is when it was built.
+
 - **1. DNS: done (2026-11-11).** `egress.py` answers DNS on `127.0.0.1:53` in the shared network namespace and
   resolves a name, over UDP or TCP, only when it is on the published allowlist (exactly, in any case), through the
   `egress` container's own resolver; any other name gets NXDOMAIN without leaving and is logged as a denial.

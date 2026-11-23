@@ -61,8 +61,8 @@ Sources, and how far each was read:
   guidance, not our empirical results or accepted controls.
 
 Accepting this ADR is for the human repository or project maintainer, with an independent security and workflow review.
-These roles are proposed; nobody is named. This is a Proposed architectural boundary, not evidence of an exploit in the
-current harness, a commissioned audit or permission to implement it.
+These roles are proposed; nobody is named. This was written as a Proposed architectural boundary, not evidence of an
+exploit in the current harness, a commissioned audit or permission to implement it.
 
 ## Decision
 Third-party agent setup resources are references by default, and a reviewed, versioned bundle becomes project guidance
@@ -167,7 +167,8 @@ replayability, human review and maintenance cost. Report no-gain or inconclusive
   - Never restore a revoked resource to regain green tests.
 
 ## Implementation notes (2026-11-11)
-The status stays Proposed: accepting this ADR is the user's decision. As the Decision asks, the semantics were first
+These notes were written while the ADR was Proposed. The user accepted it on 13 Nov 2026, and PR #93 merged the work
+below into main on 18 Nov 2026 (released in 0.31.0). As the Decision asks, the semantics were first
 mapped onto the existing controls (read-only, on `dd2f9e9`); only the gaps were built, in the engine
 (`payload/owned/scripts/harness/lib/admission.py` and small hooks in `harness.py`), with tests in
 `tests/test-admission.py`. `backbone/HOOKS.md`, "Third-party skills and setup resources", documents the behaviour.
