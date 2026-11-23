@@ -3,7 +3,7 @@
 The rules of the road. Agents read this file before every task.
 
 ## Summary
-This repository is the agentic harness, enrolled in thin mode at v0.30.0. Workers may edit the product source. The gates that check their work stay on the pinned release until Pedro cuts a new release and moves the pin.
+This repository is the agentic harness, enrolled in thin mode at v0.31.0. Workers may edit the product source. The gates that check their work stay on the pinned release until Pedro cuts a new release and moves the pin.
 
 ## Tech stack
 - Language: Python 3.8 or later. The engine uses the standard library only.
@@ -15,8 +15,8 @@ This repository is the agentic harness, enrolled in thin mode at v0.30.0. Worker
 - Coordinator: Orca, started only by Pedro. Agents may run `doctor`, `orca --dry-run`, `state`, `report` and `escalations`.
 
 ## Design rules
-1. Thin mode. Commands go through the pinned launcher, `~/.agentic-harness/engines/0.30.0/plugin/launcher.py`, once work has started. The copy at `plugin/launcher.py` in this clone is product source and workers will edit it.
-2. `.githooks/pre-commit` is the shim from main, not the v0.30.0 copy. The release shim treats a worktree's git dir as the engine cache and refuses the commit. Orca uses one worktree per task. This shim clears those git variables and still runs the pinned engine. Do not put the v0.30.0 shim back.
+1. Thin mode. Commands go through the pinned launcher, `~/.agentic-harness/engines/0.31.0/plugin/launcher.py`, once work has started. The copy at `plugin/launcher.py` in this clone is product source and workers will edit it.
+2. `.githooks/pre-commit` is the v0.31.0 release shim. The v0.30.0 shim treated a worktree's git dir as the engine cache and refused the commit. Orca uses one worktree per task. This shim clears those git variables and still runs the pinned engine. Do not put the v0.30.0 shim back.
 3. `HARNESS_PROFILE="triple"` refuses `--merge`, `--trust` and `orca-nightly`. Delivery is `--pr` only. Pedro merges.
 4. `HARNESS_ORCA_AGENTS` is `default=claude judge=codex`. The judge runs on a different model.
 5. Parallel workers: 2.
@@ -38,7 +38,7 @@ This repository is the agentic harness, enrolled in thin mode at v0.30.0. Worker
 ## Commands
 | Purpose | Command |
 |---|---|
-| Doctor | `python3 ~/.agentic-harness/engines/0.30.0/plugin/launcher.py doctor` |
+| Doctor | `python3 ~/.agentic-harness/engines/0.31.0/plugin/launcher.py doctor` |
 | Test | `tests/run-tests.sh` |
-| Dry run | `python3 ~/.agentic-harness/engines/0.30.0/plugin/launcher.py orca --dry-run --parallel 2 --pr --tasks 1.1,1.2,1.3,1.4,1.5,1.6,1.7` |
+| Dry run | `python3 ~/.agentic-harness/engines/0.31.0/plugin/launcher.py orca --dry-run --parallel 2 --pr --tasks 1.1,1.2,1.3,1.4,1.5,1.6,1.7` |
 | Stop Orca | create `.git/harness/STOP` in the clone |

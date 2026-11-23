@@ -1,13 +1,21 @@
 {
   "mode": "thin",
-  "version": "0.30.0",
-  "commit": "5b754dcd19fec8adfad234cf306954df91d88fe3",
+  "version": "0.31.0",
+  "commit": "9056f8876d2bee131741e4e5bbfe64b39c756fb1",
   "kept": {
     "backbone/0-START-HERE.md": "d15ee782343083c8e1ca7a47ae49ef258c1c5576a0687f744894b271267be3e2",
     "backbone/8-WORKFLOW.md": "fb9a9da22c5267cce550ec1c19814582b6b51f77b72a7a545e3818a5360d5694",
     "backbone/HOOKS.md": "5e13d61a284728f823d3318e2c17ab413d60294eded490bd74614a5d2fb31a96",
     "backbone/SKILLS.md": "c2f15a94e7c6529e49aff53750aac2965e261b1b174418f85d687cc65bff8979",
     "backbone/templates/adr.md": "55ec7d5879a396d35a72d33855cc5640d2b86d99a36fc5eac78482bdf449a22d",
-    "backbone/templates/spec.md": "3696fb1bcea4405957c3cb55bcd5f0f25150fd921feafecb8bf7c46a35dae44d"
+    "backbone/templates/spec.md": "3696fb1bcea4405957c3cb55bcd5f0f25150fd921feafecb8bf7c46a35dae44d",
+    ".devcontainer/harness-agent/Dockerfile": "3602fa2b3b6224dc7aa7cab0a1f6c80e8a0b11ec87de4738ec1ad94d1d731746",
+    ".devcontainer/harness-agent/devcontainer.json": "e2a311e060c749570e210167a96acf61411f42b5742731fa5d3e85652e5623a9",
+    ".devcontainer/harness-agent/docker-compose.yml": "0b7c919f5ed1561f201bf09af3b94190f1a3834ed156dc0f95c982db2ed0a54d",
+    ".devcontainer/harness-agent/egress.py": "346b36f25c451f44edc5dc68254fbd66cffa083d3f6d209692689e62f52be072",
+    ".devcontainer/harness-agent/init-firewall.sh": "5e3671576101f06009007631cb6282d7b4344913a66a7ee553fd6f612baeb34d",
+    ".devcontainer/harness-agent/managed-settings.json": "d09b682053e39ed2100a1f1f07fa4985633b587771ccae68b5750854a6ec28e5",
+    ".devcontainer/harness-agent/thin-engine.py": "3d606c7f1c5506b9f98cad3972613f26d93e81bf563379add937dc734611a6e9",
+    ".devcontainer/harness-agent/trust-workspace.py": "e88c11a3ba56831072d20b21f96c02fcfa2cb8de6fdf102bad773a102f4c6bfe"
   }
 }

@@ -1,7 +1,7 @@
 # 2. Planning: agentic-harness
 
 ## Architecture style
-One Python engine, standard library only, with a thin install in this same repository. The committed project state is `backbone/` and the pin. The gates run from the pinned release under `~/.agentic-harness/engines/0.30.0/`. Role agents and core skills come from the plugin at that same release. Orca drives ready tasks one worker per step, one worktree per task, and opens a pull request. It does not merge.
+One Python engine, standard library only, with a thin install in this same repository. The committed project state is `backbone/` and the pin. The gates run from the pinned release under `~/.agentic-harness/engines/0.31.0/`. Role agents and core skills come from the plugin at that same release. Orca drives ready tasks one worker per step, one worktree per task, and opens a pull request. It does not merge.
 
 ## Structure
 ```text
@@ -24,4 +24,4 @@ docs/research/     plans the wave 1 audits read
 - Pedro starts Orca by hand from the pinned launcher. A dependent task starts only after he merges the pull request it waits for.
 
 ## External dependencies
-Git and Python 3.8 or later. The GitHub CLI (`gh`) for pull requests. Claude Code and Codex on the machine that runs Orca, with the agentic-harness plugin at v0.30.0. The Orca app, already running. No database and no extra Python packages for the engine. The self-test may install the tools listed in `tests/requirements.txt`.
+Git and Python 3.8 or later. The GitHub CLI (`gh`) for pull requests. Claude Code and Codex on the machine that runs Orca, with the agentic-harness plugin at v0.31.0. The Orca app, already running. No database and no extra Python packages for the engine. The self-test may install the tools listed in `tests/requirements.txt`.

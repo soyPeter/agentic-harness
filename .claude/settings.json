@@ -4,11 +4,12 @@
       "source": {
         "source": "github",
         "repo": "soyPeter/agentic-harness",
-        "ref": "v0.30.0"
+        "ref": "v0.31.0"
       }
     }
   },
   "enabledPlugins": {
     "agentic-harness@agentic-harness": true
-  }
+  },
+  "disableAllHooks": false
 }
