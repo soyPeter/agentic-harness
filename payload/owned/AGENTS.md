@@ -51,6 +51,7 @@ Every task goes through five phases. You, the main session, are the **orchestrat
 ## 4. Task protocol
 
 - Tasks in `3-TASKS.md` are list lines: `- [ ] **Task <id>: <title>** (spec: backbone/specs/<id>.md)`. `[WIP]` goes on task lines only.
+- A task with `(after: ...)` cannot start until its prerequisites are `[x]` in the current worktree. Never change existing dependency notes; the user owns them.
 - Only one task may be `[WIP]`. If another is already in progress, ask the user (in autonomous mode, resume it or escalate; section 7).
 - After `HARNESS_JUDGE_MAX_ROUNDS` judge fails, stop retrying and take the findings to the user.
 - Confirm each judge or review finding against the code before fixing it, and record disproved findings next to confirmed ones. The rest of the judge-round hygiene is in `8-WORKFLOW.md` (Phase 3). A judge pass still leaves deploy risk open. A person reads the review notes and the receipt's "Not verified" list before merging.
@@ -95,6 +96,8 @@ An escalation parks the task: it leaves `[WIP]` with a `BLOCKED:` note and gets 
 **Runner.** The user or a scheduled job may drive tasks with `harness.py run`: one fresh session per task, with the prompt saying which task. Work only on that task, and end the session when it is `[x]` and committed, or BLOCKED. Never start the runner yourself.
 
 **Out-of-band changes.** Change protected files (`backbone/`, `scripts/harness/`, `.claude/`) only with the Write and Edit tools. A protected file that changes any other way, for example from a script, is detected after the command, and the task is escalated for review.
+
+**Unobserved external writes.** If an external write has no confirmed result, stop: it may have succeeded. The journal parks work as `indeterminate_write`. Never repeat or rephrase the write, clear its journal, or restart its worker. The user reconciles the exact external target with `write-reconcile`; ambiguity stays parked.
 
 **Kill switch.** While `.git/harness/STOP` exists, every tool call is refused and the Stop hook lets the session end. Report your state and stop. Only the user creates or removes the file.
 

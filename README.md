@@ -2,9 +2,10 @@
 
 A stack-agnostic harness for AI coding agents such as Claude Code, Codex and OpenCode. Install it into any git
 repository and every change goes through **one defined, gated pipeline**, whoever or whatever starts it, while people
-set the rules. The four diagrams below are explained in [docs/sdlc](docs/sdlc/README.md). Solid shapes are built and
-enforced; dashed ones are proposed or outside the harness; the orange person marks each point where the harness waits
-for a human.
+set the rules. The four diagrams below are explained in [docs/sdlc](docs/sdlc/README.md). Solid shapes show shipped
+harness mechanisms, and enforcement depends on the project's enabled gates and required CI checks; dashed ones show
+unbuilt behavior or behavior outside the harness, since ADR acceptance and implementation status are separate; the
+orange person marks each point where the harness waits for a human.
 
 The harness never generates application code. On the first session, the agent interviews you to fill in the project's
 knowledge, stack ADR, language skill and routes. Requirements: `git` and `python3` (3.8 or later, standard library
@@ -69,9 +70,10 @@ a live pilot still needs.
   it back), and admission grants no tool or permission. Agents can't invoke a skill that runs commands as it loads.
 - **Guardrails** throughout: destructive commands, secrets and project rules are blocked. Each agent can only write
   its own files, and the main session only orchestrates. Shell commands can't write harness state or switch off
-  checks, and a script that does is caught: reported in supervised mode, escalated in autonomous mode. One task is
-  `[WIP]` at a time. Commits follow Conventional Commits. The gates are on by default and only the user can switch them
-  off.
+  checks, and a script that does is caught: reported in supervised mode, escalated in autonomous mode. Nothing writes
+  inside `.git` (where the event log and cost ledgers live), no interpreter runs a program from stdin, and the
+  user-only commands can't be started by another spelling. One task is `[WIP]` at a time. Commits follow Conventional
+  Commits. The gates are on by default and only the user can switch them off.
 - **Judging**: an independent `judge` checks every requirement and acceptance criterion against the code and tests.
   The verdict is recorded by a hook, which re-derives it from the evidence: an AC without a test that mentions its id,
   unmet criteria or failing tests all turn a claimed pass into a fail. The recorder runs the test command itself rather
@@ -85,7 +87,9 @@ a live pilot still needs.
   without its review passes. Both are on by default (`HARNESS_REVIEW`, `HARNESS_DELIVER`, user-only).
   `HARNESS_DELIVER="external"` is for a lane without GitHub credentials: the task stops at the deliver step,
   `delivery-plan` tells an agent factory what to push and open from its trusted clone, and `delivery-record` records
-  the outcome.
+  the outcome, checked against the trusted clone's `verify --range` and signed when the factory's environment holds
+  `HARNESS_DELIVERY_KEY`, so a line an agent appends can't mark a task delivered. In external mode no role can push:
+  every agent's git and gh calls are limited to reads.
 
 ## Who decides, by Change-Class
 
@@ -172,12 +176,13 @@ the user's approval of the changed spec ([ADR-007](docs/adr/ADR-007-evidence-clo
 - **Knowledge source** (opt-in, user-only): in autonomous mode, griller questions `backbone/` can't answer are looked up
   in a read-only notes vault behind an MCP server (`knowledge`). Clear answers are recorded with a `vault:<path>`
   citation the harness checks; the rest are escalated.
-- **Runner**: `harness.py run` drives ready tasks unattended (optionally one worktree, branch and PR per task, with a
-  cost budget), one fresh agent session per task, with time and attempt budgets, escalating stalls. Sessions start
-  through a sandbox backend (`HARNESS_SANDBOX_BACKEND`); the only one, `devcontainer`, runs them where the runner runs,
-  ideally inside `.devcontainer/harness-agent/`, whose outbound allowlist is enforced from a second container. With
-  `HARNESS_SANDBOX_START=on`, `run` on the host brings that sandbox up itself with the devcontainer CLI and runs each
-  session in it.
+- **Runner**: `harness.py run` drives ready tasks unattended (optionally one worktree, branch and PR per task), one
+  fresh agent session per task, with time and cost budgets: `HARNESS_TASK_BUDGET_USD` caps one task across resumes
+  through a fail-closed ledger in the shared git directory, and a per-task lock keeps one task from running twice at
+  once. Stalls are escalated. Sessions start through a sandbox backend (`HARNESS_SANDBOX_BACKEND`); the only one,
+  `devcontainer`, runs them where the runner runs, ideally inside `.devcontainer/harness-agent/`, whose outbound
+  allowlist is enforced from a second container. With `HARNESS_SANDBOX_START=on`, `run` on the host brings that
+  sandbox up itself with the devcontainer CLI and runs each session in it.
 - **Observability**: `harness.py report` summarises the event log, and `harness.py trace <id>` shows one task's
   history: the context and skills its agents loaded, the files they edited, what the hooks refused, test runs and
   verdicts.
