@@ -2335,8 +2335,9 @@ def thin_paths():
                ENGINE / "scripts/harness/routing.core.conf", ENGINE_SKILLS))
 
 
-def install_path(path_str, cwd):
-    """Which harness install (engine cache, plugin or installed role agents) path_str is in, or contains, else None."""
+def install_path(path_str, cwd, whole=False):
+    """Which harness install (engine cache, plugin or installed role agents) path_str is in, or contains, else None.
+    whole: the operation takes path_str as a whole (deletes, moves or replaces it), so holding a record counts."""
     if not path_str or path_str.startswith("-"):
         return None
     path = os.path.expandvars(os.path.expanduser(path_str))
@@ -2360,9 +2361,9 @@ def install_path(path_str, cwd):
             return "the harness's role agents"
     for private in (sandbox.approvals_file(), sandbox.private_runs()):
         private = os.path.realpath(str(private))
-        # A folder holding them (~, ~/.agentic-harness) is the machine settings' check: it refuses deleting or moving
-        # the folder and still lets a command put a new file in ~.
-        if full == private or full.startswith(private + os.sep):
+        # A folder holding them takes new files; taking it whole is refused here, wherever the project is.
+        if full == private or full.startswith(private + os.sep) or (
+                whole and private.startswith(full.rstrip(os.sep) + os.sep)):
             return "the sandbox definitions approved and brought up on this machine"
     return None
 
@@ -2767,6 +2768,24 @@ def config_findings(segment, words, cwd, env=None, assignments=None):
         elif label:
             found.append("%s is in %s, which can turn the harness's hooks off; agents may read it but not change it."
                          % (path, label))
+        elif whole or prog in COPIERS:
+            found += install_findings(fulls, cwd, whole)
+    return found
+
+
+def install_findings(fulls, cwd, whole):
+    found = []
+    for full in fulls:
+        label = install_path(full, cwd, whole=bool(whole))
+        if label and whole == INTO:
+            found.append("%s receives files whose names the hooks can't read (an archive's, a folder's contents), and "
+                         "it holds %s, which decides this project's gates; agents may not change it. Extract or copy "
+                         "into a folder of its own." % (full, label))
+        elif label and whole:
+            found.append("%s is or holds %s, which decides this project's gates; agents may not delete, move or "
+                         "change it." % (full, label))
+        elif label:
+            found.append("%s is in %s, which decides this project's gates; agents may not change it." % (full, label))
     return found
 
 

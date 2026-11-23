@@ -20,14 +20,16 @@ MOVED = ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "OPENCODE_CONFIG_DIR", "OPENCODE_CON
 
 
 class Fixture(unittest.TestCase):
+    PROJECT = "project"
+
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(prefix="agent config ")
         cls.work = Path(cls.temp.name)
         cls.home = cls.work / "home"
         cls.home.mkdir()
-        cls.project = cls.work / "project"
-        cls.project.mkdir()
+        cls.project = cls.work / cls.PROJECT
+        cls.project.mkdir(parents=True)
         subprocess.run(["git", "init", "-q", "-b", "main", str(cls.project)], check=True)
         subprocess.run([str(ROOT / "bootstrap.sh"), str(cls.project)], check=True, capture_output=True,
                        env=cls.base_env())
@@ -293,6 +295,26 @@ class WritesToAgentConfiguration(Fixture):
                 self.assertAllowed(self.pre_tool_use("Write", {"file_path": str(path), "content": "x"}))
         for command in ("echo x > ~/notes.txt", "cp a.txt ~/", "echo x > ~/.claude/projects/x/memory/note.md",
                         "rm -rf ~/.cache/pip"):
+            with self.subTest(command=command):
+                self.assertAllowed(self.bash(command), command)
+
+
+class AProjectInsideTheHarnessSettingsFolder(Fixture):
+    """A project kept inside ~/.agentic-harness keeps its own gates, but not over the sandbox records that folder
+    holds."""
+    PROJECT = "home/.agentic-harness/project"
+
+    def test_the_sandbox_records_stay_out_of_reach(self):
+        for command in ("rm -rf ~/.agentic-harness", "mv ~/.agentic-harness x", "cp -R evil/.agentic-harness ~/",
+                        "cd evil && rsync -aR .agentic-harness ~/",
+                        "cd evil && rsync -R .agentic-harness/sandbox-approvals.json ~/",
+                        "cp evil/sandbox-approvals.json ~/.agentic-harness/", "tar -xf e.tar -C ~/.agentic-harness",
+                        "rm -rf ~/.agentic-harness/sandbox-runs", "echo x > ~/.agentic-harness/sandbox-approvals.json"):
+            with self.subTest(command=command):
+                self.assertRefused(self.bash(command), command)
+        approvals = self.home / ".agentic-harness/sandbox-approvals.json"
+        self.assertRefused(self.pre_tool_use("Write", {"file_path": str(approvals), "content": "{}"}))
+        for command in ("echo x > ~/notes.txt", "cp a.txt ~/", "cp -R src ~/", "echo x > notes.txt"):
             with self.subTest(command=command):
                 self.assertAllowed(self.bash(command), command)
 
