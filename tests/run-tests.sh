@@ -1375,10 +1375,13 @@ sed -i.bak 's/^- \[WIP\] \*\*Task 8\.4/- [ ] **Task 8.4/' "$AT" && rm -f "$AT.ba
 unset HARNESS_TESTER
 
 section "deliverer"
-# These policy probes never dispatch a write; discard their reservations between independent examples.
+# probe_hook <project> pre-tool-use <json>: the call as the agent CLI runs it. When the gate allows it, it runs and
+# succeeds, so post-tool-use follows and records the result of any write it makes.
 probe_hook() {
   hook "$@"; probe_code=$?
-  rm -f "$1/.git/harness/writes.jsonl"
+  if [ "$probe_code" -eq 0 ]; then
+    hook "$1" post-tool-use "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); d.update(hook_event_name="PostToolUse", tool_response={"exit_code": 0}); print(json.dumps(d))' "$3")" >/dev/null 2>&1
+  fi
   return "$probe_code"
 }
 DL="$WORK/deliver"; new_repo "$DL"; "$HARNESS/bootstrap.sh" "$DL" --name dl >/dev/null

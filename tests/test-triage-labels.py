@@ -229,13 +229,12 @@ class SuggestedLabels(JudgedTask):
             with self.subTest(change_class=change_class, risky=risky):
                 labels = self.receipt_json(change_class, risky)["suggested_labels"]
 
-                gate = self.harness("hook", "pre-tool-use", check=False, input=json.dumps({
-                    "session_id": "s", "agent_id": "a1", "agent_type": "deliverer", "tool_name": "Bash",
-                    "tool_input": {"command": "gh pr create --title t --body b --label " + ",".join(labels)}}))
-
-                # This probes permission only; no external write is dispatched.
-                (self.project / ".git/harness/writes.jsonl").unlink(missing_ok=True)
+                call = {"session_id": "s", "agent_id": "a1", "agent_type": "deliverer", "tool_name": "Bash",
+                        "tool_input": {"command": "gh pr create --title t --body b --label " + ",".join(labels)}}
+                gate = self.harness("hook", "pre-tool-use", check=False, input=json.dumps(call))
                 self.assertEqual(gate.returncode, 0, gate.stderr)
+                self.harness("hook", "post-tool-use", input=json.dumps(dict(
+                    call, hook_event_name="PostToolUse", tool_response={"exit_code": 0})))
 
     def test_the_text_receipt_lists_the_labels_as_advisory(self):
         section = self.labels_section(self.receipt("Change-Class: feature", True).stdout)

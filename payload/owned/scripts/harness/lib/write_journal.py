@@ -79,7 +79,9 @@ class Journal:
         return self.transaction(lambda rows: [row for row in self.latest(rows).values()
                                                if row["state"] == "attempted"])
 
-    def begin(self, task, operation, target, intent):
+    def begin(self, task, operation, target, intent, repeatable=False):
+        """Records an attempt before the write. A write already observed returns its row instead, unless it is
+        repeatable: then it is recorded again under the same key."""
         key = digest([task, operation, target, intent])
         def start(rows):
             latest = self.latest(rows)
@@ -88,7 +90,7 @@ class Journal:
                 raise IndeterminateWrite("indeterminate_write: reconcile or park pending attempt(s) %s; no retry"
                                          % ", ".join(pending))
             previous = latest.get(key)
-            if previous and previous["state"] == "observed":
+            if previous and previous["state"] == "observed" and not repeatable:
                 return key, previous
             self.append(dict(key=key, state="attempted", task=task, operation=operation,
                              target=target, intent=intent))

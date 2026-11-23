@@ -367,6 +367,70 @@ exit 13
         self.assertEqual(json.loads(p.harness('write-reconcile').stdout), [])
 
 
+
+DOCUMENTED_CREATE = """gh pr create --base main --title "feat: search" --label risk:low --body "$(cat <<'EOF'
+## Summary
+Adds search; closes nothing ) yet.
+
+EOF
+)\""""
+
+
+class ObservedResults(unittest.TestCase):
+    """Which shell writes count as observed after they ran, and what the agent is told when one doesn't."""
+
+    def setUp(self):
+        self.p = Project('observed results ')
+        self.addCleanup(self.p.cleanup)
+
+    def call(self, command, source=None, post=None):
+        """Runs command as the agent CLI would: pre-tool-use, then (when allowed) post-tool-use with post's fields."""
+        data = {'session_id': 's', 'agent_id': 'd1', 'agent_type': 'deliverer', 'tool_name': 'Bash',
+                'tool_use_id': 'toolu_%d' % len(command), 'tool_input': {'command': command}}
+        flags = ('--from', source) if source else ()
+        pre = self.p.harness('hook', 'pre-tool-use', *flags, input=json.dumps(data), check=False)
+        if pre.returncode == 0 and post is not None:
+            done = dict(data, hook_event_name='PostToolUse', **post)
+            return pre, self.p.harness('hook', 'post-tool-use', *flags, input=json.dumps(done), check=False)
+        return pre, None
+
+    def pending(self):
+        return json.loads(self.p.harness('write-reconcile').stdout)
+
+    def test_the_deliverers_documented_pull_request_call_is_observed(self):
+        pre, _ = self.call(DOCUMENTED_CREATE, post={'tool_response': {'exit_code': 0}})
+        self.assertEqual(pre.returncode, 0, pre.stderr)
+        self.assertEqual(self.pending(), [])
+        after, _ = self.call('gh pr edit --add-label class:docs', post={'tool_response': {'exit_code': 0}})
+        self.assertEqual(after.returncode, 0, after.stderr)
+
+    def test_a_sole_write_whose_words_hold_substitutions_or_a_heredoc_is_observed(self):
+        for command in ("gh pr edit 7 --body-file - <<'EOF'\nbody; with ) and EOF-like text\nEOF",
+                        'gh pr edit 7 --body "$(cat a.md; cat b.md)"',
+                        DOCUMENTED_CREATE + ' 2>&1'):
+            with self.subTest(command=command):
+                self.call(command, post={'tool_response': {'exit_code': 0}})
+                self.assertEqual(self.pending(), [])
+
+    def test_something_run_after_the_documented_call_leaves_it_unobserved(self):
+        for after in ('; true', ' && echo done', ' | cat', '\necho done', ' &'):
+            with self.subTest(after=after):
+                p = Project('documented then more ')
+                self.addCleanup(p.cleanup)
+                self.p = p
+                self.call(DOCUMENTED_CREATE + after, post={'tool_response': {'exit_code': 0}})
+                self.assertEqual(len(self.pending()), 1)
+
+    def test_an_edit_that_ran_may_run_again_but_a_create_may_not(self):
+        for command, again in (('gh pr edit 7 --title "feat: search"', 0),
+                               ('gh pr create --title t --body b', 2)):
+            with self.subTest(command=command):
+                self.call(command, post={'tool_response': {'exit_code': 0}})
+                repeat, _ = self.call(command, post={'tool_response': {'exit_code': 0}})
+                self.assertEqual(repeat.returncode, again, repeat.stderr)
+                self.assertEqual(self.pending(), [])
+
+
 class EvalReplay(unittest.TestCase):
     """eval replay runs the captured calls in one throwaway checkout, where nothing is ever written to GitHub."""
 

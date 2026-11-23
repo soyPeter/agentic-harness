@@ -7421,7 +7421,9 @@ def shell_write_begin(data):
     if intent:
         state = "the write journal (.git/harness/writes.jsonl) already held an attempt"
         try:
-            _, previous = write_journal_store().begin(*intent)
+            # gh pr edit sets fields, so an edit that ran may run again; a second create would be a duplicate.
+            edits_only = all(action == "pr-edit" for action in intent[1].split("+"))
+            _, previous = write_journal_store().begin(*intent, repeatable=edits_only)
             if previous:
                 reads_state(state)
                 deny("This outward write was already observed; inspect its result rather than repeat it.")
@@ -7430,28 +7432,33 @@ def shell_write_begin(data):
             deny(str(exc))
 
 
-def sole_gh_call(command, words):
-    """Whether command runs the gh call with these words and nothing else, so its exit status is that call's. A
-    redirection is the shell's, so it isn't among words, but >out;true and >out& still run something else."""
-    segments = split_segments(command.strip())
+def sole_gh_call(command, action):
+    """Whether command is one gh call that does action, with nothing run after it, so its exit status is that call's.
+    Its redirections, a heredoc it reads and command substitutions in its words (--body "$(cat <<'EOF' ...)") leave
+    that status alone; >out;true, | cat and & don't."""
+    segments = split_segments(split_heredocs(command)[0].strip())
+    if len(segments) != 1 or segments[0][1]:
+        return False
     try:
-        return (len(segments) == 1 and not segments[0][1] and command.strip().startswith("gh ")
-                and shlex.split(redirections_removed(command)) == words)
+        words = shlex.split(redirections_removed(segments[0][0]))
     except ValueError:
         return False
+    return words[:1] == ["gh"] and OUTWARD_GH.get(gh_parts(words)[:2]) == action
 
 
 def shell_write_observe(data):
+    """Records the result of a shell write that ran; without one, the attempt stays pending."""
     intent = shell_write_intent(data)
+    if not intent:
+        return None
     command = (data.get("tool_input") or {}).get("command") or ""
     writes = outward_actions(command)
-    direct = len(writes) == 1 and sole_gh_call(command, writes[0][1])
-    if intent and direct and tool_result(data) == "succeeded":
-        key = write_journal.digest(list(intent))
+    if len(writes) == 1 and sole_gh_call(command, writes[0][0]) and tool_result(data) == "succeeded":
         try:
-            write_journal_store().observe(key, None)
+            write_journal_store().observe(write_journal.digest(list(intent)), None)
         except write_journal.IndeterminateWrite as exc:
             return str(exc)
+    return None
 
 
 def log_event(kind, **fields):
