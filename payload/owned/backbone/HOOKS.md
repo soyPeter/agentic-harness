@@ -26,7 +26,7 @@ Per-file checks in PreToolUse:
 | `backbone/3-TASKS.md` | One `[WIP]` at a time; **start gate** for a new `[WIP]`; the start gate again and the **judge gate** for finishing one |
 | `backbone/specs/*.md` | `Approved-by:` lines are user-only; an approved spec is frozen |
 | `backbone/adr/*.md` | Only the user sets an ADR to `Accepted`; an accepted ADR is frozen except for being superseded |
-| `backbone/harness.conf` | The gate switches, `HARNESS_JUDGE_MAX_ROUNDS`, `HARNESS_VERIFY`, `HARNESS_ORCHESTRATOR_SCOPE` and the decision-layer keys are user-only |
+| `backbone/harness.conf` | The keys **Configuration** (below) marks user-only: the gate switches, `HARNESS_JUDGE_MAX_ROUNDS`, `HARNESS_VERIFY`, `HARNESS_ORCHESTRATOR_SCOPE`, and the autonomy, risk, runner, CI judge, sandbox, spec size, light lane, requirement style, tester, review, delivery, profile, signing, Orca, knowledge and decision-layer keys |
 | `backbone/.verdicts/*` | Never writable by agents |
 | `backbone/.harness-lock.json` | Written only by the installer and `harness.py adopt` |
 | `backbone/escalations.md` | Written by `harness.py escalate`; resolved by the user |
@@ -634,6 +634,15 @@ Two files of each kind apply: the core file in `scripts/harness/`, then the proj
 | `HARNESS_DELIVER` | `on` | `on`: the deliverer delivers a finished task; `off`: a finished task is done once committed; `external`: an agent factory delivers it from a trusted clone (see Deliverer). User-only |
 | `HARNESS_PROFILE` | empty | Organisation profile: empty, `triple` or `no-merge` (see Profiles). User-only; the environment can add it, never lift it |
 | `HARNESS_REQ_STYLE` | `plain` | `plain` or `ears`: with `ears`, `spec-check` requires an EARS pattern for every requirement. User-only |
+| `HARNESS_SPEC_MAX_ITEMS` | `30` | Requirements plus acceptance criteria a spec may have (`0` = no limit); a bigger spec is cut, or the task split. User-only |
+| `HARNESS_LIGHT_LANE`, `HARNESS_LIGHT_MAX_ITEMS`, `HARNESS_LIGHT_MAX_FILES` | `off`, `3`, `3` | The light lane and its limits (see Light lane). User-only |
+| `HARNESS_TESTER`, `HARNESS_ACCEPTANCE_PATHS` | `off`, `(^\|/)acceptance([/._-]\|$)` | The tester, and the files its acceptance tests go in (see Tester and debugger). User-only |
+| `HARNESS_DEBUGGER` | `on` | The debugger's fix brief after each judge fail (see Tester and debugger) |
+| `HARNESS_REVIEW` | `on` | The three review lenses after the judge (see Reviewer). User-only |
+| `HARNESS_ORCA_AGENTS`, `HARNESS_ORCA_LAUNCH` | `default=claude`; `codex=codex --dangerously-bypass-hook-trust -c check_for_update_on_startup=false` | The agent per role, and launch commands for agents that need flags (see Orca coordinator). User-only |
+| `HARNESS_KNOWLEDGE_ROOT`, `HARNESS_KNOWLEDGE_PATHS`, `HARNESS_KNOWLEDGE_TOOLS` | empty, empty, the server's read tools | The knowledge source (see Knowledge source). User-only |
+| `HARNESS_ATTEST_SIGNING`, `HARNESS_ATTEST_KMS_KEY`, `HARNESS_ATTEST_KMS_IDENTITY` | `key`, empty, empty | How the attest job signs (see Signed verdict attestation). User-only |
+| `HARNESS_HOOK_SLOW` | `5` | Seconds after which a hook call is logged as slow; `0` turns it off (see Event log, trace and report) |
 
 ## Decision layer (advisory)
 
