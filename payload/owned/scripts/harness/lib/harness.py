@@ -2663,16 +2663,20 @@ COPIERS = {
                                                  "--password", "--clone", "--nocache"))],
 }
 INTO = "into"   # a destination that receives content whose names the hooks can't read
+# A folder copied onto an existing folder merges its contents into it.
+RECURSIVE_COPIES = {"cp": {"-R", "-r", "-a", "--recursive", "--archive"}, "rsync": {"-r", "-a", "--recursive",
+                                                                                     "--archive"}, "scp": {"-r"}}
 
 
-def relative_copy_targets(prog, target, source):
+def relative_copy_targets(prog, target, source, whole):
     """[(path, whole)] a relative copy (rsync -R, cp --parents) of source writes: source's path below target and
     every folder on the way, or target itself when that path is empty. rsync's path starts after the last /./."""
     path = (source.rpartition("/./")[2] if prog == "rsync" else source).strip("/")
     if path in ("", "."):
         return [(target, INTO)]
     parts = path.split("/")
-    return [(os.path.join(target, *parts[:depth]), False) for depth in range(1, len(parts) + 1)]
+    return [(os.path.join(target, *parts[:depth]), False) for depth in range(1, len(parts))] + [
+        (os.path.join(target, path), whole)]
 
 
 def copy_targets(prog, args):
@@ -2685,6 +2689,7 @@ def copy_targets(prog, args):
         options, operands, maybe = parse_options(args, **table)
         given = {name for name, _ in options}
         relative = given & ({"-R", "--relative"} if prog == "rsync" else {"--parents"} if prog == "cp" else set())
+        whole = INTO if given & RECURSIVE_COPIES.get(prog, set()) else False
         targets = [(t, operands) for t in option_values(options, "-t", "--target-directory")]
         if not targets:
             for at in range(len(operands) - 1, 0, -1):
@@ -2694,9 +2699,9 @@ def copy_targets(prog, args):
         for target, sources in targets:
             found.append((target, False))
             if relative:
-                found += [entry for s in sources for entry in relative_copy_targets(prog, target, s)]
+                found += [entry for s in sources for entry in relative_copy_targets(prog, target, s, whole)]
             else:
-                found += [(os.path.join(target, os.path.basename(s.rstrip("/"))), False) for s in sources]
+                found += [(os.path.join(target, os.path.basename(s.rstrip("/"))), whole) for s in sources]
             contents = not relative and any(s.endswith("/") or os.path.basename(s.rstrip("/")) in ("", ".", "..")
                                             for s in sources)
             if prog == "ditto" or (prog in ("cp", "rsync", "scp") and contents) or (

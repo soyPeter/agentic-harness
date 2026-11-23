@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -796,6 +797,8 @@ class Start(Project):
                 "command": "rsync -R evil/./.agentic-harness/sandbox-approvals.json ~/"}},
             "a relative copy of a run": {"tool_name": "Bash", "tool_input": {
                 "command": "cd evil && rsync -R .agentic-harness/sandbox-runs/run-x/devcontainer.json ~/"}},
+            "a folder copied onto the home folder": {"tool_name": "Bash", "tool_input": {
+                "command": "cp -R evil/home %s/" % shlex.quote(str(self.work))}},
         }
         for name, call in writes.items():
             with self.subTest(write=name):
