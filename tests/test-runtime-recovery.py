@@ -384,14 +384,16 @@ class ObservedResults(unittest.TestCase):
         self.p = Project('observed results ')
         self.addCleanup(self.p.cleanup)
 
-    def call(self, command, source=None, post=None):
+    def call(self, command, source=None, post=None, agent='deliverer'):
         """Runs command as the agent CLI would: pre-tool-use, then (when allowed) post-tool-use with post's fields."""
-        data = {'session_id': 's', 'agent_id': 'd1', 'agent_type': 'deliverer', 'tool_name': 'Bash',
-                'tool_use_id': 'toolu_%d' % len(command), 'tool_input': {'command': command}}
+        data = {'session_id': 's', 'tool_name': 'Bash', 'tool_use_id': 'toolu_%d' % len(command),
+                'tool_input': {'command': command}}
+        if agent:
+            data.update(agent_id='d1', agent_type=agent)
         flags = ('--from', source) if source else ()
         pre = self.p.harness('hook', 'pre-tool-use', *flags, input=json.dumps(data), check=False)
         if pre.returncode == 0 and post is not None:
-            done = dict(data, hook_event_name='PostToolUse', **post)
+            done = dict(data, **dict({'hook_event_name': 'PostToolUse'}, **post))
             return pre, self.p.harness('hook', 'post-tool-use', *flags, input=json.dumps(done), check=False)
         return pre, None
 
@@ -421,6 +423,23 @@ class ObservedResults(unittest.TestCase):
                 self.p = p
                 self.call(DOCUMENTED_CREATE + after, post={'tool_response': {'exit_code': 0}})
                 self.assertEqual(len(self.pending()), 1)
+
+    def test_a_write_inside_another_commands_words_is_not_observed(self):
+        for command in ('echo pr edit "$(gh pr edit 7 --title t)"', 'gh pr comment 7 --body "$(gh pr edit 7 --title t)"'):
+            with self.subTest(command=command):
+                p = Project('nested write ')
+                self.addCleanup(p.cleanup)
+                self.p = p
+                pre, _ = self.call(command, post={'tool_response': {'exit_code': 0}}, agent=None)
+                self.assertEqual(pre.returncode, 0, pre.stderr)
+                self.assertEqual(len(self.pending()), 1)
+
+    def test_a_write_that_failed_stays_parked(self):
+        pre, done = self.call('gh pr create --title t --body b',
+                              post={'hook_event_name': 'PostToolUseFailure', 'error': 'exit 1'})
+        self.assertEqual(pre.returncode, 0, pre.stderr)
+        self.assertEqual(len(self.pending()), 1)
+        self.assertIn('it failed', done.stdout + done.stderr)
 
     def test_an_edit_that_ran_may_run_again_but_a_create_may_not(self):
         for command, again in (('gh pr edit 7 --title "feat: search"', 0),
@@ -495,6 +514,7 @@ class JournalAuthority(unittest.TestCase):
                      'import scripts.harness.lib.harness', 'from scripts.harness.lib import (sandbox,\n    harness)',
                      'import importlib; importlib.import_module("scripts.harness.lib.write_journal")',
                      '__import__("lib.harness")', 'import pkgutil; pkgutil.resolve_name("write_journal")',
+                     'import pkgutil; pkgutil.resolve_name("lib.harness")',
                      "import sys; sys.path.insert(0, '%s'); import os, write_journal; "
                      "[write_journal.Journal('.git/harness/writes.jsonl').resolve(r['key'], 'x') "
                      "for r in write_journal.Journal('.git/harness/writes.jsonl').pending()]" % lib):

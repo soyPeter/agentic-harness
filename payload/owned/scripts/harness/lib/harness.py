@@ -3366,7 +3366,7 @@ def engine_findings(prog, words, written):
     if command == "pin":
         return ["pin moves the engine release this project pins, and with it every gate; only the user does that, in "
                 "their own terminal."]
-    if EXPANSION.search(words[script]) and any(w in USER_COMMANDS + ("hook",) for w in words[script + 1:]):
+    if EXPANSION.search(words[script]) and any(w in USER_COMMANDS for w in words[script + 1:]):
         return [USER_COMMAND_REFUSAL % "<expansion>"]
     if command == "hook":
         return [HOOK_REFUSAL]
