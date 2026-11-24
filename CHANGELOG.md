@@ -26,6 +26,13 @@
   since 11 and 13 November; ADR-006's and ADR-007's notes no longer say their status stays Proposed; ADR-004's and
   ADR-005's follow-up notes say PRs #88 and #94 merged them; HOOKS.md lists every user-only setting; the Orca skill
   covers thin installs; and `backbone/3-TASKS.md` no longer queues follow-ups that 0.31.0 shipped. No behaviour changed.
+- **The documentation is rebuilt around a short README (docs only).** The README now holds what the harness is, the
+  four diagrams, install and thin-mode quick starts and a map of the docs. The rest moved, each part to one place: the
+  diagrams' full explanation to `docs/sdlc/README.md`; installing, updating and thin mode to `docs/install.md`;
+  enrolling, the machine guard and profiles to `docs/enforcement.md`; stack packs to `docs/catalog.md`; and working on
+  the harness to `docs/development.md`. `docs/adr/README.md` is now the one table of ADR statuses, and
+  `docs/research/README.md` indexes the plans and audits. Under Profiles, `backbone/HOOKS.md` now names `orca --pr` and
+  the doctor's check of an unknown profile. No behaviour changed.
 - Agents may again run the pinned engine from the engine cache or the plugin (its launcher or `harness.py`) with the
   commands agents may run, as the thin-mode session notes and the docs say. Since 0.31.0 the user-configuration check
   refused it as a change to the harness's machine settings. `pin`, `init --thin`, the user-only commands, another

@@ -21,7 +21,7 @@ This repository is the agentic harness, enrolled in thin mode at v0.31.0. Worker
 4. `HARNESS_ORCA_AGENTS` is `default=claude judge=codex`. The judge runs on a different model.
 5. Parallel workers: 2.
 6. A spec whose Change-Class is `docs` or `refactor` can be approved by policy when it is low risk. `feature` and `schema` wait for Pedro's `Approved-by:` line.
-7. A spec's `ADRs:` line must name an ADR file in `backbone/adr/`. Product ADRs live in `docs/adr/` and are indexed in `5-DECISIONS.md`. Cite an Accepted backbone ADR on the `ADRs:` line (ADR-002 for the stack). Mention a Proposed product ADR in the narrative, not on that line, or policy will not approve the spec.
+7. A spec's `ADRs:` line must name an ADR file in `backbone/adr/`. Product ADRs live in `docs/adr/` and are indexed in `docs/adr/README.md`, which `5-DECISIONS.md` links. Cite an Accepted backbone ADR on the `ADRs:` line (ADR-002 for the stack). Mention a Proposed product ADR in the narrative, not on that line, or policy will not approve the spec.
 8. Wave 1 tasks are audits and docs. They read the plan path on their task line. If that file is not on the base branch, the plan does not exist for the worker yet.
 9. Do not adopt the catalog pack `triple`. The profile and the pack are different things.
 10. Do not change a product ADR's status. Pedro does that.
