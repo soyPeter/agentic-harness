@@ -664,5 +664,132 @@ await before({ cwd: %r, tool: 'bash', input: { command: 'ls' } });
         self.assertFalse(self.marker.exists())
 
 
+class AgentsRunThePinnedEngine(Fixture):
+    """In a thin project, agents run the pinned engine from the engine cache or the plugin, as the session notes tell
+    them: that reads ~/.agentic-harness. pin, init --thin, hook, the user-only commands, words the engine doesn't list
+    for agents, another release and every write into the folder stay refused. The hook runs as the Claude plugin's
+    launcher runs it."""
+
+    CACHE_LAUNCHER = "~/.agentic-harness/engines/9.9.9/plugin/launcher.py"
+    ENTRY_POINTS = (CACHE_LAUNCHER, "~/.agentic-harness/engines/9.9.9/payload/owned/scripts/harness/lib/harness.py",
+                    "~/.claude/plugins/cache/agentic-harness/agentic-harness/9.9.9/plugin/launcher.py")
+    AGENT_RUNS = ("adopt java --adr ADR-002 --dry-run", "admission status", "adr-number",
+                  "approval-check pulls.json origin/main..HEAD main", "approve 1.1",
+                  "attest --range origin/main..HEAD", "catalog", "contract --json", "decisions --last 5",
+                  "delivery-plan 1.1 --json", "doctor", "environment-check environment.json policies.json main",
+                  "escalate 1.1 --reason blocked", "escalations --json", "eval replay", "finish 1.1",
+                  "git pre-commit", "next 1.1 --json", "orca-digest", "questions 1.1", "receipt 1.1 --json",
+                  "report --days 7", "repository-check secrets.json variables.json", "risk 1.1", "scan --quiet",
+                  "signing-check HEAD true", "spec-check 1.1", "start 1.1", "state", "test-run", "trace 1.1 --json",
+                  "verify --range origin/main..HEAD", "orca --dry-run", "orca-nightly --dry-run",
+                  "linear import ENG-1 --task 1.1 --dry-run")
+    REFUSED_RUNS = ("pin 9.9.8", "init --thin", "hook pre-tool-use", "write-reconcile", "run", "orca", "orca-nightly",
+                    "snapshot", "linear", "intake request.json", "delivery-record 1.1 report.json",
+                    "ci-judge --range origin/main..HEAD", "ci-protect", "sandbox-approve", "accept-agent-config",
+                    "switch 9.9.8", "status")
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        engines = cls.home / ".agentic-harness/engines"
+        cls.engine = engines / "9.9.9"
+        for part in ("payload", "plugin"):
+            shutil.copytree(str(ROOT / part), str(cls.engine / part), ignore=shutil.ignore_patterns("__pycache__"))
+        for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "v9.9.9"]):
+            subprocess.run(["git", "-C", str(cls.engine)] + args, check=True, capture_output=True, env=cls.base_env())
+        commit = subprocess.run(["git", "-C", str(cls.engine), "rev-parse", "HEAD"], check=True, capture_output=True,
+                                text=True, env=cls.base_env()).stdout.strip()
+        shutil.rmtree(str(cls.project / "scripts/harness"))
+        (cls.project / "backbone/.harness-lock.json").write_text(
+            json.dumps({"mode": "thin", "version": "9.9.9", "commit": commit}))
+        cls.plugin_launcher = cls.home / ".claude/plugins/cache/agentic-harness/agentic-harness/9.9.9/plugin/launcher.py"
+        cls.plugin_launcher.parent.mkdir(parents=True)
+        shutil.copy(str(ROOT / "plugin/launcher.py"), str(cls.plugin_launcher))
+        (cls.home / ".agentic-harness/plugins").mkdir()
+        (cls.home / ".agentic-harness/plugins/agentic-harness").symlink_to(os.path.join("..", "engines", "9.9.9"))
+        links = cls.work / "links"
+        links.mkdir()
+        (links / "launcher.py").symlink_to(cls.engine / "plugin/launcher.py")
+        (links / "engine").symlink_to(cls.engine)
+        for script in ("plugin/launcher.py", "payload/owned/scripts/harness/lib/harness.py"):
+            older = engines / "9.9.8" / script
+            older.parent.mkdir(parents=True)
+            older.write_text("print('9.9.8')\n")
+
+    def harness(self, *args, stdin="", **env):
+        clean = {k: v for k, v in self.base_env(**env).items() if not k.startswith("HARNESS_")}
+        return subprocess.run(["python3", "-I", str(self.plugin_launcher)] + list(args), cwd=self.project,
+                              input=stdin, capture_output=True, text=True, env=clean)
+
+    def spellings(self):
+        launcher = str(self.engine / "plugin/launcher.py")
+        return ("python3 %s <command>" % self.CACHE_LAUNCHER,
+                "python3 $HOME/.agentic-harness/engines/9.9.9/plugin/launcher.py <command>",
+                "python3 ${HOME}/.agentic-harness/engines/9.9.9/plugin/launcher.py <command>",
+                "python3 %s <command>" % shlex.quote(launcher),
+                "L=%s; python3 \"$L\" <command>" % shlex.quote(launcher),
+                "python3 %s <command>" % shlex.quote(str(self.work / "links/launcher.py")),
+                "python3 %s <command>" % shlex.quote(str(self.work / "links/engine/plugin/launcher.py")),
+                "python3 ~/.agentic-harness/plugins/agentic-harness/plugin/launcher.py <command>",
+                "cd ~/.agentic-harness/engines/9.9.9/plugin && python3 -m launcher <command>",
+                "cd ~/.agentic-harness/engines/9.9.9/payload/owned/scripts/harness/lib && python3 -m harness <command>",
+                "python3 -I -B %s <command>" % self.CACHE_LAUNCHER,
+                "python3 -X dev %s <command>" % self.CACHE_LAUNCHER,
+                "exec python3 %s <command>" % self.CACHE_LAUNCHER,
+                "timeout 60 python3 %s <command>" % self.CACHE_LAUNCHER,
+                "env python3 %s <command>" % self.CACHE_LAUNCHER,
+                "nice -n 5 python3 %s <command>" % self.CACHE_LAUNCHER,
+                "exec %s <command>" % self.CACHE_LAUNCHER)
+
+    def test_every_command_agents_may_run_is_allowed_from_the_cache_and_the_plugin(self):
+        for entry in self.ENTRY_POINTS:
+            for run in self.AGENT_RUNS:
+                command = "python3 %s %s" % (entry, run)
+                with self.subTest(command=command):
+                    self.assertAllowed(self.bash(command), command)
+
+    def test_the_commands_agents_may_not_run_stay_refused(self):
+        for entry in self.ENTRY_POINTS:
+            for run in self.REFUSED_RUNS:
+                command = "python3 %s %s" % (entry, run)
+                with self.subTest(command=command):
+                    self.assertRefused(self.bash(command), command)
+
+    def test_every_spelling_of_the_engine_runs_doctor(self):
+        for spelling in self.spellings():
+            command = spelling.replace("<command>", "doctor")
+            with self.subTest(command=command):
+                self.assertAllowed(self.bash(command), command)
+
+    def test_no_spelling_of_the_engine_runs_pin(self):
+        for spelling in self.spellings():
+            command = spelling.replace("<command>", "pin 9.9.8")
+            with self.subTest(command=command):
+                self.assertRefused(self.bash(command), command)
+
+    def test_writes_into_the_engine_cache_stay_refused(self):
+        commands = ("echo x > %s" % self.CACHE_LAUNCHER,
+                    "cp evil.py %s" % self.CACHE_LAUNCHER,
+                    "rm -rf ~/.agentic-harness/engines",
+                    "python3 %s trace export --format html --out ~/.agentic-harness/x" % self.CACHE_LAUNCHER,
+                    "python3 %s doctor > ~/.agentic-harness/machine.json" % self.CACHE_LAUNCHER,
+                    "cd ~/.agentic-harness/engines/9.9.9 && python3 plugin/launcher.py trace export --format html "
+                    "--out x")
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertRefused(self.bash(command), command)
+
+    def test_the_write_tool_may_not_change_the_cached_launcher(self):
+        result = self.pre_tool_use("Write", {"file_path": str(self.engine / "plugin/launcher.py"), "content": "x"})
+
+        self.assertRefused(result)
+
+    def test_another_release_in_the_cache_is_refused(self):
+        for script in ("plugin/launcher.py", "payload/owned/scripts/harness/lib/harness.py"):
+            command = "python3 ~/.agentic-harness/engines/9.9.8/%s doctor" % script
+            with self.subTest(command=command):
+                self.assertRefused(self.bash(command), command)
+
+
 if __name__ == "__main__":
     unittest.main()

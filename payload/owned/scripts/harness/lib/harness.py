@@ -2721,10 +2721,65 @@ def copy_targets(prog, args):
     return found
 
 
-def config_operands(segment, words, assignments=(), env=None):
+# The harness.py commands agents may run: every command main() dispatches except pin, init, hook and USER_COMMANDS.
+AGENT_COMMANDS = ("adopt", "admission", "adr-number", "approval-check", "approve", "attest", "catalog", "contract",
+                  "decisions", "delivery-plan", "doctor", "environment-check", "escalate", "escalations", "eval",
+                  "finish", "git", "next", "orca-digest", "questions", "receipt", "report", "repository-check", "risk",
+                  "scan", "signing-check", "spec-check", "start", "state", "test-run", "trace", "verify")
+
+
+def engine_entry_points():
+    """The real paths of the scripts that start the engine these hooks run from: this harness.py, the launcher shipped
+    beside it in a release, and the launcher of the plugin that started these hooks. Another release in the cache
+    isn't one: its gates may be weaker."""
+    points = {str(Path(__file__).resolve())}
+    if ENGINE.name == "owned" and ENGINE.parent.name == "payload":
+        points.add(real_path(str(ENGINE.parent.parent / "plugin" / "launcher.py")))
+    if os.environ.get("HARNESS_PLUGIN_ROOT"):
+        points.add(real_path(os.path.join(os.environ["HARNESS_PLUGIN_ROOT"], "plugin", "launcher.py")))
+    return points
+
+
+def started_script(run):
+    """(the index of the script or -m module word a python command runs, whether it is a module), or None."""
+    for at in range(1, len(run)):
+        found = script_operand(run[:at + 1])
+        if found is None:
+            return (at + 1, True) if run[at] == "-m" and at + 1 < len(run) else None
+        if found:
+            return at, False
+    return None
+
+
+def engine_run_words(words, cwd, env=None):
+    """The indexes of the script (or module) word and the command word when words run the engine these hooks run from
+    with a command agents may run, else (): that reads ~/.agentic-harness, it doesn't change it."""
+    at = program_index(words)
+    name = program(words[at:])
+    if is_runtime(name) and name.startswith("python"):
+        started = started_script(words[at:])
+        if started is None:
+            return ()
+        script, module = at + started[0], started[1]
+    else:
+        script, module = at, False
+    if script + 1 >= len(words):
+        return ()
+    command = words[script + 1]
+    if not (command in AGENT_COMMANDS or (command in PLANNING_COMMANDS and "--dry-run" in words[script + 2:])):
+        return ()
+    fulls, unresolved = shell_path(words[script] + (".py" if module else ""), cwd, env)
+    if unresolved or not fulls:
+        return ()
+    points = engine_entry_points()
+    return (script, script + 1) if all(real_path(full) in points for full in fulls) else ()
+
+
+def config_operands(segment, words, assignments=(), env=None, executed=()):
     """[(path, whole)] a shell segment may change: its redirection targets, and every word of a program that doesn't
     only read (cp and the like: their target, and what lands in a target folder). whole is INTO for a folder that
-    receives names the hooks can't read (an archive's, a folder's contents)."""
+    receives names the hooks can't read (an archive's, a folder's contents). executed: the indexes of the words the
+    engine runs (its script and command), which it reads."""
     found = [(p.strip("'\""), False) for p in redirection_targets(segment)]
     prog, args = program(words), words[1:]
     operands = [w for w in args if not w.startswith("-")]
@@ -2739,6 +2794,7 @@ def config_operands(segment, words, assignments=(), env=None):
     copies = copy_targets(prog, command[1:]) if prog in COPIERS else []
     if copies:
         return found + copies
+    args = [w for at, w in enumerate(words) if at and at not in executed]
     found += [(w, prog in REMOVERS) for w in args]
     found += [(w.split("=", 1)[1], False) for w in args if "=" in w]
     return found
@@ -2753,7 +2809,8 @@ def config_findings(segment, words, cwd, env=None, assignments=None):
         assignments = shell_words(segment)[0]
     found = []
     # A long command repeats words; each distinct one is resolved once.
-    for path, whole in dict.fromkeys(config_operands(segment, words, assignments, env)):
+    executed = engine_run_words(words, cwd, env)
+    for path, whole in dict.fromkeys(config_operands(segment, words, assignments, env, executed)):
         if not path or path.startswith("-"):
             continue
         fulls, unresolved = shell_path(path, cwd, env)

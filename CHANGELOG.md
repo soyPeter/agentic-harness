@@ -26,6 +26,10 @@
   since 11 and 13 November; ADR-006's and ADR-007's notes no longer say their status stays Proposed; ADR-004's and
   ADR-005's follow-up notes say PRs #88 and #94 merged them; HOOKS.md lists every user-only setting; the Orca skill
   covers thin installs; and `backbone/3-TASKS.md` no longer queues follow-ups that 0.31.0 shipped. No behaviour changed.
+- Agents may again run the pinned engine from the engine cache or the plugin (its launcher or `harness.py`) with the
+  commands agents may run, as the thin-mode session notes and the docs say. Since 0.31.0 the user-configuration check
+  refused it as a change to the harness's machine settings. `pin`, `init --thin`, the user-only commands, another
+  release in the cache and writes into `~/.agentic-harness` stay refused.
 
 ## 0.31.0 (2026-11-22)
 
