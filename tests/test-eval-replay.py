@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
 import shlex
 import shutil
 import string
@@ -526,9 +527,12 @@ class Budget(Project):
                "DB_PASS=", "\"k\": ")
 
     def timed(self, command):
-        started = time.monotonic()
+        # The suite runs this file niced beside other work, so elapsed time measures the runner, not the hook; CPU
+        # time still grows with an input that makes the hook work super-linearly.
+        before = resource.getrusage(resource.RUSAGE_CHILDREN)
         result = self.bash(command, env={"HARNESS_HOOK_BUDGET": "120"})
-        return result, time.monotonic() - started
+        after = resource.getrusage(resource.RUSAGE_CHILDREN)
+        return result, (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
 
     def test_a_refused_command_padded_with_secret_like_text_is_refused_in_time(self):
         reason = self.blocked(self.bash("rm -rf backbone/"))
@@ -536,17 +540,17 @@ class Budget(Project):
         for size in (60 * 1024, 1024 * 1024):
             for padding in self.PADDING:
                 with self.subTest(padding=padding, size=size):
-                    result, seconds = self.timed("rm -rf backbone/ backbone/A" + padding * (size // len(padding)))
+                    result, cpu_seconds = self.timed("rm -rf backbone/ backbone/A" + padding * (size // len(padding)))
                     self.assertIn(problem, self.blocked(result))
-                    self.assertLess(seconds, 15)
+                    self.assertLess(cpu_seconds, 15)
 
     def test_an_allowed_command_padded_with_secret_like_text_is_allowed_in_time(self):
         for size in (60 * 1024, 1024 * 1024):
             for padding in self.PADDING:
                 with self.subTest(padding=padding, size=size):
-                    result, seconds = self.timed("echo " + padding * (size // len(padding)))
+                    result, cpu_seconds = self.timed("echo " + padding * (size // len(padding)))
                     self.allowed(result)
-                    self.assertLess(seconds, 15)
+                    self.assertLess(cpu_seconds, 15)
 
 
 class Candidates(Project):
