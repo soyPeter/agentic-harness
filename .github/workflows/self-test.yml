@@ -15,10 +15,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         python: ["3.10", "3.13"]
     runs-on: ${{ matrix.os }}
-    # The suite takes about 10 minutes on macOS; this bounds the intermittent stall and leaves room for a slow runner.
+    # The Ubuntu jobs take 15 to 26 minutes; this bounds the intermittent stall and leaves room for a slow runner.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
@@ -32,3 +32,63 @@ jobs:
         env:
           # Properties that start a process per example run a quarter of their examples; nightly.yml runs them all.
           HYPOTHESIS_PROFILE: ci
+
+  # The macOS runner has 3 CPUs and the whole suite took up to 44 minutes there, so each Python runs in two parts at
+  # once and the macos job reports them under the required names.
+  macos-part:
+    name: self-test part ${{ matrix.part }} (macos-latest, ${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]
+        part: [1, 2]
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install the test-only tools
+        run: python -m pip install -r tests/requirements.txt
+      - name: Run the self-test
+        run: tests/run-tests.sh
+        env:
+          # Properties that start a process per example run a quarter of their examples; nightly.yml runs them all.
+          HYPOTHESIS_PROFILE: ci
+          HARNESS_TEST_PART: ${{ matrix.part }}
+
+  # always(), not !cancelled(): a skipped required check counts as passed.
+  macos:
+    name: self-test (macos-latest, ${{ matrix.python }})
+    needs: macos-part
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      # The part jobs are queried by name: needs.macos-part.result covers both Pythons' parts and can't say which
+      # Python failed.
+      - name: Require both parts of this Python
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          PYTHON: ${{ matrix.python }}
+        run: |
+          jobs=$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '.jobs[] | [.name, .conclusion] | @tsv')
+          status=0
+          for part in 1 2; do
+            name="self-test part $part (macos-latest, $PYTHON)"
+            conclusion=$(printf '%s\n' "$jobs" | awk -F'\t' -v n="$name" '$1 == n { print $2 }')
+            echo "$name: ${conclusion:-missing}"
+            [ "$conclusion" = success ] || status=1
+          done
+          exit "$status"

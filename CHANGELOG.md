@@ -26,6 +26,10 @@
   since 11 and 13 November; ADR-006's and ADR-007's notes no longer say their status stays Proposed; ADR-004's and
   ADR-005's follow-up notes say PRs #88 and #94 merged them; HOOKS.md lists every user-only setting; the Orca skill
   covers thin installs; and `backbone/3-TASKS.md` no longer queues follow-ups that 0.31.0 shipped. No behaviour changed.
+- The macOS self-test runs in two parts per Python at once (CI and tests only), so a 3-CPU runner no longer
+  approaches the 45-minute limit, and the required check names stay the same. The Budget checks of
+  `test-eval-replay.py` measure the hook's CPU time, so a loaded runner no longer fails them.
+  `HARNESS_TEST_PART=1|2` runs one part locally.
 
 ## 0.31.0 (2026-11-22)
 
