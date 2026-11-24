@@ -2335,8 +2335,10 @@ def thin_paths():
                ENGINE / "scripts/harness/routing.core.conf", ENGINE_SKILLS))
 
 
-def install_path(path_str, cwd):
-    """Which harness install (engine cache, plugin or installed role agents) path_str is in, or contains, else None."""
+def install_path(path_str, cwd, whole=False):
+    """Which harness install (engine cache, plugin or installed role agents) or sandbox record path_str is or is in,
+    else None. A folder that only holds one counts when whole is set: the operation takes path_str as a whole (delete,
+    move, chmod, a folder's contents copied or extracted into it)."""
     if not path_str or path_str.startswith("-"):
         return None
     path = os.path.expandvars(os.path.expanduser(path_str))
@@ -2350,19 +2352,19 @@ def install_path(path_str, cwd):
         base = os.path.realpath(base)
         if root == base or root.startswith(base + os.sep):
             continue   # a project inside the install (the harness developed in thin mode) keeps its own gates
-        if full == base or full.startswith(base + os.sep) or base.startswith(full.rstrip(os.sep) + os.sep):
+        if full == base or full.startswith(base + os.sep) or (whole and base.startswith(full.rstrip(os.sep) + os.sep)):
             reads_state("it names this machine's harness install folders")
             return label
     for _, agent in user_agent_files():
         agent = os.path.realpath(str(agent))
-        if full == agent or agent.startswith(full.rstrip(os.sep) + os.sep):
+        if full == agent or (whole and agent.startswith(full.rstrip(os.sep) + os.sep)):
             reads_state("it names this machine's harness install folders")
             return "the harness's role agents"
     for private in (sandbox.approvals_file(), sandbox.private_runs()):
         private = os.path.realpath(str(private))
-        # A folder holding them (~, ~/.agentic-harness) is the machine settings' check: it refuses deleting or moving
-        # the folder and still lets a command put a new file in ~.
-        if full == private or full.startswith(private + os.sep):
+        # A folder holding them takes new files; taking it whole is refused here, wherever the project is.
+        if full == private or full.startswith(private + os.sep) or (
+                whole and private.startswith(full.rstrip(os.sep) + os.sep)):
             return "the sandbox definitions approved and brought up on this machine"
     return None
 
@@ -2663,6 +2665,25 @@ COPIERS = {
                                                  "--password", "--clone", "--nocache"))],
 }
 INTO = "into"   # a destination that receives content whose names the hooks can't read
+# A folder copied onto an existing folder merges its contents into it.
+RECURSIVE_COPIES = {"cp": {"-R", "-r", "-a", "--recursive", "--archive"}, "rsync": {"-r", "-a", "--recursive",
+                                                                                     "--archive"}, "scp": {"-r"}}
+
+
+def relative_copy_targets(prog, target, source, whole):
+    """[(path, whole)] a relative copy (rsync -R, cp --parents) of source writes: source's path below target and
+    every folder on the way, or target itself when that path is empty. rsync builds differ on where the path starts
+    (the whole source, or after one of its /./), so every start counts."""
+    pieces = source.split("/./") if prog == "rsync" else [source]
+    found = []
+    for path in ("/".join(pieces[start:]).strip("/") for start in range(len(pieces))):
+        if path in ("", "."):
+            found.append((target, INTO))
+            continue
+        parts = path.split("/")
+        found += [(os.path.join(target, *parts[:depth]), False) for depth in range(1, len(parts))]
+        found.append((os.path.join(target, path), whole))
+    return list(dict.fromkeys(found))
 
 
 def copy_targets(prog, args):
@@ -2674,6 +2695,8 @@ def copy_targets(prog, args):
     for table in COPIERS[prog]:
         options, operands, maybe = parse_options(args, **table)
         given = {name for name, _ in options}
+        relative = given & ({"-R", "--relative"} if prog == "rsync" else {"--parents"} if prog == "cp" else set())
+        whole = INTO if given & RECURSIVE_COPIES.get(prog, set()) else False
         targets = [(t, operands) for t in option_values(options, "-t", "--target-directory")]
         if not targets:
             for at in range(len(operands) - 1, 0, -1):
@@ -2681,9 +2704,13 @@ def copy_targets(prog, args):
                 if at not in maybe:
                     break
         for target, sources in targets:
-            found += [(target, False)] + [(os.path.join(target, os.path.basename(s.rstrip("/"))), False)
-                                          for s in sources]
-            contents = any(s.endswith("/") or os.path.basename(s.rstrip("/")) in ("", ".", "..") for s in sources)
+            found.append((target, False))
+            if relative:
+                found += [entry for s in sources for entry in relative_copy_targets(prog, target, s, whole)]
+            else:
+                found += [(os.path.join(target, os.path.basename(s.rstrip("/"))), whole) for s in sources]
+            contents = not relative and any(s.endswith("/") or os.path.basename(s.rstrip("/")) in ("", ".", "..")
+                                            for s in sources)
             if prog == "ditto" or (prog in ("cp", "rsync", "scp") and contents) or (
                     prog == "cp" and given & {"-T", "--no-target-directory"}):
                 found.append((target, INTO))
@@ -2698,8 +2725,7 @@ def config_operands(segment, words, assignments=(), env=None):
     """[(path, whole)] a shell segment may change: its redirection targets, and every word of a program that doesn't
     only read (cp and the like: their target, and what lands in a target folder). whole is INTO for a folder that
     receives names the hooks can't read (an archive's, a folder's contents)."""
-    found = [(p.strip("'\""), False) for p in
-             re.findall(r"(?:^|[^<>&0-9])(?:[0-9]?>>?|&>>?)\s*('[^']*'|\"[^\"]*\"|[^\s;|&<>]+)", segment)]
+    found = [(p.strip("'\""), False) for p in redirection_targets(segment)]
     prog, args = program(words), words[1:]
     operands = [w for w in args if not w.startswith("-")]
     if (prog in CONFIG_READERS or (prog == "find" and not set(args) & set(FIND_WRITES))
@@ -2748,6 +2774,24 @@ def config_findings(segment, words, cwd, env=None, assignments=None):
         elif label:
             found.append("%s is in %s, which can turn the harness's hooks off; agents may read it but not change it."
                          % (path, label))
+        elif whole or prog in COPIERS:
+            found += install_findings(fulls, cwd, whole)
+    return found
+
+
+def install_findings(fulls, cwd, whole):
+    found = []
+    for full in fulls:
+        label = install_path(full, cwd, whole=bool(whole))
+        if label and whole == INTO:
+            found.append("%s receives files whose names the hooks can't read (an archive's, a folder's contents), and "
+                         "it holds %s, which decides this project's gates; agents may not change it. Extract or copy "
+                         "into a folder of its own." % (full, label))
+        elif label and whole:
+            found.append("%s is or holds %s, which decides this project's gates; agents may not delete, move or "
+                         "change it." % (full, label))
+        elif label:
+            found.append("%s is in %s, which decides this project's gates; agents may not change it." % (full, label))
     return found
 
 
@@ -2848,10 +2892,15 @@ def nested_session_findings(words, assignments, env):
 WRITE_TARGET = re.compile(r"(?:^|\s)([0-9]*(?:>>|>\||>&|<>|>)|&>>?)\s*('[^']*'|\"[^\"]*\"|[^\s;|&<>]+)")
 
 
+def redirection_targets(segment):
+    """The files segment's redirections open for writing, as written (quotes kept)."""
+    return [target for op, target in WRITE_TARGET.findall(operators_apart(segment))
+            if not (op.endswith(">&") and re.fullmatch(r"[0-9]*-?", target))]
+
+
 def written_paths(segment, words):
     """Paths a segment writes, moves or deletes: redirection targets and mutating programs' operands."""
-    paths = [target for op, target in WRITE_TARGET.findall(operators_apart(segment))
-             if not (op.endswith(">&") and re.fullmatch(r"[0-9]*-?", target))]
+    paths = redirection_targets(segment)
     prog, args = program(words), [w for w in words[1:] if not w.startswith("-")]
     if prog in MUTATORS:
         paths += args
@@ -3379,8 +3428,9 @@ def engine_findings(prog, words, written):
 
 
 def names_protected(words, cwd, env):
-    """Whether words name a harness-protected path, the git directory, the harness's install or the engine, or a path
-    the hooks can't resolve: what an unknown runner's command is checked for (brew install node names none)."""
+    """Whether words name a harness-protected path, the git directory, the harness's install or the engine, a folder
+    that holds the agent CLIs' configuration or the sandbox records, or a path the hooks can't resolve: what an unknown
+    runner's command is checked for (brew install node names none)."""
     for word in words:
         if (PROTECTED_MENTION.search(word) or GIT_DIR_HINT.search(word) or ENGINE_NAME.search(word)
                 or ENGINE_IMPORT.search(word) or engine_script(word) or word in ENGINE_MODULES + ("runpy",)):
@@ -3388,7 +3438,8 @@ def names_protected(words, cwd, env):
         if word.startswith("-"):
             continue
         fulls, unresolved = shell_path(word, cwd, env)
-        if unresolved or any(protected_path(full, cwd) or install_path(full, cwd) for full in fulls):
+        if unresolved or any(protected_path(full, cwd) or install_path(full, cwd, whole=True)
+                             or agent_config_path(full, cwd, whole=True) for full in fulls):
             return True
     return False
 

@@ -20,14 +20,16 @@ MOVED = ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "OPENCODE_CONFIG_DIR", "OPENCODE_CON
 
 
 class Fixture(unittest.TestCase):
+    PROJECT = "project"
+
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(prefix="agent config ")
         cls.work = Path(cls.temp.name)
         cls.home = cls.work / "home"
         cls.home.mkdir()
-        cls.project = cls.work / "project"
-        cls.project.mkdir()
+        cls.project = cls.work / cls.PROJECT
+        cls.project.mkdir(parents=True)
         subprocess.run(["git", "init", "-q", "-b", "main", str(cls.project)], check=True)
         subprocess.run([str(ROOT / "bootstrap.sh"), str(cls.project)], check=True, capture_output=True,
                        env=cls.base_env())
@@ -159,6 +161,10 @@ class WritesToAgentConfiguration(Fixture):
             """claude mcp add -s user evil -- python3 evil.py""",
             """codex mcp add evil -- python3 evil.py""",
             """codex features disable hooks""",
+            """echo x >| ~/.claude/settings.json""",
+            """echo x 1<> ~/.claude/settings.json""",
+            """echo x >| ~/.agentic-harness/machine.json""",
+            """echo x 1<>~/.agentic-harness/machine.json""",
         ]
         for command in commands:
             with self.subTest(command=command):
@@ -238,17 +244,23 @@ class WritesToAgentConfiguration(Fixture):
                     self.assertAllowed(self.pre_tool_use("Write", {"file_path": str(path), "content": "{}"}))
 
     def test_extracting_or_syncing_into_the_home_folder_may_change_it(self):
+        work = shlex.quote(str(self.work))
         for command in ("tar -xf evil.tar -C ~", "tar xzf evil.tgz -C $HOME", "tar --extract -f evil.tar --directory ~",
                         "tar -x -f evil.tar -C ~/.config", "bsdtar -xf evil.tar -C ~", "cd ~ && tar -xf evil.tar",
                         "unzip -o evil.zip -d ~", "cd && unzip evil.zip", "unzip evil.zip -d ~/.config",
                         "ditto -x -k evil.zip ~", "ditto evil ~", "7z x evil.7z -o%s" % shlex.quote(str(self.home)),
                         "rsync -a evil/ ~/", "rsync -a evil/ ~", "cp -R evil/. ~", "cp -R evil/ ~",
-                        "cd ~ && cpio -id < evil.cpio"):
+                        "cd ~ && cpio -id < evil.cpio", "cd evil && rsync -R .claude/settings.json ~/",
+                        "rsync -R evil/./.claude/settings.json ~/", "rsync --relative evil/./.codex/config.toml ~/",
+                        "cd evil && cp --parents .claude/settings.json ~/", "rsync -aR evil/./.claude ~/",
+                        "cp -R evil/home %s/" % work, "cp -R evil/home ~/..", "rsync -a evil/home %s/" % work,
+                        "scp -r evil/home %s/" % work, "cp -R evil/.config ~/", "rsync -aR evil/./home %s/" % work,
+                        "rsync -R evil/./.claude/./settings.json ~/", "rsync -R evil/./.codex/./x/../config.toml ~/"):
             with self.subTest(command=command):
                 self.assertRefused(self.bash(command), command)
         for command in ("tar -czf backup.tgz -C ~ notes", "tar -tf evil.tar", "tar -xf a.tar -C ~/notes",
                         "tar -xf a.tar", "unzip a.zip -d ~/notes", "unzip -l a.zip", "rsync -a src ~/notes/",
-                        "cp -R src ~/"):
+                        "cp -R src ~/", "rsync -R src/f ~/", "rsync -aR src/ ~/notes/", "cp -R src %s/" % work):
             with self.subTest(command=command):
                 self.assertAllowed(self.bash(command), command)
 
@@ -277,6 +289,20 @@ class WritesToAgentConfiguration(Fixture):
             with self.subTest(command=command):
                 self.assertAllowed(self.bash(command), command)
 
+    def test_a_command_behind_a_program_the_hooks_dont_know_is_read_too(self):
+        script = self.project / "run"
+        script.write_text('#!/bin/sh\nexec "$@"\n')
+        script.chmod(0o755)
+        self.addCleanup(script.unlink)
+        run, home = shlex.quote(str(script)), shlex.quote(str(self.home))
+        for command in ("%s cp -R evil/.agentic-harness ~/" % run, "%s cp -R evil/.claude ~/" % run,
+                        "%s rm -r -f %s" % (run, home), "%s rm -rf %s/" % (run, home), "%s mv ~ x" % run):
+            with self.subTest(command=command):
+                self.assertRefused(self.bash(command), command)
+        for command in ("%s cp a.txt ~/" % run, "%s ls ~" % run, "%s make build" % run):
+            with self.subTest(command=command):
+                self.assertAllowed(self.bash(command), command)
+
     def test_the_rest_of_the_home_folder_is_left_alone(self):
         for path in (self.home / "notes.txt", self.home / ".claude/projects/x/memory/note.md",
                      self.home / ".claude/todos/x.json", self.home / ".config/other/x.json"):
@@ -284,6 +310,26 @@ class WritesToAgentConfiguration(Fixture):
                 self.assertAllowed(self.pre_tool_use("Write", {"file_path": str(path), "content": "x"}))
         for command in ("echo x > ~/notes.txt", "cp a.txt ~/", "echo x > ~/.claude/projects/x/memory/note.md",
                         "rm -rf ~/.cache/pip"):
+            with self.subTest(command=command):
+                self.assertAllowed(self.bash(command), command)
+
+
+class AProjectInsideTheHarnessSettingsFolder(Fixture):
+    """A project kept inside ~/.agentic-harness keeps its own gates, but not over the sandbox records that folder
+    holds."""
+    PROJECT = "home/.agentic-harness/project"
+
+    def test_the_sandbox_records_stay_out_of_reach(self):
+        for command in ("rm -rf ~/.agentic-harness", "mv ~/.agentic-harness x", "cp -R evil/.agentic-harness ~/",
+                        "cd evil && rsync -aR .agentic-harness ~/",
+                        "cd evil && rsync -R .agentic-harness/sandbox-approvals.json ~/",
+                        "cp evil/sandbox-approvals.json ~/.agentic-harness/", "tar -xf e.tar -C ~/.agentic-harness",
+                        "rm -rf ~/.agentic-harness/sandbox-runs", "echo x > ~/.agentic-harness/sandbox-approvals.json"):
+            with self.subTest(command=command):
+                self.assertRefused(self.bash(command), command)
+        approvals = self.home / ".agentic-harness/sandbox-approvals.json"
+        self.assertRefused(self.pre_tool_use("Write", {"file_path": str(approvals), "content": "{}"}))
+        for command in ("echo x > ~/notes.txt", "cp a.txt ~/", "cp -R src ~/", "echo x > notes.txt"):
             with self.subTest(command=command):
                 self.assertAllowed(self.bash(command), command)
 

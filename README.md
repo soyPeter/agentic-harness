@@ -430,11 +430,13 @@ The hard floor stays CI: an agent without hooks, or a human with `--no-verify`, 
 **The agent CLIs' own configuration.** A user-level setting can switch the hooks off in every project: Claude Code's
 `disableAllHooks` (reloaded within a running session), an `env` block that every hook process inherits, or a hook,
 plugin or helper command of its own. So agents may read `~/.claude`, `~/.claude.json`, `~/.codex`,
-`~/.config/opencode`, the managed settings and `~/.agentic-harness`, but not change them. Session start, `doctor`,
-`run` and `orca` report a configuration that turns the harness off as an error, and `run` and `orca` then refuse to
-start. A change to a command-running setting (`apiKeyHelper`, hooks, plugins, MCP servers) is an error until you
-accept it with `harness.py accept-agent-config`. Claude Code's `ConfigChange` hook stops such a change from taking
-effect mid-session, and every hook runs `python3 -I`, so `PYTHONPATH` and similar variables can't hijack the engine.
+`~/.config/opencode`, the managed settings and `~/.agentic-harness`, but not change them; a project kept inside one of
+these folders is checked by its own gates there, but the sandbox's records stay out of its reach. Session start,
+`doctor`, `run` and `orca` report a configuration that turns the harness off as an error, and `run` and `orca` then
+refuse to start. A change to a command-running setting (`apiKeyHelper`, hooks, plugins, MCP servers) is an error
+until you accept it with `harness.py accept-agent-config`. Claude Code's `ConfigChange` hook stops such a change from
+taking effect mid-session, and every hook runs `python3 -I`, so `PYTHONPATH` and similar variables can't hijack the
+engine.
 Agents can't start a nested `claude`, `codex` or `opencode` session that leaves the hooks out either (`--bare`,
 `--settings '{"disableAllHooks":true}'`, `--setting-sources user`, `codex -c features.hooks=false`, a moved config
 folder).

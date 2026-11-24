@@ -315,7 +315,9 @@ each one is when it was built.
   outside the project (thin mode), or one the user approved with `harness.py sandbox-approve`, kept in
   `~/.agentic-harness/sandbox-approvals.json`, which no sandbox mounts. The lock isn't the anchor, because it lives in
   the workspace the agent can write. After `up`, the host's own code checks that a process in the agent's container is
-  isolated. Agents can't write the definition or the approvals, or run `sandbox-approve`.
+  isolated. Agents can't write the definition, the approvals or the private runs, delete, move or replace a folder
+  that holds them (wherever the project is), or run `sandbox-approve`. Like every shell check, the hooks read the
+  command, not a script it runs.
   A second review found a window between the check and `devcontainer up` reading the files, which an agent's process
   left in a sandbox that was already up could use to swap them. So `run` refuses to start while the project's sandbox
   is up, stops (later: removes) it after every session, and brings up a private copy of the definition, checked after it was copied,
@@ -377,11 +379,14 @@ each one is when it was built.
   with `HARNESS_SANDBOX_START=on`. Other spellings of `harness.py sandbox-approve` in an agent's shell command (a
   split path, `xargs`, `runpy`) are the class PR #90 refuses for every user-only command through its `USER_COMMANDS`
   list. PR #90 merged first, and the merge of main into this branch added `sandbox-approve` to `USER_COMMANDS`, so
-  every spelling it refuses is refused for `sandbox-approve` too. One spelling it doesn't refuse yet, for any
+  every spelling it refuses is refused for `sandbox-approve` too. One spelling it didn't refuse then, for any
   user-only command: `timeout`, `stdbuf` or `caffeinate` before an interpreter given the engine's path in a variable
-  (`timeout 5 python3 $H sandbox-approve`). PR #96 adds generic wrapper unwrapping to the shell checks on main; this
-  change depends on it rather than adding a second unwrapping, and its test of those spellings is skipped until #96
-  lands.
+  (`timeout 5 python3 $H sandbox-approve`). PR #96 added generic wrapper unwrapping to the shell checks on main; this
+  change depended on it rather than adding a second unwrapping, and its test of those spellings, skipped until #96
+  landed, now runs.
+  A review of v0.31.0 (2026-11-23) found that narrowing the records check let some copies reach the approvals in a
+  full install, and that a project kept inside `~/.agentic-harness` skipped the machine-settings check. The records
+  now have a check of their own for whole operations, which doesn't depend on where the project is.
 - **6. Orca's workers inside a backend's sandbox: deferred (2026-11-11).** Orca starts each worker itself, on the host,
   in the task's worktree. Running workers in the sandbox needs Orca to launch them through the sandbox (a launch command
   per agent that goes through `devcontainer exec`) and worktrees whose git metadata the sandbox can see: a worktree's
