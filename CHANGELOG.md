@@ -5,6 +5,21 @@
 - Enforce task dependencies in shared start/selection paths and protect existing dependency notes. Report missing references, cycles and early starts as warnings for this release.
 - Persist outward-write attempts before dispatch. Park unresolved PR, escalation and Linear writes across restarts; require user reconciliation before retrying. A write the agent CLI reports no result for (Codex, OpenCode's version 1 plugin API) parks too; one Claude Code's auto mode refuses is withdrawn.
 - Agents can no longer run `harness.py hook` themselves, and code that imports the engine is also refused in an import list, from `scripts.harness.lib` or by a module-name string.
+- **The shell checks read more of how a command writes around the CLIs' configuration and the sandbox's records
+  (security fix).** A review of 0.31.0 found these, and they're now checked or refused:
+  - The user-configuration check reads every redirection spelling the shell accepts, with the reader the other write
+    checks use.
+  - A relative copy (`rsync -R`, `cp --parents`) is checked at the path it writes.
+  - A folder copied onto an existing folder (a recursive `cp`, `rsync` or `scp`) counts as written into, so it is
+    refused where that folder holds protected configuration.
+  - Deleting, moving or replacing a folder that holds the sandbox approvals or the private runs is refused wherever
+    the project is, a project kept inside `~/.agentic-harness` included.
+  - A command behind a program the hooks don't know is checked when it names a folder that holds protected
+    configuration.
+  - In thin mode, the engine cache, plugin and role-agents checks refuse writes in them, and deleting, moving or
+    replacing a folder that holds them, so `cp a.txt ~/`, `cp -R src ~/` and `rsync -T /tmp/t src ~` work there as in
+    a full install.
+  - The sandbox's test of a runner before an interpreter, skipped until #96, runs again.
 - **The documentation matches main again (docs only).** The README, the ADRs' implementation notes and follow-up
   status, `backbone/HOOKS.md`, the SDLC page and its evidence diagram, the Orca skill and the `triple` pack's README
   were checked against the code after 0.31.0. ADR-003 to ADR-007 are listed as Accepted, as their headers have said
