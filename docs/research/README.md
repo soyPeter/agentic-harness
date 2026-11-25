@@ -16,6 +16,7 @@ its own header, and a plan's later findings are in its dated updates.
 | [Reviewer-first pull request bodies](2026-11-pr-body-reviewer-opener-plan.md) | Plan | Proposed | [ADR-014](../adr/ADR-014-pr-body-reviewer-opener.md) |
 | [A refactor change that edits tests is not low-risk](2026-11-refactor-class-test-change-plan.md) | Plan | Proposed | [ADR-015](../adr/ADR-015-refactor-test-change-risk.md) |
 | [Runtime dependency and lost-write audit](2026-11-runtime-gap-audit.md) | Audit, 2026-11-15 | | [ADR-011](../adr/ADR-011-indeterminate-side-effect-outcomes.md), [ADR-017](../adr/ADR-017-task-dependency-gate.md) |
+| [A first eval suite for owned harness skills](2026-11-skill-eval-suite-plan.md) | Plan | Proposed | None yet |
 | [An optional code-like skeleton in the spec's Architecture section](2026-11-structural-skeleton-spec-plan.md) | Plan | Proposed, parked after WP0 | [ADR-016](../adr/ADR-016-structural-skeleton-spec.md) |
 | [One dependency gate for `(after: ...)` task lines](2026-11-task-dependency-gate-plan.md) | Plan | Proposed; implementation update 2026-11-15 | [ADR-017](../adr/ADR-017-task-dependency-gate.md) |
 
