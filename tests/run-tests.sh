@@ -5,6 +5,8 @@
 #   The property checks need tests/requirements.txt installed; without it they are skipped.
 #   HYPOTHESIS_PROFILE=ci       fewer examples per property, as in the pull request jobs (default: thorough, all)
 #   HARNESS_TEST_JOBS=<n>       how many tests/test-*.py files run at once (default: one per CPU)
+#   HARNESS_TEST_PART=1|2       half the suite, as the macOS pull request jobs run it: 2 runs the heaviest test
+#                               files, 1 the rest and the shell sections (default: everything)
 #   HARNESS_STRESS=1            also runs the take step's stress check (a few minutes, every CPU busy)
 set -u
 
@@ -107,15 +109,65 @@ agent-config|the agent CLIs' own configuration: agents can't change it, a settin
 admission|third-party bundles: admission records, revocation, skills that run as they load (ADR-006; properties need hypothesis)
 live-plugin|live: a plugin judge verdict is recorded (runs with HARNESS_E2E=1)
 sandbox-egress|live: the sandbox's allowlist, capabilities and evidence in a real container (runs with HARNESS_E2E=1)"
+# On a 3-CPU macOS runner the whole suite took up to 44 minutes. Part 2 holds the heaviest files, part 1 the rest and
+# the shell sections, about equal halves; together they run every file once.
+PY_PART2="deliverer-gate change-class eval-replay factory-contract attest thin-convert"
+case "${HARNESS_TEST_PART:-}" in
+  ''|1|2) ;;
+  *) printf 'HARNESS_TEST_PART must be 1, 2 or unset, not "%s"\n' "$HARNESS_TEST_PART" >&2; exit 2 ;;
+esac
+py_selected() {
+  printf '%s\n' "$PY_TESTS" | while IFS='|' read -r file name; do
+    case " $PY_PART2 " in *" $file "*) heavy=1 ;; *) heavy=0 ;; esac
+    case "${HARNESS_TEST_PART:-}" in
+      1) [ "$heavy" -eq 1 ] && continue ;;
+      2) [ "$heavy" -eq 0 ] && continue ;;
+    esac
+    printf '%s|%s\n' "$file" "$name"
+  done
+}
+PY_RUN=$(py_selected)
 PY_WORK="$WORK/py"
 PY_JOBS="${HARNESS_TEST_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
-printf 'Python test files: %s at a time, Hypothesis profile %s\n' "$PY_JOBS" "${HYPOTHESIS_PROFILE:-thorough}"
-printf '%s\n' "$PY_TESTS" | while IFS='|' read -r file _; do mkdir -p "$PY_WORK/$file/tmp"; echo "$file"; done |
+printf 'Python test files: %s at a time, Hypothesis profile %s%s\n' "$PY_JOBS" "${HYPOTHESIS_PROFILE:-thorough}" \
+  "${HARNESS_TEST_PART:+, part $HARNESS_TEST_PART of 2}"
+printf '%s\n' "$PY_RUN" | while IFS='|' read -r file _; do mkdir -p "$PY_WORK/$file/tmp"; echo "$file"; done |
   xargs -P "$PY_JOBS" -I{} sh -c 'd="$1/$2"; start=$(date +%s)
     TMPDIR="$d/tmp" nice -n 10 python3 -B "$3/tests/test-$2.py" > "$d/out" 2>&1; code=$?
     echo $(( $(date +%s) - start )) > "$d/seconds"; echo "$code" > "$d/exit.tmp" && mv "$d/exit.tmp" "$d/exit"' \
     _ "$PY_WORK" {} "$HARNESS" &
 PY_PID=$!
+
+report_python_files() {
+  local listed f file name d
+  section "Python test files (run alongside the sections above)"
+  listed="|$(printf '%s\n' "$PY_TESTS" | cut -d'|' -f1 | tr '\n' '|')"
+  for f in "$HARNESS"/tests/test-*.py; do
+    f=${f##*/test-}; f=${f%.py}
+    case "$listed" in *"|$f|"*) ;; *) bad "tests/test-$f.py is in PY_TESTS, so the suite runs it" ;; esac
+  done
+  for f in $PY_PART2; do
+    case "$listed" in *"|$f|"*) ;; *) bad "PY_PART2 names tests/test-$f.py, which PY_TESTS does not list" ;; esac
+  done
+  while IFS='|' read -r file name; do
+    d="$PY_WORK/$file"
+    while [ ! -f "$d/exit" ] && kill -0 "$PY_PID" 2>/dev/null; do sleep 1; done
+    if [ ! -f "$d/exit" ]; then
+      bad "$name (tests/test-$file.py did not finish)" "$(cat "$d/out" 2>/dev/null)"
+    elif [ "$(cat "$d/exit")" -eq 0 ]; then
+      ok "$name ($(cat "$d/seconds") s)"
+    else
+      bad "$name (tests/test-$file.py: exit $(cat "$d/exit"), expected 0, $(cat "$d/seconds") s)" "$(cat "$d/out")"
+    fi
+  done <<EOF
+$PY_RUN
+EOF
+  wait "$PY_PID"
+
+  printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+  [ "$FAIL" -eq 0 ]
+}
+[ "${HARNESS_TEST_PART:-}" = 2 ] && { report_python_files; exit; }
 
 P="$WORK/demo"
 
@@ -3387,26 +3439,4 @@ out=$(cd "$TS" && HARNESS_BUILD_CMD= git commit -qm "not conventional" 2>&1; ech
 contains "a chained commit-msg hook still enforces Conventional Commits" "must follow Conventional Commits" "$out"
 git -C "$TS" config core.hooksPath scripts/harness/git-hooks
 
-section "Python test files (run alongside the sections above)"
-listed="|$(printf '%s\n' "$PY_TESTS" | cut -d'|' -f1 | tr '\n' '|')"
-for f in "$HARNESS"/tests/test-*.py; do
-  f=${f##*/test-}; f=${f%.py}
-  case "$listed" in *"|$f|"*) ;; *) bad "tests/test-$f.py is in PY_TESTS, so the suite runs it" ;; esac
-done
-while IFS='|' read -r file name; do
-  d="$PY_WORK/$file"
-  while [ ! -f "$d/exit" ] && kill -0 "$PY_PID" 2>/dev/null; do sleep 1; done
-  if [ ! -f "$d/exit" ]; then
-    bad "$name (tests/test-$file.py did not finish)" "$(cat "$d/out" 2>/dev/null)"
-  elif [ "$(cat "$d/exit")" -eq 0 ]; then
-    ok "$name ($(cat "$d/seconds") s)"
-  else
-    bad "$name (tests/test-$file.py: exit $(cat "$d/exit"), expected 0, $(cat "$d/seconds") s)" "$(cat "$d/out")"
-  fi
-done <<EOF
-$PY_TESTS
-EOF
-wait "$PY_PID"
-
-printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
-[ "$FAIL" -eq 0 ]
+report_python_files

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The macOS self-test runs in two parts per Python at once (CI and tests only), so a 3-CPU runner no longer
+  approaches the 45-minute limit, and the required check names stay the same. The Budget checks of
+  `test-eval-replay.py` measure the hook's CPU time, so a loaded runner no longer fails them.
+  `HARNESS_TEST_PART=1|2` runs one part locally.
 - Enforce task dependencies in shared start/selection paths and protect existing dependency notes. Report missing references, cycles and early starts as warnings for this release.
 - Persist outward-write attempts before dispatch. Park unresolved PR, escalation and Linear writes across restarts; require user reconciliation before retrying. A write the agent CLI reports no result for (Codex, OpenCode's version 1 plugin API) parks too; one Claude Code's auto mode refuses is withdrawn.
 - Agents can no longer run `harness.py hook` themselves, and code that imports the engine is also refused in an import list, from `scripts.harness.lib` or by a module-name string.
