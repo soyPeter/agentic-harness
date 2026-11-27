@@ -1,13 +1,44 @@
 # Changelog
 
-## Unreleased
+## 0.32.0 (2026-11-27)
+
+This release journals the harness's external writes (ADR-011) and enforces task dependencies wherever a task starts
+or is picked (ADR-017); both ADRs stay Proposed. It tightens the user-configuration and sandbox-record checks
+(security fix), lets agents run the pinned engine from the engine cache or the plugin again, and rebuilds the
+documentation around a short README. Upgrading is recommended. Existing projects upgrade through their reviewed pin
+changes; read the entries' **Upgrading** notes first. In short: in thin mode, update the plugin and move the pin
+together; a full install updates to get the new `PermissionDenied` settings hook; an external write with no known
+result now parks the repository until the user reconciles it with `harness.py write-reconcile`, and with Codex or
+OpenCode's version 1 plugin API every pull request or issue the agents create or edit does; a task whose
+`(after: ...)` prerequisites aren't done no longer starts outside Orca either, and the user fixes the dependency notes
+`doctor` warns about. The macOS self-test split changes only this repository's CI.
 
 - The macOS self-test runs in two parts per Python at once (CI and tests only), so a 3-CPU runner no longer
   approaches the 45-minute limit, and the required check names stay the same. The Budget checks of
   `test-eval-replay.py` measure the hook's CPU time, so a loaded runner no longer fails them.
-  `HARNESS_TEST_PART=1|2` runs one part locally.
-- Enforce task dependencies in shared start/selection paths and protect existing dependency notes. Report missing references, cycles and early starts as warnings for this release.
-- Persist outward-write attempts before dispatch. Park unresolved PR, escalation and Linear writes across restarts; require user reconciliation before retrying. A write the agent CLI reports no result for (Codex, OpenCode's version 1 plugin API) parks too; one Claude Code's auto mode refuses is withdrawn.
+  `HARNESS_TEST_PART=1|2` runs one part locally. Nothing changes for an installed project.
+- **Task dependencies hold wherever a task starts or is picked (ADR-017, Proposed).** `(after: 1.2, 1.3)` on a task
+  line was enforced only by Orca. Now the shared start gate and task selection apply it too, in supervised sessions,
+  `next` and `run`: a pending task whose prerequisites aren't `[x]` in the current worktree is `blocked`, and a task
+  already `[WIP]` may resume. Agents can't change existing dependency notes. Missing references, cycles and work
+  started early are warnings in `doctor`, `spec-check` and `verify` for this release.
+  **Upgrading:** a task whose prerequisites aren't done no longer starts outside Orca. Run `doctor` after the update
+  and fix the dependency notes it warns about yourself; agents can't edit them.
+- **External writes are journalled, and one with no known result parks the repository (ADR-011, Proposed).** Before
+  an in-scope write (a pull request created or edited, or an issue created, from the shell; the harness's own
+  escalation issue and runner pull request; Linear receipt comments and moves), the harness records the attempt in
+  the common git directory's `harness/writes.jsonl`, shared by linked worktrees. A write whose result wasn't observed
+  is `indeterminate_write`: it may have happened, so nothing retries it, and scheduling and further in-scope writes in
+  the repository park until the user reconciles it. The new user-only command `harness.py write-reconcile` lists the
+  attempts; `write-reconcile KEY --observed <evidence>` or `--allow-retry <evidence>` releases one. A write the agent
+  CLI reports no result for (Codex, OpenCode's version 1 plugin API) parks too; one Claude Code's auto mode refuses is
+  withdrawn, through a new `PermissionDenied` hook.
+  **Upgrading:** update the project (or, in thin mode, the plugin) to get the `PermissionDenied` hook. In thin mode,
+  move the pin when you update the plugin: a 0.32.0 plugin on an older pin forwards each auto-mode denial to an engine
+  without that hook, which prints its usage and changes no decision. With Codex or OpenCode's version 1 plugin API, each
+  pull request or issue the agents create or edit parks the repository until you reconcile it. So does a call you
+  decline at an interactive permission prompt (release it with `--allow-retry`) and, with `HARNESS_ESCALATE_GH="on"`,
+  an escalation issue that `gh` fails to create.
 - Agents can no longer run `harness.py hook` themselves, and code that imports the engine is also refused in an import list, from `scripts.harness.lib` or by a module-name string.
 - **The shell checks read more of how a command writes around the CLIs' configuration and the sandbox's records
   (security fix).** A review of 0.31.0 found these, and they're now checked or refused:
@@ -24,12 +55,17 @@
     replacing a folder that holds them, so `cp a.txt ~/`, `cp -R src ~/` and `rsync -T /tmp/t src ~` work there as in
     a full install.
   - The sandbox's test of a runner before an interpreter, skipped until #96, runs again.
+  **Upgrading:** the checks come with the engine: move the pin (thin) or update the project (full). Nothing else
+  changes for a project. Upgrading is recommended.
 - **The documentation matches main again (docs only).** The README, the ADRs' implementation notes and follow-up
   status, `backbone/HOOKS.md`, the SDLC page and its evidence diagram, the Orca skill and the `triple` pack's README
   were checked against the code after 0.31.0. ADR-003 to ADR-007 are listed as Accepted, as their headers have said
   since 11 and 13 November; ADR-006's and ADR-007's notes no longer say their status stays Proposed; ADR-004's and
   ADR-005's follow-up notes say PRs #88 and #94 merged them; HOOKS.md lists every user-only setting; the Orca skill
   covers thin installs; and `backbone/3-TASKS.md` no longer queues follow-ups that 0.31.0 shipped. No behaviour changed.
+- **ADR-013 is Accepted (docs only).** Rolling out harness changes through pinned gates and human-merged waves was
+  accepted on 23 November, and this repository's task 1.6 now triages only the ADR-003, ADR-004 and ADR-005
+  follow-ups that haven't shipped. No behaviour changed.
 - **The documentation is rebuilt around a short README (docs only).** The README now holds what the harness is, the
   four diagrams, install and thin-mode quick starts and a map of the docs. The rest moved, each part to one place: the
   diagrams' full explanation to `docs/sdlc/README.md`; installing, updating and thin mode to `docs/install.md`;
@@ -40,7 +76,8 @@
 - Agents may again run the pinned engine from the engine cache or the plugin (its launcher or `harness.py`) with the
   commands agents may run, as the thin-mode session notes and the docs say. Since 0.31.0 the user-configuration check
   refused it as a change to the harness's machine settings. `pin`, `init --thin`, the user-only commands, another
-  release in the cache and writes into `~/.agentic-harness` stay refused.
+  release in the cache and writes into `~/.agentic-harness` stay refused. **Upgrading:** the allowance comes with the
+  engine, so agents get it once the project pins 0.32.0 (thin) or is updated (full).
 
 ## 0.31.0 (2026-11-22)
 
