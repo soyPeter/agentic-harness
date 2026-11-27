@@ -33,6 +33,10 @@
   the harness to `docs/development.md`. `docs/adr/README.md` is now the one table of ADR statuses, and
   `docs/research/README.md` indexes the plans and audits. Under Profiles, `backbone/HOOKS.md` now names `orca --pr` and
   the doctor's check of an unknown profile. No behaviour changed.
+- Agents may again run the pinned engine from the engine cache or the plugin (its launcher or `harness.py`) with the
+  commands agents may run, as the thin-mode session notes and the docs say. Since 0.31.0 the user-configuration check
+  refused it as a change to the harness's machine settings. `pin`, `init --thin`, the user-only commands, another
+  release in the cache and writes into `~/.agentic-harness` stay refused.
 
 ## 0.31.0 (2026-11-22)
 
