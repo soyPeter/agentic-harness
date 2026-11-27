@@ -21,4 +21,8 @@ Stack skills come from catalog packs adopted after the stack ADR (`harness.py ca
 
 ## Stack and project skills
 
-None. ADR-002 accepts Python 3.8 and the standard library and adopts no catalog pack. Core skills come from the pinned release. `HARNESS_PROFILE="triple"` does not install the `triple` pack.
+ADR-002 accepts Python 3.8 and the standard library and adopts no catalog pack. Core skills come from the pinned release. `HARNESS_PROFILE="triple"` does not install the `triple` pack.
+
+| Skill | Use for |
+|---|---|
+| `orca-inspect` | Read-only Orca status on Estix and the daily Orca report (WP0 of the Grok Bot dispatch plan). It does not launch, stop, or message agents. |
