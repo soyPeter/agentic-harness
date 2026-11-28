@@ -18,6 +18,11 @@ on:
 permissions:
   contents: read
 
+# An explicit bash runs each step with -o pipefail; without it, tee hides the test's exit code.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   sandbox-e2e:
     name: sandbox-e2e (${{ matrix.docker }})
@@ -27,8 +32,15 @@ jobs:
         docker: [rootful, rootless]
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # Rootless Docker maps the agent's uid to a subordinate uid on the host, so the host's harness can't write what the
+    # agent wrote in the workspace (docs/development.md). The job shows how far rootless gets without failing the run.
+    continue-on-error: ${{ matrix.docker == 'rootless' }}
     env:
       DOCKER_MODE: ${{ matrix.docker }}
+      # The devcontainer CLI writes its Dockerfile under /tmp, outside the build context, and docker compose builds with
+      # Bake, whose filesystem entitlement check refuses that on every run here (ADR-003). 0 is buildx's documented
+      # opt-out (v0.20.0) and leaves its other entitlement checks on.
+      BUILDX_BAKE_ENTITLEMENTS_FS: "0"
     steps:
       - uses: actions/checkout@v7
 
