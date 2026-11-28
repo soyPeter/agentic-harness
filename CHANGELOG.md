@@ -8,6 +8,10 @@
   and how to upgrade a thin project with its pin and plugin together. The README says what the harness records. The
   four SDLC diagrams are rebuilt from JSON sources with a neutral theme, and show the dependency gate and the
   journalled outward writes as built. No behaviour changed.
+- **Two plan headers and two README mentions (docs only).** The task-dependency-gate and indeterminate-outcome plans
+  now say that 0.32.0 implemented them (#101); ADR-011 and ADR-017 stay Proposed. The README's Signals bullet says an
+  issue-tracker ticket instead of naming one, and its documentation table no longer lists the `triple` pack; the pack
+  and its page are unchanged. No behaviour changed.
 
 ## 0.32.0 (2026-11-27)
 
