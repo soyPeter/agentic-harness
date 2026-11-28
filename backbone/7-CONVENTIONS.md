@@ -8,7 +8,7 @@ Python 3.8, standard library only, in the engine (`payload/owned/scripts/harness
 ## Patterns to use, and what to avoid
 | Concern | Use | Avoid |
 |---|---|---|
-| Gates | The pinned release v0.31.0 | Editing the working tree and expecting that edit to judge the same change |
+| Gates | The pinned release v0.32.0 | Editing the working tree and expecting that edit to judge the same change |
 | Delivery | `orca --pr` and a pull request Pedro merges | `--merge`, `--trust`, a local merge into main |
 | Dependencies | The Python standard library | Third-party imports in the engine |
 | Product ADRs | A row in `docs/adr/README.md` and a mention in the spec narrative | A second copy under `backbone/adr/` that claims the same number |
