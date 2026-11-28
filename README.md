@@ -17,8 +17,8 @@ only).
 
 - **People set the rules.** Only the user accepts an ADR, writes the tool contracts in `tools.conf`, admits or
   revokes third-party skills in `admissions.conf`, or changes the user-only keys of `harness.conf`.
-- **Signals.** Work starts from a person, a Linear ticket (`harness.py linear import`) or the task list, and from the
-  harness's own feedback: escalations, red CI, failure-class proposals and `harness.py report` candidates.
+- **Signals.** Work starts from a person, an issue-tracker ticket or the task list, and from the harness's own
+  feedback: escalations, red CI, failure-class proposals and `harness.py report` candidates.
 - **Two lanes, one standard.** A supervised session (the default) or an autonomous run; either way the task passes the
   judge, the three review lenses, verify and `harness-verify` in CI. Then a person merges the pull request (ADR-002).
 - **What fails becomes the next task.** Tracing a production incident back to its pull request and spec is accepted
@@ -166,7 +166,6 @@ packs and their options: [docs/catalog.md](docs/catalog.md).
 | [0-START-HERE.md](payload/owned/backbone/0-START-HERE.md) | The map of a project's `backbone/` |
 | [docs/adr](docs/adr/README.md) | The harness's decisions, with their status |
 | [docs/research](docs/research/README.md) | The plans, audits and research behind them |
-| [catalog/triple](catalog/triple/README.md) | The `triple` pack: Triple's delivery policy for a supervised pilot |
 | [Orca skill](orca/skills/agentic-harness/SKILL.md) | For coordinators that drive a harness repository in Orca by hand |
 | [docs/development.md](docs/development.md) | Working on the harness itself: tests, releases, repository layout |
 | [CHANGELOG.md](CHANGELOG.md) | What each release changed |

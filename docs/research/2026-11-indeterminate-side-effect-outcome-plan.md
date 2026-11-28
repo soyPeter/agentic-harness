@@ -1,6 +1,7 @@
 # Proposed plan: an indeterminate outcome for unobserved side-effecting writes
 
-- **Status:** Proposed. Not accepted, not implemented, and not permission to change any gate, hook, runner or test.
+- **Status:** Proposed; implemented in 0.32.0 (#101): the write journal and reconcile-or-park. Automatic,
+  operation-specific reconciliation is not built. ADR-011, which records the decision, is still Proposed.
 - **Date:** 2026-11-10 (Europe/Madrid).
 - **Target repository:** https://github.com/soyPeter/agentic-harness
 - **Location:** `docs/research/2026-11-indeterminate-side-effect-outcome-plan.md`. Work packages and evidence remain here; the decision is recorded in [ADR-011](../adr/ADR-011-indeterminate-side-effect-outcomes.md).

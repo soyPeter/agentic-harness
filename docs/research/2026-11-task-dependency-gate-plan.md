@@ -1,6 +1,6 @@
 # Proposed plan: one dependency gate for `(after: ...)` task lines (start, next, run and verify)
 
-- **Status:** Proposed — not accepted, not implemented, and not permission to change any gate, hook, runner or test.
+- **Status:** Proposed; implemented in 0.32.0 (#101). ADR-017, which records the decision, is still Proposed.
 - **Date:** 2026-11-09 (Europe/Madrid).
 - **Target repository:** https://github.com/soyPeter/agentic-harness
 - **Location:** `docs/research/2026-11-task-dependency-gate-plan.md`. Work packages and evidence remain here; the decision is recorded in [ADR-017](../adr/ADR-017-task-dependency-gate.md).
