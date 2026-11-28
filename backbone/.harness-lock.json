@@ -1,7 +1,7 @@
 {
   "mode": "thin",
-  "version": "0.31.0",
-  "commit": "9056f8876d2bee131741e4e5bbfe64b39c756fb1",
+  "version": "0.32.0",
+  "commit": "395a71c0476cbcc83f9f0f323172110b081c493f",
   "kept": {
     "backbone/0-START-HERE.md": "d15ee782343083c8e1ca7a47ae49ef258c1c5576a0687f744894b271267be3e2",
     "backbone/8-WORKFLOW.md": "fb9a9da22c5267cce550ec1c19814582b6b51f77b72a7a545e3818a5360d5694",
