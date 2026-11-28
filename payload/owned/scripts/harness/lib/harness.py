@@ -9335,10 +9335,12 @@ def next_step(task, fingerprint=code_fingerprint):
     try:
         pending = write_journal_store().pending()
     except write_journal.IndeterminateWrite as exc:
-        return dict(step, step="blocked", role=None, needed=str(exc), failure_class="indeterminate_write")
+        return dict(step, step="blocked", role=None, needed=str(exc), failure_class="indeterminate_write",
+                    escalations=s["escalations"])
     if pending:
         return dict(step, step="blocked", role=None, failure_class="indeterminate_write",
-                    attempts=[row["key"] for row in pending], needed="reconcile or park; user runs write-reconcile")
+                    attempts=[row["key"] for row in pending], needed="reconcile or park; user runs write-reconcile",
+                    escalations=s["escalations"])
     if s["state"] == "missing":
         return dict(step, step="unknown", role=None, reason="no such task in backbone/3-TASKS.md")
     if s["state"] == "blocked":
@@ -9349,7 +9351,7 @@ def next_step(task, fingerprint=code_fingerprint):
         pending = unmet_dependencies(task)
         if pending:
             return dict(step, step="blocked", role=None, dependencies=pending,
-                        needed="finish dependencies: %s" % ", ".join(pending))
+                        needed="finish dependencies: %s" % ", ".join(pending), escalations=s["escalations"])
         if not s["spec"]:
             return dict(step, step="define", role="analyst", reason="no spec yet")
         if s["spec_problems"]:

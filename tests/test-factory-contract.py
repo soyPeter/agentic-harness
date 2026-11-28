@@ -154,6 +154,63 @@ class Answers(FactoryProject):
         self.assertEqual(sum(data["by_class"].values()), 2)
 
 
+class BlockedAnswers(unittest.TestCase):
+    """Every way `next` answers `blocked` carries the fields the contract declares for that step."""
+
+    def project(self, *tasks):
+        p = Project("blocked answers ")
+        self.addCleanup(p.cleanup)
+        for task in tasks:
+            p.add_task(task, "Task " + task)
+        p.commit("chore: tasks")
+        return p
+
+    def blocked(self, p, task):
+        declared = p.json("contract", "--json")["commands"]["next"]
+        answer = p.json("next", task, "--json")
+
+        self.assertEqual(answer["step"], "blocked", answer)
+        self.assertLessEqual(set(declared["fields"]) | set(declared["step_fields"]["blocked"]), set(answer))
+        self.assertIsInstance(answer["escalations"], list)
+        return answer
+
+    def test_an_escalated_task(self):
+        p = self.project("1.1")
+        p.harness("escalate", "1.1", "--reason", "needs a product decision", "--kind", "decision",
+                  "--needed", "the user picks the wording")
+
+        self.assertEqual(len(self.blocked(p, "1.1")["escalations"]), 1)
+
+    def test_a_task_waiting_for_its_prerequisites(self):
+        p = self.project("2.1", "2.2")
+        p.write("backbone/3-TASKS.md", p.read("backbone/3-TASKS.md").replace(
+            "(spec: backbone/specs/2.2.md)", "(spec: backbone/specs/2.2.md) (after: 2.1)"))
+
+        answer = self.blocked(p, "2.2")
+
+        self.assertEqual(answer["dependencies"], ["2.1"])
+        self.assertEqual(answer["escalations"], [])
+
+    def test_a_task_while_an_external_write_is_unresolved(self):
+        p = self.project("3.1")
+        p.hook("pre-tool-use", {"session_id": "s1", "tool_name": "Bash",
+                                "tool_input": {"command": "gh pr create --title t --body b"}}, check=True)
+
+        answer = self.blocked(p, "3.1")
+
+        self.assertEqual(answer["failure_class"], "indeterminate_write")
+        self.assertEqual(answer["escalations"], [])
+
+    def test_a_task_while_the_write_journal_cant_be_read(self):
+        p = self.project("4.1")
+        p.write(".git/harness/writes.jsonl", "{partial")
+
+        answer = self.blocked(p, "4.1")
+
+        self.assertEqual(answer["failure_class"], "indeterminate_write")
+        self.assertEqual(answer["escalations"], [])
+
+
 class Events(FactoryProject):
     def test_every_event_carries_the_contract_version(self):
         self.p.bash("git push --force origin main", "implementer")   # a refusal, logged as a block
