@@ -1,0 +1,109 @@
+# Runs the sandbox's end-to-end test (tests/test-sandbox-egress.py with HARNESS_E2E=1) in real containers on Linux,
+# once on the runner's own Docker (rootful) and once on rootless Docker for the runner's user (ADR-003). It runs every
+# night, by hand and on pull requests that change the sandbox, and is never a required check.
+name: sandbox-e2e
+
+on:
+  schedule:
+    - cron: "47 4 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".devcontainer/**"
+      - "payload/owned/.devcontainer/**"
+      - "payload/owned/scripts/harness/lib/sandbox.py"
+      - "tests/test-sandbox-egress.py"
+      - ".github/workflows/sandbox-e2e.yml"
+
+permissions:
+  contents: read
+
+# An explicit bash runs each step with -o pipefail; without it, tee hides the test's exit code.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  sandbox-e2e:
+    name: sandbox-e2e (${{ matrix.docker }})
+    strategy:
+      fail-fast: false
+      matrix:
+        docker: [rootful, rootless]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Rootless Docker maps the agent's uid to a subordinate uid on the host, so the host's harness can't write what the
+    # agent wrote in the workspace (docs/development.md). The job shows how far rootless gets without failing the run.
+    continue-on-error: ${{ matrix.docker == 'rootless' }}
+    env:
+      DOCKER_MODE: ${{ matrix.docker }}
+      # The devcontainer CLI writes its Dockerfile under /tmp, outside the build context, and docker compose builds with
+      # Bake, whose filesystem entitlement check refuses that on every run here (ADR-003). 0 is buildx's documented
+      # opt-out (v0.20.0) and leaves its other entitlement checks on.
+      BUILDX_BAKE_ENTITLEMENTS_FS: "0"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the devcontainer CLI
+        run: npm install -g @devcontainers/cli
+
+      - name: Set up rootless Docker for the runner's user
+        if: matrix.docker == 'rootless'
+        run: |
+          # Only the rootless daemon may answer the test, so the system-wide one goes, as Docker's rootless guide advises.
+          sudo systemctl disable --now docker.service docker.socket
+          sudo rm -f /var/run/docker.sock
+          sudo apt-get update -q
+          sudo apt-get install -y -q uidmap dbus-user-session slirp4netns
+          user=$(id -un)
+          grep -q "^$user:" /etc/subuid || echo "$user:100000:65536" | sudo tee -a /etc/subuid
+          grep -q "^$user:" /etc/subgid || echo "$user:100000:65536" | sudo tee -a /etc/subgid
+          # A systemd user manager runs the daemon, as on a server where it outlives the login.
+          sudo loginctl enable-linger "$user"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          for _ in $(seq 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
+          # Ubuntu 24.04 lets only AppArmor-profiled programs create user namespaces; this is Docker's documented
+          # profile for the rootlesskit the install script puts in ~/bin.
+          profile=$(echo "$HOME/bin/rootlesskit" | sed -e 's@^/@@' -e 's@/@.@g')
+          sudo tee "/etc/apparmor.d/$profile" >/dev/null <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          "$HOME/bin/rootlesskit" flags=(unconfined) {
+            userns,
+
+            include if exists <local/$profile>
+          }
+          EOF
+          sudo systemctl restart apparmor.service
+          curl -fsSL https://get.docker.com/rootless | sh
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          echo "DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock" >> "$GITHUB_ENV"
+
+      - name: Show the container tooling
+        run: |
+          uname -r
+          docker version
+          docker info --format 'security options: {{json .SecurityOptions}}; cgroup: {{.CgroupDriver}} v{{.CgroupVersion}}'
+          docker compose version
+          docker buildx version
+          devcontainer --version
+          if [ "$DOCKER_MODE" = rootless ]; then
+            docker info --format '{{json .SecurityOptions}}' | grep -q 'name=rootless'
+          fi
+
+      - name: Run the sandbox end-to-end test
+        env:
+          HARNESS_E2E: "1"
+        run: |
+          python3 -B tests/test-sandbox-egress.py -v 2>&1 | tee "$RUNNER_TEMP/sandbox-e2e.log"
+          # The test skips itself without docker or the devcontainer CLI, and a skip passes with nothing checked.
+          if grep -q 'skipped' "$RUNNER_TEMP/sandbox-e2e.log"; then
+            echo "::error::the sandbox end-to-end test skipped tests"
+            exit 1
+          fi
+
+      - name: Show the netfilter modules the host kernel has loaded
+        if: always()
+        run: lsmod | grep -E '^(nf_tables|nft_|ip_set|xt_|nfnetlink|nf_conntrack|nf_nat|nf_log|ip_tables|iptable_)' || true
