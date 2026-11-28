@@ -6,7 +6,9 @@ for every change, whoever or whatever starts it, with people setting the rules.
 
 Solid shapes show shipped harness mechanisms; enforcement depends on the project's enabled gates and required CI
 checks. Dashed ones show unbuilt behavior or behavior outside the harness. ADR acceptance and implementation
-status are separate. The orange person marks each point where the harness waits for a human.
+status are separate. The orange person marks each point where the harness waits for a human. Colour marks the role:
+blue is what the harness checks or records, grey the work, agents and inputs, white a record in `backbone/` or git,
+and orange a person.
 
 [ADR-008](../adr/ADR-008-harness-inside-agent-factory.md) (Accepted, revised 13 November 2026) places this process
 inside each lane of the agent software factory. The supplied [factory snapshot](sources/agent-software-factory-2026-11-13.png)
@@ -41,37 +43,44 @@ before claiming those caps cover the whole factory. The harness's current per-ru
 tasks; PR #90 adds per-task accounting across resumes as defence in depth, with unreported prices remaining a gap.
 
 **Evidence and recovery.** Factory test reruns should feed the harness's revision-bound receipt and required CI.
-Keep sender authorization, spec approval, test evidence and merge authority distinct. Proposed
-[ADR-011](../adr/ADR-011-indeterminate-side-effect-outcomes.md) requires durable write attempts and
-operation-specific reconciliation after lost replies; it is not implemented by updating this documentation.
+Keep sender authorization, spec approval, test evidence and merge authority distinct.
+[ADR-011](../adr/ADR-011-indeterminate-side-effect-outcomes.md) (Proposed) requires durable write attempts and
+reconciliation after lost replies. Its journal and reconcile-or-park shipped in 0.32.0: the user reconciles each write
+that had no observed result with `harness.py write-reconcile`. Automatic, operation-specific reconciliation is not
+built.
 
 The integration order is DEFINE/approval and independent acceptance checks, dedicated identity and trusted
 delivery, then feedback, KB drafts and cleanup signals. ADR-008 retains the contract, failure cases and follow-ups.
 
 ## 1. The factory at a glance
 
-![The factory: signals, define, build, judge and deliver, merge and observe, with people setting the rules above](1-factory.svg)
+![The factory: signals, define, one start gate that checks approval and task dependencies, build, judge and deliver with journalled outward writes, merge and observe, with people setting the rules above](1-factory.svg)
 
 - **People set the rules.** Only the user accepts an ADR, writes the tool contracts in `tools.conf`, admits or
   revokes third-party skills in `admissions.conf`, or changes the user-only keys of `harness.conf`: the gate switches,
   risk rules, autonomy mode and profile. Hooks refuse agents' edits to them, and verify refuses commits that change the
   user-only settings, contracts or admissions. Skill routes and guardrails come from the packs an accepted ADR adopts
   and the rules agreed at setup.
-- **Signals.** Work comes from a person, a Linear ticket (`harness.py linear import`) or the task list. The harness's
+- **Signals.** Work comes from a person, an issue-tracker ticket (Linear: `harness.py linear import`), a factory's
+  request (`harness.py intake`) or the task list. The harness's
   own feedback adds more: escalations, red CI, failure-class proposals and `harness.py report` candidates. Production
   incidents are not a signal yet.
 - **Two lanes, one standard.** In a supervised session (the default), a person answers the griller and signs
   `Approved-by`. In an autonomous run (`harness.py run`, `harness.py orca`), questions are answered from `backbone/`
   and the knowledge vault, with sources. Policy approves only low-risk `docs` and `refactor` specs, and everything
   else is escalated to a person.
+- **One start gate.** In either lane a task becomes `[WIP]` only with a valid spec, a current grill pass and an
+  approval, and once every task its `(after: ...)` note names is `[x]`; `next`, `run` and Orca pick only such tasks,
+  and verify checks it again ([ADR-017](../adr/ADR-017-task-dependency-gate.md): Proposed, and built since 0.32.0).
 - **Same checks, every task.** Whichever lane a task came from, it passes the same checks:
   - the judge, with the harness re-running the tests itself;
   - the three review lenses;
   - the judge gate at finish;
   - verify on every commit;
+  - the pull request written only after the harness journals it (section 2);
   - `harness-verify` in CI, with the base branch's verifier.
 
-  Then a person merges the pull request. A judge pass still leaves deploy risk open. That person reads the review notes and the receipt's "Not verified" list first. The deliverer can't merge, and under the `triple` profile no agent can;
+  Then a person merges the pull request. A judge pass still leaves deploy risk open. That person reads the review notes and the receipt's "Not verified" list first. The hooks refuse the deliverer's merge commands, and under a no-merge profile (`triple` or `no-merge`) every agent's;
   `harness-verify` blocks a merge only once it is a required check in branch protection (`harness.py ci-protect` or
   `enroll.sh --protect`).
 - **What fails becomes the next task.**
@@ -87,11 +96,11 @@ delivery, then feedback, KB drafts and cleanup signals. ADR-008 retains the cont
 
 ## 2. One task, request by request
 
-![A sequence diagram of one task, from the request to the merged pull request](2-task-flow.svg)
+![A sequence diagram of one task, from the request to the merged pull request, with the start gate's dependency check and the journalled pull request write](2-task-flow.svg)
 
 Read it top to bottom. Each arrow is a request, and each box on a lifeline is where the harness checks or records
 something. Both loops are bounded: the griller repeats until it passes, and the judge until it passes or
-`HARNESS_JUDGE_MAX_ROUNDS` hands the task to a person. The orange bracket is the one step autonomous mode replaces:
+`HARNESS_JUDGE_MAX_ROUNDS` hands the task to a person. The dashed orange frame is the one step autonomous mode replaces:
 `harness.py approve` instead of a person's `Approved-by`, and only for low-risk `docs` and `refactor` specs.
 
 - **Definition first**: one spec per task (`backbone/specs/<id>.md`) holds numbered requirements, Given/When/Then
@@ -127,9 +136,13 @@ something. Both loops are bounded: the griller repeats until it passes, and the 
 - **Review and delivery**: after the judge, three `reviewer`s check the change in parallel, one lens each: correctness
   (bugs, security, blast radius proven by running code), structure and lean. A must-fix finding sends the task back to
   the implementer. Once the task is committed, the `deliverer` pushes the branch, opens the PR with each task's receipt
-  and labels, and watches CI. It runs only the gh commands delivery needs, against this repository only; it can't
-  merge, approve or close, and its git ref commands (checkout, merge, reset, push and the like) may not name the default
-  branch, which changes only through the PR. Finishing, committing and pushing (pre-push hook) all refuse a task
+  and labels, and watches CI. It runs only the gh commands delivery needs, against this repository only; its merge,
+  approve and close commands are refused, and its git ref commands (checkout, merge, reset, push and the like) may not
+  name the default branch, which changes only through the PR. Before a pull request is created or edited, the harness
+  journals the attempt (`writes.jsonl`), and it resolves the attempt once the agent CLI reports the call succeeded. A
+  write with no observed result is `indeterminate_write`: nothing retries it, and the repository parks until the user
+  reconciles it with `harness.py write-reconcile` ([ADR-011](../adr/ADR-011-indeterminate-side-effect-outcomes.md):
+  Proposed, and built since 0.32.0). Finishing, committing and pushing (pre-push hook) all refuse a task
   without its review passes. Both are on by default (`HARNESS_REVIEW`, `HARNESS_DELIVER`, user-only).
   `HARNESS_DELIVER="external"` is for a lane without GitHub credentials: the task stops at the deliver step,
   `delivery-plan` tells an agent factory what to push and open from its trusted clone, and `delivery-record` records
@@ -226,5 +239,13 @@ user's approval of the changed spec ([ADR-007](../adr/ADR-007-evidence-closed-lo
   this snapshot; no factory code, credentials, deployment or forge protection was inspected.
 - [Agent-SDLC landscape research](../research/2026-11-agent-sdlc-landscape.md)
 
-The SVGs are plain text and carry their own background, so they read the same in GitHub's light and dark themes.
-Update a diagram in the same pull request as the behaviour it shows.
+## Editing the diagrams
+
+The JSON in [sources/](sources/) is the source of each diagram: `<n>-<name>.diagram.json` holds its cards, arrows and
+text, and `theme-neutral.json` its colours and system fonts. The SVGs are rendered from them with the diagram_style
+renderer and the neutral theme, for example
+`python3 diagram_style.py render sources/1-factory.diagram.json --theme sources/theme-neutral.json --output 1-factory.svg`.
+Edit the JSON, never the SVG, and keep the legend's meaning: solid is built and enforced, a dashed outline is proposed
+or outside the harness, and the orange person marks where the harness waits for a human. The SVGs carry their own
+background, so they read the same in GitHub's light and dark themes. Update a diagram in the same pull request as the
+behaviour it shows.

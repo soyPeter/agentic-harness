@@ -1,0 +1,30 @@
+{
+  "name": "Neutral",
+  "source": "Neutral theme for the agentic-harness SDLC diagrams: system fonts, a grey and blue palette, no mark. The wordmark key is kept with an empty path because the renderer prints a default mark when the key is missing.",
+  "layout": "page",
+  "paper": "#f3f4f6",
+  "panel": "#ffffff",
+  "band": "#f3f4f6",
+  "note": "#f3f4f6",
+  "ink": "#111827",
+  "muted": "#4b5563",
+  "faint": "#6b7280",
+  "rule": "#d1d5db",
+  "accent": "#1d4ed8",
+  "highlight": "#dbeafe",
+  "human": "#c2410c",
+  "font": "-apple-system, Segoe UI, Helvetica, Arial, sans-serif",
+  "mono": "Menlo, Consolas, monospace",
+  "wordmark": {
+    "width": 1,
+    "height": 28,
+    "path": "M0 0"
+  },
+  "colors": {
+    "harness": ["#1d4ed8", "#eff6ff", "#bfdbfe"],
+    "external": ["#111827", "#f3f4f6", "#d1d5db"],
+    "store": ["#4b5563", "#ffffff", "#9ca3af"],
+    "human": ["#c2410c", "#fff7ed", "#fdba74"],
+    "proposed": ["#6b7280", "#ffffff", "#ffffff"]
+  }
+}

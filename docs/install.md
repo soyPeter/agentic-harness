@@ -73,9 +73,11 @@ In Claude Code, `/agentic-harness:init` does the same. It fetches and checks the
 (`backbone/`, `CLAUDE.md`), the pin, `harness-verify.yml`, the shim with `core.hooksPath=.githooks`, the sandbox
 (`.devcontainer/harness-agent/`) and the plugin entries. After a fresh clone, each developer runs `git config core.hooksPath .githooks` once.
 
-**Move the pin** to upgrade: `python3 /path/to/agentic-harness/plugin/launcher.py pin <version>` (the user's command;
-agents can't run it). It checks the release, updates the pin and the plugin's marketplace ref, and brings the shim,
-`harness-verify.yml` and the sandbox files you haven't edited to that release. The upgrade is then one reviewed change.
+**Upgrade** by moving the pin and the plugin together: see [Upgrade a thin project](#upgrade-a-thin-project).
+
+Agents run the pinned engine from the plugin or the engine cache, with the commands the engine lists for agents.
+`pin`, `init --thin` and the user-only commands are yours to run in a terminal
+([HOOKS.md](../payload/owned/backbone/HOOKS.md#the-agent-clis-own-configuration)).
 
 **Switch an installed project**:
 
@@ -119,7 +121,8 @@ request's pin.
 **Plugin and pin**: the plugin supplies the agents, skills and agent rules, and the pinned release supplies the
 gates. When the plugin isn't the pinned release, session start says so. In autonomous mode, `run` and `orca` refuse
 to start and every call except reads is refused until they match. `doctor` reports it as an error in autonomous mode
-and a warning in supervised mode. Install the plugin at the pinned release, or move the pin.
+and a warning in supervised mode. Install the plugin at the pinned release, or move the pin
+([Upgrade a thin project](#upgrade-a-thin-project)).
 
 **Limits**:
 
@@ -138,6 +141,35 @@ and a warning in supervised mode. Install the plugin at the pinned release, or m
   harness there with `python3 ~/.agentic-harness/plugins/agentic-harness/plugin/launcher.py <command>`. `pin` keeps a
   sandbox file you edited (the allowlist in `docker-compose.yml`, say) and writes the release's copy beside it as
   `<file>.harness-new`.
+
+### Upgrade a thin project
+
+The pin decides which release's gates run; the plugin supplies the agents, skills and agent rules, and forwards each
+hook to the pinned engine. Move both to the same release at the same time: while they differ, session start says so,
+and in autonomous mode every call except reads is refused (see **Plugin and pin** above). Read the **Upgrading**
+notes of each release you skip in the [CHANGELOG](../CHANGELOG.md) first.
+
+1. **Move the pin**: `python3 /path/to/agentic-harness/plugin/launcher.py pin <version>`. It checks the release,
+   updates `backbone/.harness-lock.json` and the marketplace ref in the project's `.claude/settings.json`, and brings
+   the shim, `harness-verify.yml` and the sandbox files you haven't edited to that release. Commit it as one change.
+   Its pull request changes the lock, so it needs the `harness-change-approved` label.
+2. **Update the plugin** in each agent CLI on your machine, to the same release:
+   - Claude Code: `marketplace update` only fetches the ref the marketplace was added at, and adding a marketplace
+     records its ref under `extraKnownMarketplaces` in your user settings (`~/.claude/settings.json`). Set the `ref`
+     of the `agentic-harness` entry there to `v<version>`, then run
+     `claude plugin marketplace update agentic-harness` and `claude plugin update agentic-harness@agentic-harness`,
+     and start a new session (or run `/reload-plugins`). While that entry still names the old ref, adding the
+     marketplace at the new ref fails ("its source doesn't match its extraKnownMarketplaces entry"), and a marketplace
+     you removed is "not found" by `marketplace update` until it is added again: fix the ref first.
+   - Codex and OpenCode: install the plugin at the new release as under **Install the plugin** above.
+3. **Accept the changed configuration**: `extraKnownMarketplaces` is a setting the harness watches, so session start
+   and `doctor` report the change until you run
+   `python3 /path/to/agentic-harness/plugin/launcher.py accept-agent-config` in your own terminal. In autonomous mode
+   `run` and `orca` don't start until you do.
+4. Run `doctor` and follow the release's Upgrading notes (for 0.32.0: fix the `(after: ...)` dependency notes it
+   warns about).
+
+Other projects on the machine that still pin the older release report the plugin mismatch until their pins move too.
 
 ## What gets installed
 

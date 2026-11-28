@@ -1,0 +1,1685 @@
+{
+ "name": "sdlc-task-flow",
+ "title": "One task, request by request",
+ "subtitle": "Each request, where the harness checks it, and where it records a verdict",
+ "description": "A sequence diagram of one task through the harness: the person, the orchestrator, the role agents, the harness hooks and git or GitHub. It shows each request, where a gate checks it and where a verdict is recorded, from the request to the merged pull request: the start gate with its dependency check, and the pull request write the harness journals first, with a person reconciling a write that had no observed result.",
+ "eyebrow": "SDLC · 2 of 4",
+ "status": "Matches v0.32.0",
+ "date": "28 November 2026",
+ "width": 1720,
+ "height": 2600,
+ "legend": [],
+ "source": "Sources: backbone/8-WORKFLOW.md and backbone/HOOKS.md at v0.32.0.",
+ "notes": "Both loops are bounded: the griller repeats until it passes, the judge until it passes or HARNESS_JUDGE_MAX_ROUNDS hands the task to a person.",
+ "operations": [
+  {
+   "type": "text",
+   "x": 40,
+   "y": 50,
+   "t": "Agentic harness",
+   "color": "ink",
+   "size": 22,
+   "weight": 650,
+   "spacing": -0.3
+  },
+  {
+   "type": "rect",
+   "x": 65,
+   "y": 196,
+   "w": 220,
+   "h": 60,
+   "fill": "#fff7ed",
+   "stroke": "#fdba74",
+   "r": 10
+  },
+  {
+   "type": "text",
+   "x": 175,
+   "y": 222,
+   "t": "PERSON",
+   "color": "#c2410c",
+   "size": 13,
+   "weight": 650,
+   "spacing": 2,
+   "anchor": "middle"
+  },
+  {
+   "type": "text",
+   "x": 175,
+   "y": 243,
+   "t": "THE USER",
+   "color": "faint",
+   "size": 10.5,
+   "weight": 600,
+   "spacing": 1.4,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 345,
+   "y": 196,
+   "w": 220,
+   "h": 60,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 10
+  },
+  {
+   "type": "text",
+   "x": 455,
+   "y": 222,
+   "t": "ORCHESTRATOR",
+   "color": "#111827",
+   "size": 13,
+   "weight": 650,
+   "spacing": 2,
+   "anchor": "middle"
+  },
+  {
+   "type": "text",
+   "x": 455,
+   "y": 243,
+   "t": "SESSION · RUN · ORCA",
+   "color": "faint",
+   "size": 10.5,
+   "weight": 600,
+   "spacing": 1.4,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 625,
+   "y": 196,
+   "w": 220,
+   "h": 60,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 10
+  },
+  {
+   "type": "text",
+   "x": 735,
+   "y": 222,
+   "t": "ROLE AGENTS",
+   "color": "#111827",
+   "size": 13,
+   "weight": 650,
+   "spacing": 2,
+   "anchor": "middle"
+  },
+  {
+   "type": "text",
+   "x": 735,
+   "y": 243,
+   "t": "ANALYST … DELIVERER",
+   "color": "faint",
+   "size": 10.5,
+   "weight": 600,
+   "spacing": 1.4,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 905,
+   "y": 196,
+   "w": 220,
+   "h": 60,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 10
+  },
+  {
+   "type": "text",
+   "x": 1015,
+   "y": 222,
+   "t": "HARNESS",
+   "color": "#1d4ed8",
+   "size": 13,
+   "weight": 650,
+   "spacing": 2,
+   "anchor": "middle"
+  },
+  {
+   "type": "text",
+   "x": 1015,
+   "y": 243,
+   "t": "HOOKS · GATES",
+   "color": "faint",
+   "size": 10.5,
+   "weight": 600,
+   "spacing": 1.4,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 1285,
+   "y": 196,
+   "w": 220,
+   "h": 60,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 10
+  },
+  {
+   "type": "text",
+   "x": 1395,
+   "y": 222,
+   "t": "GIT · GITHUB",
+   "color": "#111827",
+   "size": 13,
+   "weight": 650,
+   "spacing": 2,
+   "anchor": "middle"
+  },
+  {
+   "type": "text",
+   "x": 1395,
+   "y": 243,
+   "t": "COMMIT · PR · CI",
+   "color": "faint",
+   "size": 10.5,
+   "weight": 600,
+   "spacing": 1.4,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 174.25,
+   "y": 256,
+   "w": 1.5,
+   "h": 2194,
+   "fill": "rule",
+   "stroke": "rule",
+   "r": 0
+  },
+  {
+   "type": "rect",
+   "x": 454.25,
+   "y": 256,
+   "w": 1.5,
+   "h": 2194,
+   "fill": "rule",
+   "stroke": "rule",
+   "r": 0
+  },
+  {
+   "type": "rect",
+   "x": 734.25,
+   "y": 256,
+   "w": 1.5,
+   "h": 2194,
+   "fill": "rule",
+   "stroke": "rule",
+   "r": 0
+  },
+  {
+   "type": "rect",
+   "x": 1014.25,
+   "y": 256,
+   "w": 1.5,
+   "h": 2194,
+   "fill": "rule",
+   "stroke": "rule",
+   "r": 0
+  },
+  {
+   "type": "rect",
+   "x": 1394.25,
+   "y": 256,
+   "w": 1.5,
+   "h": 2194,
+   "fill": "rule",
+   "stroke": "rule",
+   "r": 0
+  },
+  {
+   "type": "rect",
+   "x": 40,
+   "y": 271.25,
+   "w": 1640,
+   "h": 1.5,
+   "fill": "rule",
+   "stroke": "rule",
+   "r": 0
+  },
+  {
+   "type": "section",
+   "x": 40,
+   "y": 300,
+   "t": "01 · PHASE 1"
+  },
+  {
+   "type": "text",
+   "x": 40,
+   "y": 330,
+   "t": "Define",
+   "color": "ink",
+   "size": 21,
+   "weight": 600,
+   "spacing": -0.2
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     181,
+     354
+    ],
+    [
+     447,
+     354
+    ]
+   ],
+   "kind": "human",
+   "label": "a request, intake or an import",
+   "labelpos": [
+    193,
+    344
+   ]
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     461,
+     404
+    ],
+    [
+     727,
+     404
+    ]
+   ],
+   "kind": "external",
+   "label": "analyst: write the spec",
+   "labelpos": [
+    473,
+    394
+   ]
+  },
+  {
+   "type": "rect",
+   "x": 755,
+   "y": 387,
+   "w": 240,
+   "h": 55.0,
+   "fill": "#ffffff",
+   "stroke": "#9ca3af",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 769,
+   "y": 408.5,
+   "t": "REQs, ACs and the",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 769,
+   "y": 428.0,
+   "t": "Change-Class",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     461,
+     454
+    ],
+    [
+     727,
+     454
+    ]
+   ],
+   "kind": "external",
+   "label": "architect: ADRs and skills",
+   "labelpos": [
+    473,
+    444
+   ]
+  },
+  {
+   "type": "group",
+   "x": 56,
+   "y": 480,
+   "w": 1340,
+   "h": 216,
+   "t": "Loop · until the griller passes",
+   "align": "left",
+   "dash": true
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     461,
+     514
+    ],
+    [
+     727,
+     514
+    ]
+   ],
+   "kind": "external",
+   "label": "griller: grill the spec",
+   "labelpos": [
+    473,
+    504
+   ]
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     741,
+     564
+    ],
+    [
+     1007,
+     564
+    ]
+   ],
+   "kind": "external",
+   "label": "verdict",
+   "labelpos": [
+    753,
+    554
+   ]
+  },
+  {
+   "type": "rect",
+   "x": 1035,
+   "y": 547,
+   "w": 330,
+   "h": 55.0,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 568.5,
+   "t": "grill.json: fingerprint of the spec and",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 588.0,
+   "t": "its ADRs",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     449,
+     614
+    ],
+    [
+     183,
+     614
+    ]
+   ],
+   "kind": "external",
+   "label": "open questions, verbatim",
+   "labelpos": [
+    193,
+    604
+   ],
+   "dashed": true
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     181,
+     664
+    ],
+    [
+     447,
+     664
+    ]
+   ],
+   "kind": "human",
+   "label": "answers; the spec is revised",
+   "labelpos": [
+    193,
+    654
+   ]
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     181,
+     736
+    ],
+    [
+     1007,
+     736
+    ]
+   ],
+   "kind": "human",
+   "label": "Approved-by: <name> (<date>)",
+   "labelpos": [
+    193,
+    726
+   ]
+  },
+  {
+   "type": "rect",
+   "x": 1035,
+   "y": 719,
+   "w": 330,
+   "h": 55.0,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 740.5,
+   "t": "agents' edits refused; the approved spec",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 760.0,
+   "t": "is frozen",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     461,
+     820
+    ],
+    [
+     1007,
+     820
+    ]
+   ],
+   "kind": "external",
+   "label": "approve <id>",
+   "labelpos": [
+    473,
+    810
+   ]
+  },
+  {
+   "type": "rect",
+   "x": 1035,
+   "y": 803,
+   "w": 330,
+   "h": 55.0,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 824.5,
+   "t": "policy: low-risk docs and refactor; else",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 844.0,
+   "t": "escalated",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 56,
+   "y": 786,
+   "w": 1340,
+   "h": 74,
+   "fill": "none",
+   "stroke": "#c2410c",
+   "r": 10,
+   "dash": true
+  },
+  {
+   "type": "rect",
+   "x": 66,
+   "y": 774,
+   "w": 243.2,
+   "h": 24,
+   "fill": "#ffffff",
+   "stroke": "#c2410c",
+   "r": 6
+  },
+  {
+   "type": "text",
+   "x": 76,
+   "y": 790,
+   "t": "AUTONOMOUS MODE, INSTEAD",
+   "color": "#c2410c",
+   "size": 11,
+   "weight": 600,
+   "spacing": 1.6
+  },
+  {
+   "type": "rect",
+   "x": 40,
+   "y": 901.25,
+   "w": 1640,
+   "h": 1.5,
+   "fill": "rule",
+   "stroke": "rule",
+   "r": 0
+  },
+  {
+   "type": "section",
+   "x": 40,
+   "y": 930,
+   "t": "02 · PHASE 2"
+  },
+  {
+   "type": "text",
+   "x": 40,
+   "y": 960,
+   "t": "Build",
+   "color": "ink",
+   "size": 21,
+   "weight": 600,
+   "spacing": -0.2
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     461,
+     984
+    ],
+    [
+     1007,
+     984
+    ]
+   ],
+   "kind": "external",
+   "label": "start: mark [WIP]",
+   "labelpos": [
+    473,
+    974
+   ]
+  },
+  {
+   "type": "rect",
+   "x": 1035,
+   "y": 967,
+   "w": 330,
+   "h": 55.0,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 988.5,
+   "t": "start gate: spec, grill pass, approval,",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 1008.0,
+   "t": "and every (after: …) task [x]",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     461,
+     1048
+    ],
+    [
+     727,
+     1048
+    ]
+   ],
+   "kind": "external",
+   "label": "tester, if on: acceptance tests",
+   "labelpos": [
+    473,
+    1038
+   ]
+  },
+  {
+   "type": "rect",
+   "x": 1035,
+   "y": 1031,
+   "w": 330,
+   "h": 35.5,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 1052.5,
+   "t": "tests.json: test files fingerprinted",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     461,
+     1098
+    ],
+    [
+     727,
+     1098
+    ]
+   ],
+   "kind": "external",
+   "label": "implementer: implement",
+   "labelpos": [
+    473,
+    1088
+   ]
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     741,
+     1148
+    ],
+    [
+     1007,
+     1148
+    ]
+   ],
+   "kind": "external",
+   "label": "every edit and command",
+   "labelpos": [
+    753,
+    1138
+   ]
+  },
+  {
+   "type": "rect",
+   "x": 1035,
+   "y": 1131,
+   "w": 330,
+   "h": 35.5,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 1152.5,
+   "t": "skill gate, write scope, guardrails",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 40,
+   "y": 1209.25,
+   "w": 1640,
+   "h": 1.5,
+   "fill": "rule",
+   "stroke": "rule",
+   "r": 0
+  },
+  {
+   "type": "section",
+   "x": 40,
+   "y": 1238,
+   "t": "03 · PHASE 3"
+  },
+  {
+   "type": "text",
+   "x": 40,
+   "y": 1268,
+   "t": "Judge",
+   "color": "ink",
+   "size": 21,
+   "weight": 600,
+   "spacing": -0.2
+  },
+  {
+   "type": "group",
+   "x": 56,
+   "y": 1298,
+   "w": 1340,
+   "h": 174,
+   "t": "Loop · until a pass, then a person",
+   "align": "left",
+   "dash": true
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     461,
+     1332
+    ],
+    [
+     727,
+     1332
+    ]
+   ],
+   "kind": "external",
+   "label": "judge: judge the task",
+   "labelpos": [
+    473,
+    1322
+   ]
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     741,
+     1382
+    ],
+    [
+     1007,
+     1382
+    ]
+   ],
+   "kind": "external",
+   "label": "verdict",
+   "labelpos": [
+    753,
+    1372
+   ]
+  },
+  {
+   "type": "rect",
+   "x": 1035,
+   "y": 1365,
+   "w": 330,
+   "h": 55.0,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 1386.5,
+   "t": "re-runs the tests; judge.json with the",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 1406.0,
+   "t": "code fingerprint",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     1009,
+     1440
+    ],
+    [
+     463,
+     1440
+    ]
+   ],
+   "kind": "external",
+   "label": "fail: debugger brief, then a fix",
+   "labelpos": [
+    473,
+    1430
+   ],
+   "dashed": true
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     461,
+     1512
+    ],
+    [
+     727,
+     1512
+    ]
+   ],
+   "kind": "external",
+   "label": "reviewers: three lenses at once",
+   "labelpos": [
+    473,
+    1502
+   ]
+  },
+  {
+   "type": "rect",
+   "x": 1035,
+   "y": 1495,
+   "w": 330,
+   "h": 55.0,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 1516.5,
+   "t": "review.json per lens; a must-fix goes back",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 1536.0,
+   "t": "to fix",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 40,
+   "y": 1573.25,
+   "w": 1640,
+   "h": 1.5,
+   "fill": "rule",
+   "stroke": "rule",
+   "r": 0
+  },
+  {
+   "type": "section",
+   "x": 40,
+   "y": 1602,
+   "t": "04 · PHASE 4"
+  },
+  {
+   "type": "text",
+   "x": 40,
+   "y": 1632,
+   "t": "Record",
+   "color": "ink",
+   "size": 21,
+   "weight": 600,
+   "spacing": -0.2
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     461,
+     1656
+    ],
+    [
+     727,
+     1656
+    ]
+   ],
+   "kind": "external",
+   "label": "scribe: memory and new ADRs",
+   "labelpos": [
+    473,
+    1646
+   ]
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     461,
+     1706
+    ],
+    [
+     1007,
+     1706
+    ]
+   ],
+   "kind": "external",
+   "label": "finish: mark [x]",
+   "labelpos": [
+    473,
+    1696
+   ]
+  },
+  {
+   "type": "rect",
+   "x": 1035,
+   "y": 1689,
+   "w": 330,
+   "h": 35.5,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 1710.5,
+   "t": "judge gate: current passes, tests, risk",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     461,
+     1756
+    ],
+    [
+     1387,
+     1756
+    ]
+   ],
+   "kind": "external",
+   "label": "commit code, tests, spec, verdicts",
+   "labelpos": [
+    473,
+    1746
+   ]
+  },
+  {
+   "type": "rect",
+   "x": 1415,
+   "y": 1739,
+   "w": 265,
+   "h": 35.5,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1429,
+   "y": 1760.5,
+   "t": "pre-commit: verify, build",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     461,
+     1806
+    ],
+    [
+     1007,
+     1806
+    ]
+   ],
+   "kind": "external",
+   "label": "receipt <id>",
+   "labelpos": [
+    473,
+    1796
+   ]
+  },
+  {
+   "type": "rect",
+   "x": 1035,
+   "y": 1789,
+   "w": 330,
+   "h": 35.5,
+   "fill": "#ffffff",
+   "stroke": "#9ca3af",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 1810.5,
+   "t": "what is proven, what isn't, labels",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 40,
+   "y": 1867.25,
+   "w": 1640,
+   "h": 1.5,
+   "fill": "rule",
+   "stroke": "rule",
+   "r": 0
+  },
+  {
+   "type": "section",
+   "x": 40,
+   "y": 1896,
+   "t": "05 · PHASE 5"
+  },
+  {
+   "type": "text",
+   "x": 40,
+   "y": 1926,
+   "t": "Deliver",
+   "color": "ink",
+   "size": 21,
+   "weight": 600,
+   "spacing": -0.2
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     461,
+     1950
+    ],
+    [
+     727,
+     1950
+    ]
+   ],
+   "kind": "external",
+   "label": "deliverer: deliver this branch",
+   "labelpos": [
+    473,
+    1940
+   ]
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     741,
+     2000
+    ],
+    [
+     1007,
+     2000
+    ]
+   ],
+   "kind": "external",
+   "label": "gh pr create | edit",
+   "labelpos": [
+    753,
+    1990
+   ]
+  },
+  {
+   "type": "rect",
+   "x": 1035,
+   "y": 1983,
+   "w": 330,
+   "h": 55.0,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 2004.5,
+   "t": "writes.jsonl: the attempt is journalled",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 2024.0,
+   "t": "before the call runs",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     741,
+     2060
+    ],
+    [
+     1387,
+     2060
+    ]
+   ],
+   "kind": "external",
+   "label": "push; PR with receipt and labels",
+   "labelpos": [
+    753,
+    2050
+   ]
+  },
+  {
+   "type": "rect",
+   "x": 1415,
+   "y": 2043,
+   "w": 265,
+   "h": 35.5,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1429,
+   "y": 2064.5,
+   "t": "pre-push: verify (full install)",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1415,
+   "y": 2091,
+   "w": 265,
+   "h": 55.0,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1429,
+   "y": 2112.5,
+   "t": "CI: verify with the base branch's",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1429,
+   "y": 2132.0,
+   "t": "verifier",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1415,
+   "y": 2155,
+   "w": 265,
+   "h": 55.0,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1429,
+   "y": 2176.5,
+   "t": "CI judge, if the project set it",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1429,
+   "y": 2196.0,
+   "t": "up",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     741,
+     2110
+    ],
+    [
+     1007,
+     2110
+    ]
+   ],
+   "kind": "external",
+   "label": "post-tool-use: the call's result",
+   "labelpos": [
+    753,
+    2100
+   ],
+   "dashed": true
+  },
+  {
+   "type": "rect",
+   "x": 1035,
+   "y": 2093,
+   "w": 330,
+   "h": 55.0,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 2114.5,
+   "t": "observed: resolved. None:",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 2134.0,
+   "t": "indeterminate_write, the repository parks",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     181,
+     2184
+    ],
+    [
+     1007,
+     2184
+    ]
+   ],
+   "kind": "human",
+   "label": "write-reconcile KEY --observed | --allow-retry",
+   "labelpos": [
+    193,
+    2174
+   ]
+  },
+  {
+   "type": "rect",
+   "x": 1035,
+   "y": 2167,
+   "w": 330,
+   "h": 74.5,
+   "fill": "#fff7ed",
+   "stroke": "#fdba74",
+   "r": 8
+  },
+  {
+   "type": "rect",
+   "x": 1053.0,
+   "y": 2192.25,
+   "w": 10.0,
+   "h": 10.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.0
+  },
+  {
+   "type": "rect",
+   "x": 1048,
+   "y": 2204.25,
+   "w": 20.0,
+   "h": 11.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.5
+  },
+  {
+   "type": "text",
+   "x": 1079,
+   "y": 2188.5,
+   "t": "only after a write with no observed",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1079,
+   "y": 2208.0,
+   "t": "result; user-only, and ambiguity stays",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1079,
+   "y": 2227.5,
+   "t": "parked",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     741,
+     2268
+    ],
+    [
+     1007,
+     2268
+    ]
+   ],
+   "kind": "external",
+   "label": "delivered | ci-failed | hold",
+   "labelpos": [
+    753,
+    2258
+   ]
+  },
+  {
+   "type": "rect",
+   "x": 1035,
+   "y": 2251,
+   "w": 330,
+   "h": 35.5,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1049,
+   "y": 2272.5,
+   "t": "report checked against git",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     181,
+     2318
+    ],
+    [
+     1387,
+     2318
+    ]
+   ],
+   "kind": "human",
+   "label": "reviews and merges the PR",
+   "labelpos": [
+    193,
+    2308
+   ]
+  },
+  {
+   "type": "rect",
+   "x": 1415,
+   "y": 2301,
+   "w": 265,
+   "h": 55.0,
+   "fill": "#fff7ed",
+   "stroke": "#fdba74",
+   "r": 8
+  },
+  {
+   "type": "rect",
+   "x": 1433.0,
+   "y": 2316.5,
+   "w": 10.0,
+   "h": 10.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.0
+  },
+  {
+   "type": "rect",
+   "x": 1428,
+   "y": 2328.5,
+   "w": 20.0,
+   "h": 11.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.5
+  },
+  {
+   "type": "text",
+   "x": 1459,
+   "y": 2322.5,
+   "t": "a person merges; the",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1459,
+   "y": 2342.0,
+   "t": "deliverer's merge is refused",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1415,
+   "y": 2357,
+   "w": 265,
+   "h": 55.0,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1429,
+   "y": 2378.5,
+   "t": "on main: signed attestation, if",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1429,
+   "y": 2398.0,
+   "t": "signing is set up",
+   "color": "ink",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     40,
+     2508
+    ],
+    [
+     70,
+     2508
+    ]
+   ],
+   "kind": "human"
+  },
+  {
+   "type": "text",
+   "x": 82,
+   "y": 2513,
+   "t": "A person acts",
+   "color": "muted",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     368.0,
+     2508
+    ],
+    [
+     398.0,
+     2508
+    ]
+   ],
+   "kind": "external"
+  },
+  {
+   "type": "text",
+   "x": 410.0,
+   "y": 2513,
+   "t": "A request",
+   "color": "muted",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     696.0,
+     2508
+    ],
+    [
+     726.0,
+     2508
+    ]
+   ],
+   "kind": "external",
+   "dashed": true
+  },
+  {
+   "type": "text",
+   "x": 738.0,
+   "y": 2513,
+   "t": "A reply",
+   "color": "muted",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1024.0,
+   "y": 2500,
+   "w": 26,
+   "h": 16,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 4
+  },
+  {
+   "type": "text",
+   "x": 1058.0,
+   "y": 2513,
+   "t": "Checked or recorded by the harness",
+   "color": "muted",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1360.25,
+   "y": 2496,
+   "w": 8.5,
+   "h": 8.5,
+   "fill": "human",
+   "stroke": "human",
+   "r": 4.25
+  },
+  {
+   "type": "rect",
+   "x": 1356.0,
+   "y": 2506.2,
+   "w": 17.0,
+   "h": 9.35,
+   "fill": "human",
+   "stroke": "human",
+   "r": 4.675
+  },
+  {
+   "type": "text",
+   "x": 1386.0,
+   "y": 2513,
+   "t": "A person decides",
+   "color": "muted",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  }
+ ]
+}
