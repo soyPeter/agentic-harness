@@ -5,7 +5,9 @@
   (`python3 -m pip install -r tests/requirements.txt`, in a virtual environment). The `tests/test-*.py` files run in
   parallel, `HARNESS_TEST_JOBS` at a time (default: one per CPU). `HARNESS_STRESS=1` adds a stress check of the
   harness-verify step that takes the base branch's engine: it keeps every CPU busy for a few minutes, as on a loaded
-  macOS runner.
+  macOS runner. The macOS pull request jobs run the suite in two parts per Python at once (`HARNESS_TEST_PART=1|2`
+  runs one part locally), and the hook-time Budget checks of `tests/test-eval-replay.py` measure the hook's CPU time,
+  so a loaded runner doesn't fail them.
 - The property checks run every example by default (`HYPOTHESIS_PROFILE=thorough`). The required pull request jobs use
   `HYPOTHESIS_PROFILE=ci`, which runs a quarter of the examples for checks that start a process per example; the
   `nightly` workflow runs the full profile on Ubuntu and macOS every night.

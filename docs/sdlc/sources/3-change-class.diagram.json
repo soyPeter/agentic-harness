@@ -1,0 +1,1247 @@
+{
+ "name": "sdlc-change-class",
+ "title": "Who decides, by Change-Class",
+ "subtitle": "ADR-002: enforced in risk, approve and the light lane",
+ "description": "For each Change-Class (docs, refactor, feature, schema): whether the light lane applies, who approves the spec in supervised and autonomous mode, which risk label the receipt suggests, and who merges. A person approves every spec in supervised mode and merges every pull request.",
+ "eyebrow": "SDLC · 3 of 4",
+ "status": "Matches v0.32.0",
+ "date": "28 November 2026",
+ "width": 1860,
+ "height": 1400,
+ "legend": [],
+ "source": "Sources: ADR-002 and backbone/HOOKS.md (risk, light lane, change receipt) at v0.32.0.",
+ "notes": "A spec without a Change-Class line counts as feature.",
+ "operations": [
+  {
+   "type": "text",
+   "x": 40,
+   "y": 50,
+   "t": "Agentic harness",
+   "color": "ink",
+   "size": 22,
+   "weight": 650,
+   "spacing": -0.3
+  },
+  {
+   "type": "text",
+   "x": 60,
+   "y": 230,
+   "t": "CHANGE-CLASS",
+   "color": "ink",
+   "size": 13,
+   "weight": 650,
+   "spacing": 2
+  },
+  {
+   "type": "text",
+   "x": 60,
+   "y": 252,
+   "t": "DECLARED IN THE SPEC · ↓ MORE ASSURANCE",
+   "color": "faint",
+   "size": 11,
+   "weight": 600,
+   "spacing": 1.4
+  },
+  {
+   "type": "text",
+   "x": 420,
+   "y": 230,
+   "t": "LIGHT LANE",
+   "color": "ink",
+   "size": 13,
+   "weight": 650,
+   "spacing": 2
+  },
+  {
+   "type": "text",
+   "x": 420,
+   "y": 252,
+   "t": "IF THE USER SWITCHED IT ON",
+   "color": "faint",
+   "size": 11,
+   "weight": 600,
+   "spacing": 1.4
+  },
+  {
+   "type": "text",
+   "x": 710,
+   "y": 230,
+   "t": "SUPERVISED",
+   "color": "ink",
+   "size": 13,
+   "weight": 650,
+   "spacing": 2
+  },
+  {
+   "type": "text",
+   "x": 710,
+   "y": 252,
+   "t": "SPEC APPROVAL · DEFAULT",
+   "color": "faint",
+   "size": 11,
+   "weight": 600,
+   "spacing": 1.4
+  },
+  {
+   "type": "text",
+   "x": 980,
+   "y": 230,
+   "t": "AUTONOMOUS",
+   "color": "ink",
+   "size": 13,
+   "weight": 650,
+   "spacing": 2
+  },
+  {
+   "type": "text",
+   "x": 980,
+   "y": 252,
+   "t": "SPEC APPROVAL · OPT-IN",
+   "color": "faint",
+   "size": 11,
+   "weight": 600,
+   "spacing": 1.4
+  },
+  {
+   "type": "text",
+   "x": 1300,
+   "y": 230,
+   "t": "RECEIPT LABEL",
+   "color": "ink",
+   "size": 13,
+   "weight": 650,
+   "spacing": 2
+  },
+  {
+   "type": "text",
+   "x": 1300,
+   "y": 252,
+   "t": "WITHOUT → WITH OTHER RISKS",
+   "color": "faint",
+   "size": 11,
+   "weight": 600,
+   "spacing": 1.4
+  },
+  {
+   "type": "text",
+   "x": 1620,
+   "y": 230,
+   "t": "PR MERGE",
+   "color": "ink",
+   "size": 13,
+   "weight": 650,
+   "spacing": 2
+  },
+  {
+   "type": "text",
+   "x": 1620,
+   "y": 252,
+   "t": "EVERY CLASS",
+   "color": "faint",
+   "size": 11,
+   "weight": 600,
+   "spacing": 1.4
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     36,
+     290
+    ],
+    [
+     36,
+     912
+    ]
+   ],
+   "kind": "store"
+  },
+  {
+   "type": "rect",
+   "x": 60,
+   "y": 280,
+   "w": 1540,
+   "h": 150,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 12
+  },
+  {
+   "type": "text",
+   "x": 84,
+   "y": 326,
+   "t": "docs",
+   "color": "ink",
+   "size": 26,
+   "weight": 500,
+   "spacing": 0,
+   "font": "Menlo, Consolas, monospace"
+  },
+  {
+   "type": "text",
+   "x": 84,
+   "y": 360,
+   "t": "Markdown and other doc files; code",
+   "color": "muted",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 84,
+   "y": 381,
+   "t": "comments count as code",
+   "color": "muted",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 420,
+   "y": 320,
+   "w": 260,
+   "h": 57.0,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 434,
+   "y": 342.5,
+   "t": "With the user's (light) mark,",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 434,
+   "y": 363.0,
+   "t": "if the rules pass",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 990,
+   "y": 320,
+   "w": 280,
+   "h": 57.0,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1004,
+   "y": 342.5,
+   "t": "Policy approves when nothing is",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1004,
+   "y": 363.0,
+   "t": "risky",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1310,
+   "y": 338,
+   "w": 87.44,
+   "h": 30,
+   "fill": "#ffffff",
+   "stroke": "#9ca3af",
+   "r": 15
+  },
+  {
+   "type": "text",
+   "x": 1353.72,
+   "y": 358,
+   "t": "risk:low",
+   "color": "#111827",
+   "size": 13,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle",
+   "font": "Menlo, Consolas, monospace"
+  },
+  {
+   "type": "text",
+   "x": 1405.44,
+   "y": 358,
+   "t": "→",
+   "color": "muted",
+   "size": 16,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1429.44,
+   "y": 338,
+   "w": 127.09,
+   "h": 30,
+   "fill": "#fef3c7",
+   "stroke": "#f59e0b",
+   "r": 15
+  },
+  {
+   "type": "text",
+   "x": 1492.9850000000001,
+   "y": 358,
+   "t": "risk:elevated",
+   "color": "#92400e",
+   "size": 13,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle",
+   "font": "Menlo, Consolas, monospace"
+  },
+  {
+   "type": "rect",
+   "x": 60,
+   "y": 444,
+   "w": 1540,
+   "h": 150,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 12
+  },
+  {
+   "type": "text",
+   "x": 84,
+   "y": 490,
+   "t": "refactor",
+   "color": "ink",
+   "size": 26,
+   "weight": 500,
+   "spacing": 0,
+   "font": "Menlo, Consolas, monospace"
+  },
+  {
+   "type": "text",
+   "x": 84,
+   "y": 524,
+   "t": "Rename or extract, with no change in",
+   "color": "muted",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 84,
+   "y": 545,
+   "t": "behaviour",
+   "color": "muted",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 420,
+   "y": 484,
+   "w": 260,
+   "h": 57.0,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 434,
+   "y": 506.5,
+   "t": "With the user's (light) mark,",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 434,
+   "y": 527.0,
+   "t": "if the rules pass",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 990,
+   "y": 484,
+   "w": 280,
+   "h": 57.0,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1004,
+   "y": 506.5,
+   "t": "Policy approves when nothing is",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1004,
+   "y": 527.0,
+   "t": "risky",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1310,
+   "y": 502,
+   "w": 87.44,
+   "h": 30,
+   "fill": "#ffffff",
+   "stroke": "#9ca3af",
+   "r": 15
+  },
+  {
+   "type": "text",
+   "x": 1353.72,
+   "y": 522,
+   "t": "risk:low",
+   "color": "#111827",
+   "size": 13,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle",
+   "font": "Menlo, Consolas, monospace"
+  },
+  {
+   "type": "text",
+   "x": 1405.44,
+   "y": 522,
+   "t": "→",
+   "color": "muted",
+   "size": 16,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1429.44,
+   "y": 502,
+   "w": 127.09,
+   "h": 30,
+   "fill": "#fef3c7",
+   "stroke": "#f59e0b",
+   "r": 15
+  },
+  {
+   "type": "text",
+   "x": 1492.9850000000001,
+   "y": 522,
+   "t": "risk:elevated",
+   "color": "#92400e",
+   "size": 13,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle",
+   "font": "Menlo, Consolas, monospace"
+  },
+  {
+   "type": "rect",
+   "x": 60,
+   "y": 608,
+   "w": 1540,
+   "h": 150,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 12
+  },
+  {
+   "type": "text",
+   "x": 84,
+   "y": 654,
+   "t": "feature",
+   "color": "ink",
+   "size": 26,
+   "weight": 500,
+   "spacing": 0,
+   "font": "Menlo, Consolas, monospace"
+  },
+  {
+   "type": "text",
+   "x": 84,
+   "y": 688,
+   "t": "New or changed requirements, and any",
+   "color": "muted",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 84,
+   "y": 709,
+   "t": "spec without the line",
+   "color": "muted",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 420,
+   "y": 648,
+   "w": 260,
+   "h": 57.0,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 434,
+   "y": 670.5,
+   "t": "With the user's (light) mark,",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 434,
+   "y": 691.0,
+   "t": "if the rules pass",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 990,
+   "y": 648,
+   "w": 280,
+   "h": 36.5,
+   "fill": "#fff7ed",
+   "stroke": "#fdba74",
+   "r": 8
+  },
+  {
+   "type": "rect",
+   "x": 1008.0,
+   "y": 654.25,
+   "w": 10.0,
+   "h": 10.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.0
+  },
+  {
+   "type": "rect",
+   "x": 1003,
+   "y": 666.25,
+   "w": 20.0,
+   "h": 11.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.5
+  },
+  {
+   "type": "text",
+   "x": 1034,
+   "y": 670.5,
+   "t": "Escalated: a person approves",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1310,
+   "y": 666,
+   "w": 127.09,
+   "h": 30,
+   "fill": "#fef3c7",
+   "stroke": "#f59e0b",
+   "r": 15
+  },
+  {
+   "type": "text",
+   "x": 1373.545,
+   "y": 686,
+   "t": "risk:elevated",
+   "color": "#92400e",
+   "size": 13,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle",
+   "font": "Menlo, Consolas, monospace"
+  },
+  {
+   "type": "text",
+   "x": 1445.09,
+   "y": 686,
+   "t": "→",
+   "color": "muted",
+   "size": 16,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1469.09,
+   "y": 666,
+   "w": 95.37,
+   "h": 30,
+   "fill": "#fee2e2",
+   "stroke": "#ef4444",
+   "r": 15
+  },
+  {
+   "type": "text",
+   "x": 1516.7749999999999,
+   "y": 686,
+   "t": "risk:high",
+   "color": "#991b1b",
+   "size": 13,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle",
+   "font": "Menlo, Consolas, monospace"
+  },
+  {
+   "type": "rect",
+   "x": 60,
+   "y": 772,
+   "w": 1540,
+   "h": 150,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 12
+  },
+  {
+   "type": "text",
+   "x": 84,
+   "y": 818,
+   "t": "schema",
+   "color": "ink",
+   "size": 26,
+   "weight": 500,
+   "spacing": 0,
+   "font": "Menlo, Consolas, monospace"
+  },
+  {
+   "type": "text",
+   "x": 84,
+   "y": 852,
+   "t": "Migrations, auth, secrets, payments,",
+   "color": "muted",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 84,
+   "y": 873,
+   "t": "deploy and infrastructure",
+   "color": "muted",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 420,
+   "y": 824,
+   "w": 260,
+   "h": 36.5,
+   "fill": "#ffffff",
+   "stroke": "#9ca3af",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 434,
+   "y": 846.5,
+   "t": "Never",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 990,
+   "y": 812,
+   "w": 280,
+   "h": 36.5,
+   "fill": "#fff7ed",
+   "stroke": "#fdba74",
+   "r": 8
+  },
+  {
+   "type": "rect",
+   "x": 1008.0,
+   "y": 818.25,
+   "w": 10.0,
+   "h": 10.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.0
+  },
+  {
+   "type": "rect",
+   "x": 1003,
+   "y": 830.25,
+   "w": 20.0,
+   "h": 11.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.5
+  },
+  {
+   "type": "text",
+   "x": 1034,
+   "y": 834.5,
+   "t": "Escalated: a person approves",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1310,
+   "y": 830,
+   "w": 95.37,
+   "h": 30,
+   "fill": "#fee2e2",
+   "stroke": "#ef4444",
+   "r": 15
+  },
+  {
+   "type": "text",
+   "x": 1357.685,
+   "y": 850,
+   "t": "risk:high",
+   "color": "#991b1b",
+   "size": 13,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle",
+   "font": "Menlo, Consolas, monospace"
+  },
+  {
+   "type": "text",
+   "x": 1413.37,
+   "y": 850,
+   "t": "→",
+   "color": "muted",
+   "size": 16,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1437.37,
+   "y": 830,
+   "w": 95.37,
+   "h": 30,
+   "fill": "#fee2e2",
+   "stroke": "#ef4444",
+   "r": 15
+  },
+  {
+   "type": "text",
+   "x": 1485.0549999999998,
+   "y": 850,
+   "t": "risk:high",
+   "color": "#991b1b",
+   "size": 13,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle",
+   "font": "Menlo, Consolas, monospace"
+  },
+  {
+   "type": "rect",
+   "x": 710,
+   "y": 274,
+   "w": 250,
+   "h": 654,
+   "fill": "#fff7ed",
+   "stroke": "#fdba74",
+   "r": 12
+  },
+  {
+   "type": "rect",
+   "x": 818.0,
+   "y": 480,
+   "w": 16.0,
+   "h": 16.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 8.0
+  },
+  {
+   "type": "rect",
+   "x": 810,
+   "y": 499.2,
+   "w": 32.0,
+   "h": 17.6,
+   "fill": "human",
+   "stroke": "human",
+   "r": 8.8
+  },
+  {
+   "type": "text",
+   "x": 835,
+   "y": 550,
+   "t": "In supervised mode a",
+   "color": "ink",
+   "size": 16,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle"
+  },
+  {
+   "type": "text",
+   "x": 835,
+   "y": 574,
+   "t": "person writes",
+   "color": "ink",
+   "size": 16,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle"
+  },
+  {
+   "type": "text",
+   "x": 835,
+   "y": 598,
+   "t": "Approved-by for every",
+   "color": "ink",
+   "size": 16,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle"
+  },
+  {
+   "type": "text",
+   "x": 835,
+   "y": 622,
+   "t": "class. The approved",
+   "color": "ink",
+   "size": 16,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle"
+  },
+  {
+   "type": "text",
+   "x": 835,
+   "y": 646,
+   "t": "spec is frozen.",
+   "color": "ink",
+   "size": 16,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 1620,
+   "y": 274,
+   "w": 200,
+   "h": 654,
+   "fill": "#fff7ed",
+   "stroke": "#fdba74",
+   "r": 12
+  },
+  {
+   "type": "rect",
+   "x": 1712.0,
+   "y": 480,
+   "w": 16.0,
+   "h": 16.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 8.0
+  },
+  {
+   "type": "rect",
+   "x": 1704,
+   "y": 499.2,
+   "w": 32.0,
+   "h": 17.6,
+   "fill": "human",
+   "stroke": "human",
+   "r": 8.8
+  },
+  {
+   "type": "text",
+   "x": 1720,
+   "y": 550,
+   "t": "Merging is a",
+   "color": "ink",
+   "size": 16,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle"
+  },
+  {
+   "type": "text",
+   "x": 1720,
+   "y": 574,
+   "t": "person's call; the",
+   "color": "ink",
+   "size": 16,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle"
+  },
+  {
+   "type": "text",
+   "x": 1720,
+   "y": 598,
+   "t": "hooks refuse the",
+   "color": "ink",
+   "size": 16,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle"
+  },
+  {
+   "type": "text",
+   "x": 1720,
+   "y": 622,
+   "t": "deliverer's merge,",
+   "color": "ink",
+   "size": 16,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle"
+  },
+  {
+   "type": "text",
+   "x": 1720,
+   "y": 646,
+   "t": "and labels never",
+   "color": "ink",
+   "size": 16,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle"
+  },
+  {
+   "type": "text",
+   "x": 1720,
+   "y": 670,
+   "t": "merge.",
+   "color": "ink",
+   "size": 16,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle"
+  },
+  {
+   "type": "section",
+   "x": 60,
+   "y": 978,
+   "t": "WHATEVER THE CLASS"
+  },
+  {
+   "type": "rect",
+   "x": 60,
+   "y": 1012,
+   "w": 20,
+   "h": 20,
+   "fill": "#eff6ff",
+   "stroke": "#1d4ed8",
+   "r": 5
+  },
+  {
+   "type": "text",
+   "x": 96,
+   "y": 1027,
+   "t": "A risk term, a risk path or an ADR that isn't Accepted makes any spec not low-risk.",
+   "color": "ink",
+   "size": 15,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 960,
+   "y": 1012,
+   "w": 20,
+   "h": 20,
+   "fill": "#eff6ff",
+   "stroke": "#1d4ed8",
+   "r": 5
+  },
+  {
+   "type": "text",
+   "x": 996,
+   "y": 1027,
+   "t": "An unknown Change-Class, or two values, fails spec-check; the receipt labels it class:feature.",
+   "color": "ink",
+   "size": 15,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 60,
+   "y": 1094,
+   "w": 20,
+   "h": 20,
+   "fill": "#eff6ff",
+   "stroke": "#1d4ed8",
+   "r": 5
+  },
+  {
+   "type": "text",
+   "x": 96,
+   "y": 1109,
+   "t": "At finish, a policy-approved change that touched a sensitive path, more than 20 files or, for docs,",
+   "color": "ink",
+   "size": 15,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 96,
+   "y": 1131,
+   "t": "anything but documentation is refused until it is escalated.",
+   "color": "ink",
+   "size": 15,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 965.0,
+   "y": 1092,
+   "w": 10.0,
+   "h": 10.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.0
+  },
+  {
+   "type": "rect",
+   "x": 960,
+   "y": 1104.0,
+   "w": 20.0,
+   "h": 11.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.5
+  },
+  {
+   "type": "text",
+   "x": 996,
+   "y": 1109,
+   "t": "The light lane needs the user's (light) mark and at most 3 requirements and criteria and 3 changed",
+   "color": "ink",
+   "size": 15,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 996,
+   "y": 1131,
+   "t": "files. It skips the architect and the griller; approval, the judge and verify still apply.",
+   "color": "ink",
+   "size": 15,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 65.0,
+   "y": 1174,
+   "w": 10.0,
+   "h": 10.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.0
+  },
+  {
+   "type": "rect",
+   "x": 60,
+   "y": 1186.0,
+   "w": 20.0,
+   "h": 11.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.5
+  },
+  {
+   "type": "text",
+   "x": 96,
+   "y": 1191,
+   "t": "Under a no-merge profile only a person merges: orca --merge and --trust, nightly runs and enroll",
+   "color": "ink",
+   "size": 15,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 96,
+   "y": 1213,
+   "t": "--automation are refused.",
+   "color": "ink",
+   "size": 15,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 960,
+   "y": 1176,
+   "w": 20,
+   "h": 20,
+   "fill": "#eff6ff",
+   "stroke": "#1d4ed8",
+   "r": 5
+  },
+  {
+   "type": "text",
+   "x": 996,
+   "y": 1191,
+   "t": "Labels go on the PR for triage: the highest risk:* among its tasks, which only goes up, and each",
+   "color": "ink",
+   "size": 15,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 996,
+   "y": 1213,
+   "t": "class:*.",
+   "color": "ink",
+   "size": 15,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 48.25,
+   "y": 1296,
+   "w": 8.5,
+   "h": 8.5,
+   "fill": "human",
+   "stroke": "human",
+   "r": 4.25
+  },
+  {
+   "type": "rect",
+   "x": 44,
+   "y": 1306.2,
+   "w": 17.0,
+   "h": 9.35,
+   "fill": "human",
+   "stroke": "human",
+   "r": 4.675
+  },
+  {
+   "type": "text",
+   "x": 74,
+   "y": 1313,
+   "t": "A person decides",
+   "color": "muted",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 485.0,
+   "y": 1300,
+   "w": 26,
+   "h": 16,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 4
+  },
+  {
+   "type": "text",
+   "x": 519.0,
+   "y": 1313,
+   "t": "Checked by the harness",
+   "color": "muted",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 930.0,
+   "y": 1300,
+   "w": 26,
+   "h": 16,
+   "fill": "#ffffff",
+   "stroke": "#9ca3af",
+   "r": 4
+  },
+  {
+   "type": "text",
+   "x": 964.0,
+   "y": 1313,
+   "t": "Never: not allowed",
+   "color": "muted",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1375.0,
+   "y": 1300,
+   "w": 26,
+   "h": 16,
+   "fill": "#ffffff",
+   "stroke": "#4b5563",
+   "r": 4
+  },
+  {
+   "type": "text",
+   "x": 1409.0,
+   "y": 1313,
+   "t": "Solid: built and enforced",
+   "color": "muted",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  }
+ ]
+}

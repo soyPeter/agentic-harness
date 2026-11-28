@@ -2,7 +2,8 @@
 
 The harness's own decisions (product ADRs). Each ADR's `## Status` line is the decision's status, which only the
 maintainer changes; this table is the one list of them. A status says nothing about implementation: an Accepted ADR
-can have follow-ups that aren't built, and a Proposed one can have parts in main.
+can have follow-ups that aren't built, and a Proposed one can have parts in main: ADR-011's write journal with
+reconcile-or-park and ADR-017's task-dependency gate shipped in 0.32.0, and both ADRs are still Proposed.
 
 This repository's own enrollment keeps two project ADRs in [backbone/adr/](../../backbone/adr/), indexed in
 [backbone/5-DECISIONS.md](../../backbone/5-DECISIONS.md), which also says how a spec cites a product ADR.

@@ -1,0 +1,1505 @@
+{
+ "name": "sdlc-factory",
+ "title": "The software factory",
+ "subtitle": "One gated pipeline for every change, whoever starts it, while people set the rules",
+ "description": "Work enters from a person, an issue tracker, factory intake, the task list and the harness's own feedback. A supervised session or an autonomous run defines it; one start gate, which checks the spec, the grill pass, the approval and the task's dependencies, admits it to the build. Every task then passes the same judge, review, verify and CI checks; outward writes are journalled, and one with no observed result waits for a person. A person merges the pull request. People set the rules in user-only files. Dashed parts are proposed or outside the harness.",
+ "eyebrow": "SDLC · 1 of 4",
+ "status": "Matches v0.32.0",
+ "date": "28 November 2026",
+ "width": 1940,
+ "height": 1320,
+ "legend": [],
+ "source": "Sources: README.md, docs/sdlc/README.md, AGENTS.md and backbone/HOOKS.md at v0.32.0.",
+ "notes": "Colour marks the role; the outline marks the status: solid is built and enforced, dashed is proposed or outside the harness.",
+ "operations": [
+  {
+   "type": "text",
+   "x": 40,
+   "y": 50,
+   "t": "Agentic harness",
+   "color": "ink",
+   "size": 22,
+   "weight": 650,
+   "spacing": -0.3
+  },
+  {
+   "type": "group",
+   "x": 40,
+   "y": 186,
+   "w": 1860,
+   "h": 104,
+   "t": "People set the rules · enforced by hooks and verify",
+   "align": "left"
+  },
+  {
+   "type": "rect",
+   "x": 64.0,
+   "y": 226,
+   "w": 288.6666666666667,
+   "h": 44,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 208.33333333333334,
+   "y": 252.25,
+   "t": "Sources and the knowledge vault",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 368.6666666666667,
+   "y": 226,
+   "w": 288.6666666666667,
+   "h": 44,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 513.0,
+   "y": 252.25,
+   "t": "Accepted ADRs, the class ladder",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 673.3333333333334,
+   "y": 226,
+   "w": 288.6666666666667,
+   "h": 44,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 817.6666666666667,
+   "y": 252.25,
+   "t": "Tool contracts, skills, rules",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 978.0,
+   "y": 226,
+   "w": 288.6666666666667,
+   "h": 44,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1122.3333333333333,
+   "y": 252.25,
+   "t": "Gates, lenses, risk rules",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 1282.6666666666667,
+   "y": 226,
+   "w": 288.6666666666667,
+   "h": 44,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1427.0,
+   "y": 252.25,
+   "t": "Task dependencies (after: …)",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 1587.3333333333335,
+   "y": 226,
+   "w": 288.6666666666667,
+   "h": 44,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1731.6666666666667,
+   "y": 252.25,
+   "t": "Autonomy, profile, who merges",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 500,
+   "spacing": 0,
+   "anchor": "middle"
+  },
+  {
+   "type": "section",
+   "x": 40,
+   "y": 334,
+   "t": "01 · INTAKE"
+  },
+  {
+   "type": "text",
+   "x": 40,
+   "y": 368,
+   "t": "Signals",
+   "color": "ink",
+   "size": 25,
+   "weight": 600,
+   "spacing": -0.3
+  },
+  {
+   "type": "section",
+   "x": 294,
+   "y": 334,
+   "t": "02 · PHASE 1"
+  },
+  {
+   "type": "text",
+   "x": 294,
+   "y": 368,
+   "t": "Define",
+   "color": "ink",
+   "size": 25,
+   "weight": 600,
+   "spacing": -0.3
+  },
+  {
+   "type": "section",
+   "x": 664,
+   "y": 334,
+   "t": "03 · PHASE 2"
+  },
+  {
+   "type": "text",
+   "x": 664,
+   "y": 368,
+   "t": "Start and build",
+   "color": "ink",
+   "size": 25,
+   "weight": 600,
+   "spacing": -0.3
+  },
+  {
+   "type": "section",
+   "x": 1320,
+   "y": 334,
+   "t": "04 · PHASES 3–5"
+  },
+  {
+   "type": "text",
+   "x": 1320,
+   "y": 368,
+   "t": "Judge and deliver",
+   "color": "ink",
+   "size": 25,
+   "weight": 600,
+   "spacing": -0.3
+  },
+  {
+   "type": "section",
+   "x": 1640,
+   "y": 334,
+   "t": "05 · AFTER THE PR"
+  },
+  {
+   "type": "text",
+   "x": 1640,
+   "y": 368,
+   "t": "Merge and observe",
+   "color": "ink",
+   "size": 25,
+   "weight": 600,
+   "spacing": -0.3
+  },
+  {
+   "type": "rect",
+   "x": 40,
+   "y": 391.25,
+   "w": 1860,
+   "h": 1.5,
+   "fill": "rule",
+   "stroke": "rule",
+   "r": 0
+  },
+  {
+   "type": "rect",
+   "x": 40,
+   "y": 416,
+   "w": 190,
+   "h": 36,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 135.0,
+   "y": 438.5,
+   "t": "PERSON",
+   "color": "#111827",
+   "size": 12,
+   "weight": 600,
+   "spacing": 1.6,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 230,
+   "y": 433.25,
+   "w": 18,
+   "h": 1.5,
+   "fill": "faint",
+   "stroke": "faint",
+   "r": 0
+  },
+  {
+   "type": "rect",
+   "x": 40,
+   "y": 484,
+   "w": 190,
+   "h": 36,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 135.0,
+   "y": 506.5,
+   "t": "ISSUE TRACKER",
+   "color": "#111827",
+   "size": 12,
+   "weight": 600,
+   "spacing": 1.6,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 230,
+   "y": 501.25,
+   "w": 18,
+   "h": 1.5,
+   "fill": "faint",
+   "stroke": "faint",
+   "r": 0
+  },
+  {
+   "type": "rect",
+   "x": 40,
+   "y": 552,
+   "w": 190,
+   "h": 36,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 135.0,
+   "y": 574.5,
+   "t": "FACTORY INTAKE",
+   "color": "#111827",
+   "size": 12,
+   "weight": 600,
+   "spacing": 1.6,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 230,
+   "y": 569.25,
+   "w": 18,
+   "h": 1.5,
+   "fill": "faint",
+   "stroke": "faint",
+   "r": 0
+  },
+  {
+   "type": "rect",
+   "x": 40,
+   "y": 620,
+   "w": 190,
+   "h": 36,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 135.0,
+   "y": 642.5,
+   "t": "3-TASKS.MD",
+   "color": "#111827",
+   "size": 12,
+   "weight": 600,
+   "spacing": 1.6,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 230,
+   "y": 637.25,
+   "w": 18,
+   "h": 1.5,
+   "fill": "faint",
+   "stroke": "faint",
+   "r": 0
+  },
+  {
+   "type": "rect",
+   "x": 40,
+   "y": 688,
+   "w": 190,
+   "h": 36,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 135.0,
+   "y": 710.5,
+   "t": "ESCALATIONS",
+   "color": "#111827",
+   "size": 12,
+   "weight": 600,
+   "spacing": 1.6,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 230,
+   "y": 705.25,
+   "w": 18,
+   "h": 1.5,
+   "fill": "faint",
+   "stroke": "faint",
+   "r": 0
+  },
+  {
+   "type": "rect",
+   "x": 40,
+   "y": 756,
+   "w": 190,
+   "h": 36,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 135.0,
+   "y": 778.5,
+   "t": "RED CI",
+   "color": "#111827",
+   "size": 12,
+   "weight": 600,
+   "spacing": 1.6,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 230,
+   "y": 773.25,
+   "w": 18,
+   "h": 1.5,
+   "fill": "faint",
+   "stroke": "faint",
+   "r": 0
+  },
+  {
+   "type": "rect",
+   "x": 40,
+   "y": 824,
+   "w": 190,
+   "h": 36,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 135.0,
+   "y": 846.5,
+   "t": "PROPOSALS",
+   "color": "#111827",
+   "size": 12,
+   "weight": 600,
+   "spacing": 1.6,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 230,
+   "y": 841.25,
+   "w": 18,
+   "h": 1.5,
+   "fill": "faint",
+   "stroke": "faint",
+   "r": 0
+  },
+  {
+   "type": "rect",
+   "x": 40,
+   "y": 892,
+   "w": 190,
+   "h": 36,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 135.0,
+   "y": 914.5,
+   "t": "REPORT",
+   "color": "#111827",
+   "size": 12,
+   "weight": 600,
+   "spacing": 1.6,
+   "anchor": "middle"
+  },
+  {
+   "type": "rect",
+   "x": 230,
+   "y": 909.25,
+   "w": 18,
+   "h": 1.5,
+   "fill": "faint",
+   "stroke": "faint",
+   "r": 0
+  },
+  {
+   "type": "rect",
+   "x": 40,
+   "y": 960,
+   "w": 190,
+   "h": 36,
+   "fill": "#ffffff",
+   "stroke": "#6b7280",
+   "r": 8,
+   "dash": true
+  },
+  {
+   "type": "text",
+   "x": 135.0,
+   "y": 982.5,
+   "t": "PRODUCTION",
+   "color": "#6b7280",
+   "size": 12,
+   "weight": 600,
+   "spacing": 1.6,
+   "anchor": "middle"
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     230,
+     978
+    ],
+    [
+     247,
+     978
+    ]
+   ],
+   "kind": "proposed",
+   "dashed": true
+  },
+  {
+   "type": "rect",
+   "x": 247.25,
+   "y": 434,
+   "w": 1.5,
+   "h": 716,
+   "fill": "faint",
+   "stroke": "faint",
+   "r": 0
+  },
+  {
+   "type": "group",
+   "x": 270,
+   "y": 412,
+   "w": 1020,
+   "h": 322,
+   "t": "People · supervised, the default",
+   "align": "left"
+  },
+  {
+   "type": "group",
+   "x": 270,
+   "y": 754,
+   "w": 1020,
+   "h": 356,
+   "t": "Autonomous runs · opt-in",
+   "align": "left"
+  },
+  {
+   "type": "box",
+   "x": 294,
+   "y": 452,
+   "w": 340,
+   "h": 217,
+   "ids": "Analyst · architect · griller",
+   "title": "Defined with a person",
+   "lines": [
+    "The analyst writes the spec: REQs,",
+    "Given/When/Then ACs and the",
+    "Change-Class. The architect writes the",
+    "ADRs. The griller asks; the person",
+    "answers until it passes."
+   ],
+   "kind": "external",
+   "title_size": 19
+  },
+  {
+   "type": "rect",
+   "x": 303.0,
+   "y": 684,
+   "w": 10.0,
+   "h": 10.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.0
+  },
+  {
+   "type": "rect",
+   "x": 298,
+   "y": 696.0,
+   "w": 20.0,
+   "h": 11.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.5
+  },
+  {
+   "type": "text",
+   "x": 330,
+   "y": 694,
+   "t": "The user signs Approved-by;",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 330,
+   "y": 714,
+   "t": "the approved spec is frozen.",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "box",
+   "x": 914,
+   "y": 452,
+   "w": 352,
+   "h": 200,
+   "ids": "Tester · implementer",
+   "title": "Agents build it",
+   "lines": [
+    "An optional tester writes failing",
+    "acceptance tests first. The implementer",
+    "loads every routed skill, then writes",
+    "code and tests that name the AC ids."
+   ],
+   "kind": "external",
+   "title_size": 19
+  },
+  {
+   "type": "box",
+   "x": 294,
+   "y": 794,
+   "w": 340,
+   "h": 217,
+   "ids": "harness.py run · harness.py orca",
+   "title": "A run picks it up",
+   "lines": [
+    "On demand or nightly. run: a fresh",
+    "session per task. orca: a worker per",
+    "step and a worktree per task, in",
+    "parallel. Questions are answered from",
+    "backbone/ and the vault, with sources."
+   ],
+   "kind": "external",
+   "title_size": 19
+  },
+  {
+   "type": "rect",
+   "x": 294,
+   "y": 1034,
+   "w": 340,
+   "h": 56,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 308,
+   "y": 1056.0,
+   "t": "Policy approves only low-risk docs and",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 308,
+   "y": 1076.0,
+   "t": "refactor specs.",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 923.0,
+   "y": 1046,
+   "w": 10.0,
+   "h": 10.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.0
+  },
+  {
+   "type": "rect",
+   "x": 918,
+   "y": 1058.0,
+   "w": 20.0,
+   "h": 11.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.5
+  },
+  {
+   "type": "text",
+   "x": 950,
+   "y": 1056,
+   "t": "Anything else is escalated to a person,",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 950,
+   "y": 1076,
+   "t": "and the run moves on.",
+   "color": "ink",
+   "size": 14.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "box",
+   "x": 914,
+   "y": 794,
+   "w": 352,
+   "h": 200,
+   "ids": "Same agents, same hooks",
+   "title": "Workers build it",
+   "lines": [
+    "In a task worktree or the harness-agent",
+    "sandbox, within run's time, attempt and",
+    "cost budgets. orca retries a dead step",
+    "once, then escalates."
+   ],
+   "kind": "external",
+   "title_size": 19
+  },
+  {
+   "type": "box",
+   "x": 664,
+   "y": 452,
+   "w": 220,
+   "h": 569,
+   "ids": "Every lane · ADR-017",
+   "title": "Start gate",
+   "lines": [
+    "A task becomes [WIP]",
+    "only with a valid spec,",
+    "a current grill pass",
+    "and an approval, and",
+    "once each task in its",
+    "(after: …) note is [x].",
+    "next, run and orca pick",
+    "only such tasks.",
+    "verify and CI check it",
+    "again on every commit.",
+    "Proposed ADR, built in",
+    "0.32.0."
+   ],
+   "kind": "harness",
+   "title_size": 19
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     249,
+     552
+    ],
+    [
+     292,
+     552
+    ]
+   ],
+   "kind": "external"
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     634,
+     552
+    ],
+    [
+     662,
+     552
+    ]
+   ],
+   "kind": "external"
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     884,
+     552
+    ],
+    [
+     912,
+     552
+    ]
+   ],
+   "kind": "external"
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     1266,
+     552
+    ],
+    [
+     1318,
+     552
+    ]
+   ],
+   "kind": "external"
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     249,
+     894
+    ],
+    [
+     292,
+     894
+    ]
+   ],
+   "kind": "external"
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     634,
+     894
+    ],
+    [
+     662,
+     894
+    ]
+   ],
+   "kind": "external"
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     884,
+     894
+    ],
+    [
+     912,
+     894
+    ]
+   ],
+   "kind": "external"
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     1266,
+     894
+    ],
+    [
+     1318,
+     894
+    ]
+   ],
+   "kind": "external"
+  },
+  {
+   "type": "group",
+   "x": 1320,
+   "y": 412,
+   "w": 280,
+   "h": 698,
+   "t": "Same checks, every task",
+   "align": "left"
+  },
+  {
+   "type": "rect",
+   "x": 1338,
+   "y": 448,
+   "w": 244,
+   "h": 56,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1352,
+   "y": 470.0,
+   "t": "Judge, with the tests re-run",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1352,
+   "y": 490.0,
+   "t": "by the harness",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1338,
+   "y": 516,
+   "w": 244,
+   "h": 56,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1352,
+   "y": 538.0,
+   "t": "Three review lenses:",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1352,
+   "y": 558.0,
+   "t": "correctness, structure, lean",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1338,
+   "y": 584,
+   "w": 244,
+   "h": 56,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1352,
+   "y": 606.0,
+   "t": "Finish and commit only on",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1352,
+   "y": 626.0,
+   "t": "current passes",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1338,
+   "y": 652,
+   "w": 244,
+   "h": 76,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1352,
+   "y": 674.0,
+   "t": "PR with the receipt and risk",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1352,
+   "y": 694.0,
+   "t": "labels; each outward write",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1352,
+   "y": 714.0,
+   "t": "journalled first",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1338,
+   "y": 740,
+   "w": 244,
+   "h": 96,
+   "fill": "#fff7ed",
+   "stroke": "#fdba74",
+   "r": 8
+  },
+  {
+   "type": "rect",
+   "x": 1356.0,
+   "y": 776.0,
+   "w": 10.0,
+   "h": 10.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.0
+  },
+  {
+   "type": "rect",
+   "x": 1351,
+   "y": 788.0,
+   "w": 20.0,
+   "h": 11.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.5
+  },
+  {
+   "type": "text",
+   "x": 1382,
+   "y": 762.0,
+   "t": "A write with no observed",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1382,
+   "y": 782.0,
+   "t": "result parks the",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1382,
+   "y": 802.0,
+   "t": "repository until a person",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1382,
+   "y": 822.0,
+   "t": "reconciles it",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1338,
+   "y": 848,
+   "w": 244,
+   "h": 76,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 8
+  },
+  {
+   "type": "text",
+   "x": 1352,
+   "y": 870.0,
+   "t": "CI verify with the base",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1352,
+   "y": 890.0,
+   "t": "branch's verifier, once",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1352,
+   "y": 910.0,
+   "t": "required",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1338,
+   "y": 936,
+   "w": 244,
+   "h": 36,
+   "fill": "#fff7ed",
+   "stroke": "#fdba74",
+   "r": 8
+  },
+  {
+   "type": "rect",
+   "x": 1356.0,
+   "y": 942.0,
+   "w": 10.0,
+   "h": 10.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.0
+  },
+  {
+   "type": "rect",
+   "x": 1351,
+   "y": 954.0,
+   "w": 20.0,
+   "h": 11.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 5.5
+  },
+  {
+   "type": "text",
+   "x": 1382,
+   "y": 958.0,
+   "t": "A person merges",
+   "color": "ink",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1340,
+   "y": 998,
+   "t": "A fail goes to the debugger, then",
+   "color": "muted",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1340,
+   "y": 1018,
+   "t": "the implementer. Verdicts are",
+   "color": "muted",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1340,
+   "y": 1038,
+   "t": "fingerprinted: a later change",
+   "color": "muted",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "text",
+   "x": 1340,
+   "y": 1058,
+   "t": "makes them stale.",
+   "color": "muted",
+   "size": 13.5,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "box",
+   "x": 1640,
+   "y": 452,
+   "w": 260,
+   "h": 148,
+   "ids": "ADR-002 policy",
+   "title": "Merged by a person",
+   "lines": [
+    "The hooks refuse the",
+    "deliverer's merge commands."
+   ],
+   "kind": "human",
+   "title_size": 19
+  },
+  {
+   "type": "rect",
+   "x": 1870.5,
+   "y": 466,
+   "w": 9.0,
+   "h": 9.0,
+   "fill": "human",
+   "stroke": "human",
+   "r": 4.5
+  },
+  {
+   "type": "rect",
+   "x": 1866,
+   "y": 476.8,
+   "w": 18.0,
+   "h": 9.9,
+   "fill": "human",
+   "stroke": "human",
+   "r": 4.95
+  },
+  {
+   "type": "box",
+   "x": 1640,
+   "y": 640,
+   "w": 260,
+   "h": 171,
+   "ids": "Outside the harness",
+   "title": "Release and production",
+   "lines": [
+    "Your own release process.",
+    "The harness stops at the",
+    "merge."
+   ],
+   "kind": "proposed",
+   "title_size": 19
+  },
+  {
+   "type": "rect",
+   "x": 1640,
+   "y": 640,
+   "w": 260,
+   "h": 171,
+   "fill": "none",
+   "stroke": "#6b7280",
+   "r": 12,
+   "dash": true
+  },
+  {
+   "type": "box",
+   "x": 1640,
+   "y": 828,
+   "w": 260,
+   "h": 194,
+   "ids": "ADR-007 · unbuilt",
+   "title": "Incidents trace back",
+   "lines": [
+    "A regression links to its PR",
+    "and spec, as confirmed,",
+    "suspected or unknown, and",
+    "becomes one owned task."
+   ],
+   "kind": "proposed",
+   "title_size": 19
+  },
+  {
+   "type": "rect",
+   "x": 1640,
+   "y": 828,
+   "w": 260,
+   "h": 194,
+   "fill": "none",
+   "stroke": "#6b7280",
+   "r": 12,
+   "dash": true
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     1600,
+     954.0
+    ],
+    [
+     1620,
+     954.0
+    ],
+    [
+     1620,
+     520
+    ],
+    [
+     1638,
+     520
+    ]
+   ],
+   "kind": "human"
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     1770,
+     607
+    ],
+    [
+     1770,
+     638
+    ]
+   ],
+   "kind": "proposed",
+   "dashed": true
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     1770,
+     797
+    ],
+    [
+     1770,
+     826
+    ]
+   ],
+   "kind": "proposed",
+   "dashed": true
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     1460,
+     1110
+    ],
+    [
+     1460,
+     1150
+    ],
+    [
+     252,
+     1150
+    ]
+   ],
+   "kind": "external",
+   "label": "What fails becomes the next task",
+   "labelpos": [
+    640,
+    1154
+   ]
+  },
+  {
+   "type": "arrow",
+   "pts": [
+    [
+     1770,
+     1022
+    ],
+    [
+     1770,
+     1150
+    ],
+    [
+     1468,
+     1150
+    ]
+   ],
+   "kind": "proposed",
+   "dashed": true
+  },
+  {
+   "type": "rect",
+   "x": 48.25,
+   "y": 1216,
+   "w": 8.5,
+   "h": 8.5,
+   "fill": "human",
+   "stroke": "human",
+   "r": 4.25
+  },
+  {
+   "type": "rect",
+   "x": 44,
+   "y": 1226.2,
+   "w": 17.0,
+   "h": 9.35,
+   "fill": "human",
+   "stroke": "human",
+   "r": 4.675
+  },
+  {
+   "type": "text",
+   "x": 74,
+   "y": 1233,
+   "t": "A person decides; the harness waits",
+   "color": "muted",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 412.0,
+   "y": 1220,
+   "w": 26,
+   "h": 16,
+   "fill": "#eff6ff",
+   "stroke": "#bfdbfe",
+   "r": 4
+  },
+  {
+   "type": "text",
+   "x": 446.0,
+   "y": 1233,
+   "t": "Checked or recorded by the harness",
+   "color": "muted",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 784.0,
+   "y": 1220,
+   "w": 26,
+   "h": 16,
+   "fill": "#f3f4f6",
+   "stroke": "#d1d5db",
+   "r": 4
+  },
+  {
+   "type": "text",
+   "x": 818.0,
+   "y": 1233,
+   "t": "Work, agents and inputs",
+   "color": "muted",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1156.0,
+   "y": 1220,
+   "w": 26,
+   "h": 16,
+   "fill": "#ffffff",
+   "stroke": "#4b5563",
+   "r": 4
+  },
+  {
+   "type": "text",
+   "x": 1190.0,
+   "y": 1233,
+   "t": "Solid: built and enforced",
+   "color": "muted",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  },
+  {
+   "type": "rect",
+   "x": 1528.0,
+   "y": 1220,
+   "w": 26,
+   "h": 16,
+   "fill": "#ffffff",
+   "stroke": "#6b7280",
+   "r": 4,
+   "dash": true
+  },
+  {
+   "type": "text",
+   "x": 1562.0,
+   "y": 1233,
+   "t": "Dashed: proposed, or outside the harness",
+   "color": "muted",
+   "size": 14,
+   "weight": 400,
+   "spacing": 0
+  }
+ ]
+}

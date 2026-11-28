@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **The documentation and diagrams match 0.32.0 (docs only).** The README, `docs/install.md`, `docs/development.md`,
+  the ADR and research indexes, `docs/sdlc/README.md` and `backbone/HOOKS.md` now cover the task-dependency gate, the
+  write journal and `write-reconcile`, the `PermissionDenied` and `PostToolUseFailure` hooks, the macOS test split,
+  and how to upgrade a thin project with its pin and plugin together. The README says what the harness records. The
+  four SDLC diagrams are rebuilt from JSON sources with a neutral theme, and show the dependency gate and the
+  journalled outward writes as built. No behaviour changed.
+
 ## 0.32.0 (2026-11-27)
 
 This release journals the harness's external writes (ADR-011) and enforces task dependencies wherever a task starts

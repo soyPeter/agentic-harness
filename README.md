@@ -13,7 +13,7 @@ only).
 
 ## The factory
 
-![The factory: signals, define, build, judge and deliver, merge and observe, with people setting the rules above](docs/sdlc/1-factory.svg)
+![The factory: signals, define, one start gate that checks approval and task dependencies, build, judge and deliver with journalled outward writes, merge and observe, with people setting the rules above](docs/sdlc/1-factory.svg)
 
 - **People set the rules.** Only the user accepts an ADR, writes the tool contracts in `tools.conf`, admits or
   revokes third-party skills in `admissions.conf`, or changes the user-only keys of `harness.conf`.
@@ -33,16 +33,21 @@ a live pilot still needs.
 
 ## One task, request by request
 
-![A sequence diagram of one task, from the request to the merged pull request](docs/sdlc/2-task-flow.svg)
+![A sequence diagram of one task, from the request to the merged pull request, with the start gate's dependency check and the journalled pull request write](docs/sdlc/2-task-flow.svg)
 
 - **Definition first**: one spec per task, questioned by an adversarial `griller` until it passes (a light-lane task
   skips it), then approved by the user. An approved spec is frozen.
+- **Task order**: a task whose line says `(after: ...)` starts, and is picked by `next`, `run` and Orca, only once
+  those tasks are `[x]` ([ADR-017](docs/adr/ADR-017-task-dependency-gate.md): Proposed, and built since 0.32.0).
 - **Skills and tools**: `routing.conf` names the skills an agent must load before it edits a file, and
   `backbone/tools.conf` says what each tool may do.
 - **Judging and review**: an independent `judge`, whose verdict a hook re-derives from the evidence, then three
   `reviewer`s, one lens each: correctness, structure and lean.
-- **Delivery**: the `deliverer` pushes the branch, opens the pull request with each task's receipt and watches CI. It
-  can't merge.
+- **Delivery**: the `deliverer` pushes the branch, opens the pull request with each task's receipt and watches CI. The
+  hooks refuse its merge commands. The harness journals each in-scope outward write before it runs (creating or
+  editing a pull request, creating an issue, issue-tracker receipt comments); one with no observed result is never
+  retried, and parks the repository until the user reconciles it with `harness.py write-reconcile`
+  ([ADR-011](docs/adr/ADR-011-indeterminate-side-effect-outcomes.md): Proposed, and built since 0.32.0).
 
 ## Who decides, by Change-Class
 
@@ -66,6 +71,29 @@ a live pilot still needs.
   attestations** ([ADR-005](docs/adr/ADR-005-verdict-attestations.md)).
 - **What binds whom**: the hooks and gates bind agents; CI's `harness-verify` is what binds everyone, once it is
   required.
+
+## What the harness records
+
+As a by-product of its work, the harness builds a knowledge base of each project's requests, decisions, changes and
+lessons:
+
+- **Requests**: a task line in `backbone/3-TASKS.md` and one spec per task, `backbone/specs/<id>.md`, with its
+  requirements and acceptance criteria ([AGENTS.md](payload/owned/AGENTS.md#4-task-protocol)).
+- **Decisions and lessons**: ADRs in `backbone/adr/`, indexed in `backbone/5-DECISIONS.md`. After the judge passes a
+  task, the `scribe` writes an ADR for each implementation decision no ADR covers, and adds lessons and traps to
+  `backbone/6-MEMORY.md`, which agents check before each task ([AGENTS.md](payload/owned/AGENTS.md#3-the-pipeline)).
+- **Project knowledge**: the PRD, planning, knowledge and conventions pages, filled in at first-run setup
+  ([AGENTS.md](payload/owned/AGENTS.md#1-first-run-setup)).
+- **Per change**: the verdicts in `backbone/.verdicts/`, the change receipt in the pull request, and the traceability
+  export, requirement → acceptance criterion → test → verdict → commit, also as ReqIF
+  ([HOOKS.md](payload/owned/backbone/HOOKS.md#change-receipt)). At release time the `changelog` skill writes the
+  CHANGELOG entries from the Conventional Commits ([skill](payload/owned/.claude/skills/changelog/SKILL.md)).
+- **History**: the event log, read with `harness.py trace <id>` and `harness.py report`. It is kept in the git
+  directory, local to each clone, and never committed
+  ([HOOKS.md](payload/owned/backbone/HOOKS.md#event-log-trace-and-report)).
+- **Limits**: it is per repository, not a knowledge base shared across projects. The optional knowledge source
+  (`HARNESS_KNOWLEDGE_ROOT`) is read-only input for answering the griller's questions
+  ([HOOKS.md](payload/owned/backbone/HOOKS.md#knowledge-source-harness_knowledge_root)).
 
 ## Install
 
@@ -96,8 +124,9 @@ the release your projects pin:
 
 Then start a project from its repository root with
 `python3 /path/to/agentic-harness/plugin/launcher.py init --thin [--version <version>]` (in Claude Code,
-`/agentic-harness:init`), and commit what it writes. Moving the pin, switching an installed project
-(`update.sh --to-thin`, `update.sh --to-full`), CI and the limits: [docs/install.md](docs/install.md#thin-mode).
+`/agentic-harness:init`), and commit what it writes. Upgrading, where the pin and the plugin move together
+([docs/install.md](docs/install.md#upgrade-a-thin-project)), switching an installed project (`update.sh --to-thin`,
+`update.sh --to-full`), CI and the limits: [docs/install.md](docs/install.md#thin-mode).
 
 ## Driving it
 
