@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `next --json` now gives every `blocked` answer the `escalations` field the contract declares for that step, an
+  empty list when the task has none. A task waiting for its `(after: ...)` prerequisites, or for an external write
+  to be reconciled, answered without it. Contract version 1 is unchanged.
 - **The documentation and diagrams match 0.32.0 (docs only).** The README, `docs/install.md`, `docs/development.md`,
   the ADR and research indexes, `docs/sdlc/README.md` and `backbone/HOOKS.md` now cover the task-dependency gate, the
   write journal and `write-reconcile`, the `PermissionDenied` and `PostToolUseFailure` hooks, the macOS test split,
